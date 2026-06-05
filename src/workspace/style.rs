@@ -1,7 +1,5 @@
-//! src/workspace/style.rs — STYLE.md is free-form translation-memory prose (no
-//! tool-owned JSON beyond its small metadata block). The Lexicon's Style tab
-//! appends bullet notes here; they're inserted into the body ABOVE the
-//! `honya:data` block so the block stays valid.
+//! STYLE.md is free-form translation-memory prose. Appended bullet notes go into
+//! the body ABOVE the `honya:data` block so the block stays valid.
 
 use crate::workspace::{Workspace, data_block};
 

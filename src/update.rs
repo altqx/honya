@@ -1,21 +1,9 @@
-//! src/update.rs — version check + in-place self-update from GitHub Releases.
+//! Version check + in-place self-update from GitHub Releases.
 //!
-//! This mirrors `web/public/install.sh` exactly: the same repo, the same
-//! `honya-<target>.tar.gz` release assets, and the same `.sha256` sidecars. The
-//! self-updater shells out to the system `tar` and a sha256 tool (`sha256sum`,
-//! else `shasum -a 256`) — the very tools install.sh already requires — then
-//! atomically renames the new binary over the running executable. On Unix the
-//! live process keeps the old inode, so replacing a running binary is safe.
-//!
-//! Like install.sh, `tar` and the sha256 tool are resolved via `PATH`; run
-//! `honya update` only with a trusted `PATH` (no writable or `.` entries ahead
-//! of the system bin dirs).
-//!
-//! Two entry points:
-//!   * [`check_for_update`] — best-effort, non-blocking, run at startup to surface
-//!     a notification. Disabled by `HONYA_NO_UPDATE_CHECK`.
-//!   * [`run_self_update`] — the `honya update` subcommand; downloads, verifies,
-//!     and replaces the binary, printing progress.
+//! Mirrors `web/public/install.sh`: same repo, `honya-<target>.tar.gz` assets, `.sha256`
+//! sidecars, and the system `tar` + sha256 tools (resolved via PATH — run only with a
+//! trusted PATH). Atomically renames the new binary over the running exe; on Unix the live
+//! process keeps the old inode, so replacing a running binary is safe.
 
 use std::path::Path;
 use std::time::Duration;
@@ -46,8 +34,7 @@ pub fn target_triple() -> Option<&'static str> {
     }
 }
 
-/// Parse a `v1.2.3` / `1.2.3-rc1` tag into a comparable (major, minor, patch).
-/// Pre-release/build metadata is dropped — good enough to detect newer releases.
+/// Parse a `v1.2.3`/`1.2.3-rc1` tag into (major, minor, patch); pre-release/build metadata dropped.
 fn parse_semver(s: &str) -> (u64, u64, u64) {
     let s = s.trim().trim_start_matches('v').trim();
     let core = s.split(['-', '+']).next().unwrap_or(s);
@@ -136,9 +123,7 @@ pub async fn run_self_update() -> Result<()> {
     let base = format!("https://github.com/{REPO}/releases/download/{tag}");
     let archive = format!("honya-{target}.tar.gz");
 
-    // Work inside a private, unpredictable temp dir (0700, created exclusively)
-    // so a local user can't pre-stage or swap files mid-update — mirrors the
-    // `mktemp -d` that install.sh relies on.
+    // Private, unpredictable temp dir (0700, exclusive) so a local user can't swap files mid-update.
     let tmp = private_staging_dir(&tag)?;
     let guard = TempDir(tmp.clone());
 
@@ -147,9 +132,7 @@ pub async fn run_self_update() -> Result<()> {
         .await
         .with_context(|| format!("downloading {archive}"))?;
 
-    // Verify the sha256 sidecar — fail closed, the same trust model as install.sh.
-    // The checksum asset is named honya-<target>.sha256 (no .tar.gz), matching
-    // taiki-e/upload-rust-binary-action's output.
+    // Verify the sha256 sidecar (fail closed). Asset is honya-<target>.sha256, no .tar.gz suffix.
     let sumfile = download_text(&format!("{base}/honya-{target}.sha256"))
         .await
         .with_context(|| {
@@ -157,7 +140,6 @@ pub async fn run_self_update() -> Result<()> {
         })?;
     verify_sha256(&tar_path, &sumfile)?;
 
-    // Extract with the system tar (the same dependency install.sh uses).
     let status = std::process::Command::new("tar")
         .arg("-xzf")
         .arg(&tar_path)
@@ -281,9 +263,7 @@ fn replace_executable(new_bin: &Path, current_exe: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Create a private (0700), unpredictable, exclusively-created staging dir under
-/// the system temp dir. Fails closed if a candidate already exists, so a local
-/// user cannot pre-create the path. Mirrors install.sh's `mktemp -d`.
+/// Private (0700), unpredictable, exclusively-created staging dir; fails closed if a candidate exists.
 fn private_staging_dir(tag: &str) -> Result<std::path::PathBuf> {
     let base = std::env::temp_dir();
     for attempt in 0..32u64 {

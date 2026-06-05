@@ -1,18 +1,7 @@
-//! src/agents/tokenize.rs — tokenizer-free token estimation by script class.
-//!
-//! We never call a real BPE tokenizer here; the chunker only needs a stable,
-//! cheap upper-ish estimate to keep chunks near a target token budget.
-//!
-//! Rule (verbatim from the pipeline design):
-//!   * CJK characters  → 1.05 tokens/char
-//!   * everything else → 0.30 tokens/char
-//!   * sum, then ceil to a whole token.
+//! Tokenizer-free token estimation by script class: a cheap stable estimate to
+//! keep chunks near a target budget without invoking a real BPE tokenizer.
 
-/// Estimate the token count of `s` by classifying each `char` as CJK or other.
-///
-/// CJK chars weigh 1.05 tok/char, all other chars 0.30 tok/char; the weighted
-/// sum is rounded up (`ceil`) to a whole number of tokens. The empty string is
-/// zero tokens.
+/// Estimate tokens of `s`: CJK chars weigh 1.05 tok/char, others 0.30, summed and ceil'd.
 pub fn estimate_tokens(s: &str) -> usize {
     let mut weighted = 0.0_f64;
     for c in s.chars() {
@@ -25,13 +14,7 @@ pub fn estimate_tokens(s: &str) -> usize {
     weighted.ceil() as usize
 }
 
-/// True when `c` belongs to a Japanese/CJK script block that the estimator
-/// treats as dense (≈1 token per character).
-///
-/// Covers: hiragana, katakana (incl. phonetic extensions + halfwidth),
-/// CJK Unified Ideographs (BMP + Extension A), CJK Compatibility Ideographs,
-/// fullwidth/halfwidth forms, the CJK Symbols & Punctuation block, and the
-/// katakana middle-dot / iteration marks that sit just outside the kana block.
+/// True when `c` is in a Japanese/CJK script block the estimator treats as dense (≈1 tok/char).
 pub fn is_cjk(c: char) -> bool {
     matches!(c as u32,
         // CJK Symbols and Punctuation (。「」、々〆〇 …)

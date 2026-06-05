@@ -1,24 +1,15 @@
-//! src/agents/chunk.rs — paragraph-first, sentence-fallback chunking with
-//! protected atoms.
+//! Paragraph-first, sentence-fallback chunking with protected atoms.
 //!
-//! Pipeline (verbatim from the design):
-//!   1. `atomize(md)` splits the markdown into atoms = protected span | plain text.
-//!      Protected spans are NEVER split internally (fenced code, image/inline
-//!      links, inline `code`, **/__ bold, * / _ italics, ｜漢字《かんじ》 ruby and
-//!      bare 《..》).
-//!   2. `group_paragraphs` re-joins atoms into paragraph strings, splitting plain
-//!      text on blank lines while keeping protected atoms attached to their
-//!      paragraph.
-//!   3. Greedily pack paragraphs into chunks until adding the next would exceed
-//!      `target`; a blank line is always a boundary.
-//!   4. A single paragraph above `hard_cap` is split with `split_sentences_capped`
-//!      on terminal punctuation (never inside a protected atom).
-//!   5. An oversized lone protected atom becomes its own chunk.
+//! `atomize` splits markdown into protected spans (never split internally:
+//! fenced code, links, inline code, emphasis, ruby) and plain text;
+//! `group_paragraphs` rejoins them; paragraphs are greedily packed up to
+//! `target`, and any paragraph over `hard_cap` is split on sentence boundaries
+//! that never fall inside a protected atom.
 
 use once_cell::sync::Lazy;
 use regex::Regex;
 
-use crate::agents::tokenize::estimate_tokens;
+use crate::agents::tokenize::{estimate_tokens, is_cjk};
 
 /// One unit of work handed to the Translator.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,31 +27,28 @@ enum Atom {
     Protected(String),
 }
 
-// --- terminal-punctuation matcher for the sentence fallback ----------------
-// Japanese 。！？．… plus the western full stop, each optionally trailed by
-// Japanese closing brackets 」』）】 and any run of closing quotes/parens. The
-// match ends a sentence; everything up to and including it is one sentence.
+// Sentence terminator: JP 。！？．… or western full stop, plus trailing closing brackets/quotes.
 static SENTENCE_END: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"[。！？．\.…]+[」』）】\)\]”’]*").expect("sentence-end regex is valid")
 });
 
-/// Split a cleansed chapter markdown into translator-sized chunks.
-///
-/// `target` is the soft token budget per chunk (paragraphs are packed up to it);
-/// `hard_cap` is the ceiling above which a lone paragraph is broken into
-/// sentences. Indices are assigned in order starting at 0.
+/// Split chapter markdown into chunks: `target` is the soft per-chunk budget, `hard_cap` the ceiling above which a lone paragraph is split into sentences.
 pub fn chunk_chapter(md: &str, target: usize, hard_cap: usize) -> Vec<Chunk> {
     let atoms = atomize(md);
     let paragraphs = group_paragraphs(&atoms);
 
-    // Expand any over-cap paragraph into sentence pieces up front so the packer
-    // only ever sees pack-able units. Protected-only over-cap paragraphs survive
-    // as a single (large) unit and will land in a chunk of their own.
+    // Pre-split over-cap paragraphs into pieces so the packer only sees pack-able units.
     let mut units: Vec<String> = Vec::new();
     for para in paragraphs {
         if estimate_tokens(&para) > hard_cap {
             for piece in split_sentences_capped(&para, target, hard_cap) {
-                if !piece.trim().is_empty() {
+                if piece.trim().is_empty() {
+                    continue;
+                }
+                // No terminal punctuation to split on: force under the cap so a chunk can't balloon.
+                if estimate_tokens(&piece) > hard_cap {
+                    units.extend(hard_split_unit(&piece, hard_cap));
+                } else {
                     units.push(piece);
                 }
             }
@@ -69,8 +57,7 @@ pub fn chunk_chapter(md: &str, target: usize, hard_cap: usize) -> Vec<Chunk> {
         }
     }
 
-    // Greedy pack units into chunks, never exceeding `target` unless a single
-    // unit is itself larger than `target` (then it stands alone).
+    // Greedy pack, never exceeding `target` unless a lone unit is itself larger.
     let mut chunks: Vec<Chunk> = Vec::new();
     let mut current = String::new();
     let mut current_tokens = 0usize;
@@ -90,7 +77,6 @@ pub fn chunk_chapter(md: &str, target: usize, hard_cap: usize) -> Vec<Chunk> {
         }
 
         if current_tokens + unit_tokens > target {
-            // Flush the current chunk; start a new one with this unit.
             push_chunk(&mut chunks, std::mem::take(&mut current));
             current = unit;
             current_tokens = unit_tokens;
@@ -127,9 +113,7 @@ fn push_chunk(chunks: &mut Vec<Chunk>, text: String) {
     });
 }
 
-/// Split markdown into protected/plain atoms in a single left-to-right pass.
-/// Protected patterns are tried in priority order at each position; the first
-/// that matches consumes its span as one `Atom::Protected`.
+/// Split markdown into protected/plain atoms in one left-to-right pass; protected patterns are tried in priority order.
 fn atomize(md: &str) -> Vec<Atom> {
     let bytes = md.as_bytes();
     let len = bytes.len();
@@ -139,7 +123,6 @@ fn atomize(md: &str) -> Vec<Atom> {
 
     while i < len {
         if let Some(end) = match_protected(md, i) {
-            // Flush any pending plain text first.
             if !plain.is_empty() {
                 atoms.push(Atom::Plain(std::mem::take(&mut plain)));
             }
@@ -148,7 +131,6 @@ fn atomize(md: &str) -> Vec<Atom> {
             continue;
         }
 
-        // Not a protected start: consume one full char into the plain buffer.
         let ch = md[i..]
             .chars()
             .next()
@@ -163,36 +145,35 @@ fn atomize(md: &str) -> Vec<Atom> {
     atoms
 }
 
-/// If a protected span starts exactly at byte offset `start`, return the byte
-/// offset just past its end. Patterns are tried in priority order.
+/// If a protected span starts at byte offset `start`, return the offset just past its end. Patterns tried in priority order.
 fn match_protected(md: &str, start: usize) -> Option<usize> {
     let rest = &md[start..];
     let bytes = rest.as_bytes();
 
-    // 1. Fenced code block: ``` ... ``` (or longer fences), spanning newlines.
+    // Fenced code block: ``` ... ``` (or longer fences), spanning newlines.
     if rest.starts_with("```")
         && let Some(end) = match_fenced_code(rest) {
             return Some(start + end);
         }
 
-    // 2a. Image link: ![alt](url)
+    // Image link: ![alt](url)
     if rest.starts_with("![")
         && let Some(end) = match_link(rest, 2) {
             return Some(start + end);
         }
-    // 2b. Inline link: [text](url)  — but not the start of an image (handled above)
+    // Inline link: [text](url) (image case handled above)
     if !bytes.is_empty() && bytes[0] == b'['
         && let Some(end) = match_link(rest, 1) {
             return Some(start + end);
         }
 
-    // 3. Inline code: `code` (single or multiple backticks, same count to close).
+    // Inline code: `code` (N backticks, same count to close).
     if !bytes.is_empty() && bytes[0] == b'`'
         && let Some(end) = match_inline_code(rest) {
             return Some(start + end);
         }
 
-    // 4. Emphasis: **bold** / __bold__ / *italic* / _italic_ (longest first).
+    // Emphasis: **bold** / __bold__ / *italic* / _italic_ (longest first).
     for delim in ["**", "__", "*", "_"] {
         if rest.starts_with(delim)
             && let Some(end) = match_emphasis(rest, delim) {
@@ -200,13 +181,12 @@ fn match_protected(md: &str, start: usize) -> Option<usize> {
             }
     }
 
-    // 5a. Ruby with base marker: ｜漢字《かんじ》  (fullwidth vertical bar U+FF5C
-    //     or ASCII '|' immediately followed by base text then 《reading》).
+    // Ruby with base marker: ｜漢字《かんじ》 (fullwidth U+FF5C or ASCII '|').
     if (rest.starts_with('｜') || rest.starts_with('|'))
         && let Some(end) = match_ruby_with_base(rest) {
             return Some(start + end);
         }
-    // 5b. Bare ruby reading: 《..》
+    // Bare ruby reading: 《..》
     if rest.starts_with('《')
         && let Some(end) = match_bracketed(rest, '《', '》') {
             return Some(start + end);
@@ -215,53 +195,43 @@ fn match_protected(md: &str, start: usize) -> Option<usize> {
     None
 }
 
-/// Match a fenced code block starting at the beginning of `rest`. Returns the
-/// byte length of the whole fence including the closing line. An unterminated
-/// fence consumes to end-of-string (still one protected atom).
+/// Match a fenced code block; returns its byte length. An unterminated fence consumes to end-of-string.
 fn match_fenced_code(rest: &str) -> Option<usize> {
-    // Count the opening run of backticks (>= 3).
     let fence_len = rest.bytes().take_while(|&b| b == b'`').count();
     if fence_len < 3 {
         return None;
     }
     let fence: String = "`".repeat(fence_len);
 
-    // Find the start of the line after the opening fence line.
     let after_open_line = match rest.find('\n') {
         Some(nl) => nl + 1,
         None => return Some(rest.len()), // opening fence with no newline: whole thing
     };
 
-    // Search subsequent lines for a closing fence of at least `fence_len` ticks.
     let mut offset = after_open_line;
     let tail = &rest[after_open_line..];
     for line in tail.split_inclusive('\n') {
         let trimmed = line.trim_start();
         if trimmed.starts_with(&fence) {
-            // Closing fence: consume through the end of this line.
             return Some(offset + line.len());
         }
         offset += line.len();
     }
-    // Unterminated: take the rest as one atom.
-    Some(rest.len())
+    Some(rest.len()) // unterminated
 }
 
-/// Match a markdown link/image at the start of `rest`. `lead` is the number of
-/// leading bytes already known to be the prefix (`1` for `[`, `2` for `![`).
-/// Shape: PREFIX `[` text `]` `(` url `)`. Bracket nesting is tracked for the
-/// `[...]` part; the URL part stops at the first unescaped `)`.
+/// Match a markdown link/image of shape PREFIX `[`text`]``(`url`)`. `lead` is the
+/// prefix byte count (`1` for `[`, `2` for `![`); `[...]` nesting is tracked, the URL stops at the first unescaped `)`.
 fn match_link(rest: &str, lead: usize) -> Option<usize> {
     let b = rest.as_bytes();
-    // The '[' must be at index lead-1.
     if lead == 0 || lead > b.len() || b[lead - 1] != b'[' {
         return None;
     }
-    let mut i = lead; // first char inside the bracket text
+    let mut i = lead;
     let mut depth = 1i32;
     while i < b.len() {
         match b[i] {
-            b'\\' => i += 2, // skip escaped char
+            b'\\' => i += 2,
             b'[' => {
                 depth += 1;
                 i += 1;
@@ -273,14 +243,13 @@ fn match_link(rest: &str, lead: usize) -> Option<usize> {
                     break;
                 }
             }
-            b'\n' => return None, // links don't span blank structure; bail
+            b'\n' => return None, // links don't span blank structure
             _ => i += 1,
         }
     }
     if depth != 0 {
         return None;
     }
-    // Immediately after ']' must be '('.
     if i >= b.len() || b[i] != b'(' {
         return None;
     }
@@ -299,8 +268,7 @@ fn match_link(rest: &str, lead: usize) -> Option<usize> {
     None
 }
 
-/// Match inline code: a run of N backticks, then content, then the next run of
-/// exactly N backticks. Returns the full byte length.
+/// Match inline code: N backticks, content, then a run of exactly N backticks.
 fn match_inline_code(rest: &str) -> Option<usize> {
     let b = rest.as_bytes();
     let ticks = b.iter().take_while(|&&c| c == b'`').count();
@@ -309,24 +277,20 @@ fn match_inline_code(rest: &str) -> Option<usize> {
     }
     let close: String = "`".repeat(ticks);
     let after = ticks;
-    // Search for the closing run.
     if let Some(rel) = rest[after..].find(&close) {
         return Some(after + rel + ticks);
     }
     None
 }
 
-/// Match an emphasis span delimited by `delim` (`**`, `__`, `*`, `_`).
-/// Requires a non-empty body and a matching closing delimiter on the same
-/// logical run (no intervening blank line). Returns the full byte length.
+/// Match an emphasis span delimited by `delim` (`**`/`__`/`*`/`_`); needs a non-empty body and a close on the same run.
 fn match_emphasis(rest: &str, delim: &str) -> Option<usize> {
     let dl = delim.len();
     if rest.len() <= dl {
         return None;
     }
     let body = &rest[dl..];
-    // Closing delimiter must exist; body must be non-empty and not start the
-    // close immediately (would be an empty/`****` run — leave those to plain).
+    // Empty body (e.g. `****`) isn't emphasis — leave it to plain.
     if body.starts_with(delim) {
         return None;
     }
@@ -340,23 +304,20 @@ fn match_emphasis(rest: &str, delim: &str) -> Option<usize> {
     Some(dl + close_rel + dl)
 }
 
-/// Match `｜base《reading》` (or `|base《reading》`). The base run is everything
-/// up to the opening `《`; then the bracketed reading is consumed.
+/// Match `｜base《reading》` (or `|base《reading》`): base run up to `《`, then the bracketed reading.
 fn match_ruby_with_base(rest: &str) -> Option<usize> {
     let mut chars = rest.char_indices();
-    // Consume the leading bar.
     let (_, bar) = chars.next()?;
     if bar != '｜' && bar != '|' {
         return None;
     }
-    // Find the opening 《 with at least one base char between bar and it.
+    // Require at least one base char between the bar and 《.
     let mut saw_base = false;
     for (idx, c) in chars {
         if c == '《' {
             if !saw_base {
                 return None;
             }
-            // Consume the bracketed reading from here.
             let bracket = match_bracketed(&rest[idx..], '《', '》')?;
             return Some(idx + bracket);
         }
@@ -368,8 +329,7 @@ fn match_ruby_with_base(rest: &str) -> Option<usize> {
     None
 }
 
-/// Match a `open … close` bracketed span at the start of `rest`. Returns the
-/// full byte length including both brackets. No nesting; stops at a newline.
+/// Match an `open … close` bracketed span (no nesting; stops at a newline).
 fn match_bracketed(rest: &str, open: char, close: char) -> Option<usize> {
     let mut chars = rest.char_indices();
     let (_, first) = chars.next()?;
@@ -387,9 +347,7 @@ fn match_bracketed(rest: &str, open: char, close: char) -> Option<usize> {
     None
 }
 
-/// Re-assemble atoms into paragraph strings. Plain atoms are split on blank
-/// lines (a run of `\n\n` or more); protected atoms always attach to the
-/// paragraph currently being built (they never introduce a boundary).
+/// Re-assemble atoms into paragraphs: plain atoms split on blank lines; protected atoms never introduce a boundary.
 fn group_paragraphs(atoms: &[Atom]) -> Vec<String> {
     let mut paragraphs: Vec<String> = Vec::new();
     let mut current = String::new();
@@ -406,8 +364,7 @@ fn group_paragraphs(atoms: &[Atom]) -> Vec<String> {
         match atom {
             Atom::Protected(s) => current.push_str(s),
             Atom::Plain(s) => {
-                // Split this plain run on blank lines while keeping attached
-                // text glued to the preceding protected atom.
+                // Split on blank lines, keeping attached text glued to the preceding protected atom.
                 let mut segment = s.as_str();
                 while let Some(pos) = find_blank_line(segment) {
                     let (head, tail) = segment.split_at(pos.0);
@@ -423,16 +380,13 @@ fn group_paragraphs(atoms: &[Atom]) -> Vec<String> {
     paragraphs
 }
 
-/// Find the first blank-line boundary in `s`. Returns `(start, len)` where
-/// `start` is the byte offset of the first `\n` of the run and `len` is the
-/// number of bytes to skip (the whole run of `\n` / `\r\n` constituting the
-/// blank-line separator, which is two-or-more consecutive newlines).
+/// Find the first blank-line boundary (>=2 newlines), returning `(start, len)`: byte offset of the run's first `\n` and bytes to skip.
 fn find_blank_line(s: &str) -> Option<(usize, usize)> {
     let b = s.as_bytes();
     let mut i = 0usize;
     while i < b.len() {
         if b[i] == b'\n' {
-            // Count the run of newlines (treating \r as skippable padding).
+            // \r counts as skippable padding within the run.
             let run_start = i;
             let mut j = i;
             let mut newlines = 0usize;
@@ -453,10 +407,7 @@ fn find_blank_line(s: &str) -> Option<(usize, usize)> {
     None
 }
 
-/// Split a single oversized paragraph into sub-strings by terminal punctuation,
-/// packing sentences up to `target` and never producing a piece above
-/// `hard_cap` unless a single sentence itself exceeds it. Sentence boundaries
-/// inside a protected atom are ignored (we re-atomize to find safe cut points).
+/// Split an oversized paragraph on terminal punctuation, packing sentences up to `target` and staying under `hard_cap` unless a lone sentence exceeds it.
 fn split_sentences_capped(para: &str, target: usize, hard_cap: usize) -> Vec<String> {
     let sentences = split_into_sentences(para);
 
@@ -497,9 +448,83 @@ fn split_sentences_capped(para: &str, target: usize, hard_cap: usize) -> Vec<Str
     out
 }
 
-/// Split a paragraph into sentences on terminal punctuation, never cutting
-/// inside a protected atom. We atomize the paragraph and only scan plain atoms
-/// for terminators; protected atoms are appended whole to the pending sentence.
+/// Last-resort splitter for a unit still over `hard_cap` (no punctuation to break on): keep protected atoms whole, force-break plain runs by token budget; every piece fits the cap except a lone over-cap protected atom.
+fn hard_split_unit(text: &str, hard_cap: usize) -> Vec<String> {
+    let cap = hard_cap.max(1);
+    let mut out: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut current_tokens = 0usize;
+
+    let flush = |current: &mut String, current_tokens: &mut usize, out: &mut Vec<String>| {
+        let trimmed = current.trim();
+        if !trimmed.is_empty() {
+            out.push(trimmed.to_string());
+        }
+        current.clear();
+        *current_tokens = 0;
+    };
+
+    for atom in atomize(text) {
+        let fragments = match atom {
+            Atom::Protected(s) => vec![s],
+            Atom::Plain(s) if estimate_tokens(&s) <= cap => vec![s],
+            Atom::Plain(s) => break_plain_capped(&s, cap),
+        };
+        for frag in fragments {
+            let t = estimate_tokens(&frag);
+            if !current.is_empty() && current_tokens + t > cap {
+                flush(&mut current, &mut current_tokens, &mut out);
+            }
+            current.push_str(&frag);
+            current_tokens += t;
+            if current_tokens >= cap {
+                flush(&mut current, &mut current_tokens, &mut out);
+            }
+        }
+    }
+    flush(&mut current, &mut current_tokens, &mut out);
+    out
+}
+
+/// Break a plain string into <=`cap`-token runs, cutting at the last whitespace before the budget (keeps words intact), else at a char boundary (CJK has no spaces).
+fn break_plain_capped(s: &str, cap: usize) -> Vec<String> {
+    let cap = cap.max(1) as f64;
+    let mut out: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut weight = 0.0_f64;
+    // Byte offset in `current` just past the most recent whitespace char.
+    let mut last_ws: Option<usize> = None;
+
+    let char_weight = |c: char| if is_cjk(c) { 1.05 } else { 0.30 };
+
+    for ch in s.chars() {
+        let w = char_weight(ch);
+        if weight + w > cap && !current.is_empty() {
+            match last_ws.filter(|&i| i > 0 && i < current.len()) {
+                Some(idx) => {
+                    // Carry the tail after the last whitespace into the next run.
+                    let tail = current.split_off(idx);
+                    out.push(std::mem::take(&mut current));
+                    current = tail;
+                }
+                None => out.push(std::mem::take(&mut current)),
+            }
+            weight = current.chars().map(char_weight).sum();
+            last_ws = None;
+        }
+        current.push(ch);
+        weight += w;
+        if ch.is_whitespace() {
+            last_ws = Some(current.len());
+        }
+    }
+    if !current.trim().is_empty() {
+        out.push(current);
+    }
+    out
+}
+
+/// Split into sentences on terminal punctuation, never cutting inside a protected atom (only plain atoms are scanned for terminators).
 fn split_into_sentences(para: &str) -> Vec<String> {
     let atoms = atomize(para);
     let mut sentences: Vec<String> = Vec::new();
@@ -511,7 +536,6 @@ fn split_into_sentences(para: &str) -> Vec<String> {
             Atom::Plain(s) => {
                 let mut last = 0usize;
                 for m in SENTENCE_END.find_iter(s) {
-                    // Append up to and including the terminator to the sentence.
                     current.push_str(&s[last..m.end()]);
                     sentences.push(std::mem::take(&mut current));
                     last = m.end();
@@ -524,4 +548,43 @@ fn split_into_sentences(para: &str) -> Vec<String> {
         sentences.push(current);
     }
     sentences
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A paragraph with no terminal punctuation must still be broken so no chunk exceeds the hard cap.
+    #[test]
+    fn wall_of_text_without_terminators_is_capped() {
+        // ~600 CJK chars (≈630 tokens) with zero 。！？ — one giant "sentence".
+        let para = "あ".repeat(600);
+        let target = 100;
+        let hard_cap = 120;
+        let chunks = chunk_chapter(&para, target, hard_cap);
+
+        assert!(chunks.len() > 1, "must split into multiple chunks");
+        for c in &chunks {
+            assert!(
+                c.est_tokens <= hard_cap,
+                "chunk {} over cap: {} > {}",
+                c.index,
+                c.est_tokens,
+                hard_cap
+            );
+        }
+        let rejoined: String = chunks.iter().map(|c| c.text.replace('\n', "")).collect();
+        assert_eq!(rejoined, para);
+    }
+
+    /// Normal punctuated prose chunks on sentence boundaries and stays within the cap.
+    #[test]
+    fn punctuated_prose_stays_within_cap() {
+        let para = "これは文です。".repeat(80);
+        let chunks = chunk_chapter(&para, 100, 120);
+        assert!(!chunks.is_empty());
+        for c in &chunks {
+            assert!(c.est_tokens <= 120, "chunk over cap: {}", c.est_tokens);
+        }
+    }
 }

@@ -1,15 +1,4 @@
-//! src/llm/structured.rs — strict `json_schema` chat with fence-stripping and
-//! retry-on-parse-failure.
-//!
-//! [`chat_structured`] forces `response_format` to the supplied strict schema,
-//! **clears** `tool_choice` (mutually exclusive with structured output), sends
-//! the request, strips any stray ```json fences a model may have wrapped the
-//! output in, and deserializes into `T`. On a parse failure it re-sends up to
-//! `retries` more times before surfacing [`LlmError::Parse`].
-//!
-//! The two schema builders return `serde_json::Value` matching the FINAL shapes
-//! in `agent_prompts.md` verbatim: `additionalProperties:false` and every key in
-//! `required` on every object, as strict mode demands.
+//! Strict `json_schema` chat with fence-stripping and retry-on-parse-failure.
 
 use serde::de::DeserializeOwned;
 
@@ -18,9 +7,7 @@ use super::{ChatRequest, JsonSchemaSpec, ResponseFormat, Usage};
 
 /// Run a strict structured-output chat and deserialize the assistant content.
 ///
-/// * `schema_name` is the `json_schema.name` (e.g. `"translation_result"`).
-/// * `schema` is the JSON Schema object (see [`translator_schema`] etc.).
-/// * `retries` extra attempts on parse failure (so total attempts = 1 + retries).
+/// `retries` is extra attempts on parse failure, so total attempts = 1 + retries.
 pub async fn chat_structured<T: DeserializeOwned>(
     client: &dyn LlmClient,
     mut req: ChatRequest,
@@ -28,8 +15,7 @@ pub async fn chat_structured<T: DeserializeOwned>(
     schema: serde_json::Value,
     retries: usize,
 ) -> Result<(T, Usage)> {
-    // Force strict structured output; structured output and tool_choice are
-    // mutually exclusive, so clear tool_choice.
+    // Structured output and tool_choice are mutually exclusive, so clear tool_choice.
     req.response_format = Some(ResponseFormat::JsonSchema {
         json_schema: JsonSchemaSpec {
             name: schema_name.to_string(),
@@ -43,7 +29,6 @@ pub async fn chat_structured<T: DeserializeOwned>(
 
     for _ in 0..=retries {
         let resp = client.chat(&req).await?;
-        // chat() guarantees a non-empty choices vec, but stay defensive.
         let usage = resp.usage.unwrap_or_default();
         let choice = resp.choices.first().ok_or(LlmError::EmptyChoices)?;
         let raw = choice.message.content.clone().unwrap_or_default();
@@ -64,15 +49,10 @@ pub async fn chat_structured<T: DeserializeOwned>(
     Err(last_err.unwrap_or(LlmError::EmptyChoices))
 }
 
-/// Strip a single Markdown code fence wrapping JSON output.
-///
-/// Handles ```json / ``` / ~~~ openers and the matching trailing fence, plus
-/// surrounding whitespace. If the text is not fenced it is returned trimmed and
-/// unchanged. Returns a borrowed slice of the input (no allocation).
+/// Strip a single ```json/```/~~~ fence wrapping JSON; returns a trimmed borrowed slice.
 pub fn strip_fences(s: &str) -> &str {
     let trimmed = s.trim();
 
-    // Determine the fence marker, if any.
     let fence: Option<&str> = if trimmed.starts_with("```") {
         Some("```")
     } else if trimmed.starts_with("~~~") {
@@ -85,7 +65,7 @@ pub fn strip_fences(s: &str) -> &str {
         return trimmed;
     };
 
-    // Drop the opening fence line (which may carry a language tag like `json`).
+    // Drop the opening fence line, which may carry a language tag like `json`.
     let after_open = &trimmed[fence.len()..];
     let body_start = match after_open.find('\n') {
         Some(nl) => &after_open[nl + 1..],
@@ -93,17 +73,13 @@ pub fn strip_fences(s: &str) -> &str {
         None => after_open,
     };
 
-    // Drop the trailing fence if present.
     let body = body_start.trim_end();
     let inner = body.strip_suffix(fence).unwrap_or(body);
 
     inner.trim()
 }
 
-/// FINAL `translation_result` schema → deserializes into `model::TranslatorOut`.
-///
-/// Verbatim from `agent_prompts.md`: strict, `additionalProperties:false` and a
-/// full `required` list on every object.
+/// Strict `translation_result` schema (verbatim from `agent_prompts.md`) → `model::TranslatorOut`.
 pub fn translator_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
@@ -156,10 +132,7 @@ pub fn translator_schema() -> serde_json::Value {
     })
 }
 
-/// FINAL `review_result` schema → deserializes into `model::ReviewerOut`.
-///
-/// Verbatim from `agent_prompts.md`: strict, `additionalProperties:false`, both
-/// keys required.
+/// Strict `review_result` schema (verbatim from `agent_prompts.md`) → `model::ReviewerOut`.
 pub fn reviewer_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",

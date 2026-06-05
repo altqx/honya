@@ -1,17 +1,8 @@
-//! src/llm/mock.rs — a TEST-ONLY canned-response `LlmClient` (compiled only under
-//! `cfg(test)`) so the e2e suite can exercise the pipeline without a network or
-//! API key. honya itself ships no offline backend; a real OpenRouter key is
-//! required at runtime.
+//! Test-only canned-response `LlmClient` (cfg(test)) so the e2e suite runs without network or key.
 //!
-//! The mock keys off the requested `response_format`'s `json_schema.name` and
-//! returns schema-shaped JSON that deserializes cleanly into `TranslatorOut` /
-//! `ReviewerOut` (the FINAL shapes in `agent_prompts.md`):
-//!   * `translation_result` → a `TranslatorOut` with the canned Thai text and
-//!     empty discovery arrays.
-//!   * `review_result`      → `{"status":"approve","feedback":[]}` (always
-//!     approves, so the pipeline commits the canned text and moves on).
-//!   * anything else (e.g. an Orchestrator tools turn with no `response_format`)
-//!     → a plain assistant `stop` with no tool calls, so the tool loop ends.
+//! Keys off the request's `json_schema.name`: `translation_result` and
+//! `review_result` return matching shapes; anything else returns a tool-call-free
+//! `stop` so the tool loop ends.
 
 use async_trait::async_trait;
 
@@ -33,7 +24,6 @@ impl Default for MockClient {
 }
 
 impl MockClient {
-    /// Build a mock that returns a specific Thai string.
     #[allow(dead_code)]
     pub fn new(canned_thai: impl Into<String>) -> Self {
         Self {
@@ -41,7 +31,6 @@ impl MockClient {
         }
     }
 
-    /// Wrap a content string in a one-choice `stop` response.
     fn stop_with(content: String) -> ChatResponse {
         ChatResponse {
             id: Some("mock-completion".to_string()),
@@ -63,7 +52,6 @@ impl MockClient {
 #[async_trait]
 impl LlmClient for MockClient {
     async fn chat(&self, req: &ChatRequest) -> Result<ChatResponse> {
-        // Inspect the strict-schema name when present.
         let schema_name = match &req.response_format {
             Some(ResponseFormat::JsonSchema { json_schema }) => Some(json_schema.name.as_str()),
             _ => None,
@@ -71,7 +59,7 @@ impl LlmClient for MockClient {
 
         let content = match schema_name {
             Some("translation_result") => {
-                // Shape matches model::TranslatorOut exactly.
+                // Shape must match model::TranslatorOut.
                 let payload = serde_json::json!({
                     "thought_process": {
                         "scene_analysis": "(mock)",
@@ -85,15 +73,14 @@ impl LlmClient for MockClient {
                 payload.to_string()
             }
             Some("review_result") => {
-                // Shape matches model::ReviewerOut exactly; always approves.
+                // Shape must match model::ReviewerOut; always approves.
                 let payload = serde_json::json!({
                     "status": "approve",
                     "feedback": []
                 });
                 payload.to_string()
             }
-            // Orchestrator tools turn (or any other call): finish cleanly with
-            // no tool calls so the tool loop terminates after one round.
+            // Any other call: no tool calls, so the tool loop terminates after one round.
             _ => "(mock orchestrator: nothing to record)".to_string(),
         };
 

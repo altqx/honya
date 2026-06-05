@@ -1,10 +1,6 @@
-//! src/llm/client.rs — the live OpenRouter HTTP client, the `LlmClient` trait,
-//! the crate-shared `LlmError`, and configuration/env wiring.
+//! The live OpenRouter HTTP client, the `LlmClient` trait, and the crate-shared `LlmError`.
 //!
-//! `LlmError` is `pub` + `thiserror` so `error.rs` can `#[from]` it. The module
-//! also defines `pub type Result<T> = std::result::Result<T, LlmError>`, which
-//! shadows std inside this module — callers in `mod.rs` already account for that
-//! by spelling out `std::result::Result` where they need the real std type.
+//! The `Result<T>` alias here shadows `std::result::Result` within `crate::llm::*`.
 
 use std::time::Duration;
 
@@ -14,10 +10,6 @@ use reqwest::StatusCode;
 use crate::model::AppConfig;
 
 use super::{ChatRequest, ChatResponse};
-
-// ============================================================================
-// ERROR
-// ============================================================================
 
 /// All failure modes of the LLM layer.
 #[derive(thiserror::Error, Debug)]
@@ -51,10 +43,6 @@ pub enum LlmError {
 /// LLM-layer result alias. Shadows `std::result::Result` within `crate::llm::*`.
 pub type Result<T> = std::result::Result<T, LlmError>;
 
-// ============================================================================
-// CONFIG
-// ============================================================================
-
 /// Everything the HTTP client needs to talk to OpenRouter.
 #[derive(Debug, Clone)]
 pub struct ClientConfig {
@@ -71,8 +59,7 @@ pub struct ClientConfig {
 }
 
 impl ClientConfig {
-    /// Build a config from an explicit [`AppConfig`] + key. The key is resolved
-    /// once at startup (see [`crate::config::resolve_api_key`]) and threaded in.
+    /// Build a config from an [`AppConfig`] + the key resolved once at startup.
     pub fn from_app_config(cfg: &AppConfig, api_key: String) -> Self {
         Self {
             base_url: cfg.base_url.clone(),
@@ -83,26 +70,17 @@ impl ClientConfig {
         }
     }
 
-    /// The fully-qualified chat-completions endpoint.
     fn endpoint(&self) -> String {
         let base = self.base_url.trim_end_matches('/');
         format!("{base}/chat/completions")
     }
 }
 
-// ============================================================================
-// CLIENT TRAIT
-// ============================================================================
-
 /// The single capability every backend (live or mock) exposes: one chat call.
 #[async_trait]
 pub trait LlmClient: Send + Sync {
     async fn chat(&self, req: &ChatRequest) -> Result<ChatResponse>;
 }
-
-// ============================================================================
-// OPENROUTER CLIENT
-// ============================================================================
 
 /// Live OpenRouter chat client over reqwest + rustls.
 pub struct OpenRouterClient {
@@ -111,17 +89,12 @@ pub struct OpenRouterClient {
 }
 
 impl OpenRouterClient {
-    /// Build a client from an explicit [`ClientConfig`].
     pub fn new(cfg: ClientConfig) -> Result<Self> {
         let http = reqwest::Client::builder().timeout(cfg.timeout).build()?;
         Ok(Self { http, cfg })
     }
 
-    /// Issue one POST and classify the response into `Result<ChatResponse>`.
-    ///
-    /// On a non-success status this reads the body text for the error message
-    /// and, for 429, extracts the `Retry-After` header seconds. The buffered
-    /// body is consumed by `text()`, so success is parsed from that same string.
+    /// Issue one POST and classify the response; 429 extracts the `Retry-After` seconds.
     async fn send_once(&self, req: &ChatRequest) -> Result<ChatResponse> {
         let mut builder = self
             .http

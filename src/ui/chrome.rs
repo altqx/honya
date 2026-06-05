@@ -1,9 +1,8 @@
-//! src/ui/chrome.rs — the persistent frame around every screen:
-//! the breadcrumb+tally header, the Japanese tab bar, and the data-driven footer.
+//! The persistent frame around every screen: breadcrumb+tally header, tab bar,
+//! and data-driven footer.
 //!
-//! Layout math here is column-aware (via [`crate::ui::text`]) so the
-//! right-aligned tally and the right-anchored global hint cluster never drift on
-//! CJK breadcrumbs.
+//! Layout math is column-aware (via [`crate::ui::text`]) so the right-aligned
+//! tally and global hint cluster never drift on CJK breadcrumbs.
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -25,7 +24,6 @@ pub struct StatusTally {
 }
 
 impl StatusTally {
-    /// Total chapters tracked by this tally.
     fn total(&self) -> u32 {
         self.done + self.working + self.pending + self.failed
     }
@@ -41,16 +39,13 @@ impl StatusTally {
     }
 }
 
-/// Render the top header row: left breadcrumb, right `●done ◐working ○pending ✗failed  NN%`.
-///
-/// The breadcrumb is truncated to whatever space the tally leaves so the two
-/// halves never collide. Tally glyphs carry their semantic colors; the percent
-/// is soft ink.
+/// Render the top header row: left breadcrumb, right
+/// `●done ◐working ○pending ✗failed  NN%`. The breadcrumb is truncated to
+/// whatever space the tally leaves so the two halves never collide.
 pub fn render_header(f: &mut Frame, area: Rect, crumb: &str, tally: &StatusTally, theme: &Theme) {
     if area.width == 0 {
         return;
     }
-    // Background fill for the whole row.
     f.render_widget(
         Paragraph::new("").style(Style::default().bg(theme.bg)),
         area,
@@ -58,7 +53,6 @@ pub fn render_header(f: &mut Frame, area: Rect, crumb: &str, tally: &StatusTally
 
     let total_cols = area.width as usize;
 
-    // Build the right-aligned tally spans.
     let pct = tally.percent();
     let mut right: Vec<Span> = Vec::new();
     let push_stat = |spans: &mut Vec<Span>, glyph: char, count: u32, color| {
@@ -71,7 +65,7 @@ pub fn render_header(f: &mut Frame, area: Rect, crumb: &str, tally: &StatusTally
     push_stat(&mut right, '●', tally.done, theme.status_done);
     push_stat(&mut right, '◐', tally.working, theme.status_working);
     push_stat(&mut right, '○', tally.pending, theme.status_pending);
-    // Failed cell: vermilion only when there ARE failures, else faint (no alarm).
+    // Vermilion only when there are failures, else faint (no false alarm).
     let fail_color = if tally.failed > 0 {
         theme.status_failed
     } else {
@@ -91,7 +85,6 @@ pub fn render_header(f: &mut Frame, area: Rect, crumb: &str, tally: &StatusTally
 
     let right_cols: usize = right.iter().map(|s| col_width(s.content.as_ref())).sum();
 
-    // Left breadcrumb: leading space for breathing room, then truncate to fit.
     let crumb = crumb.trim();
     let left_budget = total_cols.saturating_sub(right_cols + 2);
     let crumb_trunc = crate::ui::text::truncate_cols(crumb, left_budget);
@@ -102,7 +95,6 @@ pub fn render_header(f: &mut Frame, area: Rect, crumb: &str, tally: &StatusTally
         format!(" {crumb_trunc}"),
         Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
     ));
-    // Filler gap to push the tally to the right edge.
     let gap = total_cols.saturating_sub(crumb_cols + 1 + right_cols);
     if gap > 0 {
         spans.push(Span::raw(" ".repeat(gap)));
@@ -115,12 +107,8 @@ pub fn render_header(f: &mut Frame, area: Rect, crumb: &str, tally: &StatusTally
     );
 }
 
-/// Render the primary tab bar with Japanese labels.
-///
-/// Labels: `1 書架 Shelf · 2 棚 Project · 3 訳 Translate · 4 読 Reader · 5 辞 Lexicon`.
-/// When `run_active`, tab 3's `訳` glyph is swapped for the live spinner frame so
-/// the bar itself signals a running translation. The active tab is the indigo
-/// accent; inactive tabs are soft ink.
+/// Render the primary tab bar; when `run_active`, tab 3's `訳` glyph is swapped
+/// for the live spinner frame so the bar itself signals a running translation.
 pub fn render_tabbar(
     f: &mut Frame,
     area: Rect,
@@ -132,7 +120,6 @@ pub fn render_tabbar(
     if area.width == 0 {
         return;
     }
-    // Tab 3's glyph spins while a run is live.
     let translate_glyph: &str = if run_active {
         theme::spinner_frame(frame)
     } else {
@@ -162,12 +149,9 @@ pub fn render_tabbar(
 }
 
 /// Render the footer hint bar: each `(key, label)` then the always-present
-/// global cluster `?help  :cmd  q quit`, right-aligned in faint ink.
-///
-/// Keys render in soft ink (bold), labels in faint ink. The global cluster is
-/// pinned to the right edge regardless of how many screen-specific hints there
-/// are; if the row is too narrow the screen-specific hints are dropped before
-/// the global cluster (which is the contract every screen relies on).
+/// right-aligned global cluster `?help  :cmd  q quit`. When the row is too
+/// narrow, screen-specific hints are dropped before the global cluster — the
+/// contract every screen relies on.
 pub fn render_footer(
     f: &mut Frame,
     area: Rect,
@@ -185,7 +169,6 @@ pub fn render_footer(
 
     let total_cols = area.width as usize;
 
-    // --- Global cluster (always present, right-aligned) ---
     let key_style = Style::default()
         .fg(theme.ink_soft)
         .add_modifier(Modifier::BOLD);
@@ -213,15 +196,15 @@ pub fn render_footer(
     ]);
     let global_cols: usize = global.iter().map(|s| col_width(s.content.as_ref())).sum();
 
-    // --- Screen-specific hints (left, dropped first when cramped) ---
+    // Screen-specific hints, dropped first when the row is cramped.
     let left_budget = total_cols.saturating_sub(global_cols + 2);
     let mut left: Vec<Span> = Vec::new();
     let mut left_cols = 0usize;
-    left.push(Span::raw(" ")); // leading pad
+    left.push(Span::raw(" "));
     left_cols += 1;
     for (key, label) in hints {
-        // "<key> <label>   " — measure before committing so we never overflow
-        // into the global cluster.
+        // Measure the "<key> <label>   " piece before committing so it never
+        // overflows into the global cluster.
         let piece_cols = col_width(key) + 1 + col_width(label) + 3;
         if left_cols + piece_cols > left_budget {
             break;
@@ -233,7 +216,7 @@ pub fn render_footer(
         left_cols += piece_cols;
     }
 
-    // --- Compose with a filler gap pinning the global cluster right ---
+    // Filler gap pins the global cluster to the right edge.
     let gap = total_cols.saturating_sub(left_cols + global_cols);
     let mut spans = left;
     if gap > 0 {
@@ -241,8 +224,6 @@ pub fn render_footer(
     }
     spans.append(&mut global);
 
-    // Spans are already composed left→gap→right, so default (left) alignment is
-    // exactly what we want; no explicit alignment call needed.
     f.render_widget(
         Paragraph::new(Line::from(spans)).style(Style::default().bg(theme.bg)),
         area,

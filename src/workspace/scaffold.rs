@@ -1,21 +1,6 @@
-//! src/workspace/scaffold.rs — create the project tree + metadata templates.
-//!
-//! On import we materialize the canonical layout and write all five metadata
-//! files, each carrying a `<!-- honya:data ... honya:data -->` block so the
-//! agents can immediately read/mutate them through the workspace API.
-//!
-//! ```text
-//! <root>/
-//! ├── PROJECT.md          (synopsis, models, config — honya:data: ProjectMeta)
-//! ├── CHARACTERS.md       (empty character table     — honya:data: {characters:[]})
-//! ├── GLOSSARY.md         (empty glossary table      — honya:data: {terms:[]})
-//! ├── STYLE.md            (style guide draft         — honya:data: StyleMeta)
-//! ├── images/
-//! └── Vol_NN/
-//!     ├── VOLUME.md        (recap/summaries/notes     — honya:data: VolumeData)
-//!     ├── raw/
-//!     └── translated/
-//! ```
+//! Create the project tree + metadata templates. On import we materialize the
+//! canonical layout and write all five metadata files, each with a `honya:data`
+//! block so the agents can read/mutate them through the workspace API.
 
 use std::path::Path;
 
@@ -46,10 +31,8 @@ struct StyleMeta {
     status: String,
 }
 
-/// Create the full project tree and write all root metadata + the first volume.
-///
-/// Idempotent for directory creation (`create_dir_all`); metadata files are
-/// (re)written from the templates, so call this once on import.
+/// Create the project tree and write all root metadata + the first volume.
+/// Dir creation is idempotent; root metadata is written only when absent.
 pub fn create_project(
     root: &Path,
     title: &str,
@@ -58,7 +41,6 @@ pub fn create_project(
 ) -> std::io::Result<()> {
     let ws = Workspace::new(root.to_path_buf(), vol_number);
 
-    // Directory tree.
     std::fs::create_dir_all(root)?;
     std::fs::create_dir_all(ws.images_dir())?;
     std::fs::create_dir_all(ws.vol_dir.join("raw"))?;
@@ -66,11 +48,8 @@ pub fn create_project(
 
     let date = Local::now().format("%Y-%m-%d").to_string();
 
-    // Root metadata files are written ONLY when absent, so re-importing another
-    // volume into an existing project never clobbers a built-up CHARACTERS /
-    // GLOSSARY / PROJECT / STYLE (directory creation above is already idempotent).
-
-    // PROJECT.md
+    // Each root metadata file is written only when absent, so re-importing a
+    // volume never clobbers a built-up CHARACTERS / GLOSSARY / PROJECT / STYLE.
     if !ws.project_md().exists() {
         let project_meta = ProjectMeta {
             title: title.to_string(),
@@ -85,7 +64,6 @@ pub fn create_project(
         )?;
     }
 
-    // CHARACTERS.md (empty table + {characters:[]})
     if !ws.characters_md().exists() {
         data_block::write_with_data(
             &ws.characters_md(),
@@ -94,7 +72,6 @@ pub fn create_project(
         )?;
     }
 
-    // GLOSSARY.md (empty table + {terms:[]})
     if !ws.glossary_md().exists() {
         data_block::write_with_data(
             &ws.glossary_md(),
@@ -103,7 +80,6 @@ pub fn create_project(
         )?;
     }
 
-    // STYLE.md
     if !ws.style_md().exists() {
         let style_meta = StyleMeta {
             created: date.clone(),
@@ -112,27 +88,20 @@ pub fn create_project(
         data_block::write_with_data(&ws.style_md(), &render_style_body(&date), &style_meta)?;
     }
 
-    // VOLUME.md for the first volume.
     write_volume_md(&ws, None)?;
 
     Ok(())
 }
 
-/// Ensure `Vol_NN` exists with its raw/translated subdirs and a VOLUME.md.
-///
-/// Existing VOLUME.md content is preserved: the volume data block is loaded and
-/// re-rendered (only refreshing the label when one is supplied).
+/// Ensure `Vol_NN` exists with raw/translated subdirs and a VOLUME.md; existing
+/// VOLUME.md content is preserved (loaded + re-rendered).
 #[allow(dead_code)]
 pub fn ensure_volume(root: &Path, vol_number: u32, label: Option<&str>) -> std::io::Result<()> {
     let ws = Workspace::new(root.to_path_buf(), vol_number);
     std::fs::create_dir_all(ws.vol_dir.join("raw"))?;
     std::fs::create_dir_all(ws.vol_dir.join("translated"))?;
-    // Preserves existing VOLUME.md data (loaded + re-rendered); seeds the label
-    // into the recap only when the recap is still empty.
     write_volume_md(&ws, label)
 }
-
-// --- template bodies --------------------------------------------------------
 
 fn render_project_body(title: &str, date: &str, models: &ModelSet) -> String {
     format!(
@@ -192,10 +161,10 @@ fn render_style_body(date: &str) -> String {
 }
 
 fn write_volume_md(ws: &Workspace, label: Option<&str>) -> std::io::Result<()> {
-    // Load existing data so re-running ensure_volume never destroys content.
+    // Load existing data so re-running never destroys content.
     let mut data = volume::load(ws);
 
-    // Seed an empty recap for a brand-new volume with a known label.
+    // Seed the recap only for a brand-new volume with a known label.
     if data.running_recap.trim().is_empty()
         && let Some(lbl) = label.filter(|l| !l.trim().is_empty()) {
             data.running_recap = format!("เล่ม: {}", lbl.trim());
@@ -205,8 +174,7 @@ fn write_volume_md(ws: &Workspace, label: Option<&str>) -> std::io::Result<()> {
     data_block::write_with_data(&ws.volume_md(), &body, &data)
 }
 
-// --- empty-payload wrappers (match characters.rs / glossary.rs block shapes) -
-
+// Empty-payload wrappers matching the characters.rs / glossary.rs block shapes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[derive(Default)]
 struct EmptyCharacters {

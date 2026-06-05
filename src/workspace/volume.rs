@@ -1,7 +1,4 @@
-//! src/workspace/volume.rs — read/update VOLUME.md.
-//!
-//! The data block is the full `VolumeData` JSON (`running_recap`, per-chapter
-//! `chapters` map keyed by `chapter.to_string()`, and continuity `notes`). The
+//! Read/update VOLUME.md. The data block is the full `VolumeData` JSON; the
 //! Markdown body above it is re-rendered from that payload on every write.
 
 use crate::model::{ContinuityNote, VolumeData};
@@ -40,7 +37,6 @@ pub fn render_body(data: &VolumeData) -> String {
     let mut s = String::new();
     s.push_str("# บันทึกเล่ม / Volume Notes\n\n");
 
-    // Running recap.
     s.push_str("## เนื้อเรื่องสะสม (Running Recap)\n\n");
     if data.running_recap.trim().is_empty() {
         s.push_str("_ยังไม่มีสรุปเนื้อเรื่อง_\n");
@@ -50,7 +46,7 @@ pub fn render_body(data: &VolumeData) -> String {
     }
     s.push('\n');
 
-    // Per-chapter summaries (sorted numerically by chapter key).
+    // Sorted numerically by chapter key.
     s.push_str("## สรุปรายบท (Chapter Summaries)\n\n");
     if data.chapters.is_empty() {
         s.push_str("_ยังไม่มีสรุปรายบท_\n");
@@ -65,7 +61,6 @@ pub fn render_body(data: &VolumeData) -> String {
     }
     s.push('\n');
 
-    // Continuity notes.
     s.push_str("## บันทึกความต่อเนื่อง (Continuity Notes)\n\n");
     if data.notes.is_empty() {
         s.push_str("_ไม่มีประเด็นความต่อเนื่อง_\n");
@@ -90,8 +85,6 @@ pub fn render_body(data: &VolumeData) -> String {
 
     s
 }
-
-// --- helpers ----------------------------------------------------------------
 
 fn write(ws: &Workspace, data: &VolumeData) -> std::io::Result<()> {
     let body = render_body(data);

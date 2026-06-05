@@ -1,9 +1,6 @@
-//! src/workspace/characters.rs — read/upsert/render CHARACTERS.md.
-//!
-//! The data block shape is `{"characters": [Character, ...]}`. The Markdown body
-//! above it is a rendered table derived from that array. `upsert` merges
-//! non-null fields and unions relationships so repeated tool calls accumulate
-//! detail instead of clobbering it.
+//! Read/upsert/render CHARACTERS.md. Data block is `{"characters":[Character,...]}`.
+//! `upsert` merges non-null fields and unions relationships so repeated tool calls
+//! accumulate detail instead of clobbering it.
 
 use serde::{Deserialize, Serialize};
 
@@ -24,12 +21,9 @@ pub fn load(ws: &Workspace) -> Vec<Character> {
     block.characters
 }
 
-/// Insert or merge a character into CHARACTERS.md and re-render the table.
-///
-/// Matching: by `c.id`; if empty, the id is derived from `slugify(jp_name)`
-/// (falling back to `slugify(thai_name)`, then a stable hash, so an entry is
-/// never lost to an empty id). On a match, non-null fields from `c` overwrite
-/// the existing record and relationships are unioned by `(target_id, relation)`.
+/// Insert or merge a character (matched by `c.id`; if empty, derived via
+/// slugify(jp_name)→slugify(thai_name)→hash so no entry is lost). On a match,
+/// non-empty fields overwrite and relationships union by `(target_id, relation)`.
 pub fn upsert(ws: &Workspace, mut c: Character) -> std::io::Result<()> {
     if c.id.trim().is_empty() {
         c.id = derive_id(&c);
@@ -42,7 +36,7 @@ pub fn upsert(ws: &Workspace, mut c: Character) -> std::io::Result<()> {
         chars.push(c);
     }
 
-    // Stable display order: by id.
+    // Stable order: by id.
     chars.sort_by(|a, b| a.id.cmp(&b.id));
 
     let body = render_table(&chars);
@@ -63,8 +57,8 @@ pub fn remove(ws: &Workspace, id: &str) -> std::io::Result<()> {
     data_block::write_with_data(&ws.characters_md(), &body, &block)
 }
 
-/// Query characters by free-text `query` (matches id/jp_name/thai_name/romaji,
-/// case-insensitive substring) and/or exact `id`. With both `None`, returns all.
+/// Query by case-insensitive substring `query` (id/jp_name/thai_name/romaji)
+/// and/or exact `id`; both `None` returns all.
 pub fn get(ws: &Workspace, query: Option<&str>, id: Option<&str>) -> Vec<Character> {
     let chars = load(ws);
     let q = query.map(|s| s.trim().to_lowercase());
@@ -123,10 +117,9 @@ pub fn render_table(chars: &[Character]) -> String {
     s
 }
 
-/// Render the compact character blurb injected into the Translator/Reviewer
-/// prompt: one bullet per character emitting `日本語 → ไทย` plus the honorific and
-/// speech-style (the pronoun/register fields the spec requires for continuity).
-/// Empty roster yields an empty string so the caller can omit the section.
+/// Render the character blurb for the Translator/Reviewer prompt: one `日本語 → ไทย`
+/// bullet plus honorific/speech-style (pronoun/register the spec needs for
+/// continuity); empty roster → "".
 pub fn render_context_blurb(chars: &[Character]) -> String {
     if chars.is_empty() {
         return String::new();
@@ -157,10 +150,8 @@ pub fn render_context_blurb(chars: &[Character]) -> String {
     s
 }
 
-// --- helpers ----------------------------------------------------------------
-
-/// Merge `incoming` into `target`, keeping existing values when the incoming
-/// field is empty/None and unioning relationships.
+/// Merge `incoming` into `target`: empty/None incoming fields keep existing;
+/// relationships are unioned.
 fn merge_into(target: &mut Character, incoming: Character) {
     if !incoming.jp_name.trim().is_empty() {
         target.jp_name = incoming.jp_name;
@@ -216,8 +207,7 @@ fn derive_id(c: &Character) -> String {
     if !from_thai.is_empty() {
         return from_thai;
     }
-    // Last resort: a deterministic short hash of the names so two distinct
-    // unnamed entries don't collide.
+    // Last resort: deterministic hash so two distinct unnamed entries don't collide.
     format!(
         "char-{:08x}",
         fnv1a(&format!("{}|{}", c.jp_name, c.thai_name))

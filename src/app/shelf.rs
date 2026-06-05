@@ -1,9 +1,4 @@
-//! src/app/shelf.rs — the Shelf (1 書架): home / project picker.
-//!
-//! Lists imported projects (each row shows a waxing-moon status glyph + a per-
-//! status tally), then a "＋ Import EPUB …" affordance and the unimported `.epub`
-//! files discovered in the working directory. Pressing `i` launches the 3-step
-//! import wizard; `Enter` opens the highlighted project.
+//! The Shelf (1 書架): home / project picker; `i` launches the import wizard, `Enter` opens a project.
 
 use std::path::PathBuf;
 
@@ -21,9 +16,7 @@ use crate::ui::text::{col_width, pad_to_cols, truncate_cols};
 use super::Action;
 use super::overlay::Overlay;
 
-/// Rows are: N projects, then 1 "import" affordance row, then the unimported
-/// epubs are shown in the side column (not selectable rows). Selection covers
-/// `projects.len()` project rows plus the trailing import row.
+/// Selection covers `projects.len()` project rows plus the trailing import row.
 pub struct ShelfScreen {
     list: ListState,
     unimported: Vec<(PathBuf, u64)>,
@@ -124,8 +117,7 @@ impl ShelfScreen {
                 }
             }
             KeyCode::Char('r') => {
-                // Rescan is handled by the App refreshing projects; signal via a
-                // re-open of the same selection. We rescan epubs locally here.
+                // Project rescan is the App's job; here we only rescan local epubs.
                 self.rescan(&working_root());
                 Action::None
             }
@@ -134,7 +126,6 @@ impl ShelfScreen {
     }
 
     pub fn render(&mut self, f: &mut Frame, area: Rect, projects: &[Project], theme: &Theme) {
-        // Clamp selection to current row count.
         let rows = self.row_count(projects);
         if self.list.selected().is_none_or(|s| s >= rows) {
             self.list.select(Some(rows.saturating_sub(1)));
@@ -150,7 +141,6 @@ impl ShelfScreen {
             return;
         }
 
-        // Title row: 書架 — your shelf ............ ./ (N projects · M epubs)
         let title = Line::from(vec![
             Span::styled(
                 "  書架 ",
@@ -203,9 +193,8 @@ impl ShelfScreen {
             items.push(project_row(p, i == selected, name_w, theme));
         }
 
-        // Import affordance. The dotted separator is folded into THIS item as a
-        // leading line (not a standalone ListItem) so the ListState index maps 1:1
-        // to projects.len() — otherwise selecting it would scroll the separator.
+        // Separator is folded into the import ListItem (not standalone) so the
+        // ListState index maps 1:1 to projects.len().
         let separator_line = Line::from(Span::styled(
             format!(
                 "     {}",
@@ -248,7 +237,6 @@ impl ShelfScreen {
             Line::from(import_line),
         ])));
 
-        // Unimported epub rows (informational, under the import affordance).
         for (path, size) in &self.unimported {
             let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("?");
             let size_h = human_size(*size);
@@ -260,8 +248,7 @@ impl ShelfScreen {
         }
 
         let list = List::new(items).style(Style::default().bg(theme.bg));
-        // We manage selection visuals ourselves (accent_bg wash + bar) inside the
-        // rows, so a plain List render is enough — but keep state for scrolling.
+        // Selection visuals are baked into the rows; state is kept only for scrolling.
         f.render_stateful_widget(list, list_area, &mut self.list);
     }
 
@@ -281,10 +268,6 @@ impl Default for ShelfScreen {
         Self::new()
     }
 }
-
-// ============================================================================
-// ROW RENDERING
-// ============================================================================
 
 fn project_row(p: &Project, selected: bool, name_w: usize, theme: &Theme) -> ListItem<'static> {
     let (glyph, gcolor) = overall_glyph(p, theme);
@@ -331,8 +314,7 @@ fn project_row(p: &Project, selected: bool, name_w: usize, theme: &Theme) -> Lis
     ListItem::new(Line::from(spans))
 }
 
-/// Project-level glyph: the "least finished" interesting state wins so the user
-/// sees at a glance whether anything is mid-run / failed.
+/// Project-level glyph: the "least finished" interesting state wins (failed > working > pending > done).
 fn overall_glyph(p: &Project, theme: &Theme) -> (char, ratatui::style::Color) {
     let mut any_working = false;
     let mut any_failed = false;

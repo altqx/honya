@@ -34,8 +34,7 @@ use crate::model::{AppConfig, AppEvent, EventTx};
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() -> anyhow::Result<()> {
-    // Subcommands run before the TUI (and before the key prompt — updating or
-    // printing the version must not require an API key).
+    // Subcommands run before the key prompt: update/version must not require an API key.
     match std::env::args().nth(1).as_deref() {
         Some("update" | "self-update" | "upgrade") => return update::run_self_update().await,
         Some("--version" | "-V" | "version") => {
@@ -57,8 +56,7 @@ async fn main() -> anyhow::Result<()> {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
     let mut app = App::new(EventTx(tx), cfg);
 
-    // Best-effort: notify in-app if a newer release is out (opt out with
-    // HONYA_NO_UPDATE_CHECK). Runs in the background; never blocks startup.
+    // Best-effort background update notification; never blocks startup.
     {
         let tx = app.tx.clone();
         tokio::spawn(async move {
@@ -112,9 +110,7 @@ async fn run(
     Ok(())
 }
 
-/// Build the live OpenRouter client. The key is resolved at startup (see
-/// [`ensure_api_key`]), so this normally succeeds; it errors only if the key is
-/// somehow gone or the HTTP stack cannot be constructed.
+/// Build the live OpenRouter client; errors only if the key is gone or the HTTP stack fails.
 pub fn build_client(cfg: &AppConfig) -> anyhow::Result<Arc<dyn LlmClient>> {
     let api_key = config::resolve_api_key(cfg).ok_or_else(|| {
         anyhow::anyhow!("no OpenRouter API key configured (set HONYA_API_KEY or OPENROUTER_API_KEY)")
@@ -137,9 +133,7 @@ fn print_help() {
     println!("    HONYA_NO_UPDATE_CHECK                Disable the startup update check");
 }
 
-/// honya has no offline mode: ensure an OpenRouter API key is available before
-/// the TUI starts. Resolution order is env → persisted config; if neither has
-/// one, the user is prompted (hidden input) and the key is saved for next time.
+/// Ensure an OpenRouter API key exists (env → persisted config); else prompt and save it.
 fn ensure_api_key(cfg: &mut AppConfig) -> anyhow::Result<()> {
     if config::resolve_api_key(cfg).is_some() {
         return Ok(());

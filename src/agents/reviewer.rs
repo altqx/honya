@@ -1,10 +1,5 @@
-//! src/agents/reviewer.rs — run the Reviewer agent (English, json_schema
-//! `review_result`) for one chunk.
-//!
-//! Compares the raw Japanese source against the Translator's Thai output and
-//! returns a binary verdict plus an itemized feedback list. Uses
-//! `chat_structured::<ReviewerOut>` with the strict reviewer schema at
-//! temperature 0.0 with 2 parse retries.
+//! Run the Reviewer agent (English, json_schema `review_result`) for one chunk:
+//! diff Japanese source against Thai output for a verdict plus itemized feedback.
 
 use crate::agents::prompts::{REVIEWER_SYSTEM, build_reviewer_user};
 use crate::llm::client::{LlmClient, Result};
@@ -12,11 +7,8 @@ use crate::llm::structured::{chat_structured, reviewer_schema};
 use crate::llm::{ChatRequest, Message, Usage};
 use crate::model::ReviewerOut;
 
-/// Review one translated chunk against its Japanese source.
-///
-/// `reference_ctx` carries the same locked glossary / character-pronoun / style
-/// context the Translator saw, so the Reviewer can actually enforce glossary and
-/// pronoun matching (checklist items 3 & 4). Returns the verdict plus token `Usage`.
+/// Review one translated chunk against its source. `reference_ctx` is the same
+/// glossary/pronoun/style context the Translator saw, so checklist items 3 & 4 are enforceable. Returns verdict + token `Usage`.
 pub async fn review_chunk(
     client: &dyn LlmClient,
     model: &str,

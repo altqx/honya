@@ -1,11 +1,7 @@
-//! src/agents/continuity.rs — last-N Thai sentence extraction + Translator
-//! user-message assembly.
+//! Last-N Thai sentence extraction + Translator user-message assembly.
 //!
-//! `last_thai_sentences` reads `translated/ch_NNN.md`, strips the
-//! `<!-- honya:chunk N -->` markers, splits on terminal punctuation (Western +
-//! Thai) and newlines, and returns the last `n` non-empty sentences. These are
-//! injected into the next chunk's prompt so the Translator keeps tone and
-//! pronouns continuous WITHOUT re-translating them.
+//! `last_thai_sentences` returns the previous chunk's tail sentences so the next
+//! chunk's prompt keeps tone/pronouns continuous without re-translating them.
 
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -18,17 +14,15 @@ static CHUNK_MARKER: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"<!--\s*honya:chunk\s+\d+\s*-->").expect("chunk-marker regex is valid")
 });
 
-/// Terminal punctuation that ends a sentence for continuity extraction:
-/// Western `.!?…` and Thai/East-Asian `。！？` plus the Thai paragraph marks
-/// `ฯ` (paiyannoi) and `ๆ` are intentionally NOT treated as terminators (they
-/// are word-level), but the eastern/western full stops and bangs are.
+/// Sentence terminators for continuity: western `.!?…` and east-asian `。！？`. Thai `ฯ`/`ๆ` are word-level, deliberately excluded.
 static TERMINATOR: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"[.!?。！？…]+[”’」』）】\)\]]*").expect("terminator regex is valid"));
 
-/// Read the accumulated Thai for `chapter`, strip chunk markers, and return the
-/// last `n` non-empty sentences (in original order). Used to seed the next
-/// chunk's continuity context. Returns an empty vec when nothing is translated
-/// yet or `n == 0`.
+/// Char ceiling on the continuity tail: Thai often lacks terminators, so a lone "sentence" can be a whole long line; bound by length so the prompt can't balloon.
+const MAX_CONTINUITY_CHARS: usize = 1200;
+
+/// Return the last `n` non-empty Thai sentences of `chapter` (in order) to seed
+/// continuity. Bounded twice: at most `n` sentences AND [`MAX_CONTINUITY_CHARS`] total.
 pub async fn last_thai_sentences(ws: &Workspace, chapter: u32, n: usize) -> Vec<String> {
     if n == 0 {
         return Vec::new();
@@ -38,17 +32,33 @@ pub async fn last_thai_sentences(ws: &Workspace, chapter: u32, n: usize) -> Vec<
         return Vec::new();
     }
 
-    // Drop the chunk markers so they never bleed into the prompt.
+    // Strip chunk markers so they never bleed into the prompt.
     let cleaned = CHUNK_MARKER.replace_all(&raw, " ");
 
     let sentences = split_sentences(&cleaned);
     let len = sentences.len();
     let start = len.saturating_sub(n);
-    sentences[start..].to_vec()
+    let mut tail = sentences[start..].to_vec();
+
+    // Drop oldest sentences until the tail fits, then clamp a lone over-long one to its most-recent chars.
+    while tail.len() > 1 && joined_chars(&tail) > MAX_CONTINUITY_CHARS {
+        tail.remove(0);
+    }
+    if let Some(last) = tail.last_mut() {
+        let count = last.chars().count();
+        if count > MAX_CONTINUITY_CHARS {
+            *last = last.chars().skip(count - MAX_CONTINUITY_CHARS).collect();
+        }
+    }
+    tail
 }
 
-/// Split arbitrary Thai/Markdown text into trimmed, non-empty sentences using
-/// terminal punctuation and hard line breaks as boundaries.
+/// Char count of the tail, counting one separator per sentence (the joining newline).
+fn joined_chars(tail: &[String]) -> usize {
+    tail.iter().map(|s| s.chars().count() + 1).sum()
+}
+
+/// Split text into trimmed non-empty sentences on terminal punctuation and line breaks.
 fn split_sentences(text: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut current = String::new();
@@ -85,9 +95,7 @@ fn push_trimmed(current: &mut String, out: &mut Vec<String>) {
     current.clear();
 }
 
-/// Assemble the Translator user message: an optional continuity block (the
-/// previous Thai sentences, marked do-not-retranslate) followed by the raw
-/// Japanese source delimited by `<<SOURCE_JP>> … <<END_SOURCE_JP>>`.
+/// Assemble the Translator user message: optional continuity block then the source delimited by `<<SOURCE_JP>> … <<END_SOURCE_JP>>`.
 pub fn build_translator_user_msg(prev_thai: &[String], raw_chunk: &str) -> String {
     let mut s = String::new();
 

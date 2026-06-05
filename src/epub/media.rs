@@ -1,11 +1,8 @@
-//! src/epub/media.rs — relocate image resources out of the extraction work dir
-//! into the project's `images/` directory, deduplicating filename collisions
-//! and building lookup maps so the cleanse step can rewrite `<img src>` hrefs.
+//! Relocate image resources into the project's `images/` dir, dedup filename
+//! collisions, and build lookup maps for rewriting `<img src>` hrefs.
 //!
-//! honya uses COPY (`relocate_images`) so the extracted work dir stays intact
-//! and reprocessable; `relocate_images_move` is provided for callers that want
-//! to reclaim space. The cleanse step emits a FIXED `../../images/FILE` prefix
-//! (per the hard spec), so the map VALUE only needs the relocated basename.
+//! Default is COPY so the extracted work dir stays reprocessable. The cleanse
+//! step emits a fixed `../../images/FILE` prefix, so maps store only the basename.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -16,17 +13,16 @@ use super::{ManifestItem, Result};
 /// Maps that let the importer rewrite image references.
 #[derive(Debug, Clone, Default)]
 pub struct MediaRelocation {
-    /// archive-relative resolved path (e.g. "OEBPS/Images/a.png") -> relocated basename.
+    /// Resolved archive path -> relocated basename.
     pub by_resolved_path: HashMap<String, String>,
-    /// raw manifest href (e.g. "Images/a.png") -> relocated basename.
+    /// Raw manifest href -> relocated basename.
     pub by_href: HashMap<String, String>,
     /// Absolute paths actually written into the images dir.
     pub written: Vec<PathBuf>,
 }
 
 /// Copy every image manifest item from `work_dir` into `images_dir`, dedup
-/// filenames, and build the lookup maps. `images_rel` is the directory name used
-/// inside the project (kept for callers; the map values store just the basename).
+/// filenames, and build the lookup maps.
 pub fn relocate_images(
     manifest: &[ManifestItem],
     work_dir: &Path,
@@ -36,8 +32,7 @@ pub fn relocate_images(
     relocate_inner(manifest, work_dir, images_dir, images_rel, false)
 }
 
-/// Same as `relocate_images` but MOVES (renames, falling back to copy+remove)
-/// each source file instead of copying.
+/// Like `relocate_images` but MOVES each source file (rename, falling back to copy+remove).
 #[allow(dead_code)]
 pub fn relocate_images_move(
     manifest: &[ManifestItem],
@@ -63,15 +58,13 @@ fn relocate_inner(
         fs::create_dir_all(images_dir)?;
     }
 
-    // Track basenames already taken so we can dedup (x.png -> x_1.png -> x_2.png).
+    // Track taken basenames for dedup (x.png -> x_1.png -> x_2.png).
     let mut used: HashSet<String> = HashSet::new();
 
     for item in manifest.iter().filter(|m| m.is_image()) {
-        // Source on disk: work_dir joined with the resolved archive path. The
-        // resolved path is '/'-separated; join each segment so it is OS-correct.
         let src_path = join_archive_path(work_dir, &item.resolved_path);
         if !src_path.exists() {
-            // Tolerate a manifest entry whose file is absent — skip silently.
+            // Tolerate a manifest entry whose file is absent.
             continue;
         }
 
@@ -99,7 +92,8 @@ fn relocate_inner(
     Ok(reloc)
 }
 
-/// Join a '/'-separated archive path onto a filesystem base, segment by segment.
+/// Join a '/'-separated archive path onto a filesystem base, segment by segment
+/// (so the result uses OS-correct separators).
 fn join_archive_path(base: &Path, archive_path: &str) -> PathBuf {
     let mut p = base.to_path_buf();
     for seg in archive_path.split('/') {
@@ -110,13 +104,12 @@ fn join_archive_path(base: &Path, archive_path: &str) -> PathBuf {
     p
 }
 
-/// Last '/'-separated segment of an archive path.
 fn basename_of(archive_path: &str) -> &str {
     archive_path.rsplit('/').next().unwrap_or(archive_path)
 }
 
-/// Produce a basename not already in `used`, appending `_N` before the extension
-/// on collision. Records the chosen name in `used`.
+/// Return a basename not in `used`, appending `_N` before the extension on
+/// collision; records the chosen name in `used`.
 fn dedup_name(basename: &str, used: &mut HashSet<String>) -> String {
     if used.insert(basename.to_string()) {
         return basename.to_string();
@@ -136,8 +129,7 @@ fn dedup_name(basename: &str, used: &mut HashSet<String>) -> String {
     }
 }
 
-/// Split a basename into (stem, ext_without_dot). A leading-dot file ("..gitignore"
-/// style) is treated as all-stem. No extension => ext is "".
+/// Split a basename into (stem, ext_without_dot); a leading-dot file is all-stem.
 fn split_ext(basename: &str) -> (&str, &str) {
     match basename.rfind('.') {
         Some(idx) if idx > 0 => (&basename[..idx], &basename[idx + 1..]),

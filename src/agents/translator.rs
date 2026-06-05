@@ -1,10 +1,4 @@
-//! src/agents/translator.rs — run the Translator agent (Thai, json_schema
-//! `translation_result`) for one chunk.
-//!
-//! Builds the user message via `continuity::build_translator_user_msg`,
-//! prepends the locked-glossary context and any Reviewer feedback (on retries),
-//! then calls `chat_structured::<TranslatorOut>` with the strict translator
-//! schema at temperature 0.3 with 2 parse retries.
+//! Run the Translator agent (Thai, json_schema `translation_result`) for one chunk.
 
 use crate::agents::continuity::build_translator_user_msg;
 use crate::agents::prompts::TRANSLATOR_SYSTEM;
@@ -13,18 +7,7 @@ use crate::llm::structured::{chat_structured, translator_schema};
 use crate::llm::{ChatRequest, Message, Usage};
 use crate::model::TranslatorOut;
 
-/// Translate one source chunk into Thai.
-///
-/// * `reference_ctx` — the pre-delimited reference block (locked glossary,
-///   character roster/pronouns, project synopsis, style guide) the pipeline
-///   assembles from the workspace.
-/// * `prev_thai`     — the previous chunk's tail sentences (continuity, do not
-///   re-translate).
-/// * `raw_chunk`     — the Japanese markdown to translate.
-/// * `feedback`      — `Some` on a retry, carrying the Reviewer's correction list.
-///
-/// Returns the structured output together with the API token `Usage` so the
-/// pipeline can surface a live token meter.
+/// Translate one source chunk into Thai. `prev_thai` is continuity (do not re-translate); `feedback` is `Some` on a retry. Returns output + token `Usage`.
 pub async fn translate_chunk(
     client: &dyn LlmClient,
     model: &str,
@@ -33,8 +16,6 @@ pub async fn translate_chunk(
     raw_chunk: &str,
     feedback: Option<&str>,
 ) -> Result<(TranslatorOut, Usage)> {
-    // Assemble the user content: reference context, optional reviewer feedback,
-    // then the continuity + source block.
     let mut user = String::new();
 
     let rctx = reference_ctx.trim();

@@ -1,13 +1,5 @@
-//! src/agents/prompts.rs — the three agent system prompts (verbatim) + the
-//! user-message builders that depend on per-chunk runtime data.
-//!
-//!   * `ORCHESTRATOR_SYSTEM` — English, tools. The metadata-update turn.
-//!   * `TRANSLATOR_SYSTEM`   — Thai, json_schema `translation_result`.
-//!   * `REVIEWER_SYSTEM`     — English, json_schema `review_result`.
-//!
-//! The Translator *user* message is assembled in `continuity.rs` (it needs the
-//! previous Thai sentences); here we provide the Reviewer user message and the
-//! Orchestrator metadata-turn message.
+//! The three agent system prompts plus the runtime user-message builders.
+//! (The Translator user message lives in `continuity.rs` — it needs prior Thai.)
 
 use crate::model::TranslatorOut;
 

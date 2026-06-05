@@ -1,9 +1,6 @@
-//! src/workspace/glossary.rs — read/upsert/render GLOSSARY.md.
-//!
-//! The data block shape is `{"terms": [GlossaryTerm, ...]}`. Terms are keyed on
-//! the normalized `jp_term` (trimmed). `render_context_blurb` produces the
-//! compact locked-terms list injected into the Translator prompt so the model
-//! is forced to reuse canonical Thai renderings.
+//! Read/upsert/render GLOSSARY.md. Data block is `{"terms": [GlossaryTerm,...]}`,
+//! keyed on the normalized (trimmed) `jp_term`. `render_context_blurb` builds the
+//! locked-terms list injected into the Translator prompt to force canonical Thai.
 
 use serde::{Deserialize, Serialize};
 
@@ -24,10 +21,8 @@ pub fn load(ws: &Workspace) -> Vec<GlossaryTerm> {
     block.terms
 }
 
-/// Insert or merge a term into GLOSSARY.md and re-render the table.
-///
-/// Matching is on the normalized `jp_term`. On a match, non-null fields from `t`
-/// overwrite the existing record; missing fields are preserved.
+/// Insert or merge a term (matched on normalized `jp_term`) and re-render; on a
+/// match, non-empty incoming fields overwrite, missing fields are preserved.
 pub fn upsert(ws: &Workspace, t: GlossaryTerm) -> std::io::Result<()> {
     let key = normalize(&t.jp_term);
     let mut terms = load(ws);
@@ -38,7 +33,7 @@ pub fn upsert(ws: &Workspace, t: GlossaryTerm) -> std::io::Result<()> {
         terms.push(t);
     }
 
-    // Stable display order: by category then jp_term.
+    // Stable order: category then jp_term.
     terms.sort_by(|a, b| {
         let ca = a.category.as_deref().unwrap_or("");
         let cb = b.category.as_deref().unwrap_or("");
@@ -64,9 +59,8 @@ pub fn remove(ws: &Workspace, jp_term: &str) -> std::io::Result<()> {
     data_block::write_with_data(&ws.glossary_md(), &body, &block)
 }
 
-/// Query terms by free-text `query` (matches jp_term/thai_term/romaji/gloss,
-/// case-insensitive substring), optional exact `category`, capped at `limit`
-/// (a `limit` of 0 means no cap).
+/// Query terms by case-insensitive substring `query` (jp_term/thai_term/romaji/
+/// gloss) and optional exact `category`, capped at `limit` (0 means no cap).
 pub fn get(
     ws: &Workspace,
     query: Option<&str>,
@@ -137,11 +131,8 @@ pub fn render_table(terms: &[GlossaryTerm]) -> String {
     s
 }
 
-/// Render the compact locked-terms blurb injected into the Translator prompt.
-///
-/// One bullet per term: `日本語 → ไทย` with a romaji hint, a `[หมวด]` tag, and a
-/// `[ห้ามแปล]` flag for do-not-translate entries. Empty list yields an empty
-/// string so the caller can omit the section entirely.
+/// Render the locked-terms blurb for the Translator prompt: one `日本語 → ไทย`
+/// bullet per term (romaji hint, `[หมวด]` tag, `[ห้ามแปล]` flag); empty list → "".
 pub fn render_context_blurb(terms: &[GlossaryTerm]) -> String {
     if terms.is_empty() {
         return String::new();
@@ -172,8 +163,6 @@ pub fn render_context_blurb(terms: &[GlossaryTerm]) -> String {
     s
 }
 
-// --- helpers ----------------------------------------------------------------
-
 fn merge_into(target: &mut GlossaryTerm, incoming: GlossaryTerm) {
     if !incoming.jp_term.trim().is_empty() {
         target.jp_term = incoming.jp_term;
@@ -203,7 +192,7 @@ fn merge_opt(slot: &mut Option<String>, incoming: Option<String>) {
         }
 }
 
-/// Normalize a jp_term for keying: trim surrounding whitespace.
+/// Normalize a jp_term for keying: trim whitespace.
 fn normalize(s: &str) -> String {
     s.trim().to_string()
 }

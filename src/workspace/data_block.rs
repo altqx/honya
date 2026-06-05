@@ -1,23 +1,8 @@
-//! src/workspace/data_block.rs — the `<!-- honya:data ... honya:data -->` block.
-//!
-//! Every tool-mutated metadata file (CHARACTERS.md / GLOSSARY.md / VOLUME.md)
-//! carries a single machine-owned JSON payload appended at the end of the file
-//! inside an HTML comment. The human-readable Markdown body above it is
-//! re-rendered from that payload on every write, so the JSON block is the
-//! source of truth and the table above it is a derived view.
-//!
-//! Block shape (literal delimiters):
-//! ```text
-//! ...markdown body...
-//!
-//! <!-- honya:data
-//! { ...json... }
-//! honya:data -->
-//! ```
-//!
-//! `read_data_block` is intentionally tolerant: a missing file, a missing block,
-//! or unparseable JSON all yield `T::default()` so a partially-written or
-//! hand-edited file never crashes the pipeline.
+//! The `<!-- honya:data ... honya:data -->` block: each metadata file carries a
+//! machine-owned JSON payload in a trailing HTML comment that is the source of
+//! truth; the Markdown body above it is a derived view re-rendered on each write.
+//! Reads are intentionally tolerant — missing file/block or bad JSON yield
+//! `T::default()` so a partial or hand-edited file never crashes the pipeline.
 
 use std::io::Write;
 use std::path::Path;
@@ -25,15 +10,10 @@ use std::path::Path;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-/// Opening delimiter of the data block (start of the HTML comment).
 const BLOCK_OPEN: &str = "<!-- honya:data";
-/// Closing delimiter of the data block (end of the HTML comment).
 const BLOCK_CLOSE: &str = "honya:data -->";
 
-/// Read and deserialize the JSON payload from a metadata file's data block.
-///
-/// Returns `T::default()` when the file is missing, has no data block, or the
-/// JSON inside the block fails to parse.
+/// Deserialize the data block's JSON, or `T::default()` on missing file/block/bad JSON.
 pub fn read_data_block<T: DeserializeOwned + Default>(path: &Path) -> T {
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
@@ -45,10 +25,8 @@ pub fn read_data_block<T: DeserializeOwned + Default>(path: &Path) -> T {
     }
 }
 
-/// Read the human-readable Markdown body — everything before the `honya:data`
-/// block — trimmed. Used to bundle PROJECT.md / STYLE.md prose into the agent
-/// context. A missing file yields an empty string; a file with no data block
-/// returns its whole (trimmed) contents.
+/// Read the trimmed Markdown body (everything before the `honya:data` block);
+/// missing file yields `""`, no-block file returns its whole trimmed contents.
 pub fn read_body(path: &Path) -> String {
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
@@ -60,10 +38,9 @@ pub fn read_body(path: &Path) -> String {
     }
 }
 
-/// Slice out the raw JSON text sitting between the block delimiters, if present.
+/// Slice out the raw JSON between the block delimiters, if present.
 fn extract_json(text: &str) -> Option<&str> {
     let open = text.find(BLOCK_OPEN)?;
-    // JSON starts immediately after the opening delimiter.
     let after_open = open + BLOCK_OPEN.len();
     let rest = &text[after_open..];
     let close_rel = rest.find(BLOCK_CLOSE)?;
@@ -71,10 +48,8 @@ fn extract_json(text: &str) -> Option<&str> {
     if json.is_empty() { None } else { Some(json) }
 }
 
-/// Render a metadata file: the human-readable Markdown `rendered_body`, then the
-/// comment-wrapped pretty JSON `data` block. Written atomically.
-///
-/// The parent directory is created if it does not already exist.
+/// Atomically write `rendered_body` followed by the comment-wrapped pretty JSON
+/// `data` block (creating the parent dir if needed).
 pub fn write_with_data<T: Serialize>(
     path: &Path,
     rendered_body: &str,
@@ -96,10 +71,8 @@ pub fn write_with_data<T: Serialize>(
     atomic_write(path, &out)
 }
 
-/// Write `contents` to `path` atomically: write a temp sibling then `fs::rename`.
-///
-/// The rename is atomic within a filesystem, so a reader never observes a
-/// half-written metadata file. The parent directory is created if absent.
+/// Atomic write via temp sibling + `fs::rename` so a reader never sees a
+/// half-written file (rename is atomic within a filesystem). Creates parent dir.
 pub fn atomic_write(path: &Path, contents: &str) -> std::io::Result<()> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty() {
@@ -114,7 +87,7 @@ pub fn atomic_write(path: &Path, contents: &str) -> std::io::Result<()> {
         f.sync_all()?;
     }
 
-    // Rename into place. On failure, best-effort cleanup of the temp file.
+    // Best-effort cleanup of the temp file if the rename fails.
     match std::fs::rename(&tmp, path) {
         Ok(()) => Ok(()),
         Err(e) => {
@@ -124,8 +97,8 @@ pub fn atomic_write(path: &Path, contents: &str) -> std::io::Result<()> {
     }
 }
 
-/// Build a temp sibling path next to `path` (same dir, so `rename` stays on one
-/// filesystem). Uses the process id + file name to avoid clobbering.
+/// Temp sibling next to `path` (same dir so `rename` stays on one filesystem);
+/// name uses pid + file name to avoid clobbering.
 fn temp_sibling(path: &Path) -> std::path::PathBuf {
     let file_name = path
         .file_name()

@@ -1,10 +1,7 @@
-//! src/epub/opf.rs — parse the OPF package document: Dublin Core metadata,
-//! the manifest, the spine (reading order), and the cover image.
+//! Parse the OPF package document: Dublin Core metadata, manifest, spine, cover.
 //!
-//! Namespace tolerance is deliberate: we match elements both by their proper
-//! (namespace, local) tuple AND by bare local name, because real-world EPUBs
-//! frequently declare the OPF namespace as the default (so children carry it)
-//! or omit it entirely.
+//! Namespace tolerance is deliberate: elements match by (namespace, local) AND
+//! by bare local name, since real EPUBs often declare the OPF ns as default or omit it.
 
 use std::collections::HashMap;
 
@@ -26,8 +23,7 @@ pub struct ParsedOpf {
     pub ncx_id: Option<String>,
 }
 
-/// True when a node's namespace is either `expected` or absent (default-ns
-/// tolerance: many EPUBs declare the package/DC ns as the default).
+/// True when a node's namespace is `expected` or absent (default-ns tolerance).
 fn ns_matches(actual: Option<&str>, expected: &str) -> bool {
     match actual {
         Some(uri) => uri == expected,
@@ -35,8 +31,7 @@ fn ns_matches(actual: Option<&str>, expected: &str) -> bool {
     }
 }
 
-/// True if `node` is an element matching `local`, accepting either the OPF
-/// namespace or no namespace (default-ns tolerance).
+/// True if `node` matches `local` in the OPF namespace or none (default-ns tolerance).
 fn is_opf_elem(node: &Node, local: &str) -> bool {
     if !node.is_element() {
         return false;
@@ -45,8 +40,7 @@ fn is_opf_elem(node: &Node, local: &str) -> bool {
     tag.name() == local && ns_matches(tag.namespace(), ns::OPF)
 }
 
-/// True if `node` is a Dublin Core element with the given local name. DC always
-/// carries its own namespace, but we tolerate a bare local name too.
+/// True if `node` is a Dublin Core `local` element (bare local name tolerated).
 fn is_dc_elem(node: &Node, local: &str) -> bool {
     if !node.is_element() {
         return false;
@@ -55,10 +49,8 @@ fn is_dc_elem(node: &Node, local: &str) -> bool {
     tag.name() == local && ns_matches(tag.namespace(), ns::DC)
 }
 
-/// Concatenate the *direct* text children of an element. We filter on
-/// `is_text()` ourselves rather than calling `Node::text()`, because roxmltree's
-/// `.text()` returns only the first text node and mixing it with descendant
-/// walks can duplicate content; doing it explicitly keeps behavior predictable.
+/// Concatenate the *direct* text children; filters `is_text()` ourselves because
+/// roxmltree's `.text()` returns only the first text node.
 pub fn element_text(node: &Node) -> Option<String> {
     let mut s = String::new();
     for child in node.children() {
@@ -85,7 +77,6 @@ pub fn parse_opf(opf_xml: &str, opf_path: &str) -> Result<ParsedOpf> {
 
     let opf_dir = dir_of(opf_path);
 
-    // ---- metadata ----------------------------------------------------------
     let mut metadata = Metadata::default();
     // EPUB2 cover lives in <meta name="cover" content="ITEM_ID">.
     let mut meta_cover_id: Option<String> = None;
@@ -98,7 +89,6 @@ pub fn parse_opf(opf_xml: &str, opf_path: &str) -> Result<ParsedOpf> {
         } else if is_dc_elem(&node, "language") && metadata.language.is_none() {
             metadata.language = element_text(&node);
         } else if is_opf_elem(&node, "meta") {
-            // <meta name="cover" content="..."> (EPUB2 idiom).
             let name = node.attribute("name").unwrap_or("");
             if name == "cover"
                 && let Some(content) = node.attribute("content") {
@@ -107,12 +97,10 @@ pub fn parse_opf(opf_xml: &str, opf_path: &str) -> Result<ParsedOpf> {
         }
     }
 
-    // ---- manifest ----------------------------------------------------------
     let mut manifest: Vec<ManifestItem> = Vec::new();
     let mut manifest_by_id: HashMap<String, usize> = HashMap::new();
     let mut nav_id: Option<String> = None;
     let mut ncx_id: Option<String> = None;
-    // EPUB3 cover-image (properties token) resolved path, if found.
     let mut epub3_cover_path: Option<String> = None;
 
     for node in doc.descendants() {

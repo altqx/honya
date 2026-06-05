@@ -1,16 +1,10 @@
-//! src/model.rs — the SINGLE source of truth for honya's domain + event types.
-//! Every other module depends on this and nothing here depends on them.
-//! Compiles standalone against serde 1 + chrono 0.4 (only `use` deps needed).
+//! The single source of truth for honya's domain + event types; nothing here depends on other modules.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-
-// ============================================================================
-// PROJECT / WORKSPACE DOMAIN
-// ============================================================================
 
 /// One imported light-novel project = one directory under the working root.
 /// Mirrors: project/{PROJECT.md,CHARACTERS.md,GLOSSARY.md,STYLE.md,/images,/Vol_NN/...}
@@ -90,14 +84,14 @@ pub enum ChapterKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChapterStatus {
-    Pending,     // ○ queued, untouched
+    Pending,     // queued, untouched
     Chunking,    // slicing raw md into chunks
-    Translating, // ◐ active chunk at Translator
-    Reviewing,   // ◑ active chunk at Reviewer
+    Translating, // active chunk at Translator
+    Reviewing,   // active chunk at Reviewer
     Appended,    // all chunks approved + written
-    Done,        // ● metadata finalized (recap etc.)
-    Failed,      // ✗ a chunk hit max retries / hard error
-    Paused,      // ‖ run paused with this chapter mid-flight
+    Done,        // metadata finalized (recap etc.)
+    Failed,      // a chunk hit max retries / hard error
+    Paused,      // run paused with this chapter mid-flight
 }
 
 impl ChapterStatus {
@@ -124,10 +118,6 @@ pub enum ChunkState {
     Committed, // appended to ch_NNN.md
     Failed,    // exceeded max attempts
 }
-
-// ============================================================================
-// CONFIG
-// ============================================================================
 
 /// The three model ids used by the pipeline.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -187,13 +177,8 @@ impl Default for AppConfig {
     }
 }
 
-// ============================================================================
-// AGENT STRUCTURED RESPONSES (deserialize targets for strict json_schema)
-// ============================================================================
-
-/// Translator strict-schema output ("translation_result").
-/// Honors the product spec: a brief `thought_process` (plan before output) plus the
-/// `translated_text`; the discovery arrays let the Orchestrator persist new entities via tools.
+/// Translator strict-schema output ("translation_result"): brief `thought_process` plus
+/// `translated_text`; discovery arrays let the Orchestrator persist new entities via tools.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TranslatorOut {
     pub thought_process: ThoughtProcess,
@@ -257,9 +242,7 @@ pub enum ReviewVerdict {
     Reject,
 }
 
-// ============================================================================
-// WORKSPACE METADATA TYPES (tool-mutated CHARACTERS.md / GLOSSARY.md / VOLUME.md)
-// ============================================================================
+// Workspace metadata types, tool-mutated in CHARACTERS.md / GLOSSARY.md / VOLUME.md.
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Character {
@@ -359,10 +342,6 @@ impl ToolResult {
     }
 }
 
-// ============================================================================
-// APP EVENT — the single fan-in enum for the async select! loop
-// ============================================================================
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AgentRole {
     Orchestrator,
@@ -385,15 +364,11 @@ pub struct TokenUsage {
     pub total: u32,
 }
 
-/// Everything the UI can react to, fanned-in from terminal input, the animation
-/// tick, and the background pipeline task. Sent over `tokio::sync::mpsc`.
-/// NOTE: `Crossterm(Event)` is NOT in this enum because crossterm::Event is not
-/// `Serialize`; raw input is matched directly in the select! arm (see main.rs).
-/// This enum is exclusively the *background -> UI* channel payload.
+/// The background -> UI channel payload, sent over `tokio::sync::mpsc`. Raw crossterm
+/// input is NOT here (crossterm::Event isn't Serialize); it's matched in the select! arm.
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // event payloads are consumed selectively across screens
 pub enum AppEvent {
-    // ---- chapter-level ----
     ChapterQueued {
         chapter: u32,
     },
@@ -417,7 +392,6 @@ pub enum AppEvent {
         reason: String,
     },
 
-    // ---- chunk-level (inner loop) ----
     ChunkStarted {
         chapter: u32,
         chunk: usize,
@@ -472,7 +446,6 @@ pub enum AppEvent {
         reason: String,
     },
 
-    // ---- metadata / tools (Orchestrator mutations) ----
     ToolInvoked {
         chapter: u32,
         tool: String,
@@ -497,7 +470,6 @@ pub enum AppEvent {
         note: String,
     },
 
-    // ---- streaming preview ----
     StreamDelta {
         chapter: u32,
         chunk: usize,
@@ -509,7 +481,6 @@ pub enum AppEvent {
         cost_usd: f64,
     },
 
-    // ---- run / generic ----
     Log {
         level: LogLevel,
         msg: String,
@@ -525,12 +496,10 @@ pub enum AppEvent {
         msg: String,
     },
 
-    // ---- self-update ----
     UpdateAvailable {
         version: String,
     },
 
-    // ---- import progress (EPUB preprocessing drives a Gauge) ----
     ImportProgress {
         done: usize,
         total: usize,

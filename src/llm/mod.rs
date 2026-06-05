@@ -1,21 +1,8 @@
-//! src/llm/mod.rs — OpenRouter / OpenAI-compatible chat wire-format structs.
+//! OpenRouter / OpenAI-compatible chat wire-format structs.
 //!
-//! These mirror the `/chat/completions` request and response bodies exactly so
-//! they (de)serialize straight onto the OpenRouter API. Nothing here depends on
-//! the rest of honya: it is the bottom of the LLM stack. The higher layers
-//! ([`client`], [`structured`], [`tool_loop`]) build on these types. A
-//! canned-response `mock` client exists only under `cfg(test)` for the e2e
-//! suite — honya itself has no offline backend.
-//!
-//! Two serde subtleties are load-bearing here:
-//!  * `Message.content` is `Option<String>` but is serialized as JSON `null`
-//!    (NOT skipped) on an assistant tool-call turn — OpenAI/OpenRouter require
-//!    the key to be present. Every other optional field uses
-//!    `skip_serializing_if = "Option::is_none"`.
-//!  * `FunctionCall.arguments` is a JSON *string* (the model's tool arguments
-//!    encoded as text), so [`FunctionCall::parse_args`] decodes it a second
-//!    time. It returns a fully-qualified `std::result::Result` because the
-//!    sibling [`client`] module defines a `Result<T>` alias that shadows std.
+//! Two serde subtleties are load-bearing: `Message.content` serializes as JSON
+//! `null` (not skipped) on a tool-call turn per the OpenAI/OpenRouter contract;
+//! `FunctionCall.arguments` is a JSON *string* decoded again by `parse_args`.
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -27,13 +14,7 @@ pub mod mock;
 pub mod structured;
 pub mod tool_loop;
 
-// Convenience re-exports so other clusters can reach the core LLM surface via
-// `crate::llm::*` (notably `error.rs` does `#[from] crate::llm::LlmError`).
 pub use client::LlmError;
-
-// ============================================================================
-// REQUEST
-// ============================================================================
 
 /// Body of a POST to `{base_url}/chat/completions`.
 #[derive(Debug, Clone, Default, Serialize)]
@@ -55,7 +36,6 @@ pub struct ChatRequest {
 }
 
 impl ChatRequest {
-    /// Construct a minimal request — `model` + `messages`, everything else None.
     pub fn new(model: impl Into<String>, messages: Vec<Message>) -> Self {
         Self {
             model: model.into(),
@@ -74,21 +54,18 @@ impl ChatRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,
-    /// Serialized as `null` (not skipped) so the assistant tool-call turn keeps
-    /// the key present, per the OpenAI/OpenRouter contract.
+    /// Serialized as `null` (not skipped) so a tool-call turn keeps the key.
     pub content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
     /// Set on a `role: "tool"` message to bind the result to its call.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
-    /// Optional name (tool/function name on a tool result, or named author).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
 }
 
 impl Message {
-    /// A `system` instruction message.
     pub fn system(content: impl Into<String>) -> Self {
         Self {
             role: Role::System,
@@ -99,7 +76,6 @@ impl Message {
         }
     }
 
-    /// A `user` message.
     pub fn user(content: impl Into<String>) -> Self {
         Self {
             role: Role::User,
@@ -110,7 +86,6 @@ impl Message {
         }
     }
 
-    /// An `assistant` text message (no tool calls).
     pub fn assistant(content: impl Into<String>) -> Self {
         Self {
             role: Role::Assistant,
@@ -121,7 +96,7 @@ impl Message {
         }
     }
 
-    /// A `tool` result message keyed back to the originating tool call.
+    /// A `tool` result message keyed back to its originating call.
     pub fn tool_result(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
         Self {
             role: Role::Tool,
@@ -143,10 +118,6 @@ pub enum Role {
     Tool,
 }
 
-// ============================================================================
-// TOOLS (request side)
-// ============================================================================
-
 /// A tool the model may call — currently only `type: "function"`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Tool {
@@ -156,7 +127,6 @@ pub struct Tool {
 }
 
 impl Tool {
-    /// Build a `function`-type tool from name/description/parameters schema.
     pub fn function(
         name: impl Into<String>,
         description: impl Into<String>,
@@ -183,10 +153,6 @@ pub struct FunctionDef {
     pub parameters: serde_json::Value,
 }
 
-// ============================================================================
-// RESPONSE FORMAT (structured output)
-// ============================================================================
-
 /// `response_format` discriminated on `type`.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -204,10 +170,6 @@ pub struct JsonSchemaSpec {
     pub strict: bool,
     pub schema: serde_json::Value,
 }
-
-// ============================================================================
-// RESPONSE
-// ============================================================================
 
 /// Body of a `/chat/completions` response.
 #[derive(Debug, Clone, Deserialize)]
@@ -264,10 +226,7 @@ pub struct FunctionCall {
 }
 
 impl FunctionCall {
-    /// Decode the JSON-string `arguments` into a typed value.
-    ///
-    /// Returns a fully-qualified [`std::result::Result`]: the sibling `client`
-    /// module's `Result<T>` alias shadows `std::result::Result` in this crate.
+    /// Decode the JSON-string `arguments`; fully-qualified `Result` dodges the crate's `Result<T>` alias.
     pub fn parse_args<T: DeserializeOwned>(&self) -> std::result::Result<T, serde_json::Error> {
         serde_json::from_str(&self.arguments)
     }

@@ -1,6 +1,5 @@
-//! Crate-internal runtime tests: a UI render smoke test (catches layout panics the
-//! type system can't) and a full backend end-to-end (synthetic EPUB → cleanse →
-//! mock translation pipeline → translated file on disk). Only compiled under `cargo test`.
+//! Crate-internal runtime tests: UI render smoke tests plus a full backend end-to-end
+//! (synthetic EPUB -> cleanse -> mock translation pipeline -> translated file on disk).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -111,11 +110,6 @@ fn confirm_modal_closes_on_yes() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// End-to-end backend: build a tiny EPUB, run the real ingest + cleanse, then the
-// agents pipeline with the offline MockClient, and assert a translated file lands.
-// ---------------------------------------------------------------------------
-
 fn build_sample_epub(path: &std::path::Path) {
     use std::io::Write;
     use zip::write::{SimpleFileOptions, ZipWriter};
@@ -184,7 +178,7 @@ async fn end_to_end_import_and_mock_translate() {
     use crate::llm::mock::MockClient;
     use crate::workspace::Workspace;
 
-    // Unique scratch dir (no Date/rand available — use pid + nanos-free counter).
+    // Unique scratch dir keyed on pid (no Date/rand available).
     let base = std::env::temp_dir().join(format!("honya_e2e_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
     let work = base.join("work");
@@ -195,14 +189,12 @@ async fn end_to_end_import_and_mock_translate() {
     let project_root = base.join("test-novel");
     let images_dir = project_root.join("images");
 
-    // 1. Ingest: extract + parse spine + relocate media.
     let (book, media) =
         crate::epub::import::import_with_media(&epub_path, &work, &images_dir, "images")
             .expect("import_with_media");
     let order = book.reading_order_paths();
     assert_eq!(order.len(), 1, "one spine content doc");
 
-    // 2. Scaffold the project tree.
     crate::workspace::scaffold::create_project(
         &project_root,
         "Test Novel",
@@ -212,7 +204,6 @@ async fn end_to_end_import_and_mock_translate() {
     .expect("create_project");
     let ws = Workspace::new(project_root.clone(), 1);
 
-    // 3. Cleanse each chapter → raw/ch_001.md.
     let doc_path = order[0];
     let xhtml = std::fs::read_to_string(book.disk_path(doc_path)).unwrap();
     let dir = crate::epub::paths::dir_of(doc_path);
@@ -223,7 +214,6 @@ async fn end_to_end_import_and_mock_translate() {
     }
     let md = crate::cleanse::xhtml_to_markdown(&xhtml, &image_map);
 
-    // Cleanse-rule spot checks on the real pipeline output.
     assert!(md.contains("漢字 (かんじ)"), "ruby merged: {md}");
     assert!(md.contains("**太字**"), "bold converted: {md}");
     assert!(
@@ -237,7 +227,6 @@ async fn end_to_end_import_and_mock_translate() {
 
     crate::workspace::translation::write_raw(&ws, 1, &md).unwrap();
 
-    // 4. Run the real agents pipeline with the offline mock client.
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let ctx = PipelineCtx {
         client: Arc::new(MockClient::default()) as Arc<dyn crate::llm::client::LlmClient>,
@@ -249,7 +238,6 @@ async fn end_to_end_import_and_mock_translate() {
     };
     run_pipeline(ctx, vec![1]).await.expect("run_pipeline");
 
-    // 5. Assert the translated file exists and carries the mock Thai + idempotency marker.
     let translated = project_root.join("Vol_01/translated/ch_001.md");
     let out = std::fs::read_to_string(&translated).expect("translated file written");
     assert!(out.contains("honya:chunk"), "chunk marker present: {out}");

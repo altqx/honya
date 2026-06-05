@@ -1,16 +1,9 @@
-//! src/agents/tools.rs — the Orchestrator's 7 backend tools.
+//! The Orchestrator's backend tools.
 //!
-//! The Orchestrator runs as a metadata turn after each committed chunk. It
-//! emits OpenAI-style tool calls; `dispatch_tool` parses the JSON arguments,
-//! mutates the on-disk workspace metadata (CHARACTERS.md / GLOSSARY.md /
-//! VOLUME.md / translated/), and emits the corresponding `AppEvent` so the UI
-//! reflects the change. `WorkspaceTools` adapts this to the generic
-//! `ToolExecutor` driven by `llm::tool_loop::run_tool_loop`.
-//!
-//! The 7 tools (verbatim from the design):
-//!   1. upsert_character        2. upsert_glossary_term   3. update_volume_recap
-//!   4. append_translation      5. flag_continuity_note   6. get_glossary (read)
-//!   7. get_character (read)
+//! The Orchestrator emits OpenAI-style tool calls; `dispatch_tool` parses the
+//! JSON arguments, mutates the on-disk workspace metadata (CHARACTERS.md /
+//! GLOSSARY.md / VOLUME.md / translated/), and emits the matching `AppEvent`.
+//! `WorkspaceTools` adapts this to the generic `ToolExecutor`.
 
 use std::path::PathBuf;
 
@@ -24,9 +17,7 @@ use crate::model::{
 };
 use crate::workspace::{Workspace, characters, glossary, translation, volume};
 
-/// The full `tools` array advertised to the Orchestrator. Each entry is an
-/// OpenAI-style `{"type":"function","function":{name,description,parameters}}`
-/// where `parameters` is a strict JSON Schema (`additionalProperties:false`).
+/// The OpenAI-style `tools` array advertised to the Orchestrator (strict JSON Schema).
 pub fn orchestrator_tools() -> serde_json::Value {
     json!([
         {
@@ -173,7 +164,7 @@ pub fn orchestrator_tools() -> serde_json::Value {
     ])
 }
 
-// --- per-tool argument structs (deserialized from the JSON `arguments` string)
+// Per-tool argument structs deserialized from the JSON `arguments` string.
 
 #[derive(Debug, Deserialize)]
 struct UpsertCharacterArgs {
@@ -257,9 +248,7 @@ struct GetCharacterArgs {
     id: Option<String>,
 }
 
-/// Slugify a Japanese (or any) name into a stable ascii-ish id when the model
-/// omits an explicit `id`. Non-alphanumeric runs collapse to `-`; CJK chars are
-/// kept verbatim (lowercased ascii where applicable) so ids stay unique.
+/// Derive a stable id from a name when the model omits `id`; non-alphanumeric runs collapse to `-`, CJK kept verbatim.
 fn slugify(name: &str) -> String {
     let mut out = String::new();
     let mut prev_dash = false;
@@ -283,10 +272,8 @@ fn slugify(name: &str) -> String {
     out
 }
 
-/// Execute one Orchestrator tool call against the workspace, emit the matching
-/// `AppEvent`, and return a `ToolResult` to feed back to the model. A malformed
-/// argument string or unknown tool name yields a `ToolResult::err` (the loop
-/// keeps going so the model can recover).
+/// Execute one tool call, emit the matching `AppEvent`, return a `ToolResult`.
+/// Bad args or unknown tool yield `ToolResult::err` so the loop can recover.
 pub async fn dispatch_tool(
     ws: &Workspace,
     tx: &EventTx,
@@ -491,10 +478,8 @@ pub async fn dispatch_tool(
     }
 }
 
-/// A `ToolExecutor` bound to one project workspace, event channel, and chapter.
-///
-/// `Workspace` is not assumed to be `Clone`, so we store its constituent parts
-/// (`root` + `vol_number`) and rebuild a fresh `Workspace` for each call.
+/// A `ToolExecutor` bound to one workspace/channel/chapter. `Workspace` isn't
+/// `Clone`, so we store `root` + `vol_number` and rebuild one per call.
 pub struct WorkspaceTools {
     root: PathBuf,
     vol_number: u32,
@@ -503,7 +488,6 @@ pub struct WorkspaceTools {
 }
 
 impl WorkspaceTools {
-    /// Build a tool executor for `chapter` in the given project root + volume.
     pub fn new(root: PathBuf, vol_number: u32, tx: EventTx, chapter: u32) -> Self {
         Self {
             root,

@@ -1,9 +1,7 @@
-//! src/epub/mod.rs — EPUB domain types, error enum, namespace constants.
+//! EPUB domain types, error enum, namespace constants.
 //!
-//! This module (and the whole `epub::*` tree) is self-contained: it depends
-//! ONLY on its own submodules and external crates. In particular `EpubError`
-//! must NOT depend on `crate::model` — `error.rs` does `#[from] crate::epub::EpubError`
-//! later, so a back-dependency here would create a cycle.
+//! `EpubError` must NOT depend on `crate::model`: `error.rs` does
+//! `#[from] crate::epub::EpubError`, so a back-dependency would create a cycle.
 
 pub mod extract;
 pub mod import;
@@ -17,17 +15,15 @@ use std::path::PathBuf;
 
 /// XML / OPF namespace URIs used throughout EPUB parsing.
 pub mod ns {
-    /// OPF (Open Packaging Format) package namespace.
     pub const OPF: &str = "http://www.idpf.org/2007/opf";
-    /// Dublin Core metadata namespace.
+    /// Dublin Core metadata.
     pub const DC: &str = "http://purl.org/dc/elements/1.1/";
-    /// OCF container.xml namespace.
+    /// OCF container.xml.
     pub const CONTAINER: &str = "urn:oasis:names:tc:opendocument:xmlns:container";
-    /// NCX (EPUB2 navigation) namespace.
+    /// NCX (EPUB2 navigation).
     pub const NCX: &str = "http://www.daisy.org/z3986/2005/ncx/";
-    /// XHTML namespace (nav documents, content docs).
     pub const XHTML: &str = "http://www.w3.org/1999/xhtml";
-    /// EPUB structural semantics (epub:type) namespace.
+    /// EPUB structural semantics (epub:type).
     pub const OPS: &str = "http://www.idpf.org/2007/ops";
 }
 
@@ -39,15 +35,12 @@ pub enum EpubError {
     #[error("unsafe archive entry name: {0}")]
     UnsafeEntryName(String),
 
-    /// Underlying filesystem I/O failure.
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 
-    /// Underlying zip-archive failure.
     #[error("zip error: {0}")]
     Zip(#[from] zip::result::ZipError),
 
-    /// Malformed XML (container.xml / OPF / NCX / nav).
     #[error("xml parse error in {context}: {source}")]
     Xml {
         context: String,
@@ -55,11 +48,9 @@ pub enum EpubError {
         source: roxmltree::Error,
     },
 
-    /// container.xml had no usable rootfile pointing at the OPF.
     #[error("no OPF package found (META-INF/container.xml missing or invalid)")]
     MissingOpf,
 
-    /// A spine `itemref` referenced a manifest id that does not exist.
     #[error("dangling spine reference: idref '{0}' not in manifest")]
     DanglingSpineRef(String),
 
@@ -68,9 +59,8 @@ pub enum EpubError {
     EntryTooLarge(String),
 }
 
-/// Crate-local result alias. NOTE: this shadows `std::result::Result`; any
-/// `serde_json` / other code in this module that needs the std two-arg form
-/// must use the fully-qualified `std::result::Result`.
+/// Crate-local result alias that shadows `std::result::Result`; std two-arg uses
+/// in this module must qualify as `std::result::Result`.
 pub type Result<T> = std::result::Result<T, EpubError>;
 
 /// A single `<item>` from the OPF `<manifest>`.
@@ -79,23 +69,20 @@ pub type Result<T> = std::result::Result<T, EpubError>;
 pub struct ManifestItem {
     /// `id` attribute (unique within the manifest).
     pub id: String,
-    /// Raw `href` attribute (OPF-relative, possibly percent-encoded, may carry a fragment).
+    /// Raw `href` (OPF-relative, possibly percent-encoded, may carry a fragment).
     pub href: String,
     /// Archive-relative resolved path ('/'-separated, fragment stripped, percent-decoded).
     pub resolved_path: String,
-    /// `media-type` attribute.
     pub media_type: String,
     /// EPUB3 `properties` tokens (e.g. "nav", "cover-image"), whitespace-split.
     pub properties: Vec<String>,
 }
 
 impl ManifestItem {
-    /// True if `prop` appears among this item's `properties` tokens.
     pub fn has_property(&self, prop: &str) -> bool {
         self.properties.iter().any(|p| p == prop)
     }
 
-    /// True if the media-type is an image type.
     pub fn is_image(&self) -> bool {
         self.media_type.starts_with("image/")
     }
@@ -111,7 +98,6 @@ pub struct SpineEntry {
     pub linear: bool,
     /// Archive-relative resolved path of the referenced manifest item.
     pub resolved_path: String,
-    /// Media-type of the referenced manifest item.
     pub media_type: String,
 }
 

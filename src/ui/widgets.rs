@@ -1,9 +1,7 @@
-//! src/ui/widgets.rs — reusable render primitives shared by every screen:
-//! the working spinner, the chapter/import gauge, the chunk progress LineGauge,
-//! and the waxing-moon status cell.
+//! Reusable render primitives shared by every screen.
 //!
 //! All colors are threaded from [`crate::theme::Theme`]; nothing here inlines a
-//! `Color::Rgb`. Gauges fill with the soft indigo accent over the inset track.
+//! `Color::Rgb`.
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -14,10 +12,8 @@ use ratatui::widgets::{Gauge, LineGauge, Paragraph};
 use crate::model::{ChapterKind, ChapterStatus};
 use crate::theme::{self, Theme};
 
-/// Render a Braille bloom spinner followed by `label`, e.g. `⠹ working`.
-///
-/// The frame index advances the animation (~10 fps driven by the main-loop ticker).
-/// The spinner takes the live indigo working color; the label is soft ink.
+/// Render a Braille bloom spinner followed by `label`; `frame` advances the
+/// animation (~10 fps from the main-loop ticker).
 #[allow(dead_code)]
 pub fn render_spinner(f: &mut Frame, area: Rect, frame: u64, label: &str, theme: &Theme) {
     let glyph = theme::spinner_frame(frame);
@@ -32,11 +28,8 @@ pub fn render_spinner(f: &mut Frame, area: Rect, frame: u64, label: &str, theme:
     );
 }
 
-/// Render a block-style [`Gauge`] for `done`/`total`, labeled `done/total NN%`.
-///
-/// Used for whole-of-import / whole-of-volume progress. The filled bar is the
-/// soft accent on the inset track; a `total` of 0 renders an empty 0% gauge
-/// rather than dividing by zero.
+/// Render a block-style [`Gauge`] for `done`/`total`; a `total` of 0 renders an
+/// empty 0% gauge rather than dividing by zero.
 pub fn render_gauge(f: &mut Frame, area: Rect, done: usize, total: usize, theme: &Theme) {
     let ratio = if total == 0 {
         0.0
@@ -54,11 +47,8 @@ pub fn render_gauge(f: &mut Frame, area: Rect, done: usize, total: usize, theme:
     f.render_widget(gauge, area);
 }
 
-/// Render a single-line [`LineGauge`] for a 0.0–1.0 `ratio` with a trailing `label`.
-///
-/// This is the chunk-progress bar (`▰▰▰▱▱ 39%  …`). Filled cells use the soft
-/// accent, the track uses faint ink, matching `theme::GAUGE_FILLED/GAUGE_TRACK`.
-/// `ratio` is clamped into range because `LineGauge::ratio` panics otherwise.
+/// Render a single-line [`LineGauge`] for a 0.0–1.0 `ratio` with a trailing
+/// `label`; `ratio` is clamped because `LineGauge::ratio` panics out of range.
 pub fn render_line_gauge(f: &mut Frame, area: Rect, ratio: f64, label: &str, theme: &Theme) {
     let ratio = ratio.clamp(0.0, 1.0);
     let gauge = LineGauge::default()
@@ -75,11 +65,8 @@ pub fn render_line_gauge(f: &mut Frame, area: Rect, ratio: f64, label: &str, the
     f.render_widget(gauge, area);
 }
 
-/// The waxing-moon status glyph for a chapter, as a styled [`Span`].
-///
-/// Delegates to [`theme::status_glyph`] for both the glyph and its semantic
-/// color (image-only → ▣ clay, failed → ✗ vermilion, etc). Returns `'static`
-/// so it can be cached / stored in owned [`Line`]s.
+/// The waxing-moon status glyph for a chapter, as an owned `'static` [`Span`]
+/// (so it can be cached / stored in owned [`Line`]s).
 pub fn status_cell(kind: ChapterKind, status: ChapterStatus, theme: &Theme) -> Span<'static> {
     let (glyph, color) = theme::status_glyph(kind, status, theme);
     Span::styled(glyph.to_string(), Style::default().fg(color))

@@ -1,8 +1,4 @@
-//! src/app/project.rs — the Project Dashboard (2 棚).
-//!
-//! Left: a collapsible volume/chapter tree with waxing-moon status glyphs.
-//! Top-right: the four context files at a glance. Bottom-right: a detail card for
-//! the selected chapter. This is the launch point for translation runs (`t`/`T`).
+//! The Project Dashboard (2 棚): chapter tree + context files + detail card; launches runs (`t`/`T`).
 
 use std::collections::HashSet;
 
@@ -87,7 +83,7 @@ impl ProjectScreen {
 
     pub fn handle_key(&mut self, key: KeyEvent, active: Option<&ActiveProject>) -> Action {
         let Some(active) = active else {
-            // No project: only `e` (go to lexicon) and movement no-op.
+            // No project: only `e` (go to lexicon) is live.
             if matches!(key.code, KeyCode::Char('e')) {
                 return Action::Goto(Screen::Lexicon);
             }
@@ -117,7 +113,6 @@ impl ProjectScreen {
                 if self.focus_panel == 1 {
                     self.focus_panel = 0;
                 } else if let Some(vol) = self.selected_volume(active) {
-                    // Collapse the volume the cursor is in.
                     self.collapsed.insert(vol);
                 }
                 Action::None
@@ -134,7 +129,6 @@ impl ProjectScreen {
                 if let Some(ch) = self.selected_chapter(active) {
                     Action::OpenChapter { chapter: ch }
                 } else if let Some(Row::Volume(v)) = rows.get(sel) {
-                    // Toggle the volume fold on Enter for a volume header.
                     if self.collapsed.contains(&v.number) {
                         self.collapsed.remove(&v.number);
                     } else {
@@ -292,7 +286,6 @@ impl ProjectScreen {
         let inner = block.inner(area);
         f.render_widget(block, area);
 
-        // Count entries by reading the workspace metadata best-effort.
         let chars = crate::workspace::characters::load(&active.workspace).len();
         let terms = crate::workspace::glossary::load(&active.workspace).len();
 
@@ -411,10 +404,6 @@ impl Default for ProjectScreen {
     }
 }
 
-// ============================================================================
-// ROW RENDERERS
-// ============================================================================
-
 fn volume_row(
     v: &Volume,
     collapsed: bool,
@@ -512,10 +501,6 @@ fn chapter_row(
         Span::styled(time, Style::default().fg(theme.ink_faint).bg(row_bg)),
     ]))
 }
-
-// ============================================================================
-// HELPERS
-// ============================================================================
 
 fn empty_state(f: &mut Frame, area: Rect, theme: &Theme) {
     let lines = vec![

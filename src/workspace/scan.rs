@@ -1,13 +1,7 @@
-//! src/workspace/scan.rs — discover projects/volumes/chapters on disk.
-//!
-//! Drives the Shelf and Project screens. A directory is treated as a project
-//! when it contains a `PROJECT.md`. Volumes are `Vol_NN` subdirectories;
-//! chapters are `ch_NNN.md` files under `raw/` (with status derived from the
-//! presence/shape of the matching `translated/ch_NNN.md`).
-//!
-//! All functions are sync (std::fs + walkdir); the pipeline owns the async file
-//! IO. `derive_status` reads translated/raw files directly rather than via the
-//! async `translation` helpers so it stays usable from synchronous render paths.
+//! Discover projects/volumes/chapters on disk for the Shelf and Project screens.
+//! A project is a dir with a `PROJECT.md`; volumes are `Vol_NN` subdirs; chapters
+//! are `raw/ch_NNN.md` with status from the matching `translated/ch_NNN.md`.
+//! All functions are sync (std::fs + walkdir) so they stay usable from render paths.
 
 use std::path::{Path, PathBuf};
 
@@ -17,10 +11,8 @@ use walkdir::WalkDir;
 use crate::cleanse;
 use crate::model::{Chapter, ChapterKind, ChapterStatus, Project, Volume};
 
-/// Discover all projects directly under `root` (one level deep), ascending by id.
-///
-/// A child directory is a project iff it contains a `PROJECT.md`. Each returned
-/// `Project` is fully populated with its volumes and chapters.
+/// Discover projects one level under `root` (a child dir with `PROJECT.md`),
+/// ascending by id, each fully populated with volumes and chapters.
 pub fn scan_projects(root: &Path) -> Vec<Project> {
     let mut projects = Vec::new();
     let entries = match std::fs::read_dir(root) {
@@ -100,10 +92,8 @@ pub fn scan_volumes(project_dir: &Path) -> Vec<Volume> {
     volumes
 }
 
-/// Discover chapters in a volume directory from `raw/ch_NNN.md`, ascending.
-///
-/// Title defaults to "Chapter NNN" (the EPUB TOC title is not persisted on
-/// disk; the live `Project` is the authority for titles when available).
+/// Discover chapters from `raw/ch_NNN.md`, ascending. Title defaults to
+/// "Chapter NNN" since the EPUB TOC title is not persisted on disk.
 pub fn scan_chapters(vol_dir: &Path) -> Vec<Chapter> {
     let raw_dir = vol_dir.join("raw");
     let mut numbers: Vec<u32> = Vec::new();
@@ -146,8 +136,8 @@ pub fn scan_chapters(vol_dir: &Path) -> Vec<Chapter> {
 
             Chapter {
                 number,
-                // Import writes the EPUB TOC title as a leading `# ` heading on
-                // prose chapters; fall back to the generic label when absent.
+                // Import writes the TOC title as a leading `# ` heading; fall
+                // back to the generic label when absent.
                 title: first_md_heading(&raw_md)
                     .unwrap_or_else(|| format!("Chapter {:03}", number)),
                 kind,
@@ -161,9 +151,8 @@ pub fn scan_chapters(vol_dir: &Path) -> Vec<Chapter> {
         .collect()
 }
 
-/// Read the chapter title from a leading Markdown `# ` heading, if the raw file
-/// starts with one. Stops at the first non-empty non-heading line so narrative
-/// text is never mistaken for a title.
+/// Title from a leading `# ` heading; stops at the first non-heading line so
+/// narrative text is never mistaken for a title.
 fn first_md_heading(md: &str) -> Option<String> {
     for line in md.lines() {
         let t = line.trim_start();
@@ -180,11 +169,8 @@ fn first_md_heading(md: &str) -> Option<String> {
     None
 }
 
-/// Find `*.epub` files directly under `root` that are not already a project
-/// directory, returned with their byte size for the Shelf import list.
-///
-/// Walks one level deep (depth 1) so we list importable epubs sitting beside
-/// existing project directories without descending into them.
+/// Find `*.epub` files one level under `root` (with byte size) for the Shelf
+/// import list; depth 1 so we don't descend into existing project dirs.
 pub fn find_unimported_epubs(root: &Path) -> Vec<(PathBuf, u64)> {
     let mut out = Vec::new();
 
@@ -215,22 +201,15 @@ pub fn find_unimported_epubs(root: &Path) -> Vec<(PathBuf, u64)> {
     out
 }
 
-/// Derive a chapter's lifecycle status from disk state.
-///
-/// Disk alone cannot distinguish "mid-run" from "finished" reliably, so this is
-/// the resting status; the live pipeline overrides it via `AppEvent` while a run
-/// is in flight. The rules:
-/// - `ImageOnly` → [`ChapterStatus::Done`] once written to translated/ (image
-///   chapters are copied straight there at import), else `Pending`.
-/// - non-empty translated/ → [`ChapterStatus::Done`].
-/// - only raw/ (or nothing) → [`ChapterStatus::Pending`].
+/// Resting lifecycle status from disk: `Done` when translated/ is non-empty (or,
+/// for `ImageOnly`, merely present), else `Pending`. Disk can't tell "mid-run"
+/// from "finished", so the live pipeline overrides this via `AppEvent`.
 pub fn derive_status(vol_dir: &Path, chapter: u32, kind: ChapterKind) -> ChapterStatus {
     let translated = vol_dir
         .join("translated")
         .join(format!("ch_{:03}.md", chapter));
 
     if matches!(kind, ChapterKind::ImageOnly) {
-        // Image-only content is finished as soon as it's written to translated/.
         return if translated.is_file() {
             ChapterStatus::Done
         } else {
@@ -249,14 +228,11 @@ pub fn derive_status(vol_dir: &Path, chapter: u32, kind: ChapterKind) -> Chapter
     }
 }
 
-// --- helpers ----------------------------------------------------------------
-
 /// Count `<!-- honya:chunk N -->` markers in translated text.
 fn count_chunk_markers(text: &str) -> usize {
     text.matches("<!-- honya:chunk ").count()
 }
 
-/// Count committed chunks for a chapter by reading its translated file.
 fn count_committed_chunks(vol_dir: &Path, chapter: u32) -> u32 {
     let path = vol_dir
         .join("translated")

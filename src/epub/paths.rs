@@ -1,10 +1,8 @@
-//! src/epub/paths.rs — archive-relative href resolution + dependency-free
-//! percent-decode. ALL paths are '/'-separated; we never touch `std::path` here
-//! because EPUB hrefs are URL-like, not OS paths (and OS separators differ).
+//! Archive-relative href resolution; paths are '/'-separated, not `std::path`
+//! (EPUB hrefs are URL-like, and OS separators differ).
 
-/// Decode `%XX` escapes in an href. Lenient: a malformed escape is passed
-/// through verbatim. Decodes byte-by-byte then re-interprets as UTF-8 so that
-/// multibyte sequences (e.g. percent-encoded Japanese filenames) round-trip.
+/// Decode `%XX` escapes leniently (malformed escapes pass through). Decodes
+/// byte-by-byte then re-interprets as UTF-8 so multibyte filenames round-trip.
 pub fn percent_decode(input: &str) -> String {
     let bytes = input.as_bytes();
     let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
@@ -22,7 +20,7 @@ pub fn percent_decode(input: &str) -> String {
         out.push(bytes[i]);
         i += 1;
     }
-    // Lossy is fine: invalid byte runs become U+FFFD rather than panicking.
+    // Lossy: invalid byte runs become U+FFFD rather than panicking.
     String::from_utf8_lossy(&out).into_owned()
 }
 
@@ -35,8 +33,7 @@ fn hex_val(b: u8) -> Option<u8> {
     }
 }
 
-/// Directory portion of a '/'-separated path. `"a/b/c.xhtml"` -> `"a/b"`,
-/// `"c.xhtml"` -> `""`. A trailing slash yields the path without it.
+/// Directory portion of a '/'-separated path; a trailing slash is dropped.
 pub fn dir_of(path: &str) -> String {
     let trimmed = path.trim_end_matches('/');
     match trimmed.rfind('/') {
@@ -45,8 +42,7 @@ pub fn dir_of(path: &str) -> String {
     }
 }
 
-/// Split a `#fragment` off an href. Returns `(href_without_fragment, fragment)`.
-/// The fragment (if any) is returned without the leading `#`.
+/// Split a `#fragment` off an href; the returned fragment omits the leading `#`.
 pub fn split_fragment(href: &str) -> (&str, Option<String>) {
     match href.find('#') {
         Some(idx) => (&href[..idx], Some(href[idx + 1..].to_string())),
@@ -54,15 +50,13 @@ pub fn split_fragment(href: &str) -> (&str, Option<String>) {
     }
 }
 
-/// Resolve `href` (which may be `./`, `../`, fragment-bearing, or percent-encoded)
-/// against `base_dir`, yielding a normalized archive-relative '/'-path with the
-/// fragment stripped and percent escapes decoded. Absolute hrefs (leading '/')
-/// are treated as archive-root-relative.
+/// Resolve `href` against `base_dir` into a normalized archive-relative '/'-path
+/// (fragment stripped, escapes decoded). A leading '/' is archive-root-relative.
 pub fn resolve_href(base_dir: &str, href: &str) -> String {
     let (no_frag, _) = split_fragment(href);
     let decoded = percent_decode(no_frag);
 
-    // Absolute (root-relative) href: ignore base_dir entirely.
+    // Root-relative href ignores base_dir entirely.
     let combined = if decoded.starts_with('/') {
         decoded.trim_start_matches('/').to_string()
     } else if base_dir.is_empty() {
@@ -74,8 +68,7 @@ pub fn resolve_href(base_dir: &str, href: &str) -> String {
     normalize_segments(&combined)
 }
 
-/// Collapse `.` and `..` segments in a '/'-separated path. `..` that would
-/// escape the root is dropped (clamped), matching how a sane EPUB reader behaves.
+/// Collapse `.`/`..` segments; a `..` escaping the root is clamped (dropped).
 fn normalize_segments(path: &str) -> String {
     let mut stack: Vec<&str> = Vec::new();
     for seg in path.split('/') {

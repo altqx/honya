@@ -1,6 +1,4 @@
-//! src/error.rs — crate-wide error type unifying EPUB / LLM / IO / JSON errors for
-//! non-anyhow call sites. The app boundary (main, app/) uses anyhow; library internals
-//! may use this. Built after epub + llm so their error types exist.
+//! Crate-wide error type unifying EPUB / LLM / IO / JSON errors for non-anyhow call sites.
 
 #[derive(thiserror::Error, Debug)]
 #[allow(dead_code)]

@@ -1,13 +1,7 @@
-//! src/app/mod.rs — App state, the Screen/Focus/Action/Overlay glue, the global
-//! key router, and the top-level render dispatch.
-//!
-//! This is the integration-heavy cluster: it owns the per-screen state, forwards
-//! background `AppEvent`s into the right screen, and turns user intents (`Action`)
-//! into side effects (spawning the import / translation tasks).
+//! App state, the global key router, and the top-level render dispatch.
 //!
 //! Layout invariant (see ui::layout::skeleton): header / tabs / rule / body /
-//! toast / footer. The active screen draws into `body`; chrome draws the rest;
-//! the overlay (if any) is drawn LAST over a `Clear` so it always wins.
+//! toast / footer; the overlay is drawn LAST over a `Clear` so it always wins.
 
 pub mod lexicon;
 pub mod overlay;
@@ -44,11 +38,7 @@ use self::reader::ReaderScreen;
 use self::shelf::ShelfScreen;
 use self::translate::TranslateScreen;
 
-// ============================================================================
-// CORE ENUMS — cluster E (ui::chrome) imports `Screen` from here, so the names
-// and ORDER are load-bearing. Do not reorder.
-// ============================================================================
-
+// ui::chrome imports `Screen`, so the variant names and ORDER are load-bearing.
 /// The five primary tabs (1-5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
@@ -84,8 +74,7 @@ impl Screen {
     }
 }
 
-/// Everything a screen / overlay can ask the App to do. The App's `apply` is the
-/// single mutation funnel — screens never mutate global state directly.
+/// Everything a screen / overlay can ask the App to do; `apply` is the single mutation funnel.
 #[derive(Debug, Clone)]
 pub enum Action {
     None,
@@ -105,14 +94,12 @@ pub enum Action {
     },
     PauseRun,
     StopRun,
-    /// Delete a glossary term / character from the active project's lexicon.
     DeleteGlossary {
         jp_term: String,
     },
     DeleteCharacter {
         id: String,
     },
-    /// Persist edited Settings (base URL + the three model ids) to disk.
     SaveSettings {
         base_url: String,
         orchestrator: String,
@@ -120,13 +107,11 @@ pub enum Action {
         reviewer: String,
     },
     /// Boxed to break the `Action → Overlay → Dialog → Action` size cycle.
-    /// `Action::show_overlay(ov)` is the ergonomic constructor.
     ShowOverlay(Box<Overlay>),
     CloseOverlay,
 }
 
 impl Action {
-    /// Construct a `ShowOverlay` action without writing `Box::new` at call sites.
     pub fn show_overlay(ov: Overlay) -> Self {
         Action::ShowOverlay(Box::new(ov))
     }
@@ -160,8 +145,7 @@ impl Toast {
     }
 }
 
-/// The currently-open project: its scanned metadata, a workspace path resolver,
-/// the shared LLM client, and the effective model set (project override ∨ config).
+/// The currently-open project; `models` is the project override ∨ config default.
 pub struct ActiveProject {
     pub project: Project,
     pub workspace: Workspace,
@@ -170,15 +154,11 @@ pub struct ActiveProject {
 }
 
 impl ActiveProject {
-    /// The first/active volume number (defaults to 1 if the project has none).
+    /// First/active volume number (defaults to 1 if the project has none).
     fn active_vol(&self) -> u32 {
         self.project.volumes.first().map(|v| v.number).unwrap_or(1)
     }
 }
-
-// ============================================================================
-// APP
-// ============================================================================
 
 pub struct App {
     pub running: bool,
@@ -237,14 +217,10 @@ impl App {
         }
     }
 
-    // ---- background events -------------------------------------------------
-
     pub fn on_app_event(&mut self, ev: AppEvent) {
-        // Always let the Translate screen observe everything so its live panel
-        // stays current even when the user is on another tab.
+        // Translate screen observes everything so its live panel stays current off-tab.
         self.translate.on_app_event(&ev);
 
-        // Mutate scanned chapter rows + global run flags + surface a toast.
         match &ev {
             AppEvent::ChapterStarted { chapter } => {
                 self.set_chapter_status(*chapter, ChapterStatus::Translating);
@@ -286,8 +262,7 @@ impl App {
                 self.push_log(LogLevel::Info, format!("update available: honya {version}"));
             }
             AppEvent::PipelinePaused => {
-                // Stay run_active (the run is held, not finished) so a second run
-                // can't be started while paused and the guard stays meaningful.
+                // Stay run_active (held, not finished) so a second run can't start while paused.
                 self.toast = Some(Toast::warn("run paused · p to resume"));
             }
             AppEvent::PipelineResumed => {
@@ -340,8 +315,6 @@ impl App {
         }
     }
 
-    // ---- chapter-row mutation helpers --------------------------------------
-
     fn set_chapter_status(&mut self, chapter: u32, status: ChapterStatus) {
         if let Some(active) = self.active.as_mut() {
             for vol in active.project.volumes.iter_mut() {
@@ -386,14 +359,11 @@ impl App {
 
     fn push_log(&mut self, level: LogLevel, msg: String) {
         self.log.push((level, msg));
-        // Keep the log bounded so it never grows without limit.
         if self.log.len() > 500 {
             let overflow = self.log.len() - 500;
             self.log.drain(0..overflow);
         }
     }
-
-    // ---- key handling ------------------------------------------------------
 
     pub fn on_key(&mut self, key: KeyEvent) {
         let action = self.route_key(key);
@@ -407,9 +377,7 @@ impl App {
             return Action::Quit;
         }
 
-        // 1) An open overlay gets first refusal. When it captures text input it
-        //    swallows ALL single-letter globals (the Stream 5 rule); otherwise we
-        //    still let `Esc` pop it here for consistency.
+        // 1) An open overlay gets first refusal (swallows single-letter globals when capturing).
         if !matches!(self.overlay, Overlay::None) {
             return self.overlay.handle_key(k);
         }
@@ -419,10 +387,7 @@ impl App {
             return Action::show_overlay(Overlay::palette());
         }
 
-        // 2b) If the active screen has a text field focused (e.g. the Lexicon
-        //     search / inline editor), it captures ALL keys so the user can type
-        //     freely — single-letter globals are suppressed. Only Ctrl-C (handled
-        //     above) escapes this.
+        // 2b) A focused screen text field (Lexicon search/editor) captures all keys.
         if self.screen_is_capturing() {
             return self.route_to_screen(k);
         }
@@ -435,10 +400,7 @@ impl App {
                 }
             }
             KeyCode::Tab => {
-                // The Lexicon owns Tab to cycle its sub-sections (Glossary ↔
-                // Characters ↔ Style); every other screen uses Tab to advance to
-                // the next top-level tab. (BackTab falls through to the screen on
-                // its own, so the Lexicon handles Shift-Tab to walk sections back.)
+                // Lexicon owns Tab to cycle its sub-sections; every other screen advances tabs.
                 if matches!(self.screen, Screen::Lexicon) {
                     return self.route_to_screen(k);
                 }
@@ -451,7 +413,6 @@ impl App {
             }
             KeyCode::Char('q') => return Action::Quit,
             KeyCode::Esc
-                // Esc with no overlay: drop the toast, otherwise a no-op.
                 if self.toast.is_some() => {
                     self.toast = None;
                     return Action::None;
@@ -463,8 +424,7 @@ impl App {
         self.route_to_screen(k)
     }
 
-    /// True when the active screen has a focused text field that should swallow
-    /// single-letter global keys (currently only the Lexicon's search / editor).
+    /// True when a focused screen text field should swallow single-letter globals.
     fn screen_is_capturing(&self) -> bool {
         matches!(self.screen, Screen::Lexicon) && self.lexicon.is_capturing()
     }
@@ -491,8 +451,6 @@ impl App {
         }
     }
 
-    // ---- the single mutation funnel ----------------------------------------
-
     fn apply(&mut self, a: Action) {
         match a {
             Action::None => {}
@@ -504,8 +462,7 @@ impl App {
                 self.toast = None;
             }
             Action::ShowOverlay(ov) => {
-                // The palette emits a placeholder Settings overlay (no &cfg handle);
-                // rebuild it from the live config so the fields show real values.
+                // Palette emits a placeholder Settings overlay; rebuild from live config.
                 self.overlay = match *ov {
                     Overlay::Settings(_) => Overlay::settings(&self.cfg),
                     other => other,
@@ -577,14 +534,9 @@ impl App {
         }
     }
 
-    // ---- side effects ------------------------------------------------------
-
     fn open_project(&mut self, id: String) {
-        // Always re-scan from disk so the opened project reflects the CURRENT
-        // on-disk state — chapters translated since startup, freshly-imported
-        // projects, etc. `self.projects` is otherwise only populated at launch
-        // (and after an import), so without this re-open would clone that stale
-        // snapshot and silently revert completed chapters back to "pending".
+        // Re-scan from disk first: `self.projects` is otherwise only populated at launch,
+        // so without this, re-open would clone a stale snapshot and revert done chapters.
         self.refresh_projects();
         let Some(project) = self.projects.iter().find(|p| p.id == id).cloned() else {
             self.toast = Some(Toast::error(format!("project {id} not found")));
@@ -636,8 +588,7 @@ impl App {
         }
     }
 
-    /// Look up a chapter's display title from the active project (for the live
-    /// Translate header), falling back to `None` when not found.
+    /// A chapter's display title from the active project (for the live Translate header).
     fn chapter_title(&self, chapter: u32) -> Option<String> {
         let active = self.active.as_ref()?;
         active
@@ -718,25 +669,20 @@ impl App {
         self.shelf.rescan(&working_root());
     }
 
-    // ---- render ------------------------------------------------------------
-
     pub fn render(&mut self, f: &mut Frame) {
         let area = f.area();
         let show_toast = self.toast.is_some();
         let sk: Skeleton = layout::skeleton(area, show_toast);
 
-        // Background wash for the whole screen.
         f.render_widget(
             Paragraph::new("").style(Style::default().bg(self.theme.bg)),
             area,
         );
 
-        // Header: crumb + status tally.
         let crumb = self.crumb();
         let tally = self.tally();
         chrome::render_header(f, sk.header, &crumb, &tally, &self.theme);
 
-        // Tab bar (spinner badge on tab 3 while a run is live).
         chrome::render_tabbar(
             f,
             sk.tabs,
@@ -746,18 +692,14 @@ impl App {
             &self.theme,
         );
 
-        // Hairline rule under the tabs.
         self.render_rule(f, sk.rule);
 
-        // Active screen into the body.
         self.render_body(f, sk.body);
 
-        // Toast line.
         if show_toast {
             self.render_toast(f, sk.toast);
         }
 
-        // Footer: active-screen hints + always-on global cluster (chrome appends it).
         let hints = self.hints();
         chrome::render_footer(f, sk.footer, hints, self.update_available.as_deref(), &self.theme);
 
@@ -823,7 +765,6 @@ impl App {
             Paragraph::new(left).style(Style::default().bg(self.theme.bg)),
             area,
         );
-        // Right-aligned dismiss hint.
         let hint = "⌫ dismiss ";
         let hint_w = crate::ui::text::col_width(hint) as u16;
         if area.width > hint_w {
@@ -843,8 +784,6 @@ impl App {
             );
         }
     }
-
-    // ---- chrome inputs -----------------------------------------------------
 
     fn crumb(&self) -> String {
         match (&self.active, self.screen) {
@@ -917,19 +856,12 @@ impl App {
     }
 }
 
-// ============================================================================
-// FREE HELPERS — self-contained so they never depend on a symbol outside the
-// locked module contract.
-// ============================================================================
-
 /// The working root we scan for projects / unimported epubs. Falls back to `.`.
 fn working_root() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
-/// Turn a display title into a stable, filesystem-safe directory slug.
-/// ASCII-lowercased, non-alphanumeric runs collapsed to single `-`, trimmed.
-/// Non-ASCII (CJK/Thai) is preserved verbatim so titles like 「リゼロ」 stay legible.
+/// Filesystem-safe slug: ASCII lowered, punctuation runs → single `-`; non-ASCII (CJK/Thai) preserved verbatim.
 pub fn slugify(title: &str) -> String {
     let mut out = String::with_capacity(title.len());
     let mut prev_dash = false;
@@ -938,13 +870,11 @@ pub fn slugify(title: &str) -> String {
             out.push(ch.to_ascii_lowercase());
             prev_dash = false;
         } else if ch.is_ascii() {
-            // ASCII punctuation / whitespace => a single separating dash.
             if !prev_dash && !out.is_empty() {
                 out.push('-');
                 prev_dash = true;
             }
         } else {
-            // Preserve non-ASCII glyphs (Japanese/Thai) directly.
             out.push(ch);
             prev_dash = false;
         }
@@ -957,10 +887,8 @@ pub fn slugify(title: &str) -> String {
     }
 }
 
-/// Self-contained import driver built ONLY from locked contract functions:
-/// scaffold the tree, extract+relocate via epub::import_with_media, cleanse each
-/// spine doc to markdown, write raw/ (+ translated/ for image-only chapters), and
-/// emit ImportProgress so the wizard Gauge animates. Returns the new project slug.
+/// Import driver: scaffold the tree, extract+relocate media, cleanse each spine doc to
+/// markdown, write raw/ (+ translated/ for image-only), emit ImportProgress. Returns the slug.
 async fn run_import(
     epub: PathBuf,
     dest: PathBuf,
@@ -978,8 +906,7 @@ async fn run_import(
         .map(|s| s.to_string())
         .unwrap_or_else(|| slugify(&title));
 
-    // 1) Scaffold the project tree + metadata templates (blocking fs work moved
-    //    onto a blocking thread so we never stall the runtime).
+    // Scaffold on a blocking thread so the fs work never stalls the runtime.
     {
         let dest = dest.clone();
         let title = title.clone();
@@ -996,8 +923,7 @@ async fn run_import(
         label: "extracting epub".to_string(),
     });
 
-    // 2) Extract + parse + relocate media. The epub work_dir lives under the
-    //    project so the archive stays reprocessable.
+    // work_dir lives under the project so the archive stays reprocessable.
     let work_dir = dest.join(".epub_work");
     let images_dir = dest.join("images");
     let (book, media) = {
@@ -1011,7 +937,6 @@ async fn run_import(
         .map_err(|e| anyhow::anyhow!("epub: {e}"))?
     };
 
-    // 3) Walk the spine in reading order, cleanse each content doc, write raw/.
     let doc_paths: Vec<String> = book
         .reading_order_paths()
         .into_iter()
@@ -1020,9 +945,8 @@ async fn run_import(
     let total = doc_paths.len();
     let ws = Workspace::new(dest.clone(), vol);
 
-    // EPUB TOC title per content document (first/top-level entry wins). Prepended
-    // as a leading `# ` heading on prose chapters so real chapter names survive to
-    // the dashboard and reader instead of the generic "Chapter NNN".
+    // TOC title per content doc (first entry wins); prepended as a `# ` heading on prose
+    // so real chapter names survive instead of the generic "Chapter NNN".
     let mut toc_titles: HashMap<String, String> = HashMap::new();
     for t in &book.toc {
         let title = t.title.trim();
@@ -1049,17 +973,13 @@ async fn run_import(
             }
         };
 
-        // Per-doc image map keyed by the raw <img src> -> relocated basename.
-        // Cleanse's output prefix is always ../../images/FILE, so this only needs
-        // to canonicalise basenames; an empty map still yields correct links via
-        // cleanse's raw-basename fallback.
+        // Per-doc image map: raw <img src> -> relocated basename (empty map still
+        // yields correct links via cleanse's raw-basename fallback).
         let base_dir = dir_of(archive_path);
         let image_map: HashMap<String, String> = collect_img_srcs(&html)
             .into_iter()
             .map(|src| {
-                // Resolve to the archive-relative path and look up the relocated
-                // (dedup-safe) basename; fall back to the raw basename if the src
-                // has no manifest entry.
+                // Resolve archive-relative, look up the dedup-safe basename; fall back to raw.
                 let resolved = resolve_href(&base_dir, &src);
                 let file = media
                     .by_resolved_path
@@ -1074,12 +994,10 @@ async fn run_import(
         ch_number += 1;
 
         if crate::cleanse::is_image_only(&md) {
-            // Illustration-only page: seed raw/ so scan_chapters discovers it AND
-            // copy straight to translated/ so it reads as Done; agents are skipped.
+            // Illustration-only: seed raw/ for discovery AND translated/ so it reads as Done.
             let _ = crate::workspace::translation::write_raw(&ws, ch_number, &md);
             let _ = crate::workspace::translation::write_image_only(&ws, ch_number, &md);
         } else {
-            // Prose: prepend the TOC title as a heading so it survives to disk.
             let titled = match toc_titles.get(archive_path) {
                 Some(t) => format!("# {t}\n\n{md}"),
                 None => md,
@@ -1104,17 +1022,13 @@ fn base_name(path: &str) -> String {
     path.rsplit('/').next().unwrap_or(path).to_string()
 }
 
-/// Cheap, dependency-free scan for `<img ... src="...">` values in a doc. We only
-/// need the raw src strings to canonicalise the per-chapter image map; the heavy
-/// cleanse parsing is done by cleanse::xhtml_to_markdown.
+/// Cheap, dependency-free scan for raw `<img>`/SVG `<image>` src strings (heavy parsing is cleanse's job).
 fn collect_img_srcs(html: &str) -> Vec<String> {
     let mut out = Vec::new();
     let bytes = html.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
-        // Recognize both HTML <img src> and SVG <image xlink:href|href> (the
-        // standard light-novel cover encoding) so both resolve through the
-        // relocation map. Check the longer "<image" first.
+        // Handle both <img src> and SVG <image xlink:href|href> (cover encoding); check "<image" first.
         let rest = &bytes[i..];
         let (matched, prefer_src) = if rest.starts_with(b"<image") {
             (true, false)
@@ -1167,9 +1081,6 @@ fn extract_attr(tag: &str, attr: &str) -> Option<String> {
         Some(after[..end].to_string())
     }
 }
-
-// Re-export the Dialog type at the app root so screens can build confirm dialogs
-// that wrap an Action without reaching into the overlay module path directly.
 
 #[cfg(test)]
 mod img_src_tests {

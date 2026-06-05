@@ -1,14 +1,5 @@
-//! src/epub/import.rs — top-level EPUB import orchestration.
-//!
-//! Pipeline (`import_with_media`):
-//!   1. open the archive,
-//!   2. extract everything (zip-slip-safe) into `work_dir`,
-//!   3. locate + parse the OPF (metadata / manifest / spine / cover),
-//!   4. build the TOC preferring nav.xhtml > NCX(spine toc=) > NCX-by-media-type,
-//!   5. COPY image resources into `images_dir`, returning the rewrite maps.
-//!
-//! `reading_order_paths` is spine-authoritative; `disk_path` maps an archive
-//! path to its on-disk location under `work_dir`.
+//! Top-level EPUB import orchestration: extract (zip-slip-safe), parse the OPF,
+//! build the TOC (nav.xhtml > NCX), and copy image resources, returning rewrite maps.
 
 use std::path::{Path, PathBuf};
 
@@ -56,13 +47,11 @@ pub fn import_with_media(
     Ok((book, reloc))
 }
 
-/// Read an extracted archive-relative file from `work_dir` as a UTF-8 string.
 fn read_extracted(work_dir: &Path, archive_path: &str) -> Result<String> {
     let p = disk_path_for(work_dir, archive_path);
     Ok(std::fs::read_to_string(&p)?)
 }
 
-/// Build the disk path for an archive-relative '/'-separated path under `base`.
 fn disk_path_for(base: &Path, archive_path: &str) -> PathBuf {
     let mut p = base.to_path_buf();
     for seg in archive_path.split('/') {
@@ -73,15 +62,14 @@ fn disk_path_for(base: &Path, archive_path: &str) -> PathBuf {
     p
 }
 
-/// TOC preference: EPUB3 nav.xhtml (by manifest `nav` property) >
-/// NCX referenced by the spine `toc=` / NCX media-type. Falls back to empty.
+/// TOC preference: EPUB3 nav.xhtml (manifest `nav` property) > NCX (spine `toc=`
+/// or x-dtbncx+xml media-type) > empty.
 fn build_toc(
     archive: &mut zip::ZipArchive<std::fs::File>,
     work_dir: &Path,
     _opf_path: &str,
     parsed: &ParsedOpf,
 ) -> Result<Vec<TocEntry>> {
-    // 1) Prefer the EPUB3 nav document.
     if let Some(nav_id) = &parsed.nav_id
         && let Some(&idx) = parsed.manifest_by_id.get(nav_id) {
             let nav_path = parsed.manifest[idx].resolved_path.clone();
@@ -92,7 +80,6 @@ fn build_toc(
                     }
         }
 
-    // 2) Fall back to the NCX (spine toc= or x-dtbncx+xml media-type).
     if let Some(ncx_id) = &parsed.ncx_id
         && let Some(&idx) = parsed.manifest_by_id.get(ncx_id) {
             let ncx_path = parsed.manifest[idx].resolved_path.clone();
@@ -119,7 +106,6 @@ fn read_or_archive(
     read_entry_to_string(archive, archive_path)
 }
 
-/// Stitch parsed OPF + TOC into the public `EpubBook`.
 fn assemble_book(
     work_dir: &Path,
     opf_path: String,
@@ -138,8 +124,8 @@ fn assemble_book(
 }
 
 impl EpubBook {
-    /// Reading order = the spine, in order. Returns archive-relative resolved
-    /// paths. Spine-authoritative (does not re-derive from the manifest or TOC).
+    /// Spine-authoritative reading order as archive-relative resolved paths
+    /// (not re-derived from the manifest or TOC).
     pub fn reading_order_paths(&self) -> Vec<&str> {
         self.spine
             .iter()
@@ -147,8 +133,7 @@ impl EpubBook {
             .collect()
     }
 
-    /// Map an archive-relative '/'-separated path to its on-disk location under
-    /// this book's extraction `work_dir`.
+    /// Map an archive-relative '/'-path to its on-disk location under `work_dir`.
     pub fn disk_path(&self, archive_path: &str) -> PathBuf {
         disk_path_for(&self.work_dir, archive_path)
     }

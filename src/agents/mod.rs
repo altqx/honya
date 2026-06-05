@@ -1,10 +1,8 @@
-//! src/agents/mod.rs — the 3-agent translation pipeline (Orchestrator / Translator / Reviewer).
+//! The 3-agent translation pipeline (Orchestrator / Translator / Reviewer).
 //!
-//! The deterministic Rust pipeline (`pipeline.rs`) owns chunking, dispatch, the
-//! Translator↔Reviewer retry loop, and the idempotent append to `translated/`.
-//! The Orchestrator LLM is invoked once per committed chunk as a *metadata turn*
-//! that persists discoveries (characters / glossary terms / continuity notes /
-//! volume recap) through the backend tools.
+//! `pipeline.rs` owns chunking, dispatch, the Translator↔Reviewer retry loop,
+//! and the idempotent append to `translated/`. The Orchestrator LLM runs once
+//! per committed chunk as a metadata turn that persists discoveries via tools.
 
 pub mod chunk;
 pub mod continuity;

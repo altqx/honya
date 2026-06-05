@@ -1,7 +1,5 @@
-//! src/config.rs — load/save AppConfig from disk + OpenRouter API-key discovery.
-//! Depends only on model.rs. Tolerant: a missing/corrupt config falls back to
-//! AppConfig::default(). honya has no offline mode — a key is required, resolved
-//! from the environment first and then the persisted config.
+//! Load/save AppConfig from disk + OpenRouter API-key discovery.
+//! Tolerant: a missing/corrupt config falls back to AppConfig::default().
 
 use std::path::PathBuf;
 
@@ -22,8 +20,7 @@ pub fn config_dir() -> PathBuf {
     PathBuf::from(".config").join("honya")
 }
 
-/// Where the persisted config lives: `<config dir>/config.json`
-/// (i.e. `~/.config/honya/config.json`).
+/// Where the persisted config lives: `<config dir>/config.json`.
 pub fn config_path() -> PathBuf {
     config_dir().join("config.json")
 }

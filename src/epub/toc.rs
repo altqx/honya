@@ -1,6 +1,5 @@
-//! src/epub/toc.rs — build a flattened `Vec<TocEntry>` from either the EPUB2
-//! NCX `navMap` or the EPUB3 `nav.xhtml` `<nav epub:type="toc">`. Both preserve
-//! nesting depth and document order.
+//! Build a flattened `Vec<TocEntry>` from the EPUB2 NCX `navMap` or the EPUB3
+//! `nav.xhtml` `<nav epub:type="toc">`, preserving nesting depth and order.
 
 use roxmltree::Node;
 
@@ -8,8 +7,7 @@ use super::opf::element_text;
 use super::paths::{dir_of, resolve_href, split_fragment};
 use super::{EpubError, Result, TocEntry, ns};
 
-/// Parse an EPUB2 NCX. `ncx_path` is the archive-relative path of the NCX file
-/// (used to resolve `content/@src` hrefs against the NCX's directory).
+/// Parse an EPUB2 NCX; `ncx_path` resolves `content/@src` against the NCX's dir.
 pub fn parse_ncx(ncx_xml: &str, ncx_path: &str) -> Result<Vec<TocEntry>> {
     let doc = roxmltree::Document::parse(ncx_xml).map_err(|e| EpubError::Xml {
         context: ncx_path.to_string(),
@@ -19,7 +17,6 @@ pub fn parse_ncx(ncx_xml: &str, ncx_path: &str) -> Result<Vec<TocEntry>> {
 
     let mut out: Vec<TocEntry> = Vec::new();
 
-    // Find the navMap, then walk its direct navPoint children recursively.
     if let Some(nav_map) = doc.descendants().find(|n| is_ncx_elem(n, "navMap")) {
         for np in nav_map.children().filter(|n| is_ncx_elem(n, "navPoint")) {
             walk_navpoint(&np, &base_dir, 0, &mut out);
@@ -46,7 +43,6 @@ fn is_ncx_elem(node: &Node, local: &str) -> bool {
 }
 
 fn walk_navpoint(np: &Node, base_dir: &str, depth: usize, out: &mut Vec<TocEntry>) {
-    // <navLabel><text>Title</text></navLabel>
     let title = np
         .children()
         .find(|n| is_ncx_elem(n, "navLabel"))
@@ -54,7 +50,6 @@ fn walk_navpoint(np: &Node, base_dir: &str, depth: usize, out: &mut Vec<TocEntry
         .and_then(|t| element_text(&t))
         .unwrap_or_default();
 
-    // <content src="..."/>
     if let Some(content) = np.children().find(|n| is_ncx_elem(n, "content"))
         && let Some(src) = content.attribute("src") {
             let (_, fragment) = split_fragment(src);
@@ -67,15 +62,13 @@ fn walk_navpoint(np: &Node, base_dir: &str, depth: usize, out: &mut Vec<TocEntry
             });
         }
 
-    // Nested navPoints.
     for child in np.children().filter(|n| is_ncx_elem(n, "navPoint")) {
         walk_navpoint(&child, base_dir, depth + 1, out);
     }
 }
 
-/// Parse an EPUB3 nav document. `nav_path` is the archive-relative path of the
-/// nav.xhtml (used to resolve `a/@href` against the nav's directory). Prefers
-/// the `<nav epub:type="toc">`; falls back to the first `<nav>` containing a list.
+/// Parse an EPUB3 nav document (`nav_path` resolves `a/@href`). Prefers
+/// `<nav epub:type="toc">`, else the first `<nav>` containing a list.
 pub fn parse_nav_xhtml(nav_xml: &str, nav_path: &str) -> Result<Vec<TocEntry>> {
     let doc = roxmltree::Document::parse(nav_xml).map_err(|e| EpubError::Xml {
         context: nav_path.to_string(),
@@ -83,7 +76,6 @@ pub fn parse_nav_xhtml(nav_xml: &str, nav_path: &str) -> Result<Vec<TocEntry>> {
     })?;
     let base_dir = dir_of(nav_path);
 
-    // Collect every <nav>; pick the toc-typed one if present, else the first.
     let navs: Vec<Node> = doc
         .descendants()
         .filter(|n| is_xhtml_elem(n, "nav"))
@@ -103,7 +95,6 @@ pub fn parse_nav_xhtml(nav_xml: &str, nav_path: &str) -> Result<Vec<TocEntry>> {
 
     let mut out: Vec<TocEntry> = Vec::new();
     if let Some(nav) = toc_nav {
-        // The nav's content is an <ol> of <li> entries; descend that.
         if let Some(ol) = nav.children().find(|n| is_xhtml_elem(n, "ol")) {
             walk_ol(&ol, &base_dir, 0, &mut out);
         }
@@ -120,11 +111,8 @@ fn is_xhtml_elem(node: &Node, local: &str) -> bool {
     tag.name() == local && ns_matches(tag.namespace(), ns::XHTML)
 }
 
-/// Walk an `<ol>`: each `<li>` may hold an `<a>`/`<span>` label and an optional
-/// nested `<ol>` (one level deeper).
 fn walk_ol(ol: &Node, base_dir: &str, depth: usize, out: &mut Vec<TocEntry>) {
     for li in ol.children().filter(|n| is_xhtml_elem(n, "li")) {
-        // The anchor (if any) gives both the label and the target.
         if let Some(a) = li.children().find(|n| is_xhtml_elem(n, "a")) {
             let title = anchor_text(&a);
             if let Some(href) = a.attribute("href") {
@@ -139,7 +127,6 @@ fn walk_ol(ol: &Node, base_dir: &str, depth: usize, out: &mut Vec<TocEntry>) {
             }
         }
 
-        // Nested list (sub-entries).
         if let Some(sub) = li.children().find(|n| is_xhtml_elem(n, "ol")) {
             walk_ol(&sub, base_dir, depth + 1, out);
         }

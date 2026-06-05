@@ -1,23 +1,6 @@
-//! src/workspace/mod.rs — Workspace path resolver for one project + active volume.
-//!
-//! A `Workspace` binds a project root directory together with one active volume
-//! directory (`Vol_NN`). All on-disk metadata (CHARACTERS.md, GLOSSARY.md,
-//! STYLE.md, PROJECT.md) lives at the root; per-volume state (VOLUME.md,
-//! raw/, translated/) lives under the volume directory.
-//!
-//! Layout (mirrors model::Project / model::Volume / model::Chapter):
-//! ```text
-//! <root>/
-//! ├── PROJECT.md
-//! ├── CHARACTERS.md
-//! ├── GLOSSARY.md
-//! ├── STYLE.md
-//! ├── images/
-//! └── Vol_NN/
-//!     ├── VOLUME.md
-//!     ├── raw/ch_NNN.md
-//!     └── translated/ch_NNN.md
-//! ```
+//! Workspace path resolver: binds a project root to one active volume (`Vol_NN`).
+//! Root holds shared metadata (CHARACTERS/GLOSSARY/STYLE/PROJECT.md); the volume
+//! dir holds VOLUME.md, raw/, translated/.
 
 use std::path::PathBuf;
 
@@ -90,18 +73,9 @@ impl Workspace {
     }
 }
 
-/// Slugify an arbitrary string into a stable, filesystem-safe ascii slug.
-///
-/// - Lowercases ascii letters.
-/// - Maps every non-`[a-z0-9]` character to `-`.
-/// - Collapses runs of `-` into a single `-`.
-/// - Trims leading/trailing `-`.
-///
-/// Non-ascii characters (e.g. Japanese) become separators, so a pure-Japanese
-/// title slugifies to the empty string; callers should fall back to another id
-/// source when this returns `""`.
-///
-/// Used by the import wizard, ingest, and `characters::upsert` (id derivation).
+/// Slugify into a filesystem-safe ascii slug (lowercased, non-`[a-z0-9]` → `-`,
+/// collapsed/trimmed). Non-ascii becomes separators, so a pure-Japanese title
+/// yields `""`; callers must fall back to another id source then.
 pub fn slugify(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut prev_dash = false;
@@ -117,8 +91,6 @@ pub fn slugify(s: &str) -> String {
                 prev_dash = false;
             }
             None => {
-                // Any non-alphanumeric (including unicode, whitespace, punctuation)
-                // becomes a single collapsed separator.
                 if !prev_dash && !out.is_empty() {
                     out.push('-');
                     prev_dash = true;
@@ -126,7 +98,6 @@ pub fn slugify(s: &str) -> String {
             }
         }
     }
-    // Trim a trailing dash produced by separators at the end of the input.
     while out.ends_with('-') {
         out.pop();
     }
