@@ -1,4 +1,7 @@
-//! src/llm/mock.rs — an offline `LlmClient` so honya runs with no API key.
+//! src/llm/mock.rs — a TEST-ONLY canned-response `LlmClient` (compiled only under
+//! `cfg(test)`) so the e2e suite can exercise the pipeline without a network or
+//! API key. honya itself ships no offline backend; a real OpenRouter key is
+//! required at runtime.
 //!
 //! The mock keys off the requested `response_format`'s `json_schema.name` and
 //! returns schema-shaped JSON that deserializes cleanly into `TranslatorOut` /

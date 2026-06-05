@@ -1,0 +1,43 @@
+name: pages
+
+# Deploy the honya homepage (which serves install.sh) to Cloudflare Pages.
+# Deploy root is web/public.
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "web/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Never let two deploys to the same project run at once.
+concurrency:
+  group: pages-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy to Cloudflare Pages
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Ensure Pages project exists
+        continue-on-error: true
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages project create honya --production-branch main
+
+      - name: Publish to Cloudflare Pages
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy web/public --project-name=honya --branch=main

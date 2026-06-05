@@ -11,7 +11,6 @@ use std::time::Duration;
 use async_trait::async_trait;
 use reqwest::StatusCode;
 
-use crate::config;
 use crate::model::AppConfig;
 
 use super::{ChatRequest, ChatResponse};
@@ -23,10 +22,6 @@ use super::{ChatRequest, ChatResponse};
 /// All failure modes of the LLM layer.
 #[derive(thiserror::Error, Debug)]
 pub enum LlmError {
-    /// No API key was discovered and the live client was nonetheless requested.
-    #[error("no OpenRouter API key found (set HONYA_API_KEY or OPENROUTER_API_KEY)")]
-    MissingApiKey,
-
     /// Underlying HTTP/transport failure (connection, TLS, decode, timeout).
     #[error("HTTP transport error: {0}")]
     Transport(#[from] reqwest::Error),
@@ -76,18 +71,8 @@ pub struct ClientConfig {
 }
 
 impl ClientConfig {
-    /// Build a config from the persisted [`AppConfig`] + the discovered API key.
-    ///
-    /// Reads `base_url`/`referer`/`title` from the saved config (or its defaults)
-    /// and the bearer token from [`config::api_key`]. Errors with
-    /// [`LlmError::MissingApiKey`] when no key is set.
-    pub fn from_env() -> Result<Self> {
-        let cfg = config::load();
-        let api_key = config::api_key().ok_or(LlmError::MissingApiKey)?;
-        Ok(Self::from_app_config(&cfg, api_key))
-    }
-
-    /// Build a config from an explicit [`AppConfig`] + key (no env/file reads).
+    /// Build a config from an explicit [`AppConfig`] + key. The key is resolved
+    /// once at startup (see [`crate::config::resolve_api_key`]) and threaded in.
     pub fn from_app_config(cfg: &AppConfig, api_key: String) -> Self {
         Self {
             base_url: cfg.base_url.clone(),
@@ -130,11 +115,6 @@ impl OpenRouterClient {
     pub fn new(cfg: ClientConfig) -> Result<Self> {
         let http = reqwest::Client::builder().timeout(cfg.timeout).build()?;
         Ok(Self { http, cfg })
-    }
-
-    /// Build a client from env/config discovery (see [`ClientConfig::from_env`]).
-    pub fn from_env() -> Result<Self> {
-        Self::new(ClientConfig::from_env()?)
     }
 
     /// Issue one POST and classify the response into `Result<ChatResponse>`.

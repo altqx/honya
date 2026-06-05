@@ -1,21 +1,31 @@
-//! src/config.rs — load/save AppConfig from disk + env API-key discovery.
+//! src/config.rs — load/save AppConfig from disk + OpenRouter API-key discovery.
 //! Depends only on model.rs. Tolerant: a missing/corrupt config falls back to
-//! AppConfig::default() so the app always launches (and runs the MockClient).
+//! AppConfig::default(). honya has no offline mode — a key is required, resolved
+//! from the environment first and then the persisted config.
 
 use std::path::PathBuf;
 
-use directories::ProjectDirs;
-
 use crate::model::AppConfig;
 
-/// Where the persisted config lives: <platform config dir>/honya/config.json.
-/// Falls back to ./honya-config.json if the platform dir can't be resolved.
-pub fn config_path() -> PathBuf {
-    if let Some(dirs) = ProjectDirs::from("", "", "honya") {
-        dirs.config_dir().join("config.json")
-    } else {
-        PathBuf::from("honya-config.json")
+/// The honya config directory: `$XDG_CONFIG_HOME/honya`, else `~/.config/honya`.
+pub fn config_dir() -> PathBuf {
+    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
+        let xdg = PathBuf::from(xdg);
+        if xdg.is_absolute() {
+            return xdg.join("honya");
+        }
     }
+    if let Some(home) = std::env::var_os("HOME") {
+        return PathBuf::from(home).join(".config").join("honya");
+    }
+    // Last resort when neither var is set: a local ./.config/honya.
+    PathBuf::from(".config").join("honya")
+}
+
+/// Where the persisted config lives: `<config dir>/config.json`
+/// (i.e. `~/.config/honya/config.json`).
+pub fn config_path() -> PathBuf {
+    config_dir().join("config.json")
 }
 
 /// Load config from disk, falling back to defaults on any error.
@@ -28,6 +38,7 @@ pub fn load() -> AppConfig {
 }
 
 /// Persist config as pretty JSON, creating the parent directory if needed.
+/// The file may hold the API key, so it is tightened to 0600 on Unix.
 pub fn save(cfg: &AppConfig) -> std::io::Result<()> {
     let path = config_path();
     if let Some(parent) = path.parent() {
@@ -35,12 +46,19 @@ pub fn save(cfg: &AppConfig) -> std::io::Result<()> {
     }
     let json = serde_json::to_string_pretty(cfg)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    std::fs::write(&path, json)
+    std::fs::write(&path, json)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
 }
 
-/// Discover the OpenRouter API key: HONYA_API_KEY wins, then OPENROUTER_API_KEY.
-/// Empty/whitespace values are treated as absent so the MockClient stays active.
-pub fn api_key() -> Option<String> {
+/// Resolve the OpenRouter API key. The environment wins (HONYA_API_KEY, then
+/// OPENROUTER_API_KEY); otherwise the key persisted in the config is used.
+/// Empty/whitespace values are treated as absent.
+pub fn resolve_api_key(cfg: &AppConfig) -> Option<String> {
     for var in ["HONYA_API_KEY", "OPENROUTER_API_KEY"] {
         if let Ok(v) = std::env::var(var) {
             let v = v.trim();
@@ -49,5 +67,9 @@ pub fn api_key() -> Option<String> {
             }
         }
     }
-    None
+    cfg.api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
 }

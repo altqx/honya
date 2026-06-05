@@ -3,7 +3,9 @@
 //! These mirror the `/chat/completions` request and response bodies exactly so
 //! they (de)serialize straight onto the OpenRouter API. Nothing here depends on
 //! the rest of honya: it is the bottom of the LLM stack. The higher layers
-//! ([`client`], [`mock`], [`structured`], [`tool_loop`]) build on these types.
+//! ([`client`], [`structured`], [`tool_loop`]) build on these types. A
+//! canned-response `mock` client exists only under `cfg(test)` for the e2e
+//! suite — honya itself has no offline backend.
 //!
 //! Two serde subtleties are load-bearing here:
 //!  * `Message.content` is `Option<String>` but is serialized as JSON `null`
@@ -19,6 +21,8 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 pub mod client;
+/// Test-only canned-response client for the offline e2e suite (not in the binary).
+#[cfg(test)]
 pub mod mock;
 pub mod structured;
 pub mod tool_loop;

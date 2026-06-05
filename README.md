@@ -6,8 +6,8 @@ relocated illustrations, HTML→Markdown cleanse) and runs a three-agent pipelin
 (**Orchestrator · Translator · Reviewer**) over an OpenRouter-compatible API — with the agents
 keeping your character, glossary, and volume notes current **through tool calls**.
 
-> Works fully offline out of the box: with no API key it runs a built-in **mock client**, so the
-> whole UI — import, dashboard, live run, reader, lexicon — is explorable immediately.
+> honya requires an **OpenRouter API key**. On first launch it
+> prompts you to paste a key, then saves it so you're only asked once.
 
 ## Build & run
 
@@ -18,17 +18,26 @@ cargo run --release        # launches the TUI in the current directory
 honya treats the **current working directory** as your shelf: each translation project is a
 subdirectory, and any loose `*.epub` files are offered as one-press imports.
 
-## API key (optional)
+## API key (required)
 
-```sh
-export HONYA_API_KEY=sk-or-...      # or OPENROUTER_API_KEY
-```
+honya talks to OpenRouter (`https://openrouter.ai/api/v1` by default — configurable in
+**Settings**), so it needs a key. Resolution order is:
 
-When a key is present, honya talks to OpenRouter (`https://openrouter.ai/api/v1` by default —
-configurable in **Settings**). The three models are configurable per agent; defaults follow the
-spec (`google/gemini-3.5-flash` orchestrator, `google/gemini-3-flash-preview` translator,
-`google/gemini-3.1-flash-lite` reviewer). The key is **read from the environment only** — it is
-never written to the config file.
+1. `HONYA_API_KEY`, then `OPENROUTER_API_KEY` from the environment (these always win):
+
+   ```sh
+   export HONYA_API_KEY=sk-or-...
+   ```
+
+2. Otherwise, the key saved at `~/.config/honya/config.json` (`$XDG_CONFIG_HOME/honya` if set).
+
+If neither is present, honya **prompts for the key at startup** (hidden input) and writes it to
+that config file (`0600` on Unix) so subsequent launches don't ask again. Get a key at
+<https://openrouter.ai/keys>.
+
+The three models are configurable per agent; defaults follow the spec
+(`google/gemini-3.5-flash` orchestrator, `google/gemini-3-flash-preview` translator,
+`google/gemini-3.1-flash-lite` reviewer).
 
 ## The five screens
 

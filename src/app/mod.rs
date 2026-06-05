@@ -575,7 +575,13 @@ impl App {
             .clone()
             .unwrap_or_else(|| self.cfg.models.clone());
         let workspace = Workspace::new(project.dir.clone(), vol);
-        let client = crate::build_client(&self.cfg);
+        let client = match crate::build_client(&self.cfg) {
+            Ok(client) => client,
+            Err(e) => {
+                self.toast = Some(Toast::error(format!("LLM client unavailable: {e}")));
+                return;
+            }
+        };
         self.active = Some(ActiveProject {
             project,
             workspace,

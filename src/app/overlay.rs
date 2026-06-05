@@ -83,7 +83,7 @@ impl SettingsState {
             orchestrator: cfg.models.orchestrator.clone(),
             translator: cfg.models.translator.clone(),
             reviewer: cfg.models.reviewer.clone(),
-            api_key_present: crate::config::api_key().is_some(),
+            api_key_present: crate::config::resolve_api_key(cfg).is_some(),
             field: 0,
         }
     }
@@ -771,7 +771,7 @@ impl Overlay {
             Span::styled("● present", Style::default().fg(theme.status_done))
         } else {
             Span::styled(
-                "○ missing (MockClient active)",
+                "○ missing — set HONYA_API_KEY",
                 Style::default().fg(theme.status_warn),
             )
         };

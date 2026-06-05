@@ -165,6 +165,10 @@ pub struct AppConfig {
     /// HTTP referer/title sent to OpenRouter (ranking headers).
     pub referer: Option<String>,
     pub title: Option<String>,
+    /// Persisted OpenRouter API key, captured at first launch. The environment
+    /// variables HONYA_API_KEY / OPENROUTER_API_KEY override this when set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
 }
 
 impl Default for AppConfig {
@@ -178,6 +182,7 @@ impl Default for AppConfig {
             continuity_sentences: 5,
             referer: Some("https://github.com/altqx/honya".into()),
             title: Some("honya".into()),
+            api_key: None,
         }
     }
 }
