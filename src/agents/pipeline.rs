@@ -398,7 +398,10 @@ async fn process_chunk(
             chapter,
             chunk: chunk.index,
             attempt,
-            thai_preview: preview(&thai),
+            // Send the chunk's full Thai so the live preview shows the whole
+            // translation, not just a clipped first line. The screen bounds the
+            // accumulated text so a long run can't grow it without limit.
+            thai_preview: thai.clone(),
             tokens: tok,
         });
         ctx.tx.send(AppEvent::UsageUpdate {
@@ -576,17 +579,4 @@ async fn run_orchestrator_metadata_turn(
         .map_err(|e| anyhow::anyhow!("orchestrator tool loop failed: {e}"))?;
 
     Ok(())
-}
-
-/// A short single-line preview of Thai output for the UI event stream. Uses
-/// char boundaries (Thai text has no inter-word spaces) and caps length.
-fn preview(thai: &str) -> String {
-    const MAX_CHARS: usize = 80;
-    let flat = thai.replace(['\n', '\r'], " ");
-    let flat = flat.trim();
-    let mut out: String = flat.chars().take(MAX_CHARS).collect();
-    if flat.chars().count() > MAX_CHARS {
-        out.push('…');
-    }
-    out
 }

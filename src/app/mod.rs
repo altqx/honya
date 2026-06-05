@@ -34,7 +34,7 @@ use crate::model::{
 use crate::theme::Theme;
 use crate::ui::chrome::{self, StatusTally};
 use crate::ui::layout::{self, Skeleton};
-use crate::ui::text::truncate_cols;
+use crate::ui::text::{thai_display_safe, truncate_cols};
 use crate::workspace::Workspace;
 
 use self::lexicon::LexiconScreen;
@@ -434,7 +434,16 @@ impl App {
                     return Action::Goto(s);
                 }
             }
-            KeyCode::Tab => return Action::Goto(self.next_screen()),
+            KeyCode::Tab => {
+                // The Lexicon owns Tab to cycle its sub-sections (Glossary ↔
+                // Characters ↔ Style); every other screen uses Tab to advance to
+                // the next top-level tab. (BackTab falls through to the screen on
+                // its own, so the Lexicon handles Shift-Tab to walk sections back.)
+                if matches!(self.screen, Screen::Lexicon) {
+                    return self.route_to_screen(k);
+                }
+                return Action::Goto(self.next_screen());
+            }
             KeyCode::Char('?') => return Action::show_overlay(Overlay::Help(0)),
             KeyCode::Char(':') => return Action::show_overlay(Overlay::palette()),
             KeyCode::Char('l') | KeyCode::Char('`') => {
@@ -571,10 +580,12 @@ impl App {
     // ---- side effects ------------------------------------------------------
 
     fn open_project(&mut self, id: String) {
-        // Refresh from disk so freshly-imported projects show up.
-        if !self.projects.iter().any(|p| p.id == id) {
-            self.refresh_projects();
-        }
+        // Always re-scan from disk so the opened project reflects the CURRENT
+        // on-disk state — chapters translated since startup, freshly-imported
+        // projects, etc. `self.projects` is otherwise only populated at launch
+        // (and after an import), so without this re-open would clone that stale
+        // snapshot and silently revert completed chapters back to "pending".
+        self.refresh_projects();
         let Some(project) = self.projects.iter().find(|p| p.id == id).cloned() else {
             self.toast = Some(Toast::error(format!("project {id} not found")));
             return;
@@ -798,7 +809,10 @@ impl App {
             LogLevel::Warn => ("!", self.theme.status_warn),
             LogLevel::Error => ("✗", self.theme.status_failed),
         };
-        let body = truncate_cols(&toast.msg, area.width.saturating_sub(14) as usize);
+        let body = truncate_cols(
+            &thai_display_safe(&toast.msg),
+            area.width.saturating_sub(14) as usize,
+        );
         let left = Line::from(vec![
             Span::raw(" "),
             Span::styled(glyph, Style::default().fg(color)),

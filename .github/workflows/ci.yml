@@ -1,0 +1,43 @@
+name: ci
+
+# Lint, test, and build on every push to main and on PRs — with the Cargo build
+# cached (registry + compiled dependencies), so runs after the first only
+# recompile what actually changed.
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+# Cancel an in-flight CI run when a newer commit is pushed to the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: clippy + test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      # Caches ~/.cargo (registry/git) and ./target, keyed on Cargo.lock + rustc.
+      # The cache is shared across runs on main; the first run populates it.
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Clippy (warnings = errors)
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Test
+        run: cargo test --locked

@@ -11,7 +11,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 
 use crate::model::{Character, GlossaryTerm};
 use crate::theme::{self, Theme};
-use crate::ui::text::{pad_to_cols, truncate_cols};
+use crate::ui::text::{pad_to_cols, thai_display_safe, truncate_cols};
 use crate::workspace::Workspace;
 
 use super::Action;
@@ -546,7 +546,7 @@ impl LexiconScreen {
                 ),
                 Span::styled(" ", Style::default().bg(bg)),
                 Span::styled(
-                    pad_to_cols(&t.thai_term, 16),
+                    pad_to_cols(&thai_display_safe(&t.thai_term), 16),
                     Style::default().fg(theme.th_text).bg(bg),
                 ),
                 Span::styled(" ", Style::default().bg(bg)),
@@ -616,7 +616,7 @@ impl LexiconScreen {
                 ),
                 Span::styled(" ", Style::default().bg(bg)),
                 Span::styled(
-                    pad_to_cols(&c.thai_name, 16),
+                    pad_to_cols(&thai_display_safe(&c.thai_name), 16),
                     Style::default().fg(theme.th_text).bg(bg),
                 ),
                 Span::styled(" ", Style::default().bg(bg)),
@@ -651,7 +651,7 @@ impl LexiconScreen {
             .take(area.height as usize)
             .map(|l| {
                 Line::from(Span::styled(
-                    truncate_cols(l, area.width.saturating_sub(2) as usize),
+                    truncate_cols(&thai_display_safe(l), area.width.saturating_sub(2) as usize),
                     Style::default().fg(theme.ink_soft),
                 ))
             })

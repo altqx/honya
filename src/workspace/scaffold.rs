@@ -138,8 +138,6 @@ fn render_project_body(title: &str, date: &str, models: &ModelSet) -> String {
     format!(
         "# {title}\n\
          \n\
-         > โปรเจกต์แปลนิยายไลท์โนเวล ญี่ปุ่น → ไทย (honya 本屋)\n\
-         \n\
          - **สร้างเมื่อ / Created:** {date}\n\
          - **สถานะ / Status:** กำลังนำเข้า (importing)\n\
          \n\

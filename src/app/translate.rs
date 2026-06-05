@@ -124,6 +124,12 @@ impl TranslateScreen {
                 self.agent_lines[1] =
                     format!("returned · {} tok", tokens.completion.max(tokens.total));
                 if !thai_preview.is_empty() {
+                    // `thai_preview` now carries the chunk's full multi-line Thai.
+                    // Separate successive chunks with a blank line so the preview
+                    // reads as flowing prose instead of one run-on paragraph.
+                    if !self.preview.is_empty() && !self.preview.ends_with('\n') {
+                        self.preview.push_str("\n\n");
+                    }
                     self.append_preview(thai_preview);
                 }
                 // The authoritative running total arrives via UsageUpdate (emitted
@@ -216,7 +222,9 @@ impl TranslateScreen {
     }
 
     fn append_preview(&mut self, s: &str) {
-        self.preview.push_str(s);
+        // Decompose Thai SARA AM up front so the streaming preview never renders a
+        // width-2 single cell that desyncs the terminal (see ui::text).
+        self.preview.push_str(&crate::ui::text::thai_display_safe(s));
         // Bound the preview so it never grows unbounded across a long run.
         if self.preview.len() > 16_384 {
             let cut = self.preview.len() - 12_288;

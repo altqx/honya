@@ -879,7 +879,10 @@ impl Overlay {
             lines.push(Line::from(vec![
                 Span::styled(format!(" {glyph} "), Style::default().fg(color)),
                 Span::styled(
-                    truncate_cols(msg, inner.width.saturating_sub(4) as usize),
+                    truncate_cols(
+                        &crate::ui::text::thai_display_safe(msg),
+                        inner.width.saturating_sub(4) as usize,
+                    ),
                     Style::default().fg(theme.ink_soft),
                 ),
             ]));

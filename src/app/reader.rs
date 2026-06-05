@@ -56,8 +56,11 @@ impl ReaderScreen {
         self.th_scroll = 0;
         self.ja = std::fs::read_to_string(ws.raw(chapter))
             .unwrap_or_else(|_| "（原文がまだありません — raw not found）".to_string());
-        self.th = std::fs::read_to_string(ws.translated(chapter))
+        let th = std::fs::read_to_string(ws.translated(chapter))
             .unwrap_or_else(|_| "（ยังไม่มีคำแปล — not translated yet）".to_string());
+        // Decompose Thai SARA AM so it never lands as a width-2 single cell that
+        // desyncs the terminal and smears ำ across the screen on the next redraw.
+        self.th = crate::ui::text::thai_display_safe(&th);
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Action {
