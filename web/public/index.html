@@ -1,31 +1,31 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="th">
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-<title>honya 本屋 — a calm terminal app for JA→TH light-novel translation</title>
-<meta name="description" content="honya (本屋) is a quiet, literary Ratatui TUI in Rust for AI-assisted Japanese-to-Thai light-novel translation. Drop in an EPUB; a three-agent Orchestrator·Translator·Reviewer pipeline keeps your glossary, characters and notes current. Bring your own OpenRouter key. Open source." />
+<title>honya 本屋 — แอปเทอร์มินัลเงียบสงบสำหรับแปลไลต์โนเวล ญี่ปุ่น→ไทย</title>
+<meta name="description" content="honya (本屋) คือ TUI สไตล์วรรณกรรมที่เงียบสงบ สร้างด้วย Ratatui บนภาษา Rust สำหรับการแปลไลต์โนเวลญี่ปุ่นเป็นไทยโดยมี AI ช่วย เพียงวางไฟล์ EPUB ลงไป ไปป์ไลน์สามเอเจนต์ Orchestrator·Translator·Reviewer จะคอยอัปเดตคลังศัพท์ ตัวละคร และบันทึกของคุณให้เป็นปัจจุบันเสมอ ใช้คีย์ OpenRouter ของคุณเอง โอเพนซอร์ส" />
 <meta name="color-scheme" content="light" />
 <meta name="theme-color" content="#F3EFE6" />
 
 <!-- OpenGraph -->
 <meta property="og:type" content="website" />
 <meta property="og:site_name" content="honya 本屋" />
-<meta property="og:title" content="honya — JA→TH light-novel translation, in your terminal" />
-<meta property="og:description" content="A calm, literary Ratatui TUI for AI-assisted Japanese-to-Thai light-novel translation. Three agents — Orchestrator, Translator, Reviewer — keep your glossary and notes current. Bring your own OpenRouter key. Open source." />
+<meta property="og:title" content="honya — แปลไลต์โนเวลญี่ปุ่น→ไทย ในเทอร์มินัลของคุณ" />
+<meta property="og:description" content="TUI สไตล์วรรณกรรมที่เงียบสงบด้วย Ratatui สำหรับการแปลไลต์โนเวลญี่ปุ่นเป็นไทยโดยมี AI ช่วย สามเอเจนต์ — Orchestrator, Translator, Reviewer — คอยดูแลคลังศัพท์และบันทึกของคุณให้เป็นปัจจุบัน ใช้คีย์ OpenRouter ของคุณเอง โอเพนซอร์ส" />
 <meta property="og:url" content="https://honya.altqx.com/" />
-<meta property="og:locale" content="en" />
+<meta property="og:locale" content="th_TH" />
 <meta property="og:image" content="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1200' height='630'%3E%3Crect width='1200' height='630' fill='%23F3EFE6'/%3E%3Crect x='40' y='40' width='1120' height='550' rx='14' fill='%23ECE7DC' stroke='%23CEC6B8'/%3E%3Ctext x='90' y='300' font-family='serif' font-size='180' fill='%232D2A26'%3E%E6%9C%AC%E5%B1%8B%3C/text%3E%3Ctext x='96' y='370' font-family='monospace' font-size='38' fill='%235C564E'%3Ehonya — JA%E2%86%92TH light-novel translation%3C/text%3E%3Ctext x='96' y='430' font-family='monospace' font-size='30' fill='%233A5078'%3EOrchestrator %C2%B7 Translator %C2%B7 Reviewer%3C/text%3E%3C/svg%3E" />
-<meta property="og:image:alt" content="honya 本屋 — a calm terminal app for Japanese-to-Thai light-novel translation." />
+<meta property="og:image:alt" content="honya 本屋 — แอปเทอร์มินัลเงียบสงบสำหรับแปลไลต์โนเวลญี่ปุ่นเป็นไทย" />
 <meta property="og:image:width" content="1200" />
 <meta property="og:image:height" content="630" />
 
 <!-- Twitter -->
 <meta name="twitter:card" content="summary_large_image" />
-<meta name="twitter:title" content="honya — JA→TH light-novel translation, in your terminal" />
-<meta name="twitter:description" content="A calm, literary Ratatui TUI for AI-assisted Japanese-to-Thai light-novel translation. Bring your own OpenRouter key. Open source." />
+<meta name="twitter:title" content="honya — แปลไลต์โนเวลญี่ปุ่น→ไทย ในเทอร์มินัลของคุณ" />
+<meta name="twitter:description" content="TUI สไตล์วรรณกรรมที่เงียบสงบด้วย Ratatui สำหรับการแปลไลต์โนเวลญี่ปุ่นเป็นไทยโดยมี AI ช่วย ใช้คีย์ OpenRouter ของคุณเอง โอเพนซอร์ส" />
 <meta name="twitter:image" content="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1200' height='630'%3E%3Crect width='1200' height='630' fill='%23F3EFE6'/%3E%3Ctext x='90' y='340' font-family='serif' font-size='220' fill='%232D2A26'%3E%E6%9C%AC%E5%B1%8B%3C/text%3E%3C/svg%3E" />
-<meta name="twitter:image:alt" content="honya 本屋 — a calm terminal app for Japanese-to-Thai light-novel translation." />
+<meta name="twitter:image:alt" content="honya 本屋 — แอปเทอร์มินัลเงียบสงบสำหรับแปลไลต์โนเวลญี่ปุ่นเป็นไทย" />
 <link rel="canonical" href="https://honya.altqx.com/" />
 
 <!-- inline SVG favicon: a waxing moon on washi (the chapter-status motif) -->
@@ -666,8 +666,8 @@
     display:inline-flex; align-items:center; justify-content:center; gap:9px;
     transition:background .16s var(--ease), color .16s var(--ease);
   }
-  /* fixed width so Copy → Copied never resizes the button (sized to the wider "Copied") */
-  .copy-btn .copy-label{display:inline-block; width:6.4ch; text-align:left}
+  /* fixed width so คัดลอก → คัดลอกแล้ว never resizes the button (sized to the wider "คัดลอกแล้ว") */
+  .copy-btn .copy-label{display:inline-block; width:5.6em; text-align:left; white-space:nowrap}
   .copy-btn:hover{background:#3a352f}
   .copy-btn svg{width:16px; height:16px; flex:none}
   .copy-btn.copied{background:var(--sage); color:#fff}
@@ -775,21 +775,21 @@
 </style>
 </head>
 <body>
-<a class="skip" href="#main">Skip to content</a>
+<a class="skip" href="#main">ข้ามไปยังเนื้อหา</a>
 
 <header class="site" id="top">
-  <nav class="nav" aria-label="Primary">
-    <a class="brand" href="#top" aria-label="honya — home">
+  <nav class="nav" aria-label="เมนูหลัก">
+    <a class="brand" href="#top" aria-label="honya — หน้าแรก">
       <span class="mark" aria-hidden="true">
         <svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2"/><path d="M12 3a9 9 0 0 1 0 18 6 9 0 0 0 0-18Z" fill="currentColor"/></svg>
       </span>
       <span class="name"><span class="ja" lang="ja">本屋</span>honya</span>
     </a>
     <div class="nav-links">
-      <a class="lnk" href="#what">What it is</a>
-      <a class="lnk" href="#screens">Screens</a>
-      <a class="lnk" href="#pipeline">Pipeline</a>
-      <a class="lnk" href="#install">Install</a>
+      <a class="lnk" href="#what">คืออะไร</a>
+      <a class="lnk" href="#screens">หน้าจอ</a>
+      <a class="lnk" href="#pipeline">ไปป์ไลน์</a>
+      <a class="lnk" href="#install">ติดตั้ง</a>
       <a class="nav-cta" href="https://github.com/altqx/honya" rel="noopener">
         <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2C6.48 2 2 6.58 2 12.25c0 4.53 2.87 8.37 6.84 9.73.5.1.68-.22.68-.49 0-.24-.01-.88-.01-1.72-2.78.62-3.37-1.37-3.37-1.37-.45-1.18-1.11-1.5-1.11-1.5-.91-.64.07-.62.07-.62 1 .07 1.53 1.06 1.53 1.06.89 1.56 2.34 1.11 2.91.85.09-.66.35-1.11.63-1.37-2.22-.26-4.56-1.14-4.56-5.06 0-1.12.39-2.03 1.03-2.75-.1-.26-.45-1.3.1-2.71 0 0 .84-.27 2.75 1.05a9.4 9.4 0 0 1 5 0c1.91-1.32 2.75-1.05 2.75-1.05.55 1.41.2 2.45.1 2.71.64.72 1.03 1.63 1.03 2.75 0 3.93-2.34 4.79-4.57 5.05.36.32.68.94.68 1.9 0 1.37-.01 2.47-.01 2.81 0 .27.18.6.69.49A10.04 10.04 0 0 0 22 12.25C22 6.58 17.52 2 12 2Z"/></svg>
         GitHub
@@ -805,39 +805,39 @@
     <div class="wrap">
       <div class="hero-grid">
         <div class="hero-copy">
-          <span class="eyebrow">Ratatui TUI · built in Rust</span>
+          <span class="eyebrow">Ratatui TUI · สร้างด้วย Rust</span>
           <h1 id="hero-h">
-            A quiet workshop for
-            <span class="accent">JA→TH</span> light-novel translation,
-            in your <span class="wordmark" lang="ja">本屋</span>.
+            ห้องทำงานอันเงียบสงบสำหรับการแปลไลต์โนเวล
+            <span class="accent">JA→TH</span>
+            ใน<span class="wordmark" lang="ja">本屋</span>ของคุณ
           </h1>
           <p class="hero-sub">
-            Drop an EPUB into a folder. <b>honya</b> orders the spine, relocates illustrations,
-            cleanses HTML into Markdown, then runs a three-agent pipeline over an
-            OpenRouter-compatible API — keeping your glossary, character sheet and
-            volume notes current as it goes.
+            เพียงวางไฟล์ EPUB ลงในโฟลเดอร์ <b>honya</b> จะจัดเรียงเนื้อหาตามลำดับสันหนังสือ
+            ย้ายภาพประกอบ ล้าง HTML ให้เป็น Markdown แล้วเดินงานผ่านไปป์ไลน์สามเอเจนต์
+            บน API ที่รองรับ OpenRouter — พร้อมอัปเดตคลังศัพท์ ตารางตัวละคร และบันทึกประจำเล่ม
+            ของคุณให้เป็นปัจจุบันไปตลอดทาง
           </p>
           <div class="cta-row">
             <a class="btn btn-primary" href="#install">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
-              Get started
+              เริ่มต้นใช้งาน
             </a>
             <a class="btn btn-ghost" href="https://github.com/altqx/honya" rel="noopener">
               <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2C6.48 2 2 6.58 2 12.25c0 4.53 2.87 8.37 6.84 9.73.5.1.68-.22.68-.49 0-.24-.01-.88-.01-1.72-2.78.62-3.37-1.37-3.37-1.37-.45-1.18-1.11-1.5-1.11-1.5-.91-.64.07-.62.07-.62 1 .07 1.53 1.06 1.53 1.06.89 1.56 2.34 1.11 2.91.85.09-.66.35-1.11.63-1.37-2.22-.26-4.56-1.14-4.56-5.06 0-1.12.39-2.03 1.03-2.75-.1-.26-.45-1.3.1-2.71 0 0 .84-.27 2.75 1.05a9.4 9.4 0 0 1 5 0c1.91-1.32 2.75-1.05 2.75-1.05.55 1.41.2 2.45.1 2.71.64.72 1.03 1.63 1.03 2.75 0 3.93-2.34 4.79-4.57 5.05.36.32.68.94.68 1.9 0 1.37-.01 2.47-.01 2.81 0 .27.18.6.69.49A10.04 10.04 0 0 0 22 12.25C22 6.58 17.52 2 12 2Z"/></svg>
-              View on GitHub
+              ดูบน GitHub
             </a>
           </div>
           <div class="hero-meta">
-            <span><span class="dot"></span>Bring your own OpenRouter key</span>
-            <span><span class="dot"></span>Free &amp; open source</span>
-            <span><span class="dot"></span>No telemetry</span>
+            <span><span class="dot"></span>ใช้คีย์ OpenRouter ของคุณเอง</span>
+            <span><span class="dot"></span>ฟรีและโอเพนซอร์ส</span>
+            <span><span class="dot"></span>ไม่มีการเก็บข้อมูล</span>
           </div>
         </div>
 
-        <aside class="hero-aside" aria-label="Live translation run preview">
+        <aside class="hero-aside" aria-label="ตัวอย่างการแปลแบบสด">
           <div class="term-shell">
             <div class="term-shadow" aria-hidden="true"></div>
-            <div class="terminal" role="img" aria-label="A mock of the honya terminal UI. The Translate tab (3 訳) is active. A project tree shows chapter rows with waxing-moon status glyphs; a chunk progress gauge fills; three agent lines — Orchestrator, Translator, Reviewer — report activity; a token meter counts up; and Thai text streams in beneath the Japanese source.">
+            <div class="terminal" role="img" aria-label="ภาพจำลองหน้าจอเทอร์มินัลของ honya แท็บ Translate (3 訳) กำลังทำงานอยู่ แผนผังโปรเจกต์แสดงรายการบทพร้อมสัญลักษณ์สถานะรูปดวงจันทร์ข้างขึ้น แถบความคืบหน้าของชังก์ค่อย ๆ เต็มขึ้น เอเจนต์สามตัว — Orchestrator, Translator, Reviewer — รายงานความเคลื่อนไหว มาตรวัดโทเคนนับเพิ่มขึ้น และข้อความภาษาไทยทยอยปรากฏใต้ต้นฉบับภาษาญี่ปุ่น">
               <div class="titlebar">
                 <div class="dots" aria-hidden="true"><i></i><i></i><i></i></div>
                 <div class="title"><span class="ja" lang="ja">本屋</span> honya — <span lang="ja">訳</span> Translate</div>
@@ -913,7 +913,7 @@
               </div>
             </div>
           </div>
-          <p class="term-cap">A faithful mirror of the real TUI — the app's exact colors and glyphs.</p>
+          <p class="term-cap">ภาพสะท้อนที่ตรงตาม TUI จริงทุกประการ — สีและอักขระแบบเดียวกับในแอปจริง</p>
         </aside>
       </div>
     </div>
@@ -924,38 +924,38 @@
   <section class="what" id="what" aria-labelledby="what-h">
     <div class="wrap">
       <div class="sec-head">
-        <span class="eyebrow">What it is</span>
-        <h2 id="what-h">A calm, literary tool for a slow craft — not a translation firehose.</h2>
-        <p>honya treats a light novel the way an editor would: one volume, one chapter, one
-        chunk at a time — with continuity carried forward and decisions written down.</p>
+        <span class="eyebrow">คืออะไร</span>
+        <h2 id="what-h">เครื่องมือสไตล์วรรณกรรมที่เงียบสงบสำหรับงานฝีมือที่ต้องใช้เวลา — ไม่ใช่เครื่องแปลแบบเร่งรีบ</h2>
+        <p>honya ปฏิบัติต่อไลต์โนเวลเหมือนบรรณาธิการคนหนึ่ง: ทีละเล่ม ทีละบท ทีละชังก์ —
+        โดยส่งต่อความต่อเนื่องไปข้างหน้าและบันทึกการตัดสินใจเอาไว้เสมอ</p>
       </div>
 
       <div class="what-grid">
         <div class="what-text">
-          <p class="big">You give it an EPUB. It gives you back a project folder you can read,
-          edit and trust — Japanese on the left, <span class="ja" lang="ja">タイ語</span> Thai on the right.</p>
-          <p>Pre-processing puts chapters in spine order, relocates the inline illustrations,
-          and cleanses the HTML down to plain Markdown. From there, every chapter is chunked
-          to roughly 1,000 tokens and walked through the pipeline, with the last five Thai
-          sentences from the previous chunk injected for continuity.</p>
-          <p>honya talks to an <b>OpenRouter-compatible API</b>, so it needs a key. On first
-          launch it prompts you to paste one and saves it to <code>~/.config/honya</code>, so
-          you're only asked once.</p>
+          <p class="big">คุณป้อนไฟล์ EPUB เข้าไป มันคืนโฟลเดอร์โปรเจกต์ที่คุณอ่าน แก้ไข
+          และไว้ใจได้ — ภาษาญี่ปุ่นอยู่ทางซ้าย <span class="ja" lang="ja">タイ語</span> ภาษาไทยอยู่ทางขวา</p>
+          <p>ขั้นตอนเตรียมข้อมูลจะจัดบทให้เรียงตามลำดับสันหนังสือ ย้ายภาพประกอบที่แทรกอยู่
+          และล้าง HTML ให้เหลือเป็น Markdown ล้วน จากนั้นทุกบทจะถูกแบ่งเป็นชังก์ขนาดราว 1,000 โทเคน
+          แล้วเดินผ่านไปป์ไลน์ โดยมีประโยคภาษาไทยห้าประโยคสุดท้ายจากชังก์ก่อนหน้าแทรกเข้ามา
+          เพื่อรักษาความต่อเนื่อง</p>
+          <p>honya เชื่อมต่อกับ <b>API ที่รองรับ OpenRouter</b> จึงต้องใช้คีย์ เมื่อเปิดครั้งแรก
+          มันจะให้คุณวางคีย์ลงไปและบันทึกไว้ที่ <code>~/.config/honya</code> เพื่อให้คุณถูกถาม
+          เพียงครั้งเดียว</p>
         </div>
         <div class="what-vis">
-          <div class="layout-card" aria-label="On-disk project layout">
-            <div class="lc-head"><span>project layout</span><span aria-hidden="true">on disk</span></div>
+          <div class="layout-card" aria-label="โครงสร้างโปรเจกต์บนดิสก์">
+            <div class="lc-head"><span>โครงสร้างโปรเจกต์</span><span aria-hidden="true">บนดิสก์</span></div>
             <div class="tree-disk">
 <div><span class="d">my-novel/</span></div>
-<div><span class="ind">├─ </span><span class="f">PROJECT.md</span> <span class="c"># recap &amp; state</span></div>
+<div><span class="ind">├─ </span><span class="f">PROJECT.md</span> <span class="c"># สรุปและสถานะ</span></div>
 <div><span class="ind">├─ </span><span class="f">CHARACTERS.md</span></div>
 <div><span class="ind">├─ </span><span class="f">GLOSSARY.md</span></div>
 <div><span class="ind">├─ </span><span class="f">STYLE.md</span></div>
 <div><span class="ind">├─ </span><span class="d">images/</span></div>
 <div><span class="ind">└─ </span><span class="d">Vol_01/</span></div>
 <div><span class="ind">   ├─ </span><span class="f">VOLUME.md</span></div>
-<div><span class="ind">   ├─ </span><span class="d">raw/</span> <span class="c"># cleansed JA</span></div>
-<div><span class="ind">   └─ </span><span class="d">translated/</span> <span class="c"># TH out</span></div>
+<div><span class="ind">   ├─ </span><span class="d">raw/</span> <span class="c"># JA ที่ล้างแล้ว</span></div>
+<div><span class="ind">   └─ </span><span class="d">translated/</span> <span class="c"># ผลลัพธ์ TH</span></div>
             </div>
           </div>
         </div>
@@ -967,14 +967,14 @@
   <section id="screens" aria-labelledby="screens-h">
     <div class="wrap">
       <div class="sec-head">
-        <span class="eyebrow">Five screens</span>
-        <h2 id="screens-h">Tabbed, keyboard-driven, and quiet by design.</h2>
-        <p>Press <span class="kbd">1</span>–<span class="kbd">5</span> in the app to move between views.
-        Each one does a single thing well — pick a tab to see it.</p>
+        <span class="eyebrow">ห้าหน้าจอ</span>
+        <h2 id="screens-h">ใช้แท็บ ควบคุมด้วยคีย์บอร์ด และเงียบสงบโดยการออกแบบ</h2>
+        <p>กด <span class="kbd">1</span>–<span class="kbd">5</span> ในแอปเพื่อสลับระหว่างมุมมอง
+        แต่ละหน้าจอทำสิ่งเดียวได้ดี — เลือกแท็บเพื่อดู</p>
       </div>
 
       <!-- tab bar mirrors the TUI tab strip; htmx swaps each partial into #screen-panel -->
-      <div class="screens-tabbar" role="tablist" aria-label="The five honya screens">
+      <div class="screens-tabbar" role="tablist" aria-label="ห้าหน้าจอของ honya">
         <button class="stab" type="button" role="tab" id="tab-shelf"
                 aria-selected="false" aria-controls="screen-panel"
                 hx-get="partials/screen-shelf.html" hx-target="#screen-panel" hx-swap="innerHTML" hx-push-url="false">
@@ -1012,12 +1012,12 @@
               <span class="scr-ja" lang="ja">訳</span>
               <span class="scr-en">Translate</span>
             </div>
-            <p>The live run. A chunk gauge fills as the three agents — <span class="mono">◆ Orchestrator</span>, <span class="mono">▲ Translator</span>, <span class="mono">■ Reviewer</span> — work the chapter, a token meter counts up, and the Thai streams in beneath the Japanese source.</p>
+            <p>การทำงานแบบสด แถบวัดชังก์ค่อย ๆ เต็มขึ้นขณะที่สามเอเจนต์ — <span class="mono">◆ Orchestrator</span>, <span class="mono">▲ Translator</span>, <span class="mono">■ Reviewer</span> — ทำงานในบท มาตรวัดโทเคนนับเพิ่มขึ้น และภาษาไทยทยอยปรากฏใต้ต้นฉบับภาษาญี่ปุ่น</p>
             <div class="scr-keys">
-              <span class="klbl">keys</span>
-              <span class="kkey"><span class="kbd">p</span> pause</span>
-              <span class="kkey"><span class="kbd">s</span> stop</span>
-              <span class="kkey"><span class="kbd">f</span> follow</span>
+              <span class="klbl">ปุ่ม</span>
+              <span class="kkey"><span class="kbd">p</span> หยุดชั่วคราว</span>
+              <span class="kkey"><span class="kbd">s</span> หยุด</span>
+              <span class="kkey"><span class="kbd">f</span> ติดตาม</span>
             </div>
           </div>
           <div class="scr-mock" aria-hidden="true">
@@ -1034,12 +1034,12 @@
         </div>
       </div>
 
-      <div class="moon-legend" role="img" aria-label="Waxing-moon chapter status legend: empty circle is pending; quarter, half, and gibbous moons are working stages; filled circle is done; cross is failed.">
-        <span class="lbl">status</span>
-        <span class="mi"><span class="g pending ja" aria-hidden="true">○</span> pending</span>
-        <span class="mi"><span class="g work ja" aria-hidden="true">◔</span><span class="g work ja" aria-hidden="true">◐</span><span class="g work ja" aria-hidden="true">◑</span><span class="g work ja" aria-hidden="true">◕</span> working</span>
-        <span class="mi"><span class="g done ja" aria-hidden="true">●</span> done</span>
-        <span class="mi"><span class="g fail ja" aria-hidden="true">✗</span> failed</span>
+      <div class="moon-legend" role="img" aria-label="คำอธิบายสถานะบทรูปดวงจันทร์ข้างขึ้น: วงกลมว่างคือรอดำเนินการ; จันทร์เสี้ยว ครึ่งดวง และค่อนดวงคือขั้นตอนกำลังทำงาน; วงกลมทึบคือเสร็จสิ้น; กากบาทคือล้มเหลว">
+        <span class="lbl">สถานะ</span>
+        <span class="mi"><span class="g pending ja" aria-hidden="true">○</span> รอดำเนินการ</span>
+        <span class="mi"><span class="g work ja" aria-hidden="true">◔</span><span class="g work ja" aria-hidden="true">◐</span><span class="g work ja" aria-hidden="true">◑</span><span class="g work ja" aria-hidden="true">◕</span> กำลังทำงาน</span>
+        <span class="mi"><span class="g done ja" aria-hidden="true">●</span> เสร็จสิ้น</span>
+        <span class="mi"><span class="g fail ja" aria-hidden="true">✗</span> ล้มเหลว</span>
       </div>
     </div>
   </section>
@@ -1048,17 +1048,17 @@
   <section class="pipeline" id="pipeline" aria-labelledby="pipe-h">
     <div class="wrap">
       <div class="sec-head">
-        <span class="eyebrow">The three-agent pipeline</span>
-        <h2 id="pipe-h">Orchestrator, Translator, Reviewer — per chunk, with memory.</h2>
-        <p>Each chapter is split into ~1,000-token chunks. Continuity and context travel with
-        every chunk; the reviewer can send work back before anything is written.</p>
+        <span class="eyebrow">ไปป์ไลน์สามเอเจนต์</span>
+        <h2 id="pipe-h">Orchestrator, Translator, Reviewer — ทีละชังก์ พร้อมความจำ</h2>
+        <p>แต่ละบทถูกแบ่งเป็นชังก์ขนาดราว 1,000 โทเคน ความต่อเนื่องและบริบทเดินทางไปกับทุกชังก์
+        ผู้ตรวจสามารถส่งงานกลับไปแก้ก่อนที่จะมีการเขียนสิ่งใดลงไป</p>
       </div>
 
       <div class="pipe-wrap">
         <div class="pipe-svg-card">
           <svg class="pipe-svg" viewBox="0 0 920 280" role="img" aria-labelledby="pipe-svg-title pipe-svg-desc" preserveAspectRatio="xMidYMid meet">
-            <title id="pipe-svg-title">honya three-agent pipeline diagram</title>
-            <desc id="pipe-svg-desc">Chunk and context flow into the Orchestrator, which bundles glossary, character, project and style context. The Translator drafts Thai; the Reviewer either approves — appending the Thai and advancing the recap — or rejects with itemized feedback that routes back to the Translator for a retry.</desc>
+            <title id="pipe-svg-title">แผนภาพไปป์ไลน์สามเอเจนต์ของ honya</title>
+            <desc id="pipe-svg-desc">ชังก์และบริบทไหลเข้าสู่ Orchestrator ซึ่งรวบรวมบริบทของคลังศัพท์ ตัวละคร โปรเจกต์ และสไตล์ จากนั้น Translator ร่างภาษาไทย ส่วน Reviewer จะอนุมัติ — โดยผนวกภาษาไทยและเดินหน้าบทสรุป — หรือปฏิเสธพร้อมฟีดแบ็กแยกเป็นข้อ ๆ ที่ส่งกลับไปยัง Translator เพื่อลองใหม่</desc>
             <defs>
               <marker id="arrow" markerWidth="9" markerHeight="9" refX="6.5" refY="4.5" orient="auto">
                 <path d="M0 0 L9 4.5 L0 9 Z" fill="#5C564E"/>
@@ -1073,16 +1073,16 @@
 
             <!-- input -->
             <rect x="8" y="108" width="118" height="64" rx="10" fill="#E5DFD2" stroke="#CEC6B8"/>
-            <text x="67" y="134" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="12.5" fill="#2D2A26">chunk</text>
-            <text x="67" y="152" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="10.5" fill="#968E82">~1000 tok</text>
+            <text x="67" y="134" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="12.5" fill="#2D2A26">ชังก์</text>
+            <text x="67" y="152" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="10.5" fill="#968E82">~1000 โทเคน</text>
 
             <!-- context bundle -->
             <rect x="8" y="200" width="118" height="56" rx="10" fill="#DEE0E8" stroke="#6C80A2"/>
-            <text x="67" y="222" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="10.5" fill="#3A5078">glossary·chars</text>
-            <text x="67" y="238" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="10.5" fill="#3A5078">project·style</text>
+            <text x="67" y="222" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="10.5" fill="#3A5078">ศัพท์·ตัวละคร</text>
+            <text x="67" y="238" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="10.5" fill="#3A5078">โปรเจกต์·สไตล์</text>
 
             <!-- continuity -->
-            <text x="67" y="86" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="9.5" fill="#968E82">+ prev. 5 TH lines</text>
+            <text x="67" y="86" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="9.5" fill="#968E82">+ 5 บรรทัด TH ก่อนหน้า</text>
 
             <line x1="126" y1="140" x2="186" y2="140" stroke="#5C564E" stroke-width="1.6" marker-end="url(#arrow)"/>
             <line x1="126" y1="222" x2="160" y2="222" stroke="#6C80A2" stroke-width="1.6"/>
@@ -1091,67 +1091,67 @@
             <!-- Orchestrator -->
             <rect x="188" y="98" width="180" height="84" rx="12" fill="#F3EFE6" stroke="#3A5078" stroke-width="1.6"/>
             <text x="278" y="128" text-anchor="middle" font-family="Noto Serif JP, serif" font-size="17" fill="#2D2A26">指揮 Orchestrator</text>
-            <text x="278" y="150" text-anchor="middle" font-family="Zen Kaku Gothic New, sans-serif" font-size="11" fill="#5C564E">bundles context</text>
-            <text x="278" y="166" text-anchor="middle" font-family="Zen Kaku Gothic New, sans-serif" font-size="11" fill="#5C564E">persists state · recap</text>
+            <text x="278" y="150" text-anchor="middle" font-family="Zen Kaku Gothic New, sans-serif" font-size="11" fill="#5C564E">รวบรวมบริบท</text>
+            <text x="278" y="166" text-anchor="middle" font-family="Zen Kaku Gothic New, sans-serif" font-size="11" fill="#5C564E">บันทึกสถานะ · สรุป</text>
 
             <line x1="368" y1="140" x2="428" y2="140" stroke="#5C564E" stroke-width="1.6" marker-end="url(#arrow)"/>
 
             <!-- Translator -->
             <rect x="430" y="98" width="170" height="84" rx="12" fill="#F3EFE6" stroke="#3A5078" stroke-width="1.6"/>
             <text x="515" y="128" text-anchor="middle" font-family="Noto Serif JP, serif" font-size="17" fill="#2D2A26">訳者 Translator</text>
-            <text x="515" y="150" text-anchor="middle" font-family="Zen Kaku Gothic New, sans-serif" font-size="11" fill="#5C564E">drafts Thai</text>
-            <text x="515" y="166" text-anchor="middle" font-family="Zen Kaku Gothic New, sans-serif" font-size="11" fill="#5C564E">streams tokens</text>
+            <text x="515" y="150" text-anchor="middle" font-family="Zen Kaku Gothic New, sans-serif" font-size="11" fill="#5C564E">ร่างภาษาไทย</text>
+            <text x="515" y="166" text-anchor="middle" font-family="Zen Kaku Gothic New, sans-serif" font-size="11" fill="#5C564E">สตรีมโทเคน</text>
 
             <line x1="600" y1="140" x2="660" y2="140" stroke="#5C564E" stroke-width="1.6" marker-end="url(#arrow)"/>
 
             <!-- Reviewer -->
             <rect x="662" y="98" width="170" height="84" rx="12" fill="#F3EFE6" stroke="#3A5078" stroke-width="1.6"/>
             <text x="747" y="128" text-anchor="middle" font-family="Noto Serif JP, serif" font-size="17" fill="#2D2A26">校正 Reviewer</text>
-            <text x="747" y="150" text-anchor="middle" font-family="Zen Kaku Gothic New, sans-serif" font-size="11" fill="#5C564E">checks fidelity</text>
-            <text x="747" y="166" text-anchor="middle" font-family="Zen Kaku Gothic New, sans-serif" font-size="11" fill="#5C564E">approve / reject</text>
+            <text x="747" y="150" text-anchor="middle" font-family="Zen Kaku Gothic New, sans-serif" font-size="11" fill="#5C564E">ตรวจความตรงต้นฉบับ</text>
+            <text x="747" y="166" text-anchor="middle" font-family="Zen Kaku Gothic New, sans-serif" font-size="11" fill="#5C564E">อนุมัติ / ปฏิเสธ</text>
 
             <!-- approve out -->
             <line x1="832" y1="140" x2="876" y2="140" stroke="#6A8258" stroke-width="1.8" marker-end="url(#arrow)"/>
             <text x="888" y="130" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="11" fill="#6A8258">●</text>
-            <text x="888" y="156" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="9.5" fill="#6A8258">append</text>
+            <text x="888" y="156" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="9.5" fill="#6A8258">ผนวก</text>
 
             <!-- reject loop: reviewer back to translator -->
             <path d="M747 182 L747 232 L515 232 L515 184" fill="none" stroke="#B24A3A" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#arrow-v)"/>
-            <text x="631" y="226" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="10.5" fill="#B24A3A">reject › itemized feedback › retry</text>
+            <text x="631" y="226" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="10.5" fill="#B24A3A">ปฏิเสธ › ฟีดแบ็กแยกข้อ › ลองใหม่</text>
 
             <!-- approve to orchestrator persist (subtle) -->
             <path d="M747 98 L747 64 L278 64 L278 96" fill="none" stroke="#6C80A2" stroke-width="1.4" stroke-dasharray="3 4" marker-end="url(#arrow-i)"/>
-            <text x="512" y="56" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="10" fill="#6C80A2">approve › persist new terms / characters / notes</text>
+            <text x="512" y="56" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="10" fill="#6C80A2">อนุมัติ › บันทึกศัพท์ / ตัวละคร / โน้ตใหม่</text>
           </svg>
         </div>
 
         <div class="pipe-steps">
           <div class="pstep">
             <span class="role"><span class="ja" lang="ja">指揮</span> Orchestrator</span>
-            <h4>Sets the table</h4>
-            <p>Bundles the glossary, character sheet, project recap and style — plus the previous
-            chunk's last five Thai sentences — then hands a clean, contextual prompt onward.</p>
+            <h4>จัดเตรียมทุกอย่าง</h4>
+            <p>รวบรวมคลังศัพท์ ตารางตัวละคร บทสรุปโปรเจกต์ และสไตล์ — พร้อมห้าประโยคภาษาไทย
+            สุดท้ายของชังก์ก่อนหน้า — แล้วส่งพรอมต์ที่สะอาดและมีบริบทต่อไป</p>
           </div>
           <div class="pstep">
             <span class="role"><span class="ja" lang="ja">訳者</span> Translator</span>
-            <h4>Drafts the Thai</h4>
-            <p>Translates the chunk in voice, streaming tokens into the live preview so you can
-            watch the prose arrive rather than wait on a spinner.</p>
+            <h4>ร่างภาษาไทย</h4>
+            <p>แปลชังก์โดยคงน้ำเสียงของเรื่อง สตรีมโทเคนเข้าสู่ตัวอย่างแบบสด เพื่อให้คุณได้เห็น
+            ถ้อยความค่อย ๆ ปรากฏแทนที่จะรอวงล้อหมุน</p>
           </div>
           <div class="pstep">
             <span class="role"><span class="ja" lang="ja">校正</span> Reviewer</span>
-            <h4>Approves or sends back</h4>
-            <p>Checks fidelity and consistency. On approve, the Thai is appended deterministically;
-            on reject, itemized feedback routes back for a retry.</p>
+            <h4>อนุมัติหรือส่งกลับ</h4>
+            <p>ตรวจสอบความตรงต้นฉบับและความสอดคล้อง เมื่ออนุมัติ ภาษาไทยจะถูกผนวกเข้าไป
+            อย่างแน่นอนโดยฝั่งแอป เมื่อปฏิเสธ ฟีดแบ็กแยกข้อจะถูกส่งกลับไปลองใหม่</p>
           </div>
         </div>
 
         <div class="pipe-note">
-          On approve, the Orchestrator <b>persists new characters, terms and notes</b> through tool
-          calls and advances the recap — your <span class="ja" lang="ja">辞</span> Lexicon
-          maintains itself. On reject, nothing is written: the
-          <span class="vermilion">reviewer's feedback</span> goes straight back to the
-          Translator until the chunk passes.
+          เมื่ออนุมัติ Orchestrator จะ<b>บันทึกตัวละคร ศัพท์ และโน้ตใหม่</b>ผ่านการเรียกใช้เครื่องมือ
+          และเดินหน้าบทสรุป — <span class="ja" lang="ja">辞</span> Lexicon ของคุณดูแลตัวเอง
+          เมื่อปฏิเสธ จะไม่มีการเขียนสิ่งใดลงไป:
+          <span class="vermilion">ฟีดแบ็กของผู้ตรวจ</span>จะถูกส่งกลับไปยัง Translator ทันที
+          จนกว่าชังก์จะผ่าน
         </div>
       </div>
     </div>
@@ -1162,40 +1162,40 @@
     <div class="wrap">
       <div class="install-card">
         <div class="sec-head" style="text-align:center">
-          <span class="eyebrow" style="justify-content:center">Install</span>
-          <h2 id="install-h">One line to a working bookshop.</h2>
-          <p style="margin-inline:auto">No build step. Run it, paste your OpenRouter key when
-          prompted, and start translating.</p>
+          <span class="eyebrow" style="justify-content:center">ติดตั้ง</span>
+          <h2 id="install-h">คำสั่งบรรทัดเดียวสู่ร้านหนังสือที่พร้อมใช้งาน</h2>
+          <p style="margin-inline:auto">ไม่ต้องผ่านขั้นตอนบิลด์ รันขึ้นมา วางคีย์ OpenRouter
+          เมื่อระบบถาม แล้วเริ่มแปลได้เลย</p>
         </div>
 
         <div class="copybox-wrap">
           <div class="copybox">
             <code class="cb-cmd" id="install-cmd"><span class="cb-prompt" aria-hidden="true">$ </span>curl https://honya.altqx.com/install.sh <span class="cb-pipe">|</span> bash</code>
-            <button class="copy-btn" id="copyBtn" type="button" aria-label="Copy install command to clipboard">
+            <button class="copy-btn" id="copyBtn" type="button" aria-label="คัดลอกคำสั่งติดตั้งไปยังคลิปบอร์ด">
               <svg class="ico-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>
               <svg class="ico-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>
-              <span class="copy-label">Copy</span>
+              <span class="copy-label">คัดลอก</span>
             </button>
           </div>
           <p class="copy-status" id="copyStatus" role="status" aria-live="polite"></p>
 
           <div class="alt-install">
-            <span class="or">or with cargo</span>
+            <span class="or">หรือด้วย cargo</span>
             <span class="alt-pill">
               <code id="cargo-cmd">cargo install --git https://github.com/altqx/honya honya</code>
-              <button class="alt-copy" id="cargoBtn" type="button" aria-label="Copy cargo install command to clipboard">
+              <button class="alt-copy" id="cargoBtn" type="button" aria-label="คัดลอกคำสั่งติดตั้งด้วย cargo ไปยังคลิปบอร์ด">
                 <svg class="ico-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>
                 <svg class="ico-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>
               </button>
             </span>
           </div>
 
-          <p class="install-update" style="margin:14px 0 0; text-align:center; color:var(--ink-faint-text); font-size:13.5px">Already installed? Update in place with <code>honya update</code>.</p>
+          <p class="install-update" style="margin:14px 0 0; text-align:center; color:var(--ink-faint-text); font-size:13.5px">ติดตั้งไว้แล้ว? อัปเดตได้ทันทีด้วย <code>honya update</code></p>
 
           <div class="install-foot">
-            <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>OpenRouter-compatible API</span>
-            <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>Prompts for your key on first run</span>
-            <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>Plain files on disk</span>
+            <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>API ที่รองรับ OpenRouter</span>
+            <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>ขอคีย์ของคุณเมื่อรันครั้งแรก</span>
+            <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>เก็บเป็นไฟล์ธรรมดาบนดิสก์</span>
           </div>
         </div>
       </div>
@@ -1208,48 +1208,48 @@
   <section aria-labelledby="feat-h">
     <div class="wrap">
       <div class="sec-head">
-        <span class="eyebrow">A few honest details</span>
-        <h2 id="feat-h">Built for the way translation actually gets done.</h2>
-        <p>No magic, no metrics theatre. Just a set of decisions that keep a long project coherent.</p>
+        <span class="eyebrow">รายละเอียดตามจริงสองสามข้อ</span>
+        <h2 id="feat-h">ออกแบบมาเพื่อวิธีการแปลที่เกิดขึ้นจริง</h2>
+        <p>ไม่มีเวทมนตร์ ไม่มีการอวดตัวเลข มีเพียงชุดการตัดสินใจที่ทำให้โปรเจกต์ยาว ๆ ยังคงสอดคล้องกัน</p>
       </div>
 
       <div class="feat-grid">
         <div class="feat">
           <span class="ficon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v4M12 18v4M4.9 4.9l2.9 2.9M16.2 16.2l2.9 2.9M2 12h4M18 12h4M4.9 19.1l2.9-2.9M16.2 7.8l2.9-2.9"/></svg></span>
-          <h3>Bring your own key</h3>
-          <p>honya is OpenRouter-native. It prompts for a key on first launch and saves it
-          locally to <code>~/.config/honya</code> — or read <code>HONYA_API_KEY</code> from the
-          environment. No accounts, no telemetry.</p>
+          <h3>ใช้คีย์ของคุณเอง</h3>
+          <p>honya ทำงานกับ OpenRouter โดยตรง ระบบจะขอคีย์เมื่อเปิดครั้งแรกและบันทึกไว้ในเครื่อง
+          ที่ <code>~/.config/honya</code> — หรือจะอ่าน <code>HONYA_API_KEY</code> จากตัวแปร
+          สภาพแวดล้อมก็ได้ ไม่ต้องมีบัญชี ไม่มีการเก็บข้อมูล</p>
         </div>
         <div class="feat">
           <span class="ficon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="2.4"/><circle cx="18" cy="6" r="2.4"/><circle cx="12" cy="18" r="2.4"/><path d="M8.4 6h7.2M7.2 8 11 15.6M16.8 8 13 15.6"/></svg></span>
-          <h3>Three-agent pipeline</h3>
-          <p>Orchestrator, Translator and Reviewer split the work per chunk. The reviewer can
-          reject with itemized feedback before anything lands on disk.</p>
+          <h3>ไปป์ไลน์สามเอเจนต์</h3>
+          <p>Orchestrator, Translator และ Reviewer แบ่งงานกันทีละชังก์ ผู้ตรวจสามารถปฏิเสธ
+          พร้อมฟีดแบ็กแยกข้อก่อนที่สิ่งใดจะถูกบันทึกลงดิสก์</p>
         </div>
         <div class="feat">
           <span class="ficon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h11l5 5v11a0 0 0 0 1 0 0H4a0 0 0 0 1 0 0Z"/><path d="M15 4v5h5M8 13h8M8 17h6"/></svg></span>
-          <h3>EPUB pre-processing</h3>
-          <p>Spine-ordered chapters, relocated illustrations, and HTML cleansed into tidy
-          Markdown — so the agents read clean text, not markup.</p>
+          <h3>การเตรียมข้อมูล EPUB</h3>
+          <p>จัดบทตามลำดับสันหนังสือ ย้ายภาพประกอบ และล้าง HTML ให้เป็น Markdown ที่เรียบร้อย
+          — เพื่อให้เอเจนต์อ่านข้อความที่สะอาด ไม่ใช่มาร์กอัป</p>
         </div>
         <div class="feat">
           <span class="ficon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M12 4v16M6 9h3M6 13h3M15 9h3M15 13h3"/></svg></span>
-          <h3>Side-by-side reader</h3>
-          <p>Synced JA→TH proofreading with the columns locked paragraph to paragraph, so your
-          eye never loses its place during review.</p>
+          <h3>โหมดอ่านเทียบคู่</h3>
+          <p>พิสูจน์อักษร JA→TH แบบซิงก์กัน โดยล็อกคอลัมน์ให้ตรงกันทีละย่อหน้า
+          เพื่อให้สายตาคุณไม่หลงตำแหน่งระหว่างการตรวจ</p>
         </div>
         <div class="feat">
           <span class="ficon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5V6a2 2 0 0 1 2-2h11v16H6a2 2 0 0 0-2 2Z"/><path d="M9 8h5M9 11h5"/></svg></span>
-          <h3>A glossary that maintains itself</h3>
-          <p>Through tool calls, the agents keep GLOSSARY, CHARACTERS and notes current as the
-          story unfolds — terms stay consistent across volumes.</p>
+          <h3>คลังศัพท์ที่ดูแลตัวเอง</h3>
+          <p>เอเจนต์อัปเดต GLOSSARY, CHARACTERS และโน้ตให้เป็นปัจจุบันผ่านการเรียกใช้เครื่องมือ
+          ไปพร้อมกับเรื่องที่ดำเนินไป — ศัพท์ต่าง ๆ คงเส้นคงวาตลอดทุกเล่ม</p>
         </div>
         <div class="feat">
           <span class="ficon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7l9-4 9 4-9 4-9-4Z"/><path d="M3 7v6l9 4 9-4V7"/></svg></span>
-          <h3>Everything is just files</h3>
-          <p>PROJECT.md, GLOSSARY.md, STYLE.md and per-volume folders — readable, diffable, and
-          yours. Edit by hand any time; honya picks up where you left it.</p>
+          <h3>ทุกอย่างเป็นเพียงไฟล์</h3>
+          <p>PROJECT.md, GLOSSARY.md, STYLE.md และโฟลเดอร์แยกตามเล่ม — อ่านได้ เทียบ diff ได้
+          และเป็นของคุณ แก้ด้วยมือเมื่อไหร่ก็ได้ honya จะทำงานต่อจากจุดที่คุณค้างไว้</p>
         </div>
       </div>
     </div>
@@ -1258,18 +1258,18 @@
   <!-- ───────── END BAND ───────── -->
   <section class="endband" aria-labelledby="end-h">
     <div class="wrap">
-      <span class="eyebrow">Open the bookshop</span>
-      <h2 id="end-h">Drop in an EPUB. Let the <span class="ja" lang="ja">本屋</span> do the patient work.</h2>
-      <p>Free and open source. Bring an OpenRouter-compatible key, drop in an EPUB, and let the
-      three agents do the patient work.</p>
+      <span class="eyebrow">เปิดร้านหนังสือ</span>
+      <h2 id="end-h">วางไฟล์ EPUB ลงไป แล้วปล่อยให้ <span class="ja" lang="ja">本屋</span> ทำงานอย่างใจเย็น</h2>
+      <p>ฟรีและโอเพนซอร์ส เตรียมคีย์ที่รองรับ OpenRouter วางไฟล์ EPUB ลงไป
+      แล้วปล่อยให้สามเอเจนต์ทำงานอย่างใจเย็น</p>
       <div class="cta-row">
         <a class="btn btn-primary" href="#install">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
-          Get started
+          เริ่มต้นใช้งาน
         </a>
         <a class="btn btn-ghost" href="https://github.com/altqx/honya" rel="noopener">
           <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2C6.48 2 2 6.58 2 12.25c0 4.53 2.87 8.37 6.84 9.73.5.1.68-.22.68-.49 0-.24-.01-.88-.01-1.72-2.78.62-3.37-1.37-3.37-1.37-.45-1.18-1.11-1.5-1.11-1.5-.91-.64.07-.62.07-.62 1 .07 1.53 1.06 1.53 1.06.89 1.56 2.34 1.11 2.91.85.09-.66.35-1.11.63-1.37-2.22-.26-4.56-1.14-4.56-5.06 0-1.12.39-2.03 1.03-2.75-.1-.26-.45-1.3.1-2.71 0 0 .84-.27 2.75 1.05a9.4 9.4 0 0 1 5 0c1.91-1.32 2.75-1.05 2.75-1.05.55 1.41.2 2.45.1 2.71.64.72 1.03 1.63 1.03 2.75 0 3.93-2.34 4.79-4.57 5.05.36.32.68.94.68 1.9 0 1.37-.01 2.47-.01 2.81 0 .27.18.6.69.49A10.04 10.04 0 0 0 22 12.25C22 6.58 17.52 2 12 2Z"/></svg>
-          Browse the source
+          ดูซอร์สโค้ด
         </a>
       </div>
     </div>
@@ -1279,7 +1279,7 @@
 
 <!-- ───────── FOOTER ───────── -->
 <footer class="site" aria-labelledby="foot-h">
-  <h2 id="foot-h" class="vh">Site footer</h2>
+  <h2 id="foot-h" class="vh">ส่วนท้ายเว็บไซต์</h2>
   <div class="wrap">
     <div class="foot-top">
       <div class="foot-brand">
@@ -1289,26 +1289,26 @@
           </span>
           <span class="name"><span class="ja" lang="ja">本屋</span>honya</span>
         </a>
-        <p>A calm, literary terminal app for AI-assisted Japanese-to-Thai light-novel
-        translation. Built in Rust with Ratatui.</p>
+        <p>แอปเทอร์มินัลสไตล์วรรณกรรมที่เงียบสงบ สำหรับการแปลไลต์โนเวลญี่ปุ่นเป็นไทย
+        โดยมี AI ช่วย สร้างด้วย Rust และ Ratatui</p>
       </div>
 
       <div class="foot-cols">
         <div class="foot-col">
-          <h4>Explore</h4>
-          <a href="#what">What it is</a>
-          <a href="#screens">Five screens</a>
-          <a href="#pipeline">Pipeline</a>
-          <a href="#install">Install</a>
+          <h4>สำรวจ</h4>
+          <a href="#what">คืออะไร</a>
+          <a href="#screens">ห้าหน้าจอ</a>
+          <a href="#pipeline">ไปป์ไลน์</a>
+          <a href="#install">ติดตั้ง</a>
         </div>
         <div class="foot-col">
-          <h4>Project</h4>
-          <a href="https://github.com/altqx/honya" rel="noopener">GitHub repository</a>
-          <a href="https://github.com/altqx/honya#readme" rel="noopener">Read the README</a>
-          <a href="https://github.com/altqx/honya/issues" rel="noopener">Issues</a>
+          <h4>โปรเจกต์</h4>
+          <a href="https://github.com/altqx/honya" rel="noopener">คลัง GitHub</a>
+          <a href="https://github.com/altqx/honya#readme" rel="noopener">อ่าน README</a>
+          <a href="https://github.com/altqx/honya/issues" rel="noopener">รายงานปัญหา</a>
         </div>
         <div class="foot-col">
-          <h4>Site</h4>
+          <h4>เว็บไซต์</h4>
           <a href="https://honya.altqx.com">honya.altqx.com</a>
           <a href="#install">install.sh</a>
         </div>
@@ -1316,7 +1316,7 @@
     </div>
 
     <div class="foot-bottom">
-      <span><span class="ja" lang="ja">本屋</span> — a quiet tool for a craft. Free &amp; open source.</span>
+      <span><span class="ja" lang="ja">本屋</span> — เครื่องมือเงียบ ๆ สำหรับงานฝีมือ ฟรีและโอเพนซอร์ส</span>
       <span><a href="https://github.com/altqx/honya" rel="noopener">github.com/altqx/honya</a></span>
     </div>
   </div>
@@ -1379,19 +1379,19 @@
     clearTimeout(resetTimer);
     if (success){
       copyBtn.classList.add('copied');
-      if (copyLabel) copyLabel.textContent = 'Copied';
-      copyStatus.textContent = 'Copied to clipboard — paste into your terminal.';
+      if (copyLabel) copyLabel.textContent = 'คัดลอกแล้ว';
+      copyStatus.textContent = 'คัดลอกไปยังคลิปบอร์ดแล้ว — วางลงในเทอร์มินัลของคุณได้เลย';
       copyStatus.style.color = 'var(--sage-text)';
-      if (sr) sr.textContent = 'Install command copied to clipboard.';
+      if (sr) sr.textContent = 'คัดลอกคำสั่งติดตั้งไปยังคลิปบอร์ดแล้ว';
     } else {
-      copyStatus.textContent = 'Couldn’t copy automatically — select the command and copy manually.';
+      copyStatus.textContent = 'คัดลอกอัตโนมัติไม่สำเร็จ — กรุณาเลือกคำสั่งแล้วคัดลอกเอง';
       copyStatus.style.color = 'var(--vermilion)';
-      if (sr) sr.textContent = 'Copy failed — please select the command and copy manually.';
+      if (sr) sr.textContent = 'คัดลอกไม่สำเร็จ — กรุณาเลือกคำสั่งแล้วคัดลอกเอง';
     }
     copyStatus.classList.add('show');
     resetTimer = setTimeout(function(){
       copyBtn.classList.remove('copied');
-      if (copyLabel) copyLabel.textContent = 'Copy';
+      if (copyLabel) copyLabel.textContent = 'คัดลอก';
       copyStatus.classList.remove('show');
     }, 2600);
   }
@@ -1411,11 +1411,11 @@
       copyText(CARGO_CMD).then(function(){
         clearTimeout(cargoTimer);
         cargoBtn.classList.add('copied');
-        cargoBtn.setAttribute('aria-label','Copied cargo install command');
-        if (sr) sr.textContent = 'Cargo install command copied to clipboard.';
+        cargoBtn.setAttribute('aria-label','คัดลอกคำสั่งติดตั้งด้วย cargo แล้ว');
+        if (sr) sr.textContent = 'คัดลอกคำสั่งติดตั้งด้วย cargo ไปยังคลิปบอร์ดแล้ว';
         cargoTimer = setTimeout(function(){
           cargoBtn.classList.remove('copied');
-          cargoBtn.setAttribute('aria-label','Copy cargo install command to clipboard');
+          cargoBtn.setAttribute('aria-label','คัดลอกคำสั่งติดตั้งด้วย cargo ไปยังคลิปบอร์ด');
         }, 2200);
       }, function(){
         var code = document.getElementById('cargo-cmd');

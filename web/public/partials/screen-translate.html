@@ -1,27 +1,58 @@
 <div class="scr">
-  <div class="scr-info">
-    <div class="scr-head">
-      <span class="scr-num">3</span>
-      <span class="scr-ja" lang="ja">訳</span>
-      <span class="scr-en">Translate</span>
+    <div class="scr-info">
+        <div class="scr-head">
+            <span class="scr-num">3</span>
+            <span class="scr-ja" lang="ja">訳</span>
+            <span class="scr-en">Translate</span>
+        </div>
+        <p>
+            การทำงานแบบสด แถบวัดชังก์ค่อย ๆ เต็มขึ้นขณะที่สามเอเจนต์ —
+            <span class="mono">◆ Orchestrator</span>,
+            <span class="mono">▲ Translator</span>,
+            <span class="mono">■ Reviewer</span> — ทำงานในบท
+            มาตรวัดโทเคนนับเพิ่มขึ้น และภาษาไทยทยอยปรากฏใต้ต้นฉบับภาษาญี่ปุ่น
+        </p>
+        <div class="scr-keys">
+            <span class="klbl">ปุ่ม</span>
+            <span class="kkey"><span class="kbd">p</span> หยุดชั่วคราว</span>
+            <span class="kkey"><span class="kbd">s</span> หยุด</span>
+            <span class="kkey"><span class="kbd">f</span> ติดตาม</span>
+        </div>
     </div>
-    <p>The live run. A chunk gauge fills as the three agents — <span class="mono">◆ Orchestrator</span>, <span class="mono">▲ Translator</span>, <span class="mono">■ Reviewer</span> — work the chapter, a token meter counts up, and the Thai streams in beneath the Japanese source.</p>
-    <div class="scr-keys">
-      <span class="klbl">keys</span>
-      <span class="kkey"><span class="kbd">p</span> pause</span>
-      <span class="kkey"><span class="kbd">s</span> stop</span>
-      <span class="kkey"><span class="kbd">f</span> follow</span>
+    <div class="scr-mock" aria-hidden="true">
+        <div class="scr-mock-bar">
+            <span class="dots"><i></i><i></i><i></i></span
+            ><span class="ja" lang="ja">訳</span> ch_003 · live
+        </div>
+        <div class="scr-mock-body">
+            <div class="scr-mock-row">
+                <span class="mmeta">chunk</span>
+                <span class="scr-mock-gauge"
+                    ><span class="gf">▰▰▰▰▰▰▰▰▰▰▰▰▰</span
+                    ><span class="gt">▱▱▱▱▱▱▱▱▱</span></span
+                >
+                <span class="mmeta">4/7</span>
+            </div>
+            <div class="scr-mock-row">
+                <span class="maccent">◆ Orch</span>
+                <span class="mmeta">persisting terms · recap</span>
+            </div>
+            <div class="scr-mock-row">
+                <span class="maccent">▲ Trans</span>
+                <span class="mmeta">chunk 4 · drafting…</span>
+            </div>
+            <div class="scr-mock-row">
+                <span class="maccent">■ Review</span>
+                <span class="msage">approve</span>
+            </div>
+            <div class="scr-mock-row">
+                <span class="msrc" lang="ja">少年は静かに本を閉じた。</span>
+            </div>
+            <div class="scr-mock-row">
+                <span class="mth" lang="th"
+                    >เด็กหนุ่มปิดหนังสือลงอย่างเงียบ ๆ</span
+                ><span class="maccent">▏</span>
+            </div>
+        </div>
     </div>
-  </div>
-  <div class="scr-mock" aria-hidden="true">
-    <div class="scr-mock-bar"><span class="dots"><i></i><i></i><i></i></span><span class="ja" lang="ja">訳</span> ch_003 · live</div>
-    <div class="scr-mock-body">
-      <div class="scr-mock-row"><span class="mmeta">chunk</span> <span class="scr-mock-gauge"><span class="gf">▰▰▰▰▰▰▰▰▰▰▰▰▰</span><span class="gt">▱▱▱▱▱▱▱▱▱</span></span> <span class="mmeta">4/7</span></div>
-      <div class="scr-mock-row"><span class="maccent">◆ Orch</span> <span class="mmeta">persisting terms · recap</span></div>
-      <div class="scr-mock-row"><span class="maccent">▲ Trans</span> <span class="mmeta">chunk 4 · drafting…</span></div>
-      <div class="scr-mock-row"><span class="maccent">■ Review</span> <span class="msage">approve</span></div>
-      <div class="scr-mock-row"><span class="msrc" lang="ja">少年は静かに本を閉じた。</span></div>
-      <div class="scr-mock-row"><span class="mth" lang="th">เด็กหนุ่มปิดหนังสือลงอย่างเงียบ ๆ</span><span class="maccent">▏</span></div>
-    </div>
-  </div>
 </div>
