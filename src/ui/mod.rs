@@ -3,5 +3,6 @@
 
 pub mod chrome;
 pub mod layout;
+pub mod markdown;
 pub mod text;
 pub mod widgets;

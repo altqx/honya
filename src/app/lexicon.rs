@@ -7,7 +7,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 
 use crate::model::{Character, GlossaryTerm};
 use crate::theme::{self, Theme};
@@ -646,18 +646,18 @@ impl LexiconScreen {
     fn render_style(&self, f: &mut Frame, area: Rect, ws: &Workspace, theme: &Theme) {
         let body = std::fs::read_to_string(ws.style_md())
             .unwrap_or_else(|_| "STYLE.md not found.".to_string());
-        let lines: Vec<Line> = body
-            .split('\n')
-            .take(area.height as usize)
-            .map(|l| {
-                Line::from(Span::styled(
-                    truncate_cols(&thai_display_safe(l), area.width.saturating_sub(2) as usize),
-                    Style::default().fg(theme.ink_soft),
-                ))
-            })
-            .collect();
+        // Render STYLE.md as Markdown (headings, emphasis, lists) instead of raw
+        // syntax; wrap so long guidance lines stay readable.
+        let lines = crate::ui::markdown::render(
+            &body,
+            theme.ink_soft,
+            theme,
+            area.width.saturating_sub(2) as usize,
+        );
         f.render_widget(
-            Paragraph::new(lines).style(Style::default().bg(theme.bg_panel)),
+            Paragraph::new(lines)
+                .wrap(Wrap { trim: false })
+                .style(Style::default().bg(theme.bg_panel)),
             area,
         );
     }

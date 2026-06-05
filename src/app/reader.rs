@@ -231,10 +231,9 @@ impl ReaderScreen {
         let inner = block.inner(area);
         f.render_widget(block, area);
 
-        let lines: Vec<Line> = content
-            .split('\n')
-            .map(|l| Line::from(Span::styled(l.to_string(), Style::default().fg(fg))))
-            .collect();
+        // Render the chapter Markdown as styled prose (bold/italic, headings,
+        // image chips, …) rather than leaking raw `**`/`![]()` syntax.
+        let lines = crate::ui::markdown::render(content, fg, theme, inner.width as usize);
 
         let mut para = Paragraph::new(lines)
             .scroll((scroll, 0))

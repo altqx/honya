@@ -488,38 +488,29 @@ impl TranslateScreen {
         let inner = block.inner(area);
         f.render_widget(block, area);
 
-        // Compose the preview with a trailing indigo caret.
-        let body = if self.preview.is_empty() {
-            match self.phase {
+        // Compose the preview lines: a faint placeholder when there's nothing yet,
+        // otherwise the streaming Thai rendered as Markdown. A trailing indigo
+        // caret marks the live tail.
+        let mut lines: Vec<Line> = if self.preview.is_empty() {
+            let msg = match self.phase {
                 RunPhase::Idle => {
-                    "No active run — start one from 棚 Project (t: chapter · T: volume).".to_string()
+                    "No active run — start one from 棚 Project (t: chapter · T: volume)."
                 }
-                RunPhase::Paused => "Paused.".to_string(),
-                RunPhase::Running => "…waiting for the first chunk…".to_string(),
-            }
-        } else {
-            self.preview.clone()
-        };
-        let caret = Span::styled("▏", Style::default().fg(theme.stream_cursor));
-
-        // Build lines from the preview, splitting on newlines; append caret to last.
-        let mut lines: Vec<Line> = Vec::new();
-        let body_lines: Vec<&str> = body.split('\n').collect();
-        let last = body_lines.len().saturating_sub(1);
-        for (i, raw) in body_lines.iter().enumerate() {
-            let text_style = if self.preview.is_empty() {
-                Style::default().fg(theme.ink_faint)
-            } else {
-                Style::default().fg(theme.th_text)
+                RunPhase::Paused => "Paused.",
+                RunPhase::Running => "…waiting for the first chunk…",
             };
-            if i == last {
-                lines.push(Line::from(vec![
-                    Span::styled((*raw).to_string(), text_style),
-                    caret.clone(),
-                ]));
-            } else {
-                lines.push(Line::from(Span::styled((*raw).to_string(), text_style)));
-            }
+            vec![Line::from(Span::styled(
+                msg.to_string(),
+                Style::default().fg(theme.ink_faint),
+            ))]
+        } else {
+            crate::ui::markdown::render(&self.preview, theme.th_text, theme, inner.width as usize)
+        };
+
+        let caret = Span::styled("▏", Style::default().fg(theme.stream_cursor));
+        match lines.last_mut() {
+            Some(last) => last.push_span(caret),
+            None => lines.push(Line::from(caret)),
         }
 
         // Resolve the "tail-follow" sentinel scroll into a concrete offset.

@@ -837,7 +837,7 @@
         <aside class="hero-aside" aria-label="ตัวอย่างการแปลแบบสด">
           <div class="term-shell">
             <div class="term-shadow" aria-hidden="true"></div>
-            <div class="terminal" role="img" aria-label="ภาพจำลองหน้าจอเทอร์มินัลของ honya แท็บ Translate (3 訳) กำลังทำงานอยู่ แผนผังโปรเจกต์แสดงรายการบทพร้อมสัญลักษณ์สถานะรูปดวงจันทร์ข้างขึ้น แถบความคืบหน้าของชังก์ค่อย ๆ เต็มขึ้น เอเจนต์สามตัว — Orchestrator, Translator, Reviewer — รายงานความเคลื่อนไหว มาตรวัดโทเคนนับเพิ่มขึ้น และข้อความภาษาไทยทยอยปรากฏใต้ต้นฉบับภาษาญี่ปุ่น">
+            <div class="terminal" role="img" aria-label="ภาพจำลองหน้าจอเทอร์มินัลของ honya แท็บ Translate (3 訳) กำลังทำงานอยู่ แผนผังโปรเจกต์แสดงรายการบทพร้อมสัญลักษณ์สถานะรูปดวงจันทร์ข้างขึ้น แถบความคืบหน้าของ Chunk ค่อย ๆ เต็มขึ้น เอเจนต์สามตัว — Orchestrator, Translator, Reviewer — รายงานความเคลื่อนไหว มาตรวัดโทเคนนับเพิ่มขึ้น และข้อความภาษาไทยทยอยปรากฏใต้ต้นฉบับภาษาญี่ปุ่น">
               <div class="titlebar">
                 <div class="dots" aria-hidden="true"><i></i><i></i><i></i></div>
                 <div class="title"><span class="ja" lang="ja">本屋</span> honya — <span lang="ja">訳</span> Translate</div>
@@ -926,7 +926,7 @@
       <div class="sec-head">
         <span class="eyebrow">คืออะไร</span>
         <h2 id="what-h">เครื่องมือสไตล์วรรณกรรมที่เงียบสงบสำหรับงานฝีมือที่ต้องใช้เวลา — ไม่ใช่เครื่องแปลแบบเร่งรีบ</h2>
-        <p>honya ปฏิบัติต่อไลต์โนเวลเหมือนบรรณาธิการคนหนึ่ง: ทีละเล่ม ทีละบท ทีละชังก์ —
+        <p>honya ปฏิบัติต่อไลต์โนเวลเหมือนบรรณาธิการคนหนึ่ง: ทีละเล่ม ทีละบท ทีละ Chunk —
         โดยส่งต่อความต่อเนื่องไปข้างหน้าและบันทึกการตัดสินใจเอาไว้เสมอ</p>
       </div>
 
@@ -935,8 +935,8 @@
           <p class="big">คุณป้อนไฟล์ EPUB เข้าไป มันคืนโฟลเดอร์โปรเจกต์ที่คุณอ่าน แก้ไข
           และไว้ใจได้ — ภาษาญี่ปุ่นอยู่ทางซ้าย <span class="ja" lang="ja">タイ語</span> ภาษาไทยอยู่ทางขวา</p>
           <p>ขั้นตอนเตรียมข้อมูลจะจัดบทให้เรียงตามลำดับสันหนังสือ ย้ายภาพประกอบที่แทรกอยู่
-          และล้าง HTML ให้เหลือเป็น Markdown ล้วน จากนั้นทุกบทจะถูกแบ่งเป็นชังก์ขนาดราว 1,000 โทเคน
-          แล้วเดินผ่านไปป์ไลน์ โดยมีประโยคภาษาไทยห้าประโยคสุดท้ายจากชังก์ก่อนหน้าแทรกเข้ามา
+          และล้าง HTML ให้เหลือเป็น Markdown ล้วน จากนั้นทุกบทจะถูกแบ่งเป็น Chunk ขนาดราว 1,000 โทเคน
+          แล้วเดินผ่านไปป์ไลน์ โดยมีประโยคภาษาไทยห้าประโยคสุดท้ายจาก Chunk ก่อนหน้าแทรกเข้ามา
           เพื่อรักษาความต่อเนื่อง</p>
           <p>honya เชื่อมต่อกับ <b>API ที่รองรับ OpenRouter</b> จึงต้องใช้คีย์ เมื่อเปิดครั้งแรก
           มันจะให้คุณวางคีย์ลงไปและบันทึกไว้ที่ <code>~/.config/honya</code> เพื่อให้คุณถูกถาม
@@ -1012,7 +1012,7 @@
               <span class="scr-ja" lang="ja">訳</span>
               <span class="scr-en">Translate</span>
             </div>
-            <p>การทำงานแบบสด แถบวัดชังก์ค่อย ๆ เต็มขึ้นขณะที่สามเอเจนต์ — <span class="mono">◆ Orchestrator</span>, <span class="mono">▲ Translator</span>, <span class="mono">■ Reviewer</span> — ทำงานในบท มาตรวัดโทเคนนับเพิ่มขึ้น และภาษาไทยทยอยปรากฏใต้ต้นฉบับภาษาญี่ปุ่น</p>
+            <p>การทำงานแบบสด แถบวัด Chunk ค่อย ๆ เต็มขึ้นขณะที่สามเอเจนต์ — <span class="mono">◆ Orchestrator</span>, <span class="mono">▲ Translator</span>, <span class="mono">■ Reviewer</span> — ทำงานในบท มาตรวัดโทเคนนับเพิ่มขึ้น และภาษาไทยทยอยปรากฏใต้ต้นฉบับภาษาญี่ปุ่น</p>
             <div class="scr-keys">
               <span class="klbl">ปุ่ม</span>
               <span class="kkey"><span class="kbd">p</span> หยุดชั่วคราว</span>
@@ -1049,8 +1049,8 @@
     <div class="wrap">
       <div class="sec-head">
         <span class="eyebrow">ไปป์ไลน์สามเอเจนต์</span>
-        <h2 id="pipe-h">Orchestrator, Translator, Reviewer — ทีละชังก์ พร้อมความจำ</h2>
-        <p>แต่ละบทถูกแบ่งเป็นชังก์ขนาดราว 1,000 โทเคน ความต่อเนื่องและบริบทเดินทางไปกับทุกชังก์
+        <h2 id="pipe-h">Orchestrator, Translator, Reviewer — ทีละ Chunk พร้อมความจำ</h2>
+        <p>แต่ละบทถูกแบ่งเป็น Chunk ขนาดราว 1,000 โทเคน ความต่อเนื่องและบริบทเดินทางไปกับทุก Chunk
         ผู้ตรวจสามารถส่งงานกลับไปแก้ก่อนที่จะมีการเขียนสิ่งใดลงไป</p>
       </div>
 
@@ -1058,7 +1058,7 @@
         <div class="pipe-svg-card">
           <svg class="pipe-svg" viewBox="0 0 920 280" role="img" aria-labelledby="pipe-svg-title pipe-svg-desc" preserveAspectRatio="xMidYMid meet">
             <title id="pipe-svg-title">แผนภาพไปป์ไลน์สามเอเจนต์ของ honya</title>
-            <desc id="pipe-svg-desc">ชังก์และบริบทไหลเข้าสู่ Orchestrator ซึ่งรวบรวมบริบทของคลังศัพท์ ตัวละคร โปรเจกต์ และสไตล์ จากนั้น Translator ร่างภาษาไทย ส่วน Reviewer จะอนุมัติ — โดยผนวกภาษาไทยและเดินหน้าบทสรุป — หรือปฏิเสธพร้อมฟีดแบ็กแยกเป็นข้อ ๆ ที่ส่งกลับไปยัง Translator เพื่อลองใหม่</desc>
+            <desc id="pipe-svg-desc">Chunk และบริบทไหลเข้าสู่ Orchestrator ซึ่งรวบรวมบริบทของคลังศัพท์ ตัวละคร โปรเจกต์ และสไตล์ จากนั้น Translator ร่างภาษาไทย ส่วน Reviewer จะอนุมัติ — โดยผนวกภาษาไทยและเดินหน้าบทสรุป — หรือปฏิเสธพร้อมฟีดแบ็กแยกเป็นข้อ ๆ ที่ส่งกลับไปยัง Translator เพื่อลองใหม่</desc>
             <defs>
               <marker id="arrow" markerWidth="9" markerHeight="9" refX="6.5" refY="4.5" orient="auto">
                 <path d="M0 0 L9 4.5 L0 9 Z" fill="#5C564E"/>
@@ -1073,7 +1073,7 @@
 
             <!-- input -->
             <rect x="8" y="108" width="118" height="64" rx="10" fill="#E5DFD2" stroke="#CEC6B8"/>
-            <text x="67" y="134" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="12.5" fill="#2D2A26">ชังก์</text>
+            <text x="67" y="134" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="12.5" fill="#2D2A26">Chunk</text>
             <text x="67" y="152" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="10.5" fill="#968E82">~1000 โทเคน</text>
 
             <!-- context bundle -->
@@ -1130,12 +1130,12 @@
             <span class="role"><span class="ja" lang="ja">指揮</span> Orchestrator</span>
             <h4>จัดเตรียมทุกอย่าง</h4>
             <p>รวบรวมคลังศัพท์ ตารางตัวละคร บทสรุปโปรเจกต์ และสไตล์ — พร้อมห้าประโยคภาษาไทย
-            สุดท้ายของชังก์ก่อนหน้า — แล้วส่งพรอมต์ที่สะอาดและมีบริบทต่อไป</p>
+            สุดท้ายของ Chunk ก่อนหน้า — แล้วส่งพรอมต์ที่สะอาดและมีบริบทต่อไป</p>
           </div>
           <div class="pstep">
             <span class="role"><span class="ja" lang="ja">訳者</span> Translator</span>
             <h4>ร่างภาษาไทย</h4>
-            <p>แปลชังก์โดยคงน้ำเสียงของเรื่อง สตรีมโทเคนเข้าสู่ตัวอย่างแบบสด เพื่อให้คุณได้เห็น
+            <p>แปล Chunk โดยคงน้ำเสียงของเรื่อง สตรีมโทเคนเข้าสู่ตัวอย่างแบบสด เพื่อให้คุณได้เห็น
             ถ้อยความค่อย ๆ ปรากฏแทนที่จะรอวงล้อหมุน</p>
           </div>
           <div class="pstep">
@@ -1151,7 +1151,7 @@
           และเดินหน้าบทสรุป — <span class="ja" lang="ja">辞</span> Lexicon ของคุณดูแลตัวเอง
           เมื่อปฏิเสธ จะไม่มีการเขียนสิ่งใดลงไป:
           <span class="vermilion">ฟีดแบ็กของผู้ตรวจ</span>จะถูกส่งกลับไปยัง Translator ทันที
-          จนกว่าชังก์จะผ่าน
+          จนกว่า Chunk จะผ่าน
         </div>
       </div>
     </div>
@@ -1224,7 +1224,7 @@
         <div class="feat">
           <span class="ficon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="2.4"/><circle cx="18" cy="6" r="2.4"/><circle cx="12" cy="18" r="2.4"/><path d="M8.4 6h7.2M7.2 8 11 15.6M16.8 8 13 15.6"/></svg></span>
           <h3>ไปป์ไลน์สามเอเจนต์</h3>
-          <p>Orchestrator, Translator และ Reviewer แบ่งงานกันทีละชังก์ ผู้ตรวจสามารถปฏิเสธ
+          <p>Orchestrator, Translator และ Reviewer แบ่งงานกันทีละ Chunk ผู้ตรวจสามารถปฏิเสธ
           พร้อมฟีดแบ็กแยกข้อก่อนที่สิ่งใดจะถูกบันทึกลงดิสก์</p>
         </div>
         <div class="feat">
