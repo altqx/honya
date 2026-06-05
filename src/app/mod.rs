@@ -202,6 +202,8 @@ pub struct App {
     pub run_ctl: Option<crate::agents::pipeline::RunControl>,
     /// Rolling activity log shown in the Log overlay.
     pub log: Vec<(LogLevel, String)>,
+    /// Set when a newer release is detected at startup (drives a footer hint).
+    pub update_available: Option<String>,
 }
 
 impl App {
@@ -231,6 +233,7 @@ impl App {
             run_active: false,
             run_ctl: None,
             log: Vec::new(),
+            update_available: None,
         }
     }
 
@@ -274,6 +277,13 @@ impl App {
                 self.set_chapter_status(*chapter, ChapterStatus::Failed);
                 self.toast = Some(Toast::error(format!("ch {chapter} failed · {reason}")));
                 self.push_log(LogLevel::Error, format!("ch {chapter} failed: {reason}"));
+            }
+            AppEvent::UpdateAvailable { version } => {
+                self.update_available = Some(version.clone());
+                self.toast = Some(Toast::info(format!(
+                    "honya {version} available — run `honya update`"
+                )));
+                self.push_log(LogLevel::Info, format!("update available: honya {version}"));
             }
             AppEvent::PipelinePaused => {
                 // Stay run_active (the run is held, not finished) so a second run
@@ -738,7 +748,7 @@ impl App {
 
         // Footer: active-screen hints + always-on global cluster (chrome appends it).
         let hints = self.hints();
-        chrome::render_footer(f, sk.footer, hints, &self.theme);
+        chrome::render_footer(f, sk.footer, hints, self.update_available.as_deref(), &self.theme);
 
         // Overlay last, over a Clear, so it always wins.
         if !matches!(self.overlay, Overlay::None) {

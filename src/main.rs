@@ -15,6 +15,7 @@ mod llm;
 mod model;
 mod theme;
 mod ui;
+mod update;
 mod workspace;
 
 #[cfg(test)]
@@ -33,6 +34,21 @@ use crate::model::{AppConfig, AppEvent, EventTx};
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() -> anyhow::Result<()> {
+    // Subcommands run before the TUI (and before the key prompt — updating or
+    // printing the version must not require an API key).
+    match std::env::args().nth(1).as_deref() {
+        Some("update" | "self-update" | "upgrade") => return update::run_self_update().await,
+        Some("--version" | "-V" | "version") => {
+            println!("honya {}", update::current_version());
+            return Ok(());
+        }
+        Some("--help" | "-h" | "help") => {
+            print_help();
+            return Ok(());
+        }
+        _ => {}
+    }
+
     let mut cfg = config::load();
     if let Err(e) = ensure_api_key(&mut cfg) {
         eprintln!("honya: {e}");
@@ -40,6 +56,17 @@ async fn main() -> anyhow::Result<()> {
     }
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
     let mut app = App::new(EventTx(tx), cfg);
+
+    // Best-effort: notify in-app if a newer release is out (opt out with
+    // HONYA_NO_UPDATE_CHECK). Runs in the background; never blocks startup.
+    {
+        let tx = app.tx.clone();
+        tokio::spawn(async move {
+            if let Some(version) = update::check_for_update().await {
+                tx.send(AppEvent::UpdateAvailable { version });
+            }
+        });
+    }
 
     let mut terminal = ratatui::init();
     let result = run(&mut terminal, &mut app, rx).await;
@@ -95,6 +122,19 @@ pub fn build_client(cfg: &AppConfig) -> anyhow::Result<Arc<dyn LlmClient>> {
     let client =
         llm::client::OpenRouterClient::new(llm::client::ClientConfig::from_app_config(cfg, api_key))?;
     Ok(Arc::new(client))
+}
+
+/// Print CLI usage for `honya --help`.
+fn print_help() {
+    println!("honya 本屋 — AI-assisted Japanese → Thai light-novel translation\n");
+    println!("USAGE:");
+    println!("    honya             Launch the TUI in the current directory");
+    println!("    honya update      Update honya to the latest release (aliases: self-update, upgrade)");
+    println!("    honya --version   Print the version");
+    println!("    honya --help      Show this help\n");
+    println!("ENVIRONMENT:");
+    println!("    HONYA_API_KEY / OPENROUTER_API_KEY   OpenRouter key (overrides saved config)");
+    println!("    HONYA_NO_UPDATE_CHECK                Disable the startup update check");
 }
 
 /// honya has no offline mode: ensure an OpenRouter API key is available before

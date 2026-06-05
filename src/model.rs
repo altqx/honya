@@ -525,6 +525,11 @@ pub enum AppEvent {
         msg: String,
     },
 
+    // ---- self-update ----
+    UpdateAvailable {
+        version: String,
+    },
+
     // ---- import progress (EPUB preprocessing drives a Gauge) ----
     ImportProgress {
         done: usize,

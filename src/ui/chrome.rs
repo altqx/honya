@@ -168,7 +168,13 @@ pub fn render_tabbar(
 /// pinned to the right edge regardless of how many screen-specific hints there
 /// are; if the row is too narrow the screen-specific hints are dropped before
 /// the global cluster (which is the contract every screen relies on).
-pub fn render_footer(f: &mut Frame, area: Rect, hints: &[(&str, &str)], theme: &Theme) {
+pub fn render_footer(
+    f: &mut Frame,
+    area: Rect,
+    hints: &[(&str, &str)],
+    update: Option<&str>,
+    theme: &Theme,
+) {
     if area.width == 0 {
         return;
     }
@@ -185,14 +191,26 @@ pub fn render_footer(f: &mut Frame, area: Rect, hints: &[(&str, &str)], theme: &
         .add_modifier(Modifier::BOLD);
     let lbl_style = Style::default().fg(theme.ink_faint);
 
-    let mut global: Vec<Span> = vec![
+    let mut global: Vec<Span> = Vec::new();
+    // A pending self-update shows as a persistent amber badge before the cluster.
+    if let Some(version) = update {
+        let warn = Style::default()
+            .fg(theme.status_warn)
+            .add_modifier(Modifier::BOLD);
+        global.push(Span::styled("⬆ ", warn));
+        global.push(Span::styled(
+            format!("{version} · honya update  "),
+            Style::default().fg(theme.status_warn),
+        ));
+    }
+    global.extend([
         Span::styled("?", key_style),
         Span::styled("help  ", lbl_style),
         Span::styled(":", key_style),
         Span::styled("cmd  ", lbl_style),
         Span::styled("q", key_style),
         Span::styled(" quit", lbl_style),
-    ];
+    ]);
     let global_cols: usize = global.iter().map(|s| col_width(s.content.as_ref())).sum();
 
     // --- Screen-specific hints (left, dropped first when cramped) ---

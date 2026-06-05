@@ -39,6 +39,21 @@ The three models are configurable per agent; defaults follow the spec
 (`google/gemini-3.5-flash` orchestrator, `google/gemini-3-flash-preview` translator,
 `google/gemini-3.1-flash-lite` reviewer).
 
+## Updating
+
+```sh
+honya update          # download the latest release, verify its checksum, replace the binary
+```
+
+`honya update` updates the installed binary **in place** — it downloads the latest GitHub
+release for your platform, verifies its SHA-256 against the published checksum, and atomically
+replaces the running executable. Re-running the installer
+(`curl https://honya.altqx.com/install.sh | bash`) works too.
+
+At startup honya does a **best-effort, non-blocking** check for a newer release and shows a
+footer hint (`⬆ … honya update`) when one is out. Opt out with `HONYA_NO_UPDATE_CHECK=1`. Other
+useful commands: `honya --version`, `honya --help`.
+
 ## The five screens
 
 | Tab | | Purpose |
