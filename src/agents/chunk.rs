@@ -152,45 +152,54 @@ fn match_protected(md: &str, start: usize) -> Option<usize> {
 
     // Fenced code block: ``` ... ``` (or longer fences), spanning newlines.
     if rest.starts_with("```")
-        && let Some(end) = match_fenced_code(rest) {
-            return Some(start + end);
-        }
+        && let Some(end) = match_fenced_code(rest)
+    {
+        return Some(start + end);
+    }
 
     // Image link: ![alt](url)
     if rest.starts_with("![")
-        && let Some(end) = match_link(rest, 2) {
-            return Some(start + end);
-        }
+        && let Some(end) = match_link(rest, 2)
+    {
+        return Some(start + end);
+    }
     // Inline link: [text](url) (image case handled above)
-    if !bytes.is_empty() && bytes[0] == b'['
-        && let Some(end) = match_link(rest, 1) {
-            return Some(start + end);
-        }
+    if !bytes.is_empty()
+        && bytes[0] == b'['
+        && let Some(end) = match_link(rest, 1)
+    {
+        return Some(start + end);
+    }
 
     // Inline code: `code` (N backticks, same count to close).
-    if !bytes.is_empty() && bytes[0] == b'`'
-        && let Some(end) = match_inline_code(rest) {
-            return Some(start + end);
-        }
+    if !bytes.is_empty()
+        && bytes[0] == b'`'
+        && let Some(end) = match_inline_code(rest)
+    {
+        return Some(start + end);
+    }
 
     // Emphasis: **bold** / __bold__ / *italic* / _italic_ (longest first).
     for delim in ["**", "__", "*", "_"] {
         if rest.starts_with(delim)
-            && let Some(end) = match_emphasis(rest, delim) {
-                return Some(start + end);
-            }
+            && let Some(end) = match_emphasis(rest, delim)
+        {
+            return Some(start + end);
+        }
     }
 
     // Ruby with base marker: ｜漢字《かんじ》 (fullwidth U+FF5C or ASCII '|').
     if (rest.starts_with('｜') || rest.starts_with('|'))
-        && let Some(end) = match_ruby_with_base(rest) {
-            return Some(start + end);
-        }
+        && let Some(end) = match_ruby_with_base(rest)
+    {
+        return Some(start + end);
+    }
     // Bare ruby reading: 《..》
     if rest.starts_with('《')
-        && let Some(end) = match_bracketed(rest, '《', '》') {
-            return Some(start + end);
-        }
+        && let Some(end) = match_bracketed(rest, '《', '》')
+    {
+        return Some(start + end);
+    }
 
     None
 }

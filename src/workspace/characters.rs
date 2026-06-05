@@ -178,9 +178,10 @@ fn merge_into(target: &mut Character, incoming: Character) {
 /// Overwrite `slot` only when `incoming` is a non-empty `Some`.
 fn merge_opt(slot: &mut Option<String>, incoming: Option<String>) {
     if let Some(v) = incoming
-        && !v.trim().is_empty() {
-            *slot = Some(v);
-        }
+        && !v.trim().is_empty()
+    {
+        *slot = Some(v);
+    }
 }
 
 /// Union relationships by `(target_id, relation)`; later wins on collision.

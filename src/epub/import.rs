@@ -71,23 +71,27 @@ fn build_toc(
     parsed: &ParsedOpf,
 ) -> Result<Vec<TocEntry>> {
     if let Some(nav_id) = &parsed.nav_id
-        && let Some(&idx) = parsed.manifest_by_id.get(nav_id) {
-            let nav_path = parsed.manifest[idx].resolved_path.clone();
-            if let Ok(xml) = read_or_archive(archive, work_dir, &nav_path)
-                && let Ok(entries) = parse_nav_xhtml(&xml, &nav_path)
-                    && !entries.is_empty() {
-                        return Ok(entries);
-                    }
+        && let Some(&idx) = parsed.manifest_by_id.get(nav_id)
+    {
+        let nav_path = parsed.manifest[idx].resolved_path.clone();
+        if let Ok(xml) = read_or_archive(archive, work_dir, &nav_path)
+            && let Ok(entries) = parse_nav_xhtml(&xml, &nav_path)
+            && !entries.is_empty()
+        {
+            return Ok(entries);
         }
+    }
 
     if let Some(ncx_id) = &parsed.ncx_id
-        && let Some(&idx) = parsed.manifest_by_id.get(ncx_id) {
-            let ncx_path = parsed.manifest[idx].resolved_path.clone();
-            if let Ok(xml) = read_or_archive(archive, work_dir, &ncx_path)
-                && let Ok(entries) = parse_ncx(&xml, &ncx_path) {
-                    return Ok(entries);
-                }
+        && let Some(&idx) = parsed.manifest_by_id.get(ncx_id)
+    {
+        let ncx_path = parsed.manifest[idx].resolved_path.clone();
+        if let Ok(xml) = read_or_archive(archive, work_dir, &ncx_path)
+            && let Ok(entries) = parse_ncx(&xml, &ncx_path)
+        {
+            return Ok(entries);
         }
+    }
 
     Ok(Vec::new())
 }

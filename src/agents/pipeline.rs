@@ -648,8 +648,14 @@ mod tests {
 
         // The chunk references 聖剣 and スバル, but never 王都.
         let ctx = build_reference_ctx(&ws, "スバルは聖剣を抜いた。");
-        assert!(ctx.contains("聖剣"), "in-chunk term must be injected:\n{ctx}");
-        assert!(ctx.contains("スバル"), "in-chunk character must be injected");
+        assert!(
+            ctx.contains("聖剣"),
+            "in-chunk term must be injected:\n{ctx}"
+        );
+        assert!(
+            ctx.contains("スバル"),
+            "in-chunk character must be injected"
+        );
         assert!(
             !ctx.contains("王都") && !ctx.contains("ราชธานี"),
             "absent term must NOT balloon the context:\n{ctx}"

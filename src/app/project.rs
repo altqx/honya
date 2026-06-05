@@ -141,9 +141,10 @@ impl ProjectScreen {
             }
             KeyCode::Char(' ') => {
                 if let Some(ch) = self.selected_chapter(active)
-                    && !self.selected.insert(ch) {
-                        self.selected.remove(&ch);
-                    }
+                    && !self.selected.insert(ch)
+                {
+                    self.selected.remove(&ch);
+                }
                 Action::None
             }
             KeyCode::Char('t') => {

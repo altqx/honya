@@ -38,7 +38,9 @@ pub fn target_triple() -> Option<&'static str> {
 fn parse_semver(s: &str) -> (u64, u64, u64) {
     let s = s.trim().trim_start_matches('v').trim();
     let core = s.split(['-', '+']).next().unwrap_or(s);
-    let mut parts = core.split('.').map(|p| p.trim().parse::<u64>().unwrap_or(0));
+    let mut parts = core
+        .split('.')
+        .map(|p| p.trim().parse::<u64>().unwrap_or(0));
     (
         parts.next().unwrap_or(0),
         parts.next().unwrap_or(0),
@@ -287,7 +289,10 @@ fn private_staging_dir(tag: &str) -> Result<std::path::PathBuf> {
             Err(e) => return Err(e).context("creating a private temp dir for the download"),
         }
     }
-    bail!("could not create a unique staging dir under {}", base.display());
+    bail!(
+        "could not create a unique staging dir under {}",
+        base.display()
+    );
 }
 
 /// Locate the `honya` binary inside the extracted tree: the archive root first,

@@ -4,9 +4,9 @@ use ratatui::style::Color;
 use ratatui::symbols;
 
 pub struct Theme {
-    pub bg: Color,       // washi paper
-    pub bg_panel: Color, // recessed list panels
-    pub bg_inset: Color, // gutters, modal backing, gauge track
+    pub bg: Color,        // washi paper
+    pub bg_panel: Color,  // recessed list panels
+    pub bg_inset: Color,  // gutters, modal backing, gauge track
     pub ink: Color,       // primary
     pub ink_soft: Color,  // secondary / labels
     pub ink_faint: Color, // hints / inactive / hairline text

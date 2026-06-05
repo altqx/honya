@@ -27,9 +27,10 @@ pub async fn append_chunk(
 
     // Idempotency: skip if the marker already exists.
     if let Ok(existing) = tokio::fs::read_to_string(&path).await
-        && existing.contains(&marker) {
-            return Ok(0);
-        }
+        && existing.contains(&marker)
+    {
+        return Ok(0);
+    }
 
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await?;
@@ -77,8 +78,9 @@ pub fn write_image_only(ws: &Workspace, chapter: u32, markdown: &str) -> std::io
 
 fn ensure_parent(path: &Path) -> std::io::Result<()> {
     if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)?;
-        }
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
+    }
     Ok(())
 }

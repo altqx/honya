@@ -224,7 +224,8 @@ impl TranslateScreen {
     fn append_preview(&mut self, s: &str) {
         // Decompose Thai SARA AM up front so the streaming preview never renders a
         // width-2 single cell that desyncs the terminal (see ui::text).
-        self.preview.push_str(&crate::ui::text::thai_display_safe(s));
+        self.preview
+            .push_str(&crate::ui::text::thai_display_safe(s));
         // Bound the preview so it never grows unbounded across a long run.
         if self.preview.len() > 16_384 {
             let cut = self.preview.len() - 12_288;

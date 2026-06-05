@@ -55,9 +55,10 @@ pub fn element_text(node: &Node) -> Option<String> {
     let mut s = String::new();
     for child in node.children() {
         if child.is_text()
-            && let Some(t) = child.text() {
-                s.push_str(t);
-            }
+            && let Some(t) = child.text()
+        {
+            s.push_str(t);
+        }
     }
     let trimmed = s.trim();
     if trimmed.is_empty() {
@@ -91,9 +92,10 @@ pub fn parse_opf(opf_xml: &str, opf_path: &str) -> Result<ParsedOpf> {
         } else if is_opf_elem(&node, "meta") {
             let name = node.attribute("name").unwrap_or("");
             if name == "cover"
-                && let Some(content) = node.attribute("content") {
-                    meta_cover_id = Some(content.to_string());
-                }
+                && let Some(content) = node.attribute("content")
+            {
+                meta_cover_id = Some(content.to_string());
+            }
         }
     }
 
@@ -150,9 +152,10 @@ pub fn parse_opf(opf_xml: &str, opf_path: &str) -> Result<ParsedOpf> {
         // spine `toc` attribute (EPUB2) points at the NCX manifest id.
         if ncx_id.is_none()
             && let Some(toc_ref) = spine_node.attribute("toc")
-                && manifest_by_id.contains_key(toc_ref) {
-                    ncx_id = Some(toc_ref.to_string());
-                }
+            && manifest_by_id.contains_key(toc_ref)
+        {
+            ncx_id = Some(toc_ref.to_string());
+        }
         for itemref in spine_node.children().filter(|n| is_opf_elem(n, "itemref")) {
             let Some(idref) = itemref.attribute("idref") else {
                 continue;

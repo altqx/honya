@@ -323,9 +323,9 @@ impl Overlay {
                                 .selected_epub()
                                 .and_then(|p| p.file_stem())
                                 .and_then(|s| s.to_str())
-                            {
-                                st.name = prettify_stem(stem);
-                            }
+                        {
+                            st.name = prettify_stem(stem);
+                        }
                         st.step = 1;
                         Action::None
                     }
@@ -1062,4 +1062,3 @@ fn prettify_stem(stem: &str) -> String {
     let base = if trimmed.is_empty() { words } else { trimmed };
     base.join(" ").trim().to_string()
 }
-

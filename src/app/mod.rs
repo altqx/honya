@@ -22,9 +22,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use crate::llm::client::LlmClient;
-use crate::model::{
-    AppConfig, AppEvent, ChapterStatus, EventTx, LogLevel, ModelSet, Project,
-};
+use crate::model::{AppConfig, AppEvent, ChapterStatus, EventTx, LogLevel, ModelSet, Project};
 use crate::theme::Theme;
 use crate::ui::chrome::{self, StatusTally};
 use crate::ui::layout::{self, Skeleton};
@@ -412,11 +410,10 @@ impl App {
                 return Action::show_overlay(Overlay::Log(0));
             }
             KeyCode::Char('q') => return Action::Quit,
-            KeyCode::Esc
-                if self.toast.is_some() => {
-                    self.toast = None;
-                    return Action::None;
-                }
+            KeyCode::Esc if self.toast.is_some() => {
+                self.toast = None;
+                return Action::None;
+            }
             _ => {}
         }
 
@@ -701,7 +698,13 @@ impl App {
         }
 
         let hints = self.hints();
-        chrome::render_footer(f, sk.footer, hints, self.update_available.as_deref(), &self.theme);
+        chrome::render_footer(
+            f,
+            sk.footer,
+            hints,
+            self.update_available.as_deref(),
+            &self.theme,
+        );
 
         // Overlay last, over a Clear, so it always wins.
         if !matches!(self.overlay, Overlay::None) {

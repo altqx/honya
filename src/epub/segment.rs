@@ -267,7 +267,10 @@ mod tests {
 
     #[test]
     fn classify_plain_prose() {
-        assert_eq!(classify(&doc("p3", "ただの本文。".to_string())), DocClass::Prose);
+        assert_eq!(
+            classify(&doc("p3", "ただの本文。".to_string())),
+            DocClass::Prose
+        );
     }
 
     #[test]
@@ -317,7 +320,11 @@ mod tests {
         assert_eq!(out[0].kind, LogicalKind::ImageOnly);
         assert!(out[0].title.is_none());
         for name in ["cover.png", "k001.png", "k002-004.png", "p001.png"] {
-            assert!(out[0].body.contains(name), "front missing {name}: {}", out[0].body);
+            assert!(
+                out[0].body.contains(name),
+                "front missing {name}: {}",
+                out[0].body
+            );
         }
 
         assert_eq!(out[1].title.as_deref(), Some("プロローグ"));
@@ -329,7 +336,10 @@ mod tests {
         let pos_header = body.find("m005.png").expect("header image present");
         let pos_mid = body.find("p012.png").expect("mid illustration absorbed");
         let pos_cont = body.find("続きの本文").expect("continuation absorbed");
-        assert!(pos_header < pos_mid && pos_mid < pos_cont, "order preserved: {body}");
+        assert!(
+            pos_header < pos_mid && pos_mid < pos_cont,
+            "order preserved: {body}"
+        );
 
         assert_eq!(out[3].title.as_deref(), Some("思い出1"));
 
@@ -355,7 +365,10 @@ mod tests {
         let docs = vec![doc("c", img("cover.png")), doc("k", img("k001.png"))];
         let out = segment(&docs);
         assert_eq!(out.len(), 1);
-        assert!(cleanse::is_image_only(&out[0].body), "combined front stays image-only");
+        assert!(
+            cleanse::is_image_only(&out[0].body),
+            "combined front stays image-only"
+        );
     }
 
     #[test]
@@ -387,7 +400,11 @@ mod tests {
 
     #[test]
     fn all_images_collapse_to_single_block() {
-        let docs = vec![doc("a", img("a.png")), doc("b", img("b.png")), doc("c", img("c.png"))];
+        let docs = vec![
+            doc("a", img("a.png")),
+            doc("b", img("b.png")),
+            doc("c", img("c.png")),
+        ];
         let out = segment(&docs);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].kind, LogicalKind::ImageOnly);

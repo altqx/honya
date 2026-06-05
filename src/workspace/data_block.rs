@@ -75,9 +75,10 @@ pub fn write_with_data<T: Serialize>(
 /// half-written file (rename is atomic within a filesystem). Creates parent dir.
 pub fn atomic_write(path: &Path, contents: &str) -> std::io::Result<()> {
     if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)?;
-        }
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
+    }
 
     let tmp = temp_sibling(path);
     {

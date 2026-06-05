@@ -113,10 +113,13 @@ async fn run(
 /// Build the live OpenRouter client; errors only if the key is gone or the HTTP stack fails.
 pub fn build_client(cfg: &AppConfig) -> anyhow::Result<Arc<dyn LlmClient>> {
     let api_key = config::resolve_api_key(cfg).ok_or_else(|| {
-        anyhow::anyhow!("no OpenRouter API key configured (set HONYA_API_KEY or OPENROUTER_API_KEY)")
+        anyhow::anyhow!(
+            "no OpenRouter API key configured (set HONYA_API_KEY or OPENROUTER_API_KEY)"
+        )
     })?;
-    let client =
-        llm::client::OpenRouterClient::new(llm::client::ClientConfig::from_app_config(cfg, api_key))?;
+    let client = llm::client::OpenRouterClient::new(llm::client::ClientConfig::from_app_config(
+        cfg, api_key,
+    ))?;
     Ok(Arc::new(client))
 }
 
@@ -125,7 +128,9 @@ fn print_help() {
     println!("honya 本屋 — AI-assisted Japanese → Thai light-novel translation\n");
     println!("USAGE:");
     println!("    honya             Launch the TUI in the current directory");
-    println!("    honya update      Update honya to the latest release (aliases: self-update, upgrade)");
+    println!(
+        "    honya update      Update honya to the latest release (aliases: self-update, upgrade)"
+    );
     println!("    honya --version   Print the version");
     println!("    honya --help      Show this help\n");
     println!("ENVIRONMENT:");
@@ -141,8 +146,13 @@ fn ensure_api_key(cfg: &mut AppConfig) -> anyhow::Result<()> {
     let key = prompt_api_key()?;
     cfg.api_key = Some(key);
     match config::save(cfg) {
-        Ok(()) => eprintln!("honya: saved your key to {}", config::config_path().display()),
-        Err(e) => eprintln!("honya: warning: could not save config ({e}); you'll be asked again next launch."),
+        Ok(()) => eprintln!(
+            "honya: saved your key to {}",
+            config::config_path().display()
+        ),
+        Err(e) => eprintln!(
+            "honya: warning: could not save config ({e}); you'll be asked again next launch."
+        ),
     }
     Ok(())
 }
@@ -153,11 +163,20 @@ fn prompt_api_key() -> anyhow::Result<String> {
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     writeln!(out)?;
-    writeln!(out, "  本屋 honya — AI-assisted Japanese → Thai translation")?;
+    writeln!(
+        out,
+        "  本屋 honya — AI-assisted Japanese → Thai translation"
+    )?;
     writeln!(out)?;
     writeln!(out, "  honya needs an OpenRouter API key to run.")?;
-    writeln!(out, "  Get one at https://openrouter.ai/keys (it looks like sk-or-v1-…).")?;
-    writeln!(out, "  Tip: export HONYA_API_KEY or OPENROUTER_API_KEY to skip this prompt.")?;
+    writeln!(
+        out,
+        "  Get one at https://openrouter.ai/keys (it looks like sk-or-v1-…)."
+    )?;
+    writeln!(
+        out,
+        "  Tip: export HONYA_API_KEY or OPENROUTER_API_KEY to skip this prompt."
+    )?;
     writeln!(out)?;
     let key = read_secret(&mut out, "  Paste your OpenRouter API key: ")?;
     let key = key.trim().to_string();

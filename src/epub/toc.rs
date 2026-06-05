@@ -51,16 +51,17 @@ fn walk_navpoint(np: &Node, base_dir: &str, depth: usize, out: &mut Vec<TocEntry
         .unwrap_or_default();
 
     if let Some(content) = np.children().find(|n| is_ncx_elem(n, "content"))
-        && let Some(src) = content.attribute("src") {
-            let (_, fragment) = split_fragment(src);
-            let content_path = resolve_href(base_dir, src);
-            out.push(TocEntry {
-                title,
-                content_path,
-                fragment,
-                depth,
-            });
-        }
+        && let Some(src) = content.attribute("src")
+    {
+        let (_, fragment) = split_fragment(src);
+        let content_path = resolve_href(base_dir, src);
+        out.push(TocEntry {
+            title,
+            content_path,
+            fragment,
+            depth,
+        });
+    }
 
     for child in np.children().filter(|n| is_ncx_elem(n, "navPoint")) {
         walk_navpoint(&child, base_dir, depth + 1, out);
@@ -94,10 +95,10 @@ pub fn parse_nav_xhtml(nav_xml: &str, nav_path: &str) -> Result<Vec<TocEntry>> {
         .or_else(|| navs.first().copied());
 
     let mut out: Vec<TocEntry> = Vec::new();
-    if let Some(nav) = toc_nav {
-        if let Some(ol) = nav.children().find(|n| is_xhtml_elem(n, "ol")) {
-            walk_ol(&ol, &base_dir, 0, &mut out);
-        }
+    if let Some(nav) = toc_nav
+        && let Some(ol) = nav.children().find(|n| is_xhtml_elem(n, "ol"))
+    {
+        walk_ol(&ol, &base_dir, 0, &mut out);
     }
 
     Ok(out)
@@ -138,9 +139,10 @@ fn anchor_text(a: &Node) -> String {
     let mut s = String::new();
     for d in a.descendants() {
         if d.is_text()
-            && let Some(t) = d.text() {
-                s.push_str(t);
-            }
+            && let Some(t) = d.text()
+        {
+            s.push_str(t);
+        }
     }
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }

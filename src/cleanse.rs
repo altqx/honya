@@ -265,10 +265,7 @@ fn resolve_image(src: &str, image_map: &HashMap<String, String>) -> String {
 fn basename(src: &str) -> &str {
     let no_frag = src.split('#').next().unwrap_or(src);
     let no_query = no_frag.split('?').next().unwrap_or(no_frag);
-    no_query
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(no_query)
+    no_query.rsplit(['/', '\\']).next().unwrap_or(no_query)
 }
 
 fn ws_collapse_re() -> &'static Regex {

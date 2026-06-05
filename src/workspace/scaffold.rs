@@ -166,23 +166,22 @@ fn write_volume_md(ws: &Workspace, label: Option<&str>) -> std::io::Result<()> {
 
     // Seed the recap only for a brand-new volume with a known label.
     if data.running_recap.trim().is_empty()
-        && let Some(lbl) = label.filter(|l| !l.trim().is_empty()) {
-            data.running_recap = format!("เล่ม: {}", lbl.trim());
-        }
+        && let Some(lbl) = label.filter(|l| !l.trim().is_empty())
+    {
+        data.running_recap = format!("เล่ม: {}", lbl.trim());
+    }
 
     let body = volume::render_body(&data);
     data_block::write_with_data(&ws.volume_md(), &body, &data)
 }
 
 // Empty-payload wrappers matching the characters.rs / glossary.rs block shapes.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct EmptyCharacters {
     characters: Vec<serde_json::Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct EmptyTerms {
     terms: Vec<serde_json::Value>,
 }
