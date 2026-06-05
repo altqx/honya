@@ -14,13 +14,13 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 
 use crate::model::{Chapter, ChapterKind, ChapterStatus, Volume};
-use crate::theme::{self, status_glyph, Theme};
+use crate::theme::{self, Theme, status_glyph};
 use crate::ui::text::{col_width, pad_to_cols, truncate_cols};
 use crate::ui::widgets::status_cell;
 
-use super::{ActiveProject, Action};
-use super::overlay::Overlay;
 use super::Screen;
+use super::overlay::Overlay;
+use super::{Action, ActiveProject};
 
 /// A flattened tree row: either a volume header or a chapter.
 enum Row<'a> {
@@ -56,7 +56,10 @@ impl ProjectScreen {
             rows.push(Row::Volume(vol));
             if !self.collapsed.contains(&vol.number) {
                 for ch in &vol.chapters {
-                    rows.push(Row::Chapter { vol: vol.number, ch });
+                    rows.push(Row::Chapter {
+                        vol: vol.number,
+                        ch,
+                    });
                 }
             }
         }
@@ -97,7 +100,11 @@ impl ProjectScreen {
 
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => {
-                let next = if sel == 0 { n.saturating_sub(1) } else { sel - 1 };
+                let next = if sel == 0 {
+                    n.saturating_sub(1)
+                } else {
+                    sel - 1
+                };
                 self.tree.select(Some(next));
                 Action::None
             }
@@ -195,7 +202,13 @@ impl ProjectScreen {
         }
     }
 
-    pub fn render(&mut self, f: &mut Frame, area: Rect, active: Option<&ActiveProject>, theme: &Theme) {
+    pub fn render(
+        &mut self,
+        f: &mut Frame,
+        area: Rect,
+        active: Option<&ActiveProject>,
+        theme: &Theme,
+    ) {
         let Some(active) = active else {
             empty_state(f, area, theme);
             return;
@@ -236,10 +249,20 @@ impl ProjectScreen {
         let mut items = Vec::new();
         for (i, row) in rows.iter().enumerate() {
             items.push(match row {
-                Row::Volume(v) => volume_row(v, self.collapsed.contains(&v.number), i == sel, inner.width, theme),
-                Row::Chapter { ch, .. } => {
-                    chapter_row(ch, i == sel, self.selected.contains(&ch.number), name_w, theme)
-                }
+                Row::Volume(v) => volume_row(
+                    v,
+                    self.collapsed.contains(&v.number),
+                    i == sel,
+                    inner.width,
+                    theme,
+                ),
+                Row::Chapter { ch, .. } => chapter_row(
+                    ch,
+                    i == sel,
+                    self.selected.contains(&ch.number),
+                    name_w,
+                    theme,
+                ),
             });
         }
 
@@ -262,7 +285,10 @@ impl ProjectScreen {
             .borders(Borders::ALL)
             .border_set(theme::hairline_set())
             .border_style(Style::default().fg(theme.rule))
-            .title(Span::styled(" Context 文脈 ", Style::default().fg(theme.ink_soft)))
+            .title(Span::styled(
+                " Context 文脈 ",
+                Style::default().fg(theme.ink_soft),
+            ))
             .style(Style::default().bg(theme.bg_panel));
         let inner = block.inner(area);
         f.render_widget(block, area);
@@ -273,8 +299,18 @@ impl ProjectScreen {
 
         let files = [
             ("●", "PROJECT.md", "synopsis".to_string(), theme.status_done),
-            ("●", "CHARACTERS.md", format!("{chars} entries"), theme.status_done),
-            ("●", "GLOSSARY.md", format!("{terms} terms"), theme.status_done),
+            (
+                "●",
+                "CHARACTERS.md",
+                format!("{chars} entries"),
+                theme.status_done,
+            ),
+            (
+                "●",
+                "GLOSSARY.md",
+                format!("{terms} terms"),
+                theme.status_done,
+            ),
             ("◐", "STYLE.md", "draft".to_string(), theme.status_working),
         ];
         let mut lines = Vec::new();
@@ -296,7 +332,9 @@ impl ProjectScreen {
         let chapter = ch_no.and_then(|n| find_chapter(active, n));
 
         let title = match &chapter {
-            Some(c) if !c.title.is_empty() => format!(" Selected — {} ", truncate_cols(&c.title, 16)),
+            Some(c) if !c.title.is_empty() => {
+                format!(" Selected — {} ", truncate_cols(&c.title, 16))
+            }
             _ => " Selected ".to_string(),
         };
         let block = Block::default()
@@ -378,11 +416,25 @@ impl Default for ProjectScreen {
 // ROW RENDERERS
 // ============================================================================
 
-fn volume_row(v: &Volume, collapsed: bool, selected: bool, width: u16, theme: &Theme) -> ListItem<'static> {
+fn volume_row(
+    v: &Volume,
+    collapsed: bool,
+    selected: bool,
+    width: u16,
+    theme: &Theme,
+) -> ListItem<'static> {
     let caret = if collapsed { "▸" } else { "▾" };
     let tally = vol_tally(v);
-    let bar = if selected { theme::SELECT_BAR.to_string() } else { " ".to_string() };
-    let row_bg = if selected { theme.accent_bg } else { theme.bg_panel };
+    let bar = if selected {
+        theme::SELECT_BAR.to_string()
+    } else {
+        " ".to_string()
+    };
+    let row_bg = if selected {
+        theme.accent_bg
+    } else {
+        theme.bg_panel
+    };
     let label = match &v.label {
         Some(l) => format!("Vol.{:02} {l}", v.number),
         None => format!("Vol.{:02}", v.number),
@@ -393,13 +445,22 @@ fn volume_row(v: &Volume, collapsed: bool, selected: bool, width: u16, theme: &T
     let dots = "┄".repeat(fill.min(width as usize));
 
     ListItem::new(Line::from(vec![
-        Span::styled(format!(" {bar} "), Style::default().fg(theme.accent).bg(row_bg)),
+        Span::styled(
+            format!(" {bar} "),
+            Style::default().fg(theme.accent).bg(row_bg),
+        ),
         Span::styled(
             format!("{caret} {label} "),
-            Style::default().fg(theme.ink).bg(row_bg).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.ink)
+                .bg(row_bg)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled(dots, Style::default().fg(theme.rule).bg(row_bg)),
-        Span::styled(format!("  {tally_str}"), Style::default().fg(theme.ink_soft).bg(row_bg)),
+        Span::styled(
+            format!("  {tally_str}"),
+            Style::default().fg(theme.ink_soft).bg(row_bg),
+        ),
     ]))
 }
 
@@ -413,7 +474,11 @@ fn chapter_row(
     let cell = status_cell(ch.kind, ch.status, theme);
     let bar = if selected { theme::SELECT_BAR } else { ' ' };
     let mark = if marked { '◆' } else { ' ' };
-    let row_bg = if selected { theme.accent_bg } else { theme.bg_panel };
+    let row_bg = if selected {
+        theme.accent_bg
+    } else {
+        theme.bg_panel
+    };
     let name = pad_to_cols(&truncate_cols(&ch.title, name_w), name_w);
     let status = status_word(ch.status);
     let time = ch
@@ -422,8 +487,14 @@ fn chapter_row(
         .unwrap_or_default();
 
     ListItem::new(Line::from(vec![
-        Span::styled(format!(" {bar}"), Style::default().fg(theme.accent).bg(row_bg)),
-        Span::styled(mark.to_string(), Style::default().fg(theme.accent).bg(row_bg)),
+        Span::styled(
+            format!(" {bar}"),
+            Style::default().fg(theme.accent).bg(row_bg),
+        ),
+        Span::styled(
+            mark.to_string(),
+            Style::default().fg(theme.accent).bg(row_bg),
+        ),
         // status_cell already carries its own fg color; layer the row bg under it.
         cell.patch_style(Style::default().bg(row_bg)),
         Span::styled(

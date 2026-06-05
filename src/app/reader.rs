@@ -54,12 +54,10 @@ impl ReaderScreen {
         self.chapter = chapter;
         self.scroll = 0;
         self.th_scroll = 0;
-        self.ja = std::fs::read_to_string(ws.raw(chapter)).unwrap_or_else(|_| {
-            "（原文がまだありません — raw not found）".to_string()
-        });
-        self.th = std::fs::read_to_string(ws.translated(chapter)).unwrap_or_else(|_| {
-            "（ยังไม่มีคำแปล — not translated yet）".to_string()
-        });
+        self.ja = std::fs::read_to_string(ws.raw(chapter))
+            .unwrap_or_else(|_| "（原文がまだありません — raw not found）".to_string());
+        self.th = std::fs::read_to_string(ws.translated(chapter))
+            .unwrap_or_else(|_| "（ยังไม่มีคำแปล — not translated yet）".to_string());
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Action {
@@ -84,12 +82,16 @@ impl ReaderScreen {
                 // Previous chapter: the App owns the workspace, so signal via
                 // OpenChapter with the decremented number (App reloads us).
                 if self.chapter > 1 {
-                    Action::OpenChapter { chapter: self.chapter - 1 }
+                    Action::OpenChapter {
+                        chapter: self.chapter - 1,
+                    }
                 } else {
                     Action::None
                 }
             }
-            KeyCode::Char(']') => Action::OpenChapter { chapter: self.chapter + 1 },
+            KeyCode::Char(']') => Action::OpenChapter {
+                chapter: self.chapter + 1,
+            },
             KeyCode::Char('z') => {
                 self.sync = !self.sync;
                 if self.sync {
@@ -140,7 +142,16 @@ impl ReaderScreen {
 
         match self.layout_mode {
             MODE_JA => {
-                self.render_pane(f, body, theme, "日本語 (raw)", &self.ja, theme.ja_text, self.scroll, false);
+                self.render_pane(
+                    f,
+                    body,
+                    theme,
+                    "日本語 (raw)",
+                    &self.ja,
+                    theme.ja_text,
+                    self.scroll,
+                    false,
+                );
             }
             MODE_TH => {
                 self.render_pane(
@@ -159,7 +170,16 @@ impl ReaderScreen {
                     .direction(Direction::Horizontal)
                     .constraints([Constraint::Percentage(48), Constraint::Percentage(52)])
                     .split(body);
-                self.render_pane(f, cols[0], theme, "日本語 (raw)", &self.ja, theme.ja_text, self.scroll, false);
+                self.render_pane(
+                    f,
+                    cols[0],
+                    theme,
+                    "日本語 (raw)",
+                    &self.ja,
+                    theme.ja_text,
+                    self.scroll,
+                    false,
+                );
                 self.render_pane(
                     f,
                     cols[1],
@@ -177,7 +197,11 @@ impl ReaderScreen {
     }
 
     fn effective_th_scroll(&self) -> u16 {
-        if self.sync { self.scroll } else { self.th_scroll }
+        if self.sync {
+            self.scroll
+        } else {
+            self.th_scroll
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -232,15 +256,31 @@ impl ReaderScreen {
         };
         let line = Line::from(vec![
             Span::styled("  sync ", Style::default().fg(theme.ink_faint)),
-            Span::styled(sync_glyph, Style::default().fg(if self.sync { theme.status_done } else { theme.ink_faint })),
+            Span::styled(
+                sync_glyph,
+                Style::default().fg(if self.sync {
+                    theme.status_done
+                } else {
+                    theme.ink_faint
+                }),
+            ),
             Span::styled(" · wrap ", Style::default().fg(theme.ink_faint)),
-            Span::styled(wrap_glyph, Style::default().fg(if self.wrap { theme.status_done } else { theme.ink_faint })),
+            Span::styled(
+                wrap_glyph,
+                Style::default().fg(if self.wrap {
+                    theme.status_done
+                } else {
+                    theme.ink_faint
+                }),
+            ),
             Span::styled(" · layout ", Style::default().fg(theme.ink_faint)),
             Span::styled(mode, Style::default().fg(theme.accent_soft)),
             Span::styled(" · ch ", Style::default().fg(theme.ink_faint)),
             Span::styled(
                 format!("{:03}", self.chapter),
-                Style::default().fg(theme.ink_soft).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(theme.ink_soft)
+                    .add_modifier(Modifier::BOLD),
             ),
         ]);
         f.render_widget(

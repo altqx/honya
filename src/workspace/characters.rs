@@ -219,7 +219,10 @@ fn derive_id(c: &Character) -> String {
     }
     // Last resort: a deterministic short hash of the names so two distinct
     // unnamed entries don't collide.
-    format!("char-{:08x}", fnv1a(&format!("{}|{}", c.jp_name, c.thai_name)))
+    format!(
+        "char-{:08x}",
+        fnv1a(&format!("{}|{}", c.jp_name, c.thai_name))
+    )
 }
 
 /// Tiny FNV-1a hash for fallback id derivation (no external dep).

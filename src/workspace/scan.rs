@@ -126,8 +126,9 @@ pub fn scan_chapters(vol_dir: &Path) -> Vec<Chapter> {
     numbers
         .into_iter()
         .map(|number| {
-            let raw_md = std::fs::read_to_string(vol_dir.join("raw").join(format!("ch_{:03}.md", number)))
-                .unwrap_or_default();
+            let raw_md =
+                std::fs::read_to_string(vol_dir.join("raw").join(format!("ch_{:03}.md", number)))
+                    .unwrap_or_default();
             let kind = if !raw_md.trim().is_empty() && cleanse::is_image_only(&raw_md) {
                 ChapterKind::ImageOnly
             } else if raw_md.trim().is_empty() {
@@ -136,8 +137,12 @@ pub fn scan_chapters(vol_dir: &Path) -> Vec<Chapter> {
                 ChapterKind::Prose
             };
             let status = derive_status(vol_dir, number, kind);
-            let last_run = file_modified(&vol_dir.join("translated").join(format!("ch_{:03}.md", number)))
-                .or_else(|| file_modified(&vol_dir.join("raw").join(format!("ch_{:03}.md", number))));
+            let last_run = file_modified(
+                &vol_dir
+                    .join("translated")
+                    .join(format!("ch_{:03}.md", number)),
+            )
+            .or_else(|| file_modified(&vol_dir.join("raw").join(format!("ch_{:03}.md", number))));
 
             Chapter {
                 number,

@@ -12,7 +12,6 @@ pub mod opf;
 pub mod paths;
 pub mod toc;
 
-
 use std::collections::HashMap;
 use std::path::PathBuf;
 

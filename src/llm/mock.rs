@@ -13,9 +13,7 @@
 use async_trait::async_trait;
 
 use super::client::{LlmClient, Result};
-use super::{
-    ChatRequest, ChatResponse, Choice, ResponseFormat, ResponseMessage, Usage,
-};
+use super::{ChatRequest, ChatResponse, Choice, ResponseFormat, ResponseMessage, Usage};
 
 /// Offline canned-response client.
 pub struct MockClient {
@@ -34,7 +32,9 @@ impl Default for MockClient {
 impl MockClient {
     /// Build a mock that returns a specific Thai string.
     pub fn new(canned_thai: impl Into<String>) -> Self {
-        Self { canned_thai: canned_thai.into() }
+        Self {
+            canned_thai: canned_thai.into(),
+        }
     }
 
     /// Wrap a content string in a one-choice `stop` response.

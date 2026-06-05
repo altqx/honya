@@ -120,7 +120,11 @@ fn push_chunk(chunks: &mut Vec<Chunk>, text: String) {
     let index = chunks.len();
     // Recompute tokens from the trimmed text so the figure matches the payload.
     let est_tokens = estimate_tokens(&text);
-    chunks.push(Chunk { index, text, est_tokens });
+    chunks.push(Chunk {
+        index,
+        text,
+        est_tokens,
+    });
 }
 
 /// Split markdown into protected/plain atoms in a single left-to-right pass.
@@ -145,7 +149,10 @@ fn atomize(md: &str) -> Vec<Atom> {
         }
 
         // Not a protected start: consume one full char into the plain buffer.
-        let ch = md[i..].chars().next().expect("index points at a char boundary");
+        let ch = md[i..]
+            .chars()
+            .next()
+            .expect("index points at a char boundary");
         plain.push(ch);
         i += ch.len_utf8();
     }

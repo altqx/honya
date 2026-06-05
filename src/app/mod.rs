@@ -29,7 +29,7 @@ use ratatui::widgets::Paragraph;
 
 use crate::llm::client::LlmClient;
 use crate::model::{
-    AppEvent, AppConfig, Chapter, ChapterKind, ChapterStatus, EventTx, LogLevel, ModelSet, Project,
+    AppConfig, AppEvent, Chapter, ChapterKind, ChapterStatus, EventTx, LogLevel, ModelSet, Project,
 };
 use crate::theme::Theme;
 use crate::ui::chrome::{self, StatusTally};
@@ -150,13 +150,22 @@ pub struct Toast {
 
 impl Toast {
     fn info(msg: impl Into<String>) -> Self {
-        Self { msg: msg.into(), level: LogLevel::Info }
+        Self {
+            msg: msg.into(),
+            level: LogLevel::Info,
+        }
     }
     fn warn(msg: impl Into<String>) -> Self {
-        Self { msg: msg.into(), level: LogLevel::Warn }
+        Self {
+            msg: msg.into(),
+            level: LogLevel::Warn,
+        }
     }
     fn error(msg: impl Into<String>) -> Self {
-        Self { msg: msg.into(), level: LogLevel::Error }
+        Self {
+            msg: msg.into(),
+            level: LogLevel::Error,
+        }
     }
 }
 
@@ -172,11 +181,7 @@ pub struct ActiveProject {
 impl ActiveProject {
     /// The first/active volume number (defaults to 1 if the project has none).
     fn active_vol(&self) -> u32 {
-        self.project
-            .volumes
-            .first()
-            .map(|v| v.number)
-            .unwrap_or(1)
+        self.project.volumes.first().map(|v| v.number).unwrap_or(1)
     }
 }
 
@@ -268,7 +273,11 @@ impl App {
             AppEvent::ChapterStateChanged { chapter, state } => {
                 self.set_chapter_status(*chapter, *state);
             }
-            AppEvent::ChapterChunked { chapter, total_chunks, .. } => {
+            AppEvent::ChapterChunked {
+                chapter,
+                total_chunks,
+                ..
+            } => {
                 self.set_chapter_chunks(*chapter, *total_chunks as u32, None);
             }
             AppEvent::ChunkCommitted { chapter, .. } => {
@@ -292,7 +301,10 @@ impl App {
                 self.run_active = true;
                 self.toast = Some(Toast::info("run resumed"));
             }
-            AppEvent::PipelineFinished { chapters_done, chapters_failed } => {
+            AppEvent::PipelineFinished {
+                chapters_done,
+                chapters_failed,
+            } => {
                 self.run_active = false;
                 self.run_ctl = None;
                 self.toast = Some(Toast::info(format!(
@@ -432,7 +444,9 @@ impl App {
             KeyCode::Tab => return Action::Goto(self.next_screen()),
             KeyCode::Char('?') => return Action::show_overlay(Overlay::Help(0)),
             KeyCode::Char(':') => return Action::show_overlay(Overlay::palette()),
-            KeyCode::Char('l') | KeyCode::Char('`') => return Action::show_overlay(Overlay::Log(0)),
+            KeyCode::Char('l') | KeyCode::Char('`') => {
+                return Action::show_overlay(Overlay::Log(0));
+            }
             KeyCode::Char('q') => return Action::Quit,
             KeyCode::Esc => {
                 // Esc with no overlay: drop the toast, otherwise a no-op.
@@ -550,7 +564,12 @@ impl App {
                 }
                 self.overlay = Overlay::None;
             }
-            Action::SaveSettings { base_url, orchestrator, translator, reviewer } => {
+            Action::SaveSettings {
+                base_url,
+                orchestrator,
+                translator,
+                reviewer,
+            } => {
                 self.cfg.base_url = base_url;
                 self.cfg.models.orchestrator = orchestrator;
                 self.cfg.models.translator = translator;
@@ -576,10 +595,18 @@ impl App {
             return;
         };
         let vol = project.volumes.first().map(|v| v.number).unwrap_or(1);
-        let models = project.models.clone().unwrap_or_else(|| self.cfg.models.clone());
+        let models = project
+            .models
+            .clone()
+            .unwrap_or_else(|| self.cfg.models.clone());
         let workspace = Workspace::new(project.dir.clone(), vol);
         let client = crate::build_client(&self.cfg);
-        self.active = Some(ActiveProject { project, workspace, client, models });
+        self.active = Some(ActiveProject {
+            project,
+            workspace,
+            client,
+            models,
+        });
         self.lexicon.reset();
         self.project = ProjectScreen::new();
         self.screen = Screen::Project;
@@ -656,7 +683,10 @@ impl App {
         });
         self.run_active = true;
         self.screen = Screen::Translate;
-        self.toast = Some(Toast::info(format!("translating {} chapter(s)", chapters.len())));
+        self.toast = Some(Toast::info(format!(
+            "translating {} chapter(s)",
+            chapters.len()
+        )));
     }
 
     fn start_import(&mut self, epub: PathBuf, title: String, vol: u32) {
@@ -705,7 +735,14 @@ impl App {
         chrome::render_header(f, sk.header, &crumb, &tally, &self.theme);
 
         // Tab bar (spinner badge on tab 3 while a run is live).
-        chrome::render_tabbar(f, sk.tabs, self.screen, self.run_active, self.frame, &self.theme);
+        chrome::render_tabbar(
+            f,
+            sk.tabs,
+            self.screen,
+            self.run_active,
+            self.frame,
+            &self.theme,
+        );
 
         // Hairline rule under the tabs.
         self.render_rule(f, sk.rule);
@@ -724,14 +761,17 @@ impl App {
 
         // Overlay last, over a Clear, so it always wins.
         if !matches!(self.overlay, Overlay::None) {
-            self.overlay.render(f, area, &self.theme, &self.cfg, &self.log);
+            self.overlay
+                .render(f, area, &self.theme, &self.cfg, &self.log);
         }
     }
 
     fn render_body(&mut self, f: &mut Frame, body: Rect) {
         match self.screen {
             Screen::Shelf => self.shelf.render(f, body, &self.projects, &self.theme),
-            Screen::Project => self.project.render(f, body, self.active.as_ref(), &self.theme),
+            Screen::Project => self
+                .project
+                .render(f, body, self.active.as_ref(), &self.theme),
             Screen::Translate => self.translate.render(f, body, self.frame, &self.theme),
             Screen::Reader => self.reader.render(f, body, &self.theme),
             Screen::Lexicon => self.lexicon.render(
@@ -758,7 +798,9 @@ impl App {
         if area.height == 0 || area.width == 0 {
             return;
         }
-        let Some(toast) = self.toast.as_ref() else { return };
+        let Some(toast) = self.toast.as_ref() else {
+            return;
+        };
         let (glyph, color) = match toast.level {
             LogLevel::Trace => ("·", self.theme.ink_faint),
             LogLevel::Info => ("✓", self.theme.status_done),
@@ -820,7 +862,12 @@ impl App {
     }
 
     fn tally(&self) -> StatusTally {
-        let mut t = StatusTally { done: 0, working: 0, pending: 0, failed: 0 };
+        let mut t = StatusTally {
+            done: 0,
+            working: 0,
+            pending: 0,
+            failed: 0,
+        };
         if let Some(active) = self.active.as_ref() {
             for vol in &active.project.volumes {
                 for ch in &vol.chapters {
@@ -1145,7 +1192,13 @@ mod img_src_tests {
             <svg><image href="bare.png"/></svg>"#;
         let srcs = collect_img_srcs(html);
         assert!(srcs.contains(&"a.png".to_string()), "html img: {srcs:?}");
-        assert!(srcs.contains(&"cover.png".to_string()), "svg xlink:href: {srcs:?}");
-        assert!(srcs.contains(&"bare.png".to_string()), "svg bare href: {srcs:?}");
+        assert!(
+            srcs.contains(&"cover.png".to_string()),
+            "svg xlink:href: {srcs:?}"
+        );
+        assert!(
+            srcs.contains(&"bare.png".to_string()),
+            "svg bare href: {srcs:?}"
+        );
     }
 }

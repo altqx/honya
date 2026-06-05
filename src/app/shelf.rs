@@ -15,11 +15,11 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 
 use crate::model::{ChapterKind, ChapterStatus, Project};
-use crate::theme::{self, status_glyph, Theme};
+use crate::theme::{self, Theme, status_glyph};
 use crate::ui::text::{col_width, pad_to_cols, truncate_cols};
 
-use super::overlay::Overlay;
 use super::Action;
+use super::overlay::Overlay;
 
 /// Rows are: N projects, then 1 "import" affordance row, then the unimported
 /// epubs are shown in the side column (not selectable rows). Selection covers
@@ -33,7 +33,10 @@ impl ShelfScreen {
     pub fn new() -> Self {
         let mut list = ListState::default();
         list.select(Some(0));
-        Self { list, unimported: Vec::new() }
+        Self {
+            list,
+            unimported: Vec::new(),
+        }
     }
 
     /// Re-discover unimported epubs in the working root.
@@ -60,10 +63,18 @@ impl ShelfScreen {
 
     pub fn handle_key(&mut self, key: KeyEvent, projects: &[Project]) -> Action {
         let rows = self.row_count(projects);
-        let sel = self.list.selected().unwrap_or(0).min(rows.saturating_sub(1));
+        let sel = self
+            .list
+            .selected()
+            .unwrap_or(0)
+            .min(rows.saturating_sub(1));
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => {
-                let next = if sel == 0 { rows.saturating_sub(1) } else { sel - 1 };
+                let next = if sel == 0 {
+                    rows.saturating_sub(1)
+                } else {
+                    sel - 1
+                };
                 self.list.select(Some(next));
                 Action::None
             }
@@ -141,7 +152,10 @@ impl ShelfScreen {
 
         // Title row: 書架 — your shelf ............ ./ (N projects · M epubs)
         let title = Line::from(vec![
-            Span::styled("  書架 ", Style::default().fg(theme.ink).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "  書架 ",
+                Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
+            ),
             Span::styled("— your shelf", Style::default().fg(theme.ink_soft)),
         ]);
         let count = format!(
@@ -153,7 +167,12 @@ impl ShelfScreen {
         );
         f.render_widget(
             Paragraph::new(title).style(Style::default().bg(theme.bg)),
-            Rect { x: inner.x, y: inner.y, width: inner.width, height: 1 },
+            Rect {
+                x: inner.x,
+                y: inner.y,
+                width: inner.width,
+                height: 1,
+            },
         );
         let cw = col_width(&count) as u16;
         if inner.width > cw + 2 {
@@ -188,21 +207,28 @@ impl ShelfScreen {
         // leading line (not a standalone ListItem) so the ListState index maps 1:1
         // to projects.len() — otherwise selecting it would scroll the separator.
         let separator_line = Line::from(Span::styled(
-            format!("     {}", "┄".repeat(list_area.width.saturating_sub(6) as usize)),
+            format!(
+                "     {}",
+                "┄".repeat(list_area.width.saturating_sub(6) as usize)
+            ),
             Style::default().fg(theme.rule),
         ));
 
         let import_selected = selected == self.import_row_index(projects);
-        let import_bar = if import_selected { theme::SELECT_BAR.to_string() } else { " ".to_string() };
+        let import_bar = if import_selected {
+            theme::SELECT_BAR.to_string()
+        } else {
+            " ".to_string()
+        };
         let import_style = if import_selected {
-            Style::default().fg(theme.accent).bg(theme.accent_bg).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(theme.accent)
+                .bg(theme.accent_bg)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(theme.accent)
         };
-        let epub_note = format!(
-            "{} unimported .epub in this folder",
-            self.unimported.len()
-        );
+        let epub_note = format!("{} unimported .epub in this folder", self.unimported.len());
         let mut import_line = vec![
             Span::styled(format!(" {import_bar} "), Style::default().fg(theme.accent)),
             Span::styled("＋ Import EPUB …", import_style),
@@ -212,7 +238,10 @@ impl ShelfScreen {
         if (list_area.width as usize) > used + note_w + 4 {
             let gap = list_area.width as usize - used - note_w - 2;
             import_line.push(Span::raw(" ".repeat(gap)));
-            import_line.push(Span::styled(epub_note, Style::default().fg(theme.ink_faint)));
+            import_line.push(Span::styled(
+                epub_note,
+                Style::default().fg(theme.ink_faint),
+            ));
         }
         items.push(ListItem::new(ratatui::text::Text::from(vec![
             separator_line,
@@ -223,10 +252,7 @@ impl ShelfScreen {
         for (path, size) in &self.unimported {
             let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("?");
             let size_h = human_size(*size);
-            let label = format!(
-                "        · {}",
-                pad_to_cols(name, 28),
-            );
+            let label = format!("        · {}", pad_to_cols(name, 28),);
             items.push(ListItem::new(Line::from(vec![
                 Span::styled(label, Style::default().fg(theme.ink_soft)),
                 Span::styled(size_h, Style::default().fg(theme.ink_faint)),
@@ -266,10 +292,17 @@ fn project_row(p: &Project, selected: bool, name_w: usize, theme: &Theme) -> Lis
     let touched = touched_label(p);
     let vol = p.volumes.first().map(|v| v.number).unwrap_or(1);
 
-    let bar = if selected { theme::SELECT_BAR.to_string() } else { " ".to_string() };
+    let bar = if selected {
+        theme::SELECT_BAR.to_string()
+    } else {
+        " ".to_string()
+    };
     let row_bg = if selected { theme.accent_bg } else { theme.bg };
     let name_style = if selected {
-        Style::default().fg(theme.ink).bg(row_bg).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(theme.ink)
+            .bg(row_bg)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(theme.ink).bg(row_bg)
     };
@@ -278,7 +311,10 @@ fn project_row(p: &Project, selected: bool, name_w: usize, theme: &Theme) -> Lis
     let name_padded = pad_to_cols(&name, name_w);
 
     let spans = vec![
-        Span::styled(format!(" {bar} "), Style::default().fg(theme.accent).bg(row_bg)),
+        Span::styled(
+            format!(" {bar} "),
+            Style::default().fg(theme.accent).bg(row_bg),
+        ),
         Span::styled(glyph.to_string(), Style::default().fg(gcolor).bg(row_bg)),
         Span::styled("  ", Style::default().bg(row_bg)),
         Span::styled(name_padded, name_style),
@@ -287,10 +323,7 @@ fn project_row(p: &Project, selected: bool, name_w: usize, theme: &Theme) -> Lis
             Style::default().fg(theme.ink_soft).bg(row_bg),
         ),
         Span::styled(
-            format!(
-                "●{} ◐{} ○{} ✗{}  ",
-                tally.0, tally.1, tally.2, tally.3
-            ),
+            format!("●{} ◐{} ○{} ✗{}  ", tally.0, tally.1, tally.2, tally.3),
             Style::default().fg(theme.ink_soft).bg(row_bg),
         ),
         Span::styled(touched, Style::default().fg(theme.ink_faint).bg(row_bg)),

@@ -12,7 +12,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 use crate::model::{AgentRole, AppEvent, ReviewVerdict, TokenUsage};
-use crate::theme::{self, agent_badge, spinner_frame, Theme};
+use crate::theme::{self, Theme, agent_badge, spinner_frame};
 use crate::ui::text::truncate_cols;
 use crate::ui::widgets::render_line_gauge;
 
@@ -46,11 +46,7 @@ impl TranslateScreen {
             follow: true,
             scroll: 0,
             last_bottom: 0,
-            agent_lines: [
-                "idle".to_string(),
-                "idle".to_string(),
-                "idle".to_string(),
-            ],
+            agent_lines: ["idle".to_string(), "idle".to_string(), "idle".to_string()],
             active_agent: 1,
             current_chapter: None,
             chapter_title: String::new(),
@@ -83,13 +79,22 @@ impl TranslateScreen {
                 ];
                 self.last_note = format!("chapter {chapter} started");
             }
-            AppEvent::ChapterChunked { chapter, total_chunks, .. } => {
+            AppEvent::ChapterChunked {
+                chapter,
+                total_chunks,
+                ..
+            } => {
                 self.current_chapter = Some(*chapter);
                 self.chunk = (self.chunk.0, *total_chunks);
                 self.agent_lines[0] = format!("chunked into {total_chunks}");
                 self.active_agent = 0;
             }
-            AppEvent::ChunkStarted { chapter, chunk, total, .. } => {
+            AppEvent::ChunkStarted {
+                chapter,
+                chunk,
+                total,
+                ..
+            } => {
                 self.current_chapter = Some(*chapter);
                 self.chunk = (chunk + 1, *total);
             }
@@ -97,7 +102,11 @@ impl TranslateScreen {
                 self.active_agent = 1;
                 self.agent_lines[1] = format!("requesting chunk {} (attempt {attempt})", chunk + 1);
             }
-            AppEvent::TranslatorReturned { thai_preview, tokens, .. } => {
+            AppEvent::TranslatorReturned {
+                thai_preview,
+                tokens,
+                ..
+            } => {
                 self.active_agent = 1;
                 self.agent_lines[1] =
                     format!("returned · {} tok", tokens.completion.max(tokens.total));
@@ -111,7 +120,9 @@ impl TranslateScreen {
                 self.active_agent = 2;
                 self.agent_lines[2] = "reviewing …".to_string();
             }
-            AppEvent::ReviewerReturned { verdict, feedback, .. } => {
+            AppEvent::ReviewerReturned {
+                verdict, feedback, ..
+            } => {
                 self.active_agent = 2;
                 self.agent_lines[2] = match verdict {
                     ReviewVerdict::Approve => "✓ approved".to_string(),
@@ -121,17 +132,31 @@ impl TranslateScreen {
                     }
                 };
             }
-            AppEvent::ChunkRetry { attempt, max, feedback, .. } => {
+            AppEvent::ChunkRetry {
+                attempt,
+                max,
+                feedback,
+                ..
+            } => {
                 self.retries = self.retries.saturating_add(1);
                 self.agent_lines[2] = format!(
                     "retry {attempt}/{max} · {}",
                     truncate_one_line(feedback, 50)
                 );
             }
-            AppEvent::ChunkCommitted { chunk, bytes_written, .. } => {
+            AppEvent::ChunkCommitted {
+                chunk,
+                bytes_written,
+                ..
+            } => {
                 self.last_note = format!("chunk {} committed · {bytes_written} B", chunk + 1);
             }
-            AppEvent::ChunkFailed { chunk, attempts, reason, .. } => {
+            AppEvent::ChunkFailed {
+                chunk,
+                attempts,
+                reason,
+                ..
+            } => {
                 self.agent_lines[2] = format!(
                     "✗ chunk {} failed after {attempts} · {}",
                     chunk + 1,
@@ -247,7 +272,12 @@ impl TranslateScreen {
             .borders(Borders::ALL)
             .border_set(theme::hairline_set())
             .border_style(Style::default().fg(theme.accent))
-            .title(Span::styled(title, Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)))
+            .title(Span::styled(
+                title,
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ))
             .style(Style::default().bg(theme.bg_panel));
         let inner = block.inner(area);
         f.render_widget(block, area);
@@ -277,7 +307,11 @@ impl TranslateScreen {
         let head = Line::from(vec![
             Span::styled(
                 truncate_cols(
-                    if self.chapter_title.is_empty() { "current chapter" } else { &self.chapter_title },
+                    if self.chapter_title.is_empty() {
+                        "current chapter"
+                    } else {
+                        &self.chapter_title
+                    },
                     (inner.width as usize).saturating_sub(28),
                 ),
                 Style::default().fg(theme.ink),
@@ -295,11 +329,19 @@ impl TranslateScreen {
         );
 
         // Chunk LineGauge.
-        let ratio = if total > 0 { cur as f64 / total as f64 } else { 0.0 };
+        let ratio = if total > 0 {
+            cur as f64 / total as f64
+        } else {
+            0.0
+        };
         render_line_gauge(f, parts[1], ratio.clamp(0.0, 1.0), "", theme);
 
         // Three agent lines.
-        let roles = [AgentRole::Orchestrator, AgentRole::Translator, AgentRole::Reviewer];
+        let roles = [
+            AgentRole::Orchestrator,
+            AgentRole::Translator,
+            AgentRole::Reviewer,
+        ];
         let agent_area = parts[2];
         for (i, role) in roles.iter().enumerate() {
             let (badge, color) = agent_badge(*role, theme);
@@ -313,8 +355,15 @@ impl TranslateScreen {
                 break;
             }
             let active = i == self.active_agent;
-            let spin = if active { format!("{} ", spinner_frame(frame)) } else { "  ".to_string() };
-            let body = truncate_cols(&self.agent_lines[i], (line_area.width as usize).saturating_sub(14));
+            let spin = if active {
+                format!("{} ", spinner_frame(frame))
+            } else {
+                "  ".to_string()
+            };
+            let body = truncate_cols(
+                &self.agent_lines[i],
+                (line_area.width as usize).saturating_sub(14),
+            );
             let body_style = if active {
                 Style::default().fg(theme.ink)
             } else {
@@ -345,7 +394,11 @@ impl TranslateScreen {
             Span::styled("   ·   ", Style::default().fg(theme.rule)),
             Span::styled(
                 format!("retries {}", self.retries),
-                Style::default().fg(if self.retries > 0 { theme.status_warn } else { theme.ink_soft }),
+                Style::default().fg(if self.retries > 0 {
+                    theme.status_warn
+                } else {
+                    theme.ink_soft
+                }),
             ),
             Span::styled("   ·   ", Style::default().fg(theme.rule)),
             Span::styled(
@@ -360,7 +413,11 @@ impl TranslateScreen {
     }
 
     fn render_preview(&mut self, f: &mut Frame, area: Rect, theme: &Theme) {
-        let follow_note = if self.follow { "f: following" } else { "f: paused" };
+        let follow_note = if self.follow {
+            "f: following"
+        } else {
+            "f: paused"
+        };
         let block = Block::default()
             .borders(Borders::ALL)
             .border_set(theme::hairline_set())
@@ -429,7 +486,10 @@ impl TranslateScreen {
             };
             f.render_widget(
                 Paragraph::new(Span::styled(
-                    format!(" ✓ {}", truncate_cols(&self.last_note, inner.width.saturating_sub(4) as usize)),
+                    format!(
+                        " ✓ {}",
+                        truncate_cols(&self.last_note, inner.width.saturating_sub(4) as usize)
+                    ),
                     Style::default().fg(theme.status_done),
                 ))
                 .style(Style::default().bg(theme.bg_panel)),

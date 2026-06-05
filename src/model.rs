@@ -119,7 +119,7 @@ pub enum ChunkState {
     Queued,
     Translating,
     Reviewing,
-    Rejected,  // transient: feedback received, about to retry
+    Rejected, // transient: feedback received, about to retry
     Approved,
     Committed, // appended to ch_NNN.md
     Failed,    // exceeded max attempts
@@ -261,13 +261,20 @@ pub struct Character {
     pub id: String,
     pub jp_name: String,
     pub thai_name: String,
-    #[serde(default)] pub romaji: Option<String>,
-    #[serde(default)] pub gender: Option<String>,
-    #[serde(default)] pub honorific: Option<String>,
-    #[serde(default)] pub speech_style: Option<String>,
-    #[serde(default)] pub relationships: Vec<Relationship>,
-    #[serde(default)] pub notes: Option<String>,
-    #[serde(default)] pub first_seen_chapter: Option<u32>,
+    #[serde(default)]
+    pub romaji: Option<String>,
+    #[serde(default)]
+    pub gender: Option<String>,
+    #[serde(default)]
+    pub honorific: Option<String>,
+    #[serde(default)]
+    pub speech_style: Option<String>,
+    #[serde(default)]
+    pub relationships: Vec<Relationship>,
+    #[serde(default)]
+    pub notes: Option<String>,
+    #[serde(default)]
+    pub first_seen_chapter: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -280,27 +287,37 @@ pub struct Relationship {
 pub struct GlossaryTerm {
     pub jp_term: String,
     pub thai_term: String,
-    #[serde(default)] pub romaji: Option<String>,
-    #[serde(default)] pub category: Option<String>,
-    #[serde(default)] pub gloss: Option<String>,
-    #[serde(default)] pub do_not_translate: Option<bool>,
-    #[serde(default)] pub first_seen_chapter: Option<u32>,
+    #[serde(default)]
+    pub romaji: Option<String>,
+    #[serde(default)]
+    pub category: Option<String>,
+    #[serde(default)]
+    pub gloss: Option<String>,
+    #[serde(default)]
+    pub do_not_translate: Option<bool>,
+    #[serde(default)]
+    pub first_seen_chapter: Option<u32>,
 }
 
 /// VOLUME.md honya:data payload.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct VolumeData {
-    #[serde(default)] pub running_recap: String,
+    #[serde(default)]
+    pub running_recap: String,
     /// chapter number (as string key) -> one-line summary.
-    #[serde(default)] pub chapters: BTreeMap<String, String>,
-    #[serde(default)] pub notes: Vec<ContinuityNote>,
+    #[serde(default)]
+    pub chapters: BTreeMap<String, String>,
+    #[serde(default)]
+    pub notes: Vec<ContinuityNote>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContinuityNote {
-    #[serde(default)] pub chapter: Option<u32>,
+    #[serde(default)]
+    pub chapter: Option<u32>,
     pub severity: String, // info|warning|conflict
-    #[serde(default)] pub kind: Option<String>,
+    #[serde(default)]
+    pub kind: Option<String>,
     pub note: String,
 }
 
@@ -315,13 +332,25 @@ pub struct ToolResult {
 
 impl ToolResult {
     pub fn ok(msg: impl Into<String>) -> Self {
-        Self { ok: true, message: msg.into(), data: None }
+        Self {
+            ok: true,
+            message: msg.into(),
+            data: None,
+        }
     }
     pub fn data(msg: impl Into<String>, d: serde_json::Value) -> Self {
-        Self { ok: true, message: msg.into(), data: Some(d) }
+        Self {
+            ok: true,
+            message: msg.into(),
+            data: Some(d),
+        }
     }
     pub fn err(msg: impl Into<String>) -> Self {
-        Self { ok: false, message: msg.into(), data: None }
+        Self {
+            ok: false,
+            message: msg.into(),
+            data: None,
+        }
     }
 }
 
@@ -362,45 +391,146 @@ pub enum AppEvent {
     Tick,
 
     // ---- chapter-level ----
-    ChapterQueued { chapter: u32 },
-    ChapterStarted { chapter: u32 },
-    ChapterChunked { chapter: u32, total_chunks: usize, est_tokens_total: usize },
-    ChapterStateChanged { chapter: u32, state: ChapterStatus },
-    ChapterCompleted { chapter: u32 },
-    ChapterFailed { chapter: u32, reason: String },
+    ChapterQueued {
+        chapter: u32,
+    },
+    ChapterStarted {
+        chapter: u32,
+    },
+    ChapterChunked {
+        chapter: u32,
+        total_chunks: usize,
+        est_tokens_total: usize,
+    },
+    ChapterStateChanged {
+        chapter: u32,
+        state: ChapterStatus,
+    },
+    ChapterCompleted {
+        chapter: u32,
+    },
+    ChapterFailed {
+        chapter: u32,
+        reason: String,
+    },
 
     // ---- chunk-level (inner loop) ----
-    ChunkStarted { chapter: u32, chunk: usize, total: usize, est_tokens: usize },
-    ChunkStateChanged { chapter: u32, chunk: usize, state: ChunkState },
-    TranslatorRequested { chapter: u32, chunk: usize, attempt: u32 },
-    TranslatorReturned { chapter: u32, chunk: usize, attempt: u32, thai_preview: String, tokens: TokenUsage },
-    ReviewerRequested { chapter: u32, chunk: usize, attempt: u32 },
-    ReviewerReturned { chapter: u32, chunk: usize, attempt: u32, verdict: ReviewVerdict, feedback: Option<String> },
-    ChunkRetry { chapter: u32, chunk: usize, attempt: u32, max: u32, feedback: String },
-    ChunkCommitted { chapter: u32, chunk: usize, bytes_written: usize },
-    ChunkFailed { chapter: u32, chunk: usize, attempts: u32, reason: String },
+    ChunkStarted {
+        chapter: u32,
+        chunk: usize,
+        total: usize,
+        est_tokens: usize,
+    },
+    ChunkStateChanged {
+        chapter: u32,
+        chunk: usize,
+        state: ChunkState,
+    },
+    TranslatorRequested {
+        chapter: u32,
+        chunk: usize,
+        attempt: u32,
+    },
+    TranslatorReturned {
+        chapter: u32,
+        chunk: usize,
+        attempt: u32,
+        thai_preview: String,
+        tokens: TokenUsage,
+    },
+    ReviewerRequested {
+        chapter: u32,
+        chunk: usize,
+        attempt: u32,
+    },
+    ReviewerReturned {
+        chapter: u32,
+        chunk: usize,
+        attempt: u32,
+        verdict: ReviewVerdict,
+        feedback: Option<String>,
+    },
+    ChunkRetry {
+        chapter: u32,
+        chunk: usize,
+        attempt: u32,
+        max: u32,
+        feedback: String,
+    },
+    ChunkCommitted {
+        chapter: u32,
+        chunk: usize,
+        bytes_written: usize,
+    },
+    ChunkFailed {
+        chapter: u32,
+        chunk: usize,
+        attempts: u32,
+        reason: String,
+    },
 
     // ---- metadata / tools (Orchestrator mutations) ----
-    ToolInvoked { chapter: u32, tool: String, summary: String },
-    CharacterUpserted { id: String, jp_name: String, thai_name: String },
-    GlossaryUpserted { jp_term: String, thai_term: String },
-    VolumeRecapUpdated { chapter: u32 },
-    ContinuityFlag { chapter: u32, severity: String, kind: String, note: String },
+    ToolInvoked {
+        chapter: u32,
+        tool: String,
+        summary: String,
+    },
+    CharacterUpserted {
+        id: String,
+        jp_name: String,
+        thai_name: String,
+    },
+    GlossaryUpserted {
+        jp_term: String,
+        thai_term: String,
+    },
+    VolumeRecapUpdated {
+        chapter: u32,
+    },
+    ContinuityFlag {
+        chapter: u32,
+        severity: String,
+        kind: String,
+        note: String,
+    },
 
     // ---- streaming preview ----
-    StreamDelta { chapter: u32, chunk: usize, role: AgentRole, delta: String },
-    UsageUpdate { total: TokenUsage, cost_usd: f64 },
+    StreamDelta {
+        chapter: u32,
+        chunk: usize,
+        role: AgentRole,
+        delta: String,
+    },
+    UsageUpdate {
+        total: TokenUsage,
+        cost_usd: f64,
+    },
 
     // ---- run / generic ----
-    Log { level: LogLevel, msg: String },
+    Log {
+        level: LogLevel,
+        msg: String,
+    },
     PipelinePaused,
     PipelineResumed,
-    PipelineFinished { chapters_done: u32, chapters_failed: u32 },
-    Error { context: String, msg: String },
+    PipelineFinished {
+        chapters_done: u32,
+        chapters_failed: u32,
+    },
+    Error {
+        context: String,
+        msg: String,
+    },
 
     // ---- import progress (EPUB preprocessing drives a Gauge) ----
-    ImportProgress { done: usize, total: usize, label: String },
-    ImportFinished { project_id: String },
+    ImportProgress {
+        done: usize,
+        total: usize,
+        label: String,
+    },
+    ImportFinished {
+        project_id: String,
+    },
 }
 
 /// Clonable sender handle background tasks use to talk to the UI.

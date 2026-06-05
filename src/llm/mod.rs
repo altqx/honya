@@ -190,9 +190,7 @@ pub enum ResponseFormat {
     /// `{"type":"json_object"}` — free-form JSON.
     JsonObject,
     /// `{"type":"json_schema","json_schema":{...}}` — strict schema.
-    JsonSchema {
-        json_schema: JsonSchemaSpec,
-    },
+    JsonSchema { json_schema: JsonSchemaSpec },
 }
 
 /// The `json_schema` payload of a strict structured-output request.

@@ -79,7 +79,10 @@ pub fn render_body(data: &VolumeData) -> String {
                     .map(|n| n.to_string())
                     .unwrap_or_else(|| "—".to_string()),
                 cell(&note.severity),
-                note.kind.as_deref().map(cell).unwrap_or_else(|| "—".to_string()),
+                note.kind
+                    .as_deref()
+                    .map(cell)
+                    .unwrap_or_else(|| "—".to_string()),
                 cell(&note.note),
             ));
         }

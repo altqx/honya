@@ -193,8 +193,20 @@ mod tests {
         ];
 
         let reloc = relocate_images(&manifest, &work, &images, "images").unwrap();
-        assert_eq!(reloc.by_resolved_path.get("OEBPS/Images/a.png").map(|s| s.as_str()), Some("a.png"));
-        assert_eq!(reloc.by_resolved_path.get("OEBPS/Extra/a.png").map(|s| s.as_str()), Some("a_1.png"));
+        assert_eq!(
+            reloc
+                .by_resolved_path
+                .get("OEBPS/Images/a.png")
+                .map(|s| s.as_str()),
+            Some("a.png")
+        );
+        assert_eq!(
+            reloc
+                .by_resolved_path
+                .get("OEBPS/Extra/a.png")
+                .map(|s| s.as_str()),
+            Some("a_1.png")
+        );
         assert!(images.join("a.png").exists());
         assert!(images.join("a_1.png").exists());
         assert_eq!(reloc.written.len(), 2);

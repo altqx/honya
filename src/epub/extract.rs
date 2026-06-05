@@ -12,7 +12,7 @@ use std::path::Path;
 use zip::ZipArchive;
 
 use super::paths::percent_decode;
-use super::{ns, EpubError, Result};
+use super::{EpubError, Result, ns};
 
 /// Open an EPUB file as a zip archive.
 pub fn open_archive(epub_path: &Path) -> Result<ZipArchive<File>> {

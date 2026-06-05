@@ -12,12 +12,10 @@
 
 use std::path::{Path, PathBuf};
 
-use super::extract::{
-    extract_all, locate_opf_from_dir, open_archive, read_entry_to_string,
-};
-use super::media::{relocate_images, MediaRelocation};
-use super::opf::{parse_opf, ParsedOpf};
-use super::toc::{parse_ncx, parse_nav_xhtml};
+use super::extract::{extract_all, locate_opf_from_dir, open_archive, read_entry_to_string};
+use super::media::{MediaRelocation, relocate_images};
+use super::opf::{ParsedOpf, parse_opf};
+use super::toc::{parse_nav_xhtml, parse_ncx};
 use super::{EpubBook, Result, TocEntry};
 
 /// Import an EPUB into `work_dir`, returning the parsed book (no media relocation).
@@ -147,7 +145,10 @@ impl EpubBook {
     /// Reading order = the spine, in order. Returns archive-relative resolved
     /// paths. Spine-authoritative (does not re-derive from the manifest or TOC).
     pub fn reading_order_paths(&self) -> Vec<&str> {
-        self.spine.iter().map(|s| s.resolved_path.as_str()).collect()
+        self.spine
+            .iter()
+            .map(|s| s.resolved_path.as_str())
+            .collect()
     }
 
     /// Map an archive-relative '/'-separated path to its on-disk location under

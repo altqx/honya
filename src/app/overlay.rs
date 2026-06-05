@@ -49,7 +49,14 @@ impl ImportState {
             .and_then(|s| s.to_str())
             .map(prettify_stem)
             .unwrap_or_default();
-        Self { step: 0, epubs, sel: 0, name, vol: 1, progress: None }
+        Self {
+            step: 0,
+            epubs,
+            sel: 0,
+            name,
+            vol: 1,
+            progress: None,
+        }
     }
 
     fn selected_epub(&self) -> Option<&PathBuf> {
@@ -108,17 +115,48 @@ pub struct PaletteItem {
 impl PaletteState {
     fn new() -> Self {
         let items = vec![
-            PaletteItem { label: "Go: Shelf 書架", action: Action::Goto(Screen::Shelf) },
-            PaletteItem { label: "Go: Project 棚", action: Action::Goto(Screen::Project) },
-            PaletteItem { label: "Go: Translate 訳", action: Action::Goto(Screen::Translate) },
-            PaletteItem { label: "Go: Reader 読", action: Action::Goto(Screen::Reader) },
-            PaletteItem { label: "Go: Lexicon 辞", action: Action::Goto(Screen::Lexicon) },
-            PaletteItem { label: "Settings", action: Action::show_overlay(Overlay::settings_placeholder()) },
-            PaletteItem { label: "Help", action: Action::show_overlay(Overlay::Help(0)) },
-            PaletteItem { label: "Activity log", action: Action::show_overlay(Overlay::Log(0)) },
-            PaletteItem { label: "Quit", action: Action::Quit },
+            PaletteItem {
+                label: "Go: Shelf 書架",
+                action: Action::Goto(Screen::Shelf),
+            },
+            PaletteItem {
+                label: "Go: Project 棚",
+                action: Action::Goto(Screen::Project),
+            },
+            PaletteItem {
+                label: "Go: Translate 訳",
+                action: Action::Goto(Screen::Translate),
+            },
+            PaletteItem {
+                label: "Go: Reader 読",
+                action: Action::Goto(Screen::Reader),
+            },
+            PaletteItem {
+                label: "Go: Lexicon 辞",
+                action: Action::Goto(Screen::Lexicon),
+            },
+            PaletteItem {
+                label: "Settings",
+                action: Action::show_overlay(Overlay::settings_placeholder()),
+            },
+            PaletteItem {
+                label: "Help",
+                action: Action::show_overlay(Overlay::Help(0)),
+            },
+            PaletteItem {
+                label: "Activity log",
+                action: Action::show_overlay(Overlay::Log(0)),
+            },
+            PaletteItem {
+                label: "Quit",
+                action: Action::Quit,
+            },
         ];
-        Self { query: String::new(), items, sel: 0 }
+        Self {
+            query: String::new(),
+            items,
+            sel: 0,
+        }
     }
 
     /// Indices of items matching the current (case-insensitive substring) query.
@@ -177,7 +215,11 @@ impl Overlay {
     }
 
     pub fn confirm(title: impl Into<String>, body: impl Into<String>, confirm: Action) -> Self {
-        Overlay::Modal(Dialog { title: title.into(), body: body.into(), confirm })
+        Overlay::Modal(Dialog {
+            title: title.into(),
+            body: body.into(),
+            confirm,
+        })
     }
 
     /// A settings overlay built from defaults — used by the palette which has no
@@ -251,7 +293,9 @@ impl Overlay {
     }
 
     fn handle_import_key(&mut self, key: KeyEvent) -> Action {
-        let Overlay::Import(st) = self else { return Action::None };
+        let Overlay::Import(st) = self else {
+            return Action::None;
+        };
         match st.step {
             // ---- step 0: pick epub ----
             0 => match key.code {
@@ -274,8 +318,10 @@ impl Overlay {
                     } else {
                         // Refresh the name default from the chosen file.
                         if st.name.trim().is_empty() {
-                            if let Some(stem) =
-                                st.selected_epub().and_then(|p| p.file_stem()).and_then(|s| s.to_str())
+                            if let Some(stem) = st
+                                .selected_epub()
+                                .and_then(|p| p.file_stem())
+                                .and_then(|s| s.to_str())
                             {
                                 st.name = prettify_stem(stem);
                             }
@@ -327,7 +373,9 @@ impl Overlay {
                 KeyCode::Char(d @ '0'..='9') => {
                     // Type a number directly.
                     let digit = d as u32 - '0' as u32;
-                    st.vol = (st.vol.saturating_mul(10).saturating_add(digit)).min(999).max(1);
+                    st.vol = (st.vol.saturating_mul(10).saturating_add(digit))
+                        .min(999)
+                        .max(1);
                     Action::None
                 }
                 KeyCode::Backspace => {
@@ -353,7 +401,9 @@ impl Overlay {
     }
 
     fn handle_settings_key(&mut self, key: KeyEvent) -> Action {
-        let Overlay::Settings(st) = self else { return Action::None };
+        let Overlay::Settings(st) = self else {
+            return Action::None;
+        };
         match key.code {
             KeyCode::Esc => Action::CloseOverlay,
             KeyCode::Enter => Action::SaveSettings {
@@ -383,7 +433,9 @@ impl Overlay {
     }
 
     fn handle_palette_key(&mut self, key: KeyEvent) -> Action {
-        let Overlay::Palette(st) = self else { return Action::None };
+        let Overlay::Palette(st) = self else {
+            return Action::None;
+        };
         match key.code {
             KeyCode::Esc => Action::CloseOverlay,
             KeyCode::Up => {
@@ -449,7 +501,12 @@ impl Overlay {
                 _ => &[("Esc", "close")],
             },
             Overlay::Settings(_) => &[("Tab", "field"), ("type", "edit"), ("Esc/↵", "close")],
-            Overlay::Palette(_) => &[("type", "filter"), ("↑↓", "move"), ("↵", "run"), ("Esc", "close")],
+            Overlay::Palette(_) => &[
+                ("type", "filter"),
+                ("↑↓", "move"),
+                ("↵", "run"),
+                ("Esc", "close"),
+            ],
             Overlay::Log(_) => &[("jk", "scroll"), ("Esc/l", "close")],
             Overlay::Help(_) => &[("jk", "scroll"), ("Esc/?", "close")],
             Overlay::Modal(_) => &[("y", "confirm"), ("n/Esc", "cancel")],
@@ -486,7 +543,9 @@ impl Overlay {
             .border_style(Style::default().fg(theme.accent))
             .title(Span::styled(
                 format!(" {title} "),
-                Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
             ))
             .style(Style::default().bg(theme.bg_panel))
     }
@@ -536,7 +595,11 @@ impl Overlay {
         for (i, p) in st.epubs.iter().enumerate() {
             let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("?");
             let selected = i == st.sel;
-            let bar = if selected { theme::SELECT_BAR.to_string() } else { " ".to_string() };
+            let bar = if selected {
+                theme::SELECT_BAR.to_string()
+            } else {
+                " ".to_string()
+            };
             let style = if selected {
                 Style::default().fg(theme.ink).bg(theme.accent_bg)
             } else {
@@ -544,7 +607,10 @@ impl Overlay {
             };
             lines.push(Line::from(vec![
                 Span::styled(format!(" {bar} "), Style::default().fg(theme.accent)),
-                Span::styled(truncate_cols(name, area.width.saturating_sub(6) as usize), style),
+                Span::styled(
+                    truncate_cols(name, area.width.saturating_sub(6) as usize),
+                    style,
+                ),
             ]));
         }
         f.render_widget(
@@ -624,7 +690,9 @@ impl Overlay {
                 Span::styled("  Volume   ", Style::default().fg(theme.ink_soft)),
                 Span::styled(
                     format!("Vol.{:02}", st.vol),
-                    Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
                 ),
             ]),
             Line::raw(""),
@@ -704,10 +772,16 @@ impl Overlay {
         let key_state = if st.api_key_present {
             Span::styled("● present", Style::default().fg(theme.status_done))
         } else {
-            Span::styled("○ missing (MockClient active)", Style::default().fg(theme.status_warn))
+            Span::styled(
+                "○ missing (MockClient active)",
+                Style::default().fg(theme.status_warn),
+            )
         };
         lines.push(Line::from(vec![
-            Span::styled("   API key             ", Style::default().fg(theme.ink_faint)),
+            Span::styled(
+                "   API key             ",
+                Style::default().fg(theme.ink_faint),
+            ),
             key_state,
         ]));
         lines.push(Line::raw(""));
@@ -748,7 +822,11 @@ impl Overlay {
         let mut lines = Vec::new();
         for (row, &idx) in matches.iter().enumerate() {
             let selected = row == st.sel;
-            let bar = if selected { theme::SELECT_BAR.to_string() } else { " ".to_string() };
+            let bar = if selected {
+                theme::SELECT_BAR.to_string()
+            } else {
+                " ".to_string()
+            };
             let style = if selected {
                 Style::default().fg(theme.ink).bg(theme.accent_bg)
             } else {
@@ -890,7 +968,9 @@ impl Overlay {
         for (section, keys) in groups {
             lines.push(Line::from(Span::styled(
                 format!(" {section}"),
-                Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
             )));
             for (k, desc) in *keys {
                 lines.push(Line::from(vec![

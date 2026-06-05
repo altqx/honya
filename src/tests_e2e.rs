@@ -10,8 +10,8 @@ use ratatui::backend::TestBackend;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::app::App;
-use crate::app::overlay::{ImportState, Overlay};
 use crate::app::Screen;
+use crate::app::overlay::{ImportState, Overlay};
 use crate::model::{AppConfig, EventTx, ModelSet};
 
 fn fresh_app() -> App {
@@ -134,7 +134,10 @@ fn build_sample_epub(path: &std::path::Path) {
   <rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles>
 </container>"#);
 
-    add(&mut zip, "OEBPS/content.opf", r#"<?xml version="1.0" encoding="utf-8"?>
+    add(
+        &mut zip,
+        "OEBPS/content.opf",
+        r#"<?xml version="1.0" encoding="utf-8"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="bookid">
   <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
     <dc:title>Test Novel</dc:title>
@@ -148,25 +151,36 @@ fn build_sample_epub(path: &std::path::Path) {
   <spine>
     <itemref idref="ch1"/>
   </spine>
-</package>"#.as_bytes());
+</package>"#
+            .as_bytes(),
+    );
 
-    add(&mut zip, "OEBPS/ch1.xhtml", r#"<?xml version="1.0" encoding="utf-8"?>
+    add(
+        &mut zip,
+        "OEBPS/ch1.xhtml",
+        r#"<?xml version="1.0" encoding="utf-8"?>
 <html xmlns="http://www.w3.org/1999/xhtml"><head><title>第一章</title></head>
 <body>
 <p>これは<ruby>漢字<rt>かんじ</rt></ruby>のテストです。</p>
 <p><b>太字</b>と<i>斜体</i>。</p>
 <p>「こんにちは」と彼は言った。</p>
 <p><img src="images/pic.png" alt="x"/></p>
-</body></html>"#.as_bytes());
+</body></html>"#
+            .as_bytes(),
+    );
 
-    add(&mut zip, "OEBPS/images/pic.png", b"\x89PNG\r\n\x1a\n\x00\x00\x00\x00fake-png-bytes");
+    add(
+        &mut zip,
+        "OEBPS/images/pic.png",
+        b"\x89PNG\r\n\x1a\n\x00\x00\x00\x00fake-png-bytes",
+    );
 
     zip.finish().unwrap();
 }
 
 #[tokio::test]
 async fn end_to_end_import_and_mock_translate() {
-    use crate::agents::pipeline::{run_pipeline, PipelineCtx, RunControl};
+    use crate::agents::pipeline::{PipelineCtx, RunControl, run_pipeline};
     use crate::llm::mock::MockClient;
     use crate::workspace::Workspace;
 
@@ -189,8 +203,13 @@ async fn end_to_end_import_and_mock_translate() {
     assert_eq!(order.len(), 1, "one spine content doc");
 
     // 2. Scaffold the project tree.
-    crate::workspace::scaffold::create_project(&project_root, "Test Novel", &ModelSet::default(), 1)
-        .expect("create_project");
+    crate::workspace::scaffold::create_project(
+        &project_root,
+        "Test Novel",
+        &ModelSet::default(),
+        1,
+    )
+    .expect("create_project");
     let ws = Workspace::new(project_root.clone(), 1);
 
     // 3. Cleanse each chapter → raw/ch_001.md.
@@ -207,8 +226,14 @@ async fn end_to_end_import_and_mock_translate() {
     // Cleanse-rule spot checks on the real pipeline output.
     assert!(md.contains("漢字 (かんじ)"), "ruby merged: {md}");
     assert!(md.contains("**太字**"), "bold converted: {md}");
-    assert!(md.contains('“') && md.contains('”'), "JP quotes → Thai quotes: {md}");
-    assert!(md.contains("![ภาพประกอบ](../../images/pic.png)"), "image link: {md}");
+    assert!(
+        md.contains('“') && md.contains('”'),
+        "JP quotes → Thai quotes: {md}"
+    );
+    assert!(
+        md.contains("![ภาพประกอบ](../../images/pic.png)"),
+        "image link: {md}"
+    );
 
     crate::workspace::translation::write_raw(&ws, 1, &md).unwrap();
 
@@ -228,10 +253,7 @@ async fn end_to_end_import_and_mock_translate() {
     let translated = project_root.join("Vol_01/translated/ch_001.md");
     let out = std::fs::read_to_string(&translated).expect("translated file written");
     assert!(out.contains("honya:chunk"), "chunk marker present: {out}");
-    assert!(
-        out.contains("ข้อความแปลจำลอง"),
-        "mock Thai appended: {out}"
-    );
+    assert!(out.contains("ข้อความแปลจำลอง"), "mock Thai appended: {out}");
 
     let _ = std::fs::remove_dir_all(&base);
 }

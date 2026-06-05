@@ -89,14 +89,17 @@ pub fn build_orchestrator_metadata_msg(chapter: u32, out: &TranslatorOut) -> Str
         "Chapter {chapter} — a chunk was just approved and appended. Persist any new metadata it surfaced using your tools.\n",
     ));
 
-    if out.new_characters.is_empty() && out.new_terms.is_empty() && out.continuity_notes.is_empty() {
+    if out.new_characters.is_empty() && out.new_terms.is_empty() && out.continuity_notes.is_empty()
+    {
         s.push_str("\nThe translator reported no new characters, terms, or continuity notes for this chunk. ");
         s.push_str("If nothing else needs recording, you may stop without calling any tools.\n");
         return s;
     }
 
     if !out.new_characters.is_empty() {
-        s.push_str("\nNew characters (call upsert_character for each that is genuinely new or changed):\n");
+        s.push_str(
+            "\nNew characters (call upsert_character for each that is genuinely new or changed):\n",
+        );
         for c in &out.new_characters {
             s.push_str(&format!(
                 "- jp_name: {} | thai_name: {} | gender: {} | notes: {}\n",

@@ -62,10 +62,24 @@ impl EditForm {
         Self {
             kind: SUB_CHARACTERS,
             fields: vec![
-                ("JP name", c.as_ref().map(|x| x.jp_name.clone()).unwrap_or_default()),
-                ("Thai name", c.as_ref().map(|x| x.thai_name.clone()).unwrap_or_default()),
-                ("Gender", c.as_ref().and_then(|x| x.gender.clone()).unwrap_or_default()),
-                ("Notes", c.as_ref().and_then(|x| x.notes.clone()).unwrap_or_default()),
+                (
+                    "JP name",
+                    c.as_ref().map(|x| x.jp_name.clone()).unwrap_or_default(),
+                ),
+                (
+                    "Thai name",
+                    c.as_ref().map(|x| x.thai_name.clone()).unwrap_or_default(),
+                ),
+                (
+                    "Gender",
+                    c.as_ref()
+                        .and_then(|x| x.gender.clone())
+                        .unwrap_or_default(),
+                ),
+                (
+                    "Notes",
+                    c.as_ref().and_then(|x| x.notes.clone()).unwrap_or_default(),
+                ),
             ],
             field: 0,
             is_new: seed.is_none(),
@@ -160,7 +174,11 @@ impl LexiconScreen {
                 .filter(|t| {
                     t.jp_term.to_lowercase().contains(&q)
                         || t.thai_term.to_lowercase().contains(&q)
-                        || t.category.as_deref().unwrap_or("").to_lowercase().contains(&q)
+                        || t.category
+                            .as_deref()
+                            .unwrap_or("")
+                            .to_lowercase()
+                            .contains(&q)
                 })
                 .collect()
         }
@@ -174,8 +192,7 @@ impl LexiconScreen {
             let q = self.filter.to_lowercase();
             all.into_iter()
                 .filter(|c| {
-                    c.jp_name.to_lowercase().contains(&q)
-                        || c.thai_name.to_lowercase().contains(&q)
+                    c.jp_name.to_lowercase().contains(&q) || c.thai_name.to_lowercase().contains(&q)
                 })
                 .collect()
         }
@@ -253,7 +270,9 @@ impl LexiconScreen {
     }
 
     fn handle_edit_key(&mut self, key: KeyEvent, ws: Option<&Workspace>) -> Action {
-        let Some(form) = self.editing.as_mut() else { return Action::None };
+        let Some(form) = self.editing.as_mut() else {
+            return Action::None;
+        };
         match key.code {
             KeyCode::Esc => {
                 self.editing = None;
@@ -289,7 +308,9 @@ impl LexiconScreen {
     }
 
     fn commit_edit(&mut self, ws: Option<&Workspace>) -> Action {
-        let Some(form) = self.editing.take() else { return Action::None };
+        let Some(form) = self.editing.take() else {
+            return Action::None;
+        };
         let Some(ws) = ws else { return Action::None };
         let result = match form.kind {
             SUB_CHARACTERS => crate::workspace::characters::upsert(ws, form.to_character()),
@@ -351,7 +372,9 @@ impl LexiconScreen {
             _ => self.glossary(ws).get(idx).map(|t| {
                 (
                     format!("{} → {}", t.jp_term, t.thai_term),
-                    Action::DeleteGlossary { jp_term: t.jp_term.clone() },
+                    Action::DeleteGlossary {
+                        jp_term: t.jp_term.clone(),
+                    },
                 )
             }),
         };
@@ -395,16 +418,25 @@ impl LexiconScreen {
     }
 
     fn render_header(&self, f: &mut Frame, area: Rect, ws: Option<&Workspace>, theme: &Theme) {
-        let tabs = [("Glossary", SUB_GLOSSARY), ("Characters", SUB_CHARACTERS), ("Style", SUB_STYLE)];
+        let tabs = [
+            ("Glossary", SUB_GLOSSARY),
+            ("Characters", SUB_CHARACTERS),
+            ("Style", SUB_STYLE),
+        ];
         let mut spans = vec![Span::raw("  ")];
         for (label, id) in tabs {
             if id == self.sub {
                 spans.push(Span::styled(
                     format!("〔 {label} 〕"),
-                    Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
                 ));
             } else {
-                spans.push(Span::styled(format!("  {label}  "), Style::default().fg(theme.ink_faint)));
+                spans.push(Span::styled(
+                    format!("  {label}  "),
+                    Style::default().fg(theme.ink_faint),
+                ));
             }
             spans.push(Span::raw(" "));
         }
@@ -415,7 +447,11 @@ impl LexiconScreen {
             _ => "—".to_string(),
         };
         let filter_str = if self.searching || !self.filter.is_empty() {
-            format!("/ filter: {}{}   ", self.filter, if self.searching { "▏" } else { "" })
+            format!(
+                "/ filter: {}{}   ",
+                self.filter,
+                if self.searching { "▏" } else { "" }
+            )
         } else {
             String::new()
         };
@@ -430,7 +466,12 @@ impl LexiconScreen {
             f.render_widget(
                 Paragraph::new(Span::styled(right, Style::default().fg(theme.ink_faint)))
                     .style(Style::default().bg(theme.bg)),
-                Rect { x: area.x + area.width - rw - 1, y: area.y, width: rw, height: 1 },
+                Rect {
+                    x: area.x + area.width - rw - 1,
+                    y: area.y,
+                    width: rw,
+                    height: 1,
+                },
             );
         }
     }
@@ -487,19 +528,36 @@ impl LexiconScreen {
         for (i, t) in terms.iter().enumerate() {
             let selected = i == sel;
             let bar = if selected { theme::SELECT_BAR } else { ' ' };
-            let bg = if selected { theme.accent_bg } else { theme.bg_panel };
-            let dnt = if t.do_not_translate.unwrap_or(false) { "✓" } else { "·" };
+            let bg = if selected {
+                theme.accent_bg
+            } else {
+                theme.bg_panel
+            };
+            let dnt = if t.do_not_translate.unwrap_or(false) {
+                "✓"
+            } else {
+                "·"
+            };
             items.push(ListItem::new(Line::from(vec![
                 Span::styled(format!(" {bar} "), Style::default().fg(theme.accent).bg(bg)),
-                Span::styled(pad_to_cols(&t.jp_term, 12), Style::default().fg(theme.ink).bg(bg)),
+                Span::styled(
+                    pad_to_cols(&t.jp_term, 12),
+                    Style::default().fg(theme.ink).bg(bg),
+                ),
                 Span::styled(" ", Style::default().bg(bg)),
-                Span::styled(pad_to_cols(&t.thai_term, 16), Style::default().fg(theme.th_text).bg(bg)),
+                Span::styled(
+                    pad_to_cols(&t.thai_term, 16),
+                    Style::default().fg(theme.th_text).bg(bg),
+                ),
                 Span::styled(" ", Style::default().bg(bg)),
                 Span::styled(
                     pad_to_cols(t.category.as_deref().unwrap_or("—"), 8),
                     Style::default().fg(theme.ink_soft).bg(bg),
                 ),
-                Span::styled(format!(" {dnt}   "), Style::default().fg(theme.ink_faint).bg(bg)),
+                Span::styled(
+                    format!(" {dnt}   "),
+                    Style::default().fg(theme.ink_faint).bg(bg),
+                ),
                 Span::styled(
                     truncate_cols(t.gloss.as_deref().unwrap_or(""), gloss_w),
                     Style::default().fg(theme.ink_soft).bg(bg),
@@ -518,7 +576,13 @@ impl LexiconScreen {
         );
     }
 
-    fn render_characters_table(&mut self, f: &mut Frame, area: Rect, ws: &Workspace, theme: &Theme) {
+    fn render_characters_table(
+        &mut self,
+        f: &mut Frame,
+        area: Rect,
+        ws: &Workspace,
+        theme: &Theme,
+    ) {
         let chars = self.characters(ws);
         if self.list.selected().map_or(true, |s| s >= chars.len()) {
             self.list.select(Some(chars.len().saturating_sub(1)));
@@ -539,12 +603,22 @@ impl LexiconScreen {
         for (i, c) in chars.iter().enumerate() {
             let selected = i == sel;
             let bar = if selected { theme::SELECT_BAR } else { ' ' };
-            let bg = if selected { theme.accent_bg } else { theme.bg_panel };
+            let bg = if selected {
+                theme.accent_bg
+            } else {
+                theme.bg_panel
+            };
             items.push(ListItem::new(Line::from(vec![
                 Span::styled(format!(" {bar} "), Style::default().fg(theme.accent).bg(bg)),
-                Span::styled(pad_to_cols(&c.jp_name, 14), Style::default().fg(theme.ink).bg(bg)),
+                Span::styled(
+                    pad_to_cols(&c.jp_name, 14),
+                    Style::default().fg(theme.ink).bg(bg),
+                ),
                 Span::styled(" ", Style::default().bg(bg)),
-                Span::styled(pad_to_cols(&c.thai_name, 16), Style::default().fg(theme.th_text).bg(bg)),
+                Span::styled(
+                    pad_to_cols(&c.thai_name, 16),
+                    Style::default().fg(theme.th_text).bg(bg),
+                ),
                 Span::styled(" ", Style::default().bg(bg)),
                 Span::styled(
                     pad_to_cols(c.gender.as_deref().unwrap_or("—"), 8),
@@ -589,17 +663,25 @@ impl LexiconScreen {
     }
 
     fn render_edit(&self, f: &mut Frame, area: Rect, theme: &Theme) {
-        let Some(form) = self.editing.as_ref() else { return };
+        let Some(form) = self.editing.as_ref() else {
+            return;
+        };
         let modal = crate::ui::layout::centered_modal(60, (form.fields.len() as u16) * 2 + 6, area);
         f.render_widget(ratatui::widgets::Clear, modal);
-        let title = if form.is_new { "New entry" } else { "Edit entry" };
+        let title = if form.is_new {
+            "New entry"
+        } else {
+            "Edit entry"
+        };
         let block = Block::default()
             .borders(Borders::ALL)
             .border_set(theme::hairline_set())
             .border_style(Style::default().fg(theme.accent))
             .title(Span::styled(
                 format!(" {title} "),
-                Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
             ))
             .style(Style::default().bg(theme.bg_panel));
         let inner = block.inner(modal);
@@ -665,7 +747,11 @@ impl Default for LexiconScreen {
 
 fn opt(s: String) -> Option<String> {
     let t = s.trim();
-    if t.is_empty() { None } else { Some(t.to_string()) }
+    if t.is_empty() {
+        None
+    } else {
+        Some(t.to_string())
+    }
 }
 
 /// A stable id derived from a JP name (mirrors the workspace's slugify-jp rule:

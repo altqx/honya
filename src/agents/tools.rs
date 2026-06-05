@@ -22,7 +22,7 @@ use crate::llm::tool_loop::ToolExecutor;
 use crate::model::{
     AppEvent, Character, ContinuityNote, EventTx, GlossaryTerm, Relationship, ToolResult,
 };
-use crate::workspace::{characters, glossary, translation, volume, Workspace};
+use crate::workspace::{Workspace, characters, glossary, translation, volume};
 
 /// The full `tools` array advertised to the Orchestrator. Each entry is an
 /// OpenAI-style `{"type":"function","function":{name,description,parameters}}`
@@ -334,7 +334,9 @@ pub async fn dispatch_tool(
         "upsert_glossary_term" => {
             let a: UpsertGlossaryArgs = match serde_json::from_str(args_json) {
                 Ok(a) => a,
-                Err(e) => return ToolResult::err(format!("invalid upsert_glossary_term args: {e}")),
+                Err(e) => {
+                    return ToolResult::err(format!("invalid upsert_glossary_term args: {e}"));
+                }
             };
             let term = GlossaryTerm {
                 jp_term: a.jp_term.clone(),
@@ -419,7 +421,9 @@ pub async fn dispatch_tool(
         "flag_continuity_note" => {
             let a: FlagNoteArgs = match serde_json::from_str(args_json) {
                 Ok(a) => a,
-                Err(e) => return ToolResult::err(format!("invalid flag_continuity_note args: {e}")),
+                Err(e) => {
+                    return ToolResult::err(format!("invalid flag_continuity_note args: {e}"));
+                }
             };
             let note = ContinuityNote {
                 chapter: a.chapter.or(Some(chapter)),
@@ -459,7 +463,10 @@ pub async fn dispatch_tool(
                 summary: format!("read {} glossary term(s)", terms.len()),
             });
             let data = serde_json::to_value(&terms).unwrap_or(serde_json::Value::Null);
-            ToolResult::data(format!("Found {} glossary term(s)", terms.len()), json!({ "terms": data }))
+            ToolResult::data(
+                format!("Found {} glossary term(s)", terms.len()),
+                json!({ "terms": data }),
+            )
         }
 
         "get_character" => {
@@ -474,7 +481,10 @@ pub async fn dispatch_tool(
                 summary: format!("read {} character(s)", chars.len()),
             });
             let data = serde_json::to_value(&chars).unwrap_or(serde_json::Value::Null);
-            ToolResult::data(format!("Found {} character(s)", chars.len()), json!({ "characters": data }))
+            ToolResult::data(
+                format!("Found {} character(s)", chars.len()),
+                json!({ "characters": data }),
+            )
         }
 
         other => ToolResult::err(format!("unknown tool: {other}")),
@@ -495,7 +505,12 @@ pub struct WorkspaceTools {
 impl WorkspaceTools {
     /// Build a tool executor for `chapter` in the given project root + volume.
     pub fn new(root: PathBuf, vol_number: u32, tx: EventTx, chapter: u32) -> Self {
-        Self { root, vol_number, tx, chapter }
+        Self {
+            root,
+            vol_number,
+            tx,
+            chapter,
+        }
     }
 
     fn workspace(&self) -> Workspace {

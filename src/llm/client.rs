@@ -162,20 +162,27 @@ impl OpenRouterClient {
         if status == StatusCode::TOO_MANY_REQUESTS {
             let retry_after = parse_retry_after(&resp);
             let message = resp.text().await.unwrap_or_default();
-            return Err(LlmError::RateLimited { retry_after, message });
+            return Err(LlmError::RateLimited {
+                retry_after,
+                message,
+            });
         }
 
         if !status.is_success() {
             let message = resp.text().await.unwrap_or_default();
-            return Err(LlmError::Api { status: status.as_u16(), message });
+            return Err(LlmError::Api {
+                status: status.as_u16(),
+                message,
+            });
         }
 
         let raw = resp.text().await?;
-        let parsed: ChatResponse = serde_json::from_str(&raw).map_err(|source| LlmError::Parse {
-            target: "ChatResponse",
-            source,
-            raw,
-        })?;
+        let parsed: ChatResponse =
+            serde_json::from_str(&raw).map_err(|source| LlmError::Parse {
+                target: "ChatResponse",
+                source,
+                raw,
+            })?;
 
         if parsed.choices.is_empty() {
             return Err(LlmError::EmptyChoices);

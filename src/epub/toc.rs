@@ -6,7 +6,7 @@ use roxmltree::Node;
 
 use super::opf::element_text;
 use super::paths::{dir_of, resolve_href, split_fragment};
-use super::{ns, EpubError, Result, TocEntry};
+use super::{EpubError, Result, TocEntry, ns};
 
 /// Parse an EPUB2 NCX. `ncx_path` is the archive-relative path of the NCX file
 /// (used to resolve `content/@src` hrefs against the NCX's directory).
@@ -85,7 +85,10 @@ pub fn parse_nav_xhtml(nav_xml: &str, nav_path: &str) -> Result<Vec<TocEntry>> {
     let base_dir = dir_of(nav_path);
 
     // Collect every <nav>; pick the toc-typed one if present, else the first.
-    let navs: Vec<Node> = doc.descendants().filter(|n| is_xhtml_elem(n, "nav")).collect();
+    let navs: Vec<Node> = doc
+        .descendants()
+        .filter(|n| is_xhtml_elem(n, "nav"))
+        .collect();
 
     let toc_nav = navs
         .iter()

@@ -6,7 +6,7 @@
 //! `chat_structured::<ReviewerOut>` with the strict reviewer schema at
 //! temperature 0.0 with 2 parse retries.
 
-use crate::agents::prompts::{build_reviewer_user, REVIEWER_SYSTEM};
+use crate::agents::prompts::{REVIEWER_SYSTEM, build_reviewer_user};
 use crate::llm::client::{LlmClient, Result};
 use crate::llm::structured::{chat_structured, reviewer_schema};
 use crate::llm::{ChatRequest, Message, Usage};

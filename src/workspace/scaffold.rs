@@ -215,7 +215,9 @@ struct EmptyCharacters {
 }
 impl Default for EmptyCharacters {
     fn default() -> Self {
-        Self { characters: Vec::new() }
+        Self {
+            characters: Vec::new(),
+        }
     }
 }
 

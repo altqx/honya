@@ -25,7 +25,10 @@ pub fn render_spinner(f: &mut Frame, area: Rect, frame: u64, label: &str, theme:
         Span::raw(" "),
         Span::styled(label.to_string(), Style::default().fg(theme.ink_soft)),
     ]);
-    f.render_widget(Paragraph::new(line).style(Style::default().bg(theme.bg)), area);
+    f.render_widget(
+        Paragraph::new(line).style(Style::default().bg(theme.bg)),
+        area,
+    );
 }
 
 /// Render a block-style [`Gauge`] for `done`/`total`, labeled `done/total NN%`.
@@ -45,11 +48,7 @@ pub fn render_gauge(f: &mut Frame, area: Rect, done: usize, total: usize, theme:
         .ratio(ratio)
         .label(Span::styled(label, Style::default().fg(theme.ink)))
         .use_unicode(true)
-        .gauge_style(
-            Style::default()
-                .fg(theme.accent_soft)
-                .bg(theme.bg_inset),
-        )
+        .gauge_style(Style::default().fg(theme.accent_soft).bg(theme.bg_inset))
         .style(Style::default().bg(theme.bg));
     f.render_widget(gauge, area);
 }

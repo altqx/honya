@@ -39,11 +39,7 @@ pub async fn run_tool_loop(
         let resp = client.chat(&req).await?;
 
         let choice = resp.choices.first().ok_or(LlmError::EmptyChoices)?;
-        let tool_calls: Vec<ToolCall> = choice
-            .message
-            .tool_calls
-            .clone()
-            .unwrap_or_default();
+        let tool_calls: Vec<ToolCall> = choice.message.tool_calls.clone().unwrap_or_default();
 
         // No tool calls → the model is done; return the final response.
         if tool_calls.is_empty() {
@@ -76,7 +72,8 @@ pub async fn run_tool_loop(
                 .to_string(),
             };
 
-            req.messages.push(Message::tool_result(call.id.clone(), result));
+            req.messages
+                .push(Message::tool_result(call.id.clone(), result));
         }
     }
 

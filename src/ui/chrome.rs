@@ -100,9 +100,7 @@ pub fn render_header(f: &mut Frame, area: Rect, crumb: &str, tally: &StatusTally
     let mut spans: Vec<Span> = Vec::with_capacity(right.len() + 2);
     spans.push(Span::styled(
         format!(" {crumb_trunc}"),
-        Style::default()
-            .fg(theme.ink)
-            .add_modifier(Modifier::BOLD),
+        Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
     ));
     // Filler gap to push the tally to the right edge.
     let gap = total_cols.saturating_sub(crumb_cols + 1 + right_cols);

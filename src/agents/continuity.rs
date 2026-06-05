@@ -10,8 +10,8 @@
 use once_cell::sync::Lazy;
 use regex::Regex;
 
-use crate::workspace::translation::read_translated;
 use crate::workspace::Workspace;
+use crate::workspace::translation::read_translated;
 
 /// Matches a `<!-- honya:chunk N -->` marker (any whitespace, any integer).
 static CHUNK_MARKER: Lazy<Regex> = Lazy::new(|| {
@@ -22,9 +22,8 @@ static CHUNK_MARKER: Lazy<Regex> = Lazy::new(|| {
 /// Western `.!?…` and Thai/East-Asian `。！？` plus the Thai paragraph marks
 /// `ฯ` (paiyannoi) and `ๆ` are intentionally NOT treated as terminators (they
 /// are word-level), but the eastern/western full stops and bangs are.
-static TERMINATOR: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"[.!?。！？…]+[”’」』）】\)\]]*").expect("terminator regex is valid")
-});
+static TERMINATOR: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"[.!?。！？…]+[”’」』）】\)\]]*").expect("terminator regex is valid"));
 
 /// Read the accumulated Thai for `chapter`, strip chunk markers, and return the
 /// last `n` non-empty sentences (in original order). Used to seed the next

@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use roxmltree::Node;
 
 use super::paths::{dir_of, resolve_href};
-use super::{ns, EpubError, Metadata, ManifestItem, Result, SpineEntry};
+use super::{EpubError, ManifestItem, Metadata, Result, SpineEntry, ns};
 
 /// Result of parsing the OPF: everything `import.rs` needs to build an `EpubBook`.
 #[derive(Debug, Clone)]
@@ -121,8 +121,12 @@ pub fn parse_opf(opf_xml: &str, opf_path: &str) -> Result<ParsedOpf> {
         if !is_opf_elem(&node, "item") {
             continue;
         }
-        let Some(id) = node.attribute("id") else { continue };
-        let Some(href) = node.attribute("href") else { continue };
+        let Some(id) = node.attribute("id") else {
+            continue;
+        };
+        let Some(href) = node.attribute("href") else {
+            continue;
+        };
         let media_type = node.attribute("media-type").unwrap_or("").to_string();
         let properties: Vec<String> = node
             .attribute("properties")
@@ -166,8 +170,13 @@ pub fn parse_opf(opf_xml: &str, opf_path: &str) -> Result<ParsedOpf> {
             }
         }
         for itemref in spine_node.children().filter(|n| is_opf_elem(n, "itemref")) {
-            let Some(idref) = itemref.attribute("idref") else { continue };
-            let linear = itemref.attribute("linear").map(|v| v != "no").unwrap_or(true);
+            let Some(idref) = itemref.attribute("idref") else {
+                continue;
+            };
+            let linear = itemref
+                .attribute("linear")
+                .map(|v| v != "no")
+                .unwrap_or(true);
 
             let Some(&idx) = manifest_by_id.get(idref) else {
                 return Err(EpubError::DanglingSpineRef(idref.to_string()));
@@ -258,7 +267,10 @@ mod tests {
     #[test]
     fn epub3_cover_image_wins() {
         let p = parse_opf(OPF, "OEBPS/content.opf").unwrap();
-        assert_eq!(p.metadata.cover_image_path.as_deref(), Some("OEBPS/Images/cover.png"));
+        assert_eq!(
+            p.metadata.cover_image_path.as_deref(),
+            Some("OEBPS/Images/cover.png")
+        );
     }
 
     #[test]

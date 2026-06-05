@@ -61,5 +61,6 @@ pub async fn translate_chunk(
         ..ChatRequest::default()
     };
 
-    chat_structured::<TranslatorOut>(client, req, "translation_result", translator_schema(), 2).await
+    chat_structured::<TranslatorOut>(client, req, "translation_result", translator_schema(), 2)
+        .await
 }

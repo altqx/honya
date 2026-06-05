@@ -14,12 +14,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 
-use crate::agents::chunk::{chunk_chapter, Chunk};
-use crate::agents::prompts::{build_orchestrator_metadata_msg, ORCHESTRATOR_SYSTEM};
-use crate::agents::reviewer::review_chunk;
-use crate::agents::tools::{orchestrator_tools, WorkspaceTools};
-use crate::agents::translator::translate_chunk;
+use crate::agents::chunk::{Chunk, chunk_chapter};
 use crate::agents::continuity;
+use crate::agents::prompts::{ORCHESTRATOR_SYSTEM, build_orchestrator_metadata_msg};
+use crate::agents::reviewer::review_chunk;
+use crate::agents::tools::{WorkspaceTools, orchestrator_tools};
+use crate::agents::translator::translate_chunk;
 use crate::cleanse;
 use crate::llm::client::LlmClient;
 use crate::llm::tool_loop::run_tool_loop;
@@ -28,7 +28,7 @@ use crate::model::{
     AppConfig, AppEvent, ChapterStatus, ChunkState, EventTx, LogLevel, ModelSet, ReviewVerdict,
     TokenUsage, TranslatorOut,
 };
-use crate::workspace::{characters, data_block, glossary, translation, Workspace};
+use crate::workspace::{Workspace, characters, data_block, glossary, translation};
 
 /// Shared, cheap-to-clone run control toggled by the UI (p pause / s stop) and
 /// polled by the pipeline between chunks. 0 = running, 1 = paused, 2 = stopped.
@@ -47,7 +47,10 @@ impl RunControl {
         let _ = self
             .0
             .compare_exchange(0, 1, Ordering::Relaxed, Ordering::Relaxed)
-            .or_else(|_| self.0.compare_exchange(1, 0, Ordering::Relaxed, Ordering::Relaxed));
+            .or_else(|_| {
+                self.0
+                    .compare_exchange(1, 0, Ordering::Relaxed, Ordering::Relaxed)
+            });
     }
     pub fn is_paused(&self) -> bool {
         self.0.load(Ordering::Relaxed) == 1
@@ -112,14 +115,18 @@ pub async fn run_pipeline(ctx: PipelineCtx, chapters: Vec<u32>) -> anyhow::Resul
             break;
         }
         ctx.tx.send(AppEvent::ChapterStarted { chapter });
-        ctx.tx
-            .send(AppEvent::ChapterStateChanged { chapter, state: ChapterStatus::Chunking });
+        ctx.tx.send(AppEvent::ChapterStateChanged {
+            chapter,
+            state: ChapterStatus::Chunking,
+        });
 
         match process_chapter(&ctx, chapter, &mut acc).await {
             Ok(Outcome::Completed) => {
                 done += 1;
-                ctx.tx
-                    .send(AppEvent::ChapterStateChanged { chapter, state: ChapterStatus::Done });
+                ctx.tx.send(AppEvent::ChapterStateChanged {
+                    chapter,
+                    state: ChapterStatus::Done,
+                });
                 ctx.tx.send(AppEvent::ChapterCompleted { chapter });
             }
             Ok(Outcome::Stopped) => {
@@ -132,8 +139,10 @@ pub async fn run_pipeline(ctx: PipelineCtx, chapters: Vec<u32>) -> anyhow::Resul
             Err(e) => {
                 failed += 1;
                 let reason = e.to_string();
-                ctx.tx
-                    .send(AppEvent::ChapterStateChanged { chapter, state: ChapterStatus::Failed });
+                ctx.tx.send(AppEvent::ChapterStateChanged {
+                    chapter,
+                    state: ChapterStatus::Failed,
+                });
                 ctx.tx.send(AppEvent::ChapterFailed {
                     chapter,
                     reason: reason.clone(),
@@ -179,7 +188,11 @@ async fn process_chapter(
         return Ok(Outcome::Completed);
     }
 
-    let chunks = chunk_chapter(&raw, ctx.cfg.chunk_target_tokens, ctx.cfg.chunk_hard_cap_tokens);
+    let chunks = chunk_chapter(
+        &raw,
+        ctx.cfg.chunk_target_tokens,
+        ctx.cfg.chunk_hard_cap_tokens,
+    );
     if chunks.is_empty() {
         // No translatable prose after chunking — treat as image-only passthrough.
         translation::write_image_only(&ctx.ws, chapter, &raw)?;
@@ -208,8 +221,10 @@ async fn process_chapter(
         process_chunk(ctx, chapter, chunk, acc).await?;
     }
 
-    ctx.tx
-        .send(AppEvent::ChapterStateChanged { chapter, state: ChapterStatus::Appended });
+    ctx.tx.send(AppEvent::ChapterStateChanged {
+        chapter,
+        state: ChapterStatus::Appended,
+    });
     Ok(Outcome::Completed)
 }
 
@@ -222,8 +237,10 @@ async fn gate(ctx: &PipelineCtx, chapter: u32) -> bool {
     }
     if ctx.ctl.is_paused() {
         ctx.tx.send(AppEvent::PipelinePaused);
-        ctx.tx
-            .send(AppEvent::ChapterStateChanged { chapter, state: ChapterStatus::Paused });
+        ctx.tx.send(AppEvent::ChapterStateChanged {
+            chapter,
+            state: ChapterStatus::Paused,
+        });
         while ctx.ctl.is_paused() {
             tokio::time::sleep(Duration::from_millis(120)).await;
         }
@@ -344,8 +361,10 @@ async fn process_chunk(
             chunk: chunk.index,
             state: ChunkState::Translating,
         });
-        ctx.tx
-            .send(AppEvent::ChapterStateChanged { chapter, state: ChapterStatus::Translating });
+        ctx.tx.send(AppEvent::ChapterStateChanged {
+            chapter,
+            state: ChapterStatus::Translating,
+        });
         ctx.tx.send(AppEvent::TranslatorRequested {
             chapter,
             chunk: chunk.index,
@@ -393,8 +412,10 @@ async fn process_chunk(
             chunk: chunk.index,
             state: ChunkState::Reviewing,
         });
-        ctx.tx
-            .send(AppEvent::ChapterStateChanged { chapter, state: ChapterStatus::Reviewing });
+        ctx.tx.send(AppEvent::ChapterStateChanged {
+            chapter,
+            state: ChapterStatus::Reviewing,
+        });
         ctx.tx.send(AppEvent::ReviewerRequested {
             chapter,
             chunk: chunk.index,
@@ -436,7 +457,11 @@ async fn process_chunk(
             } else {
                 ReviewVerdict::Reject
             },
-            feedback: if fb_text.is_empty() { None } else { Some(fb_text.clone()) },
+            feedback: if fb_text.is_empty() {
+                None
+            } else {
+                Some(fb_text.clone())
+            },
         });
 
         if approved {
@@ -505,15 +530,15 @@ async fn process_chunk(
                     fb_text
                 },
             });
-            anyhow::bail!(
-                "chunk {} rejected after {max} attempt(s)",
-                chunk.index
-            );
+            anyhow::bail!("chunk {} rejected after {max} attempt(s)", chunk.index);
         }
     }
 
     // Unreachable: the loop either returns Ok on approve or bails on final reject.
-    anyhow::bail!("chunk {} exhausted attempts without resolution", chunk.index)
+    anyhow::bail!(
+        "chunk {} exhausted attempts without resolution",
+        chunk.index
+    )
 }
 
 /// Run the Orchestrator metadata turn for a just-approved chunk: a single tool

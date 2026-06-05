@@ -3,7 +3,7 @@
 //! appends bullet notes here; they're inserted into the body ABOVE the
 //! `honya:data` block so the block stays valid.
 
-use crate::workspace::{data_block, Workspace};
+use crate::workspace::{Workspace, data_block};
 
 /// Append a `- {note}` bullet to STYLE.md's body, preserving the data block.
 pub fn append_note(ws: &Workspace, note: &str) -> std::io::Result<()> {

@@ -117,15 +117,27 @@ mod tests {
 
     #[test]
     fn split_fragment_cases() {
-        assert_eq!(split_fragment("p.xhtml#sec1"), ("p.xhtml", Some("sec1".into())));
+        assert_eq!(
+            split_fragment("p.xhtml#sec1"),
+            ("p.xhtml", Some("sec1".into()))
+        );
         assert_eq!(split_fragment("p.xhtml"), ("p.xhtml", None));
     }
 
     #[test]
     fn resolve_href_relative() {
-        assert_eq!(resolve_href("OEBPS/Text", "ch1.xhtml"), "OEBPS/Text/ch1.xhtml");
-        assert_eq!(resolve_href("OEBPS/Text", "../Images/a.png"), "OEBPS/Images/a.png");
-        assert_eq!(resolve_href("OEBPS/Text", "./ch1.xhtml#frag"), "OEBPS/Text/ch1.xhtml");
+        assert_eq!(
+            resolve_href("OEBPS/Text", "ch1.xhtml"),
+            "OEBPS/Text/ch1.xhtml"
+        );
+        assert_eq!(
+            resolve_href("OEBPS/Text", "../Images/a.png"),
+            "OEBPS/Images/a.png"
+        );
+        assert_eq!(
+            resolve_href("OEBPS/Text", "./ch1.xhtml#frag"),
+            "OEBPS/Text/ch1.xhtml"
+        );
     }
 
     #[test]
