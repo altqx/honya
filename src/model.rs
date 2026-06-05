@@ -386,10 +386,8 @@ pub struct TokenUsage {
 /// `Serialize`; raw input is matched directly in the select! arm (see main.rs).
 /// This enum is exclusively the *background -> UI* channel payload.
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // event payloads are consumed selectively across screens
 pub enum AppEvent {
-    // ---- animation / lifecycle of the channel ----
-    Tick,
-
     // ---- chapter-level ----
     ChapterQueued {
         chapter: u32,

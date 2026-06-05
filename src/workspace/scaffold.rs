@@ -122,6 +122,7 @@ pub fn create_project(
 ///
 /// Existing VOLUME.md content is preserved: the volume data block is loaded and
 /// re-rendered (only refreshing the label when one is supplied).
+#[allow(dead_code)]
 pub fn ensure_volume(root: &Path, vol_number: u32, label: Option<&str>) -> std::io::Result<()> {
     let ws = Workspace::new(root.to_path_buf(), vol_number);
     std::fs::create_dir_all(ws.vol_dir.join("raw"))?;
@@ -197,11 +198,10 @@ fn write_volume_md(ws: &Workspace, label: Option<&str>) -> std::io::Result<()> {
     let mut data = volume::load(ws);
 
     // Seed an empty recap for a brand-new volume with a known label.
-    if data.running_recap.trim().is_empty() {
-        if let Some(lbl) = label.filter(|l| !l.trim().is_empty()) {
+    if data.running_recap.trim().is_empty()
+        && let Some(lbl) = label.filter(|l| !l.trim().is_empty()) {
             data.running_recap = format!("เล่ม: {}", lbl.trim());
         }
-    }
 
     let body = volume::render_body(&data);
     data_block::write_with_data(&ws.volume_md(), &body, &data)
@@ -210,23 +210,13 @@ fn write_volume_md(ws: &Workspace, label: Option<&str>) -> std::io::Result<()> {
 // --- empty-payload wrappers (match characters.rs / glossary.rs block shapes) -
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 struct EmptyCharacters {
     characters: Vec<serde_json::Value>,
 }
-impl Default for EmptyCharacters {
-    fn default() -> Self {
-        Self {
-            characters: Vec::new(),
-        }
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 struct EmptyTerms {
     terms: Vec<serde_json::Value>,
-}
-impl Default for EmptyTerms {
-    fn default() -> Self {
-        Self { terms: Vec::new() }
-    }
 }

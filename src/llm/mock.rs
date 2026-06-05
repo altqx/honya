@@ -31,6 +31,7 @@ impl Default for MockClient {
 
 impl MockClient {
     /// Build a mock that returns a specific Thai string.
+    #[allow(dead_code)]
     pub fn new(canned_thai: impl Into<String>) -> Self {
         Self {
             canned_thai: canned_thai.into(),

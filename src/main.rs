@@ -84,13 +84,12 @@ async fn run(
 /// Pick the LLM backend: the real OpenRouter client when an API key is present,
 /// otherwise the offline MockClient so the TUI is always fully usable.
 pub fn build_client(cfg: &AppConfig) -> Arc<dyn LlmClient> {
-    if config::api_key().is_some() {
-        if let Ok(client) = llm::client::OpenRouterClient::from_env() {
+    if config::api_key().is_some()
+        && let Ok(client) = llm::client::OpenRouterClient::from_env() {
             return Arc::new(client);
         }
         // Never write to stderr here — the TUI owns the alternate screen. Silently
         // fall back to the mock client; the user sees mock behavior regardless.
-    }
     let _ = cfg;
     Arc::new(llm::mock::MockClient::default())
 }

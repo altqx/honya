@@ -506,7 +506,7 @@ impl LexiconScreen {
 
     fn render_glossary_table(&mut self, f: &mut Frame, area: Rect, ws: &Workspace, theme: &Theme) {
         let terms = self.glossary(ws);
-        if self.list.selected().map_or(true, |s| s >= terms.len()) {
+        if self.list.selected().is_none_or(|s| s >= terms.len()) {
             self.list.select(Some(terms.len().saturating_sub(1)));
         }
         let sel = self.list.selected().unwrap_or(0);
@@ -584,7 +584,7 @@ impl LexiconScreen {
         theme: &Theme,
     ) {
         let chars = self.characters(ws);
-        if self.list.selected().map_or(true, |s| s >= chars.len()) {
+        if self.list.selected().is_none_or(|s| s >= chars.len()) {
             self.list.select(Some(chars.len().saturating_sub(1)));
         }
         let sel = self.list.selected().unwrap_or(0);

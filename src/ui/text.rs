@@ -9,7 +9,7 @@
 //! how wide text renders.
 
 use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthStr;
 
 /// Display width of `s` in terminal columns (CJK = 2, combining marks = 0).
 ///
@@ -78,10 +78,3 @@ pub fn pad_to_cols(s: &str, cols: usize) -> String {
     }
 }
 
-/// Width of a single `char` in columns (combining marks count as 0).
-///
-/// Convenience for callers that have already split into `char`s; prefer
-/// [`col_width`] for whole strings since it is grapheme-aware.
-pub fn char_width(c: char) -> usize {
-    UnicodeWidthChar::width(c).unwrap_or(0)
-}

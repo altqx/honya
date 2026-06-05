@@ -62,8 +62,6 @@ pub const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦"
 pub fn spinner_frame(frame: u64) -> &'static str {
     SPINNER[(frame as usize) % SPINNER.len()]
 }
-pub const THINK_DOTS: [&str; 3] = ["·", "··", "···"];
-
 // --- status glyphs (waxing-moon metaphor: ○ → ◐/◑ → ●) ---
 // returns (glyph, semantic color) — used by list rows, header tally, detail card.
 pub fn status_glyph(kind: ChapterKind, status: ChapterStatus, t: &Theme) -> (char, Color) {

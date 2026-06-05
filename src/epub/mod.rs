@@ -75,6 +75,7 @@ pub type Result<T> = std::result::Result<T, EpubError>;
 
 /// A single `<item>` from the OPF `<manifest>`.
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // full OPF record; callers use resolved_path / media_type helpers
 pub struct ManifestItem {
     /// `id` attribute (unique within the manifest).
     pub id: String,
@@ -102,6 +103,7 @@ impl ManifestItem {
 
 /// A single `<itemref>` from the OPF `<spine>`, resolved against the manifest.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct SpineEntry {
     /// `idref` attribute (points at a `ManifestItem::id`).
     pub idref: String,
@@ -125,6 +127,7 @@ pub struct Metadata {
 
 /// One flattened TOC entry (from nav.xhtml or NCX), depth preserved.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct TocEntry {
     /// Display label.
     pub title: String,
@@ -138,6 +141,7 @@ pub struct TocEntry {
 
 /// Fully parsed EPUB: where it was extracted, the OPF essentials, and the TOC.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct EpubBook {
     /// Directory the archive was extracted into (absolute or caller-relative).
     pub work_dir: PathBuf,

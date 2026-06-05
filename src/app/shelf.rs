@@ -136,7 +136,7 @@ impl ShelfScreen {
     pub fn render(&mut self, f: &mut Frame, area: Rect, projects: &[Project], theme: &Theme) {
         // Clamp selection to current row count.
         let rows = self.row_count(projects);
-        if self.list.selected().map_or(true, |s| s >= rows) {
+        if self.list.selected().is_none_or(|s| s >= rows) {
             self.list.select(Some(rows.saturating_sub(1)));
         }
 

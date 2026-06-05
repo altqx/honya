@@ -29,7 +29,7 @@ pub fn extract_all(archive: &mut ZipArchive<File>, dest_dir: &Path) -> Result<Ve
     let mut written: Vec<String> = Vec::new();
 
     for i in 0..archive.len() {
-        let mut entry = archive.by_index(i)?;
+        let entry = archive.by_index(i)?;
 
         // The raw archive name (for diagnostics + our '/'-keyed records).
         let raw_name = entry.name().to_string();
@@ -92,6 +92,7 @@ fn read_entry_capped<R: Read>(entry: R, size_hint: u64, name: &str) -> Result<Ve
 
 /// Locate the OPF package document by reading META-INF/container.xml from the
 /// still-zipped archive.
+#[allow(dead_code)]
 pub fn locate_opf(archive: &mut ZipArchive<File>) -> Result<String> {
     let xml = read_entry_to_string(archive, "META-INF/container.xml")?;
     locate_opf_from_str(&xml)

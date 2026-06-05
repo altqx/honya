@@ -16,10 +16,10 @@ use crate::model::TranslatorOut;
 /// Translate one source chunk into Thai.
 ///
 /// * `reference_ctx` — the pre-delimited reference block (locked glossary,
-///                     character roster/pronouns, project synopsis, style guide)
-///                     the pipeline assembles from the workspace.
+///   character roster/pronouns, project synopsis, style guide) the pipeline
+///   assembles from the workspace.
 /// * `prev_thai`     — the previous chunk's tail sentences (continuity, do not
-///                     re-translate).
+///   re-translate).
 /// * `raw_chunk`     — the Japanese markdown to translate.
 /// * `feedback`      — `Some` on a retry, carrying the Reviewer's correction list.
 ///

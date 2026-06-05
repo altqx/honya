@@ -247,6 +247,7 @@ impl Overlay {
     // ---- input capture rule -----------------------------------------------
 
     /// True when a text field is focused → suppress single-letter globals.
+    #[allow(dead_code)]
     pub fn is_input_capturing(&self) -> bool {
         match self {
             Overlay::Import(st) => st.step == 1, // name field
@@ -317,15 +318,14 @@ impl Overlay {
                         Action::CloseOverlay
                     } else {
                         // Refresh the name default from the chosen file.
-                        if st.name.trim().is_empty() {
-                            if let Some(stem) = st
+                        if st.name.trim().is_empty()
+                            && let Some(stem) = st
                                 .selected_epub()
                                 .and_then(|p| p.file_stem())
                                 .and_then(|s| s.to_str())
                             {
                                 st.name = prettify_stem(stem);
                             }
-                        }
                         st.step = 1;
                         Action::None
                     }
@@ -373,9 +373,7 @@ impl Overlay {
                 KeyCode::Char(d @ '0'..='9') => {
                     // Type a number directly.
                     let digit = d as u32 - '0' as u32;
-                    st.vol = (st.vol.saturating_mul(10).saturating_add(digit))
-                        .min(999)
-                        .max(1);
+                    st.vol = (st.vol.saturating_mul(10).saturating_add(digit)).clamp(1, 999);
                     Action::None
                 }
                 KeyCode::Backspace => {
@@ -1061,3 +1059,4 @@ fn prettify_stem(stem: &str) -> String {
     let base = if trimmed.is_empty() { words } else { trimmed };
     base.join(" ").trim().to_string()
 }
+

@@ -55,8 +55,8 @@ fn walk_navpoint(np: &Node, base_dir: &str, depth: usize, out: &mut Vec<TocEntry
         .unwrap_or_default();
 
     // <content src="..."/>
-    if let Some(content) = np.children().find(|n| is_ncx_elem(n, "content")) {
-        if let Some(src) = content.attribute("src") {
+    if let Some(content) = np.children().find(|n| is_ncx_elem(n, "content"))
+        && let Some(src) = content.attribute("src") {
             let (_, fragment) = split_fragment(src);
             let content_path = resolve_href(base_dir, src);
             out.push(TocEntry {
@@ -66,7 +66,6 @@ fn walk_navpoint(np: &Node, base_dir: &str, depth: usize, out: &mut Vec<TocEntry
                 depth,
             });
         }
-    }
 
     // Nested navPoints.
     for child in np.children().filter(|n| is_ncx_elem(n, "navPoint")) {
@@ -151,11 +150,10 @@ fn walk_ol(ol: &Node, base_dir: &str, depth: usize, out: &mut Vec<TocEntry>) {
 fn anchor_text(a: &Node) -> String {
     let mut s = String::new();
     for d in a.descendants() {
-        if d.is_text() {
-            if let Some(t) = d.text() {
+        if d.is_text()
+            && let Some(t) = d.text() {
                 s.push_str(t);
             }
-        }
     }
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }

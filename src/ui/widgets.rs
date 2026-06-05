@@ -16,8 +16,9 @@ use crate::theme::{self, Theme};
 
 /// Render a Braille bloom spinner followed by `label`, e.g. `⠹ working`.
 ///
-/// The frame index advances the animation (~10 fps driven by `AppEvent::Tick`).
+/// The frame index advances the animation (~10 fps driven by the main-loop ticker).
 /// The spinner takes the live indigo working color; the label is soft ink.
+#[allow(dead_code)]
 pub fn render_spinner(f: &mut Frame, area: Rect, frame: u64, label: &str, theme: &Theme) {
     let glyph = theme::spinner_frame(frame);
     let line = Line::from(vec![

@@ -29,7 +29,7 @@ use ratatui::widgets::Paragraph;
 
 use crate::llm::client::LlmClient;
 use crate::model::{
-    AppConfig, AppEvent, Chapter, ChapterKind, ChapterStatus, EventTx, LogLevel, ModelSet, Project,
+    AppConfig, AppEvent, ChapterStatus, EventTx, LogLevel, ModelSet, Project,
 };
 use crate::theme::Theme;
 use crate::ui::chrome::{self, StatusTally};
@@ -84,14 +84,6 @@ impl Screen {
     }
 }
 
-/// Which pane currently owns the keyboard within a screen.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Focus {
-    Sidebar,
-    Main,
-    Detail,
-}
-
 /// Everything a screen / overlay can ask the App to do. The App's `apply` is the
 /// single mutation funnel — screens never mutate global state directly.
 #[derive(Debug, Clone)]
@@ -99,7 +91,6 @@ pub enum Action {
     None,
     Quit,
     Goto(Screen),
-    FocusNext,
     ImportEpub {
         epub: PathBuf,
         title: String,
@@ -192,7 +183,6 @@ impl ActiveProject {
 pub struct App {
     pub running: bool,
     pub screen: Screen,
-    pub focus: Focus,
     pub overlay: Overlay,
     pub frame: u64,
     pub tx: EventTx,
@@ -225,7 +215,6 @@ impl App {
         Self {
             running: true,
             screen: Screen::Shelf,
-            focus: Focus::Main,
             overlay: Overlay::None,
             frame: 0,
             tx,
@@ -248,12 +237,6 @@ impl App {
     // ---- background events -------------------------------------------------
 
     pub fn on_app_event(&mut self, ev: AppEvent) {
-        // Animation tick: just bump the frame counter (cheap, no redraw flag here).
-        if let AppEvent::Tick = ev {
-            self.frame = self.frame.wrapping_add(1);
-            return;
-        }
-
         // Always let the Translate screen observe everything so its live panel
         // stays current even when the user is on another tab.
         self.translate.on_app_event(&ev);
@@ -448,13 +431,12 @@ impl App {
                 return Action::show_overlay(Overlay::Log(0));
             }
             KeyCode::Char('q') => return Action::Quit,
-            KeyCode::Esc => {
+            KeyCode::Esc
                 // Esc with no overlay: drop the toast, otherwise a no-op.
-                if self.toast.is_some() {
+                if self.toast.is_some() => {
                     self.toast = None;
                     return Action::None;
                 }
-            }
             _ => {}
         }
 
@@ -501,13 +483,6 @@ impl App {
             Action::Goto(s) => {
                 self.screen = s;
                 self.toast = None;
-            }
-            Action::FocusNext => {
-                self.focus = match self.focus {
-                    Focus::Sidebar => Focus::Main,
-                    Focus::Main => Focus::Detail,
-                    Focus::Detail => Focus::Sidebar,
-                };
             }
             Action::ShowOverlay(ov) => {
                 // The palette emits a placeholder Settings overlay (no &cfg handle);
@@ -1160,21 +1135,6 @@ fn extract_attr(tag: &str, attr: &str) -> Option<String> {
             .find(|c: char| c.is_whitespace() || c == '>' || c == '/')
             .unwrap_or(after.len());
         Some(after[..end].to_string())
-    }
-}
-
-/// Convenience used by the Project screen + Lexicon when they need an empty
-/// chapter placeholder (kept here so the helper modules don't re-derive it).
-pub(crate) fn empty_chapter(number: u32) -> Chapter {
-    Chapter {
-        number,
-        title: String::new(),
-        kind: ChapterKind::Prose,
-        status: ChapterStatus::Pending,
-        source_segments: 0,
-        total_chunks: 0,
-        committed_chunks: 0,
-        last_run: None,
     }
 }
 

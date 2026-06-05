@@ -197,11 +197,10 @@ fn merge_into(target: &mut GlossaryTerm, incoming: GlossaryTerm) {
 }
 
 fn merge_opt(slot: &mut Option<String>, incoming: Option<String>) {
-    if let Some(v) = incoming {
-        if !v.trim().is_empty() {
+    if let Some(v) = incoming
+        && !v.trim().is_empty() {
             *slot = Some(v);
         }
-    }
 }
 
 /// Normalize a jp_term for keying: trim surrounding whitespace.

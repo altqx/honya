@@ -19,6 +19,7 @@ use super::toc::{parse_nav_xhtml, parse_ncx};
 use super::{EpubBook, Result, TocEntry};
 
 /// Import an EPUB into `work_dir`, returning the parsed book (no media relocation).
+#[allow(dead_code)]
 pub fn import_epub(epub_path: &Path, work_dir: &Path) -> Result<EpubBook> {
     let mut archive = open_archive(epub_path)?;
     extract_all(&mut archive, work_dir)?;
@@ -81,30 +82,25 @@ fn build_toc(
     parsed: &ParsedOpf,
 ) -> Result<Vec<TocEntry>> {
     // 1) Prefer the EPUB3 nav document.
-    if let Some(nav_id) = &parsed.nav_id {
-        if let Some(&idx) = parsed.manifest_by_id.get(nav_id) {
+    if let Some(nav_id) = &parsed.nav_id
+        && let Some(&idx) = parsed.manifest_by_id.get(nav_id) {
             let nav_path = parsed.manifest[idx].resolved_path.clone();
-            if let Ok(xml) = read_or_archive(archive, work_dir, &nav_path) {
-                if let Ok(entries) = parse_nav_xhtml(&xml, &nav_path) {
-                    if !entries.is_empty() {
+            if let Ok(xml) = read_or_archive(archive, work_dir, &nav_path)
+                && let Ok(entries) = parse_nav_xhtml(&xml, &nav_path)
+                    && !entries.is_empty() {
                         return Ok(entries);
                     }
-                }
-            }
         }
-    }
 
     // 2) Fall back to the NCX (spine toc= or x-dtbncx+xml media-type).
-    if let Some(ncx_id) = &parsed.ncx_id {
-        if let Some(&idx) = parsed.manifest_by_id.get(ncx_id) {
+    if let Some(ncx_id) = &parsed.ncx_id
+        && let Some(&idx) = parsed.manifest_by_id.get(ncx_id) {
             let ncx_path = parsed.manifest[idx].resolved_path.clone();
-            if let Ok(xml) = read_or_archive(archive, work_dir, &ncx_path) {
-                if let Ok(entries) = parse_ncx(&xml, &ncx_path) {
+            if let Ok(xml) = read_or_archive(archive, work_dir, &ncx_path)
+                && let Ok(entries) = parse_ncx(&xml, &ncx_path) {
                     return Ok(entries);
                 }
-            }
         }
-    }
 
     Ok(Vec::new())
 }

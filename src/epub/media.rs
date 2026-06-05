@@ -38,6 +38,7 @@ pub fn relocate_images(
 
 /// Same as `relocate_images` but MOVES (renames, falling back to copy+remove)
 /// each source file instead of copying.
+#[allow(dead_code)]
 pub fn relocate_images_move(
     manifest: &[ManifestItem],
     work_dir: &Path,

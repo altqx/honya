@@ -124,7 +124,7 @@ fn build_sample_epub(path: &std::path::Path) {
     let mut zip = ZipWriter::new(file);
     let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
-    let mut add = |zip: &mut ZipWriter<std::fs::File>, name: &str, bytes: &[u8]| {
+    let add = |zip: &mut ZipWriter<std::fs::File>, name: &str, bytes: &[u8]| {
         zip.start_file(name, opts).unwrap();
         zip.write_all(bytes).unwrap();
     };

@@ -37,11 +37,10 @@ pub async fn append_chunk(
     let marker = chunk_marker(chunk_index);
 
     // Idempotency: if the marker already exists, do nothing.
-    if let Ok(existing) = tokio::fs::read_to_string(&path).await {
-        if existing.contains(&marker) {
+    if let Ok(existing) = tokio::fs::read_to_string(&path).await
+        && existing.contains(&marker) {
             return Ok(0);
         }
-    }
 
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await?;
@@ -68,10 +67,9 @@ pub async fn append_chunk(
 
 /// Read the full accumulated Thai for `chapter` (empty string when absent).
 pub async fn read_translated(ws: &Workspace, chapter: u32) -> String {
-    match tokio::fs::read_to_string(ws.translated(chapter)).await {
-        Ok(text) => text,
-        Err(_) => String::new(),
-    }
+    tokio::fs::read_to_string(ws.translated(chapter))
+        .await
+        .unwrap_or_default()
 }
 
 /// Write (overwrite) the cleansed source Markdown for `chapter` to
@@ -94,10 +92,9 @@ pub fn write_image_only(ws: &Workspace, chapter: u32, markdown: &str) -> std::io
 }
 
 fn ensure_parent(path: &Path) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)?;
         }
-    }
     Ok(())
 }

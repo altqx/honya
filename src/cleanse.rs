@@ -10,11 +10,11 @@
 //!   * `「」`                                  -> `“”`  (U+201C / U+201D)
 //!   * `『』`                                  -> `‘’`  (U+2018 / U+2019)
 //!   * `<ruby>Base<rt>Furigana</rt></ruby>`   -> `Base (Furigana)`
-//!         (`<rb>` is transparent; `<rp>` parens are stripped)
+//!     (`<rb>` is transparent; `<rp>` parens are stripped)
 //!   * `<img src=X>`                          -> `![ภาพประกอบ](../../images/FILE.png)`
-//!         FILE resolved via image_map (src key -> basename key -> raw basename);
-//!         the OUTPUT PREFIX IS ALWAYS `../../images/` (chapter md lives at
-//!         Vol_NN/raw|translated/, two dirs under project root).
+//!     FILE resolved via image_map (src key -> basename key -> raw basename);
+//!     the OUTPUT PREFIX IS ALWAYS `../../images/` (chapter md lives at
+//!     Vol_NN/raw|translated/, two dirs under project root).
 //!   * any other tag                          -> stripped (text kept)
 //!   * block elements                         -> a blank line between blocks
 //!   * 3+ consecutive newlines                -> collapsed to 2
@@ -300,7 +300,7 @@ fn basename(src: &str) -> &str {
     let no_frag = src.split('#').next().unwrap_or(src);
     let no_query = no_frag.split('?').next().unwrap_or(no_frag);
     no_query
-        .rsplit(|c| c == '/' || c == '\\')
+        .rsplit(['/', '\\'])
         .next()
         .unwrap_or(no_query)
 }

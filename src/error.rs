@@ -3,6 +3,7 @@
 //! may use this. Built after epub + llm so their error types exist.
 
 #[derive(thiserror::Error, Debug)]
+#[allow(dead_code)]
 pub enum HonyaError {
     #[error(transparent)]
     Epub(#[from] crate::epub::EpubError),
@@ -16,4 +17,5 @@ pub enum HonyaError {
     Other(String),
 }
 
+#[allow(dead_code)]
 pub type Result<T> = std::result::Result<T, HonyaError>;

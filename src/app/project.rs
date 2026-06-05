@@ -146,11 +146,10 @@ impl ProjectScreen {
                 }
             }
             KeyCode::Char(' ') => {
-                if let Some(ch) = self.selected_chapter(active) {
-                    if !self.selected.insert(ch) {
+                if let Some(ch) = self.selected_chapter(active)
+                    && !self.selected.insert(ch) {
                         self.selected.remove(&ch);
                     }
-                }
                 Action::None
             }
             KeyCode::Char('t') => {
@@ -240,7 +239,7 @@ impl ProjectScreen {
 
         let rows = self.rows(active);
         let n = rows.len();
-        if self.tree.selected().map_or(true, |s| s >= n) {
+        if self.tree.selected().is_none_or(|s| s >= n) {
             self.tree.select(Some(n.saturating_sub(1)));
         }
         let sel = self.tree.selected().unwrap_or(0);
@@ -538,7 +537,7 @@ fn empty_state(f: &mut Frame, area: Rect, theme: &Theme) {
     );
 }
 
-fn find_chapter<'a>(active: &'a ActiveProject, number: u32) -> Option<&'a Chapter> {
+fn find_chapter(active: &ActiveProject, number: u32) -> Option<&Chapter> {
     for vol in &active.project.volumes {
         for ch in &vol.chapters {
             if ch.number == number {
