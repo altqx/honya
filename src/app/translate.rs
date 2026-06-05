@@ -18,6 +18,15 @@ use crate::ui::widgets::render_line_gauge;
 
 use super::{Action, Screen};
 
+/// Whether a pipeline run is live, so the screen stops claiming "Now translating"
+/// when nothing is running.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RunPhase {
+    Idle,
+    Running,
+    Paused,
+}
+
 pub struct TranslateScreen {
     follow: bool,
     scroll: u16,
@@ -38,6 +47,8 @@ pub struct TranslateScreen {
     cost_usd: f64,
     retries: u32,
     last_note: String,
+    /// Idle until a run starts; drives the header, border, and spinners.
+    phase: RunPhase,
 }
 
 impl TranslateScreen {
@@ -56,6 +67,7 @@ impl TranslateScreen {
             cost_usd: 0.0,
             retries: 0,
             last_note: String::new(),
+            phase: RunPhase::Idle,
         }
     }
 
@@ -68,6 +80,7 @@ impl TranslateScreen {
     pub fn on_app_event(&mut self, ev: &AppEvent) {
         match ev {
             AppEvent::ChapterStarted { chapter } => {
+                self.phase = RunPhase::Running;
                 self.current_chapter = Some(*chapter);
                 self.preview.clear();
                 self.scroll = 0;
@@ -184,6 +197,20 @@ impl TranslateScreen {
             AppEvent::ChapterCompleted { chapter } => {
                 self.last_note = format!("chapter {chapter} done");
             }
+            AppEvent::PipelinePaused => {
+                self.phase = RunPhase::Paused;
+            }
+            AppEvent::PipelineResumed => {
+                self.phase = RunPhase::Running;
+            }
+            AppEvent::PipelineFinished {
+                chapters_done,
+                chapters_failed,
+            } => {
+                self.phase = RunPhase::Idle;
+                self.last_note =
+                    format!("run finished · {chapters_done} done · {chapters_failed} failed");
+            }
             _ => {}
         }
     }
@@ -264,19 +291,36 @@ impl TranslateScreen {
     }
 
     fn render_pipeline(&self, f: &mut Frame, area: Rect, frame: u64, theme: &Theme) {
-        let title = match self.current_chapter {
-            Some(ch) => format!(" いま訳しているところ — Now translating · ch {ch} "),
-            None => " いま訳しているところ — Now translating ".to_string(),
+        let (title, accent) = match self.phase {
+            RunPhase::Running => (
+                match self.current_chapter {
+                    Some(ch) => format!(" いま訳しているところ — Now translating · ch {ch} "),
+                    None => " いま訳しているところ — Now translating ".to_string(),
+                },
+                theme.accent,
+            ),
+            RunPhase::Paused => (
+                match self.current_chapter {
+                    Some(ch) => format!(" 一時停止 — Paused · ch {ch} "),
+                    None => " 一時停止 — Paused ".to_string(),
+                },
+                theme.status_warn,
+            ),
+            RunPhase::Idle => (
+                match self.current_chapter {
+                    Some(ch) => format!(" 訳 Translate — idle · last ch {ch} "),
+                    None => " 訳 Translate — no active run ".to_string(),
+                },
+                theme.ink_faint,
+            ),
         };
         let block = Block::default()
             .borders(Borders::ALL)
             .border_set(theme::hairline_set())
-            .border_style(Style::default().fg(theme.accent))
+            .border_style(Style::default().fg(accent))
             .title(Span::styled(
                 title,
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(accent).add_modifier(Modifier::BOLD),
             ))
             .style(Style::default().bg(theme.bg_panel));
         let inner = block.inner(area);
@@ -299,10 +343,16 @@ impl TranslateScreen {
 
         // Chunk header: title + "chunk N / M  ⠹ working".
         let (cur, total) = self.chunk;
-        let working = if total > 0 && cur <= total && cur > 0 {
-            format!("{} working", spinner_frame(frame))
-        } else {
-            "idle".to_string()
+        let working = match self.phase {
+            RunPhase::Idle => "idle".to_string(),
+            RunPhase::Paused => "paused".to_string(),
+            RunPhase::Running => {
+                if total > 0 && cur > 0 && cur <= total {
+                    format!("{} working", spinner_frame(frame))
+                } else {
+                    "starting…".to_string()
+                }
+            }
         };
         let head = Line::from(vec![
             Span::styled(
@@ -354,7 +404,7 @@ impl TranslateScreen {
             if line_area.y >= agent_area.y + agent_area.height {
                 break;
             }
-            let active = i == self.active_agent;
+            let active = self.phase == RunPhase::Running && i == self.active_agent;
             let spin = if active {
                 format!("{} ", spinner_frame(frame))
             } else {
@@ -432,7 +482,13 @@ impl TranslateScreen {
 
         // Compose the preview with a trailing indigo caret.
         let body = if self.preview.is_empty() {
-            "…waiting for the first chunk…".to_string()
+            match self.phase {
+                RunPhase::Idle => {
+                    "No active run — start one from 棚 Project (t: chapter · T: volume).".to_string()
+                }
+                RunPhase::Paused => "Paused.".to_string(),
+                RunPhase::Running => "…waiting for the first chunk…".to_string(),
+            }
         } else {
             self.preview.clone()
         };
