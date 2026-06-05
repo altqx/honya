@@ -36,6 +36,21 @@ hero (incl. the animated terminal) and install CTA are inline in `index.html`.
 
 Edit the homepage in place and push — there is no build step.
 
+### Typography
+
+All fonts come from the Google Fonts CDN in one combined request (see the single
+`<link>` in `<head>`): **Zen Kaku Gothic New** (Latin/UI sans), **Noto Serif JP**
+(the 本屋 wordmark and Japanese glyphs), **JetBrains Mono** (terminal/code), and
+**Noto Sans Thai Looped** for the Thai body copy. The page is Thai-first
+(`<html lang="th">`), so Thai text is the bulk of the content.
+
+The font stacks are CSS variables (`--sans`, `--serif`, `--mono`) in `:root`.
+`Noto Sans Thai Looped` is deliberately placed **after** the Latin/JP face in each
+stack: those faces don't carry Thai glyphs, so Thai falls through to the looped
+face while Latin keeps Zen Kaku Gothic New / JetBrains Mono untouched. That order
+preserves the metric-locked fallback (no font-swap reflow) for Latin and the
+tabular-nums alignment in the terminal mock.
+
 ## Cloudflare Pages setup (one-time, dashboard)
 
 1. Create a Pages project named **`honya`** (Workers & Pages → Create → Pages).
