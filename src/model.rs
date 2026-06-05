@@ -130,9 +130,9 @@ pub struct ModelSet {
 impl Default for ModelSet {
     fn default() -> Self {
         Self {
-            orchestrator: "anthropic/claude-3.5-sonnet".into(),
-            translator: "anthropic/claude-3.5-sonnet".into(),
-            reviewer: "anthropic/claude-3.5-sonnet".into(),
+            orchestrator: "google/gemini-3.5-flash".into(),
+            translator: "google/gemini-3-flash-preview".into(),
+            reviewer: "google/gemini-3.1-flash-lite".into(),
         }
     }
 }

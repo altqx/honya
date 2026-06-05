@@ -957,7 +957,8 @@ async fn run_import(
         }
     }
 
-    let mut ch_number: u32 = 0;
+    // Cleanse every spine doc, segment into logical chapters, then write them.
+    let mut docs: Vec<crate::epub::segment::DocInput> = Vec::with_capacity(total);
     for (i, archive_path) in doc_paths.iter().enumerate() {
         let disk = book.disk_path(archive_path);
         let html = match tokio::fs::read_to_string(&disk).await {
@@ -991,30 +992,79 @@ async fn run_import(
             .collect();
 
         let md = crate::cleanse::xhtml_to_markdown(&html, &image_map);
-        ch_number += 1;
-
-        if crate::cleanse::is_image_only(&md) {
-            // Illustration-only: seed raw/ for discovery AND translated/ so it reads as Done.
-            let _ = crate::workspace::translation::write_raw(&ws, ch_number, &md);
-            let _ = crate::workspace::translation::write_image_only(&ws, ch_number, &md);
-        } else {
-            let titled = match toc_titles.get(archive_path) {
-                Some(t) => format!("# {t}\n\n{md}"),
-                None => md,
-            };
-            let _ = crate::workspace::translation::write_raw(&ws, ch_number, &titled);
-        }
+        docs.push(crate::epub::segment::DocInput {
+            archive_path: archive_path.clone(),
+            markdown: md,
+            toc_title: toc_titles.get(archive_path).cloned(),
+            internal_link_count: count_internal_xhtml_links(&html),
+            body_class: body_class(&html),
+        });
 
         tx.send(AppEvent::ImportProgress {
             done: i + 1,
             total,
-            label: format!("cleansing ch {}/{}", i + 1, total),
+            label: format!("cleansing {}/{}", i + 1, total),
         });
-        // Yield so the UI ticks the gauge between chapters.
+        // Yield so the UI ticks the gauge between docs.
         tokio::task::yield_now().await;
     }
 
+    let chapters = crate::epub::segment::segment(&docs);
+
+    let mut ch_number: u32 = 0;
+    for lc in &chapters {
+        ch_number += 1;
+        match lc.kind {
+            crate::epub::segment::LogicalKind::ImageOnly => {
+                // Seed raw/ for discovery AND translated/ so it reads as Done.
+                let _ = crate::workspace::translation::write_raw(&ws, ch_number, &lc.body);
+                let _ = crate::workspace::translation::write_image_only(&ws, ch_number, &lc.body);
+            }
+            crate::epub::segment::LogicalKind::Prose => {
+                // Title heading goes ABOVE the leading m### image so scan.rs's
+                // first_md_heading recovers it.
+                let titled = match &lc.title {
+                    Some(t) => format!("# {t}\n\n{}", lc.body),
+                    None => lc.body.clone(),
+                };
+                let _ = crate::workspace::translation::write_raw(&ws, ch_number, &titled);
+            }
+        }
+    }
+
     Ok(slug)
+}
+
+/// Count `<a href="…​.xhtml…">` links in raw HTML — the in-spine TOC/nav signal.
+fn count_internal_xhtml_links(html: &str) -> usize {
+    let lower = html.to_ascii_lowercase();
+    let mut count = 0;
+    let mut rest = lower.as_str();
+    while let Some(p) = rest.find("<a") {
+        let after = &rest[p + 2..];
+        // Confirm a real <a tag start (next char whitespace or '>').
+        let is_tag = after
+            .chars()
+            .next()
+            .map(|c| c.is_whitespace() || c == '>')
+            .unwrap_or(false);
+        let end = after.find('>').unwrap_or(after.len());
+        let tag = &after[..end];
+        if is_tag && tag.contains("href") && tag.contains(".xhtml") {
+            count += 1;
+        }
+        rest = &after[end..];
+    }
+    count
+}
+
+/// First `<body class="…">` value, if any (segmenter's nav/TOC + page-kind hint).
+fn body_class(html: &str) -> Option<String> {
+    let lower = html.to_ascii_lowercase();
+    let pos = lower.find("<body")?;
+    let rest = &html[pos..];
+    let end = rest.find('>').map(|e| e + 1).unwrap_or(rest.len());
+    extract_attr(&rest[..end], "class")
 }
 
 /// Extract the trailing path component of a '/'-separated archive path.

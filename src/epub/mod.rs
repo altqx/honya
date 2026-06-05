@@ -8,6 +8,7 @@ pub mod import;
 pub mod media;
 pub mod opf;
 pub mod paths;
+pub mod segment;
 pub mod toc;
 
 use std::collections::HashMap;
