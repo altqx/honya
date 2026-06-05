@@ -1,0 +1,43 @@
+[package]
+name = "honya"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# --- TUI (single crossterm 0.29.0 in tree, verified via `cargo tree -i crossterm`) ---
+ratatui              = "0.30"                                              # 0.30.0; re-exports crossterm via ratatui-crossterm 0.1
+crossterm            = { version = "0.29", features = ["event-stream"] }   # added directly ONLY for EventStream; unifies with ratatui's copy
+unicode-width        = "0.2"                                               # column width for CJK/Thai layout
+unicode-segmentation = "1"                                                 # grapheme-safe truncation
+
+# --- async runtime + HTTP ---
+tokio       = { version = "1.52", features = ["full"] }                    # rt-multi-thread, macros, time, fs, sync, io-util
+reqwest     = { version = "0.13", default-features = false, features = ["json", "rustls", "http2"] }  # NOTE: feature is "rustls", NOT "rustls-tls"
+futures     = "0.3"                                                        # FutureExt::fuse, StreamExt::next for select!
+async-trait = "0.1"                                                        # dyn-compatible async LlmClient / ToolExecutor traits
+
+# --- serialization ---
+serde       = { version = "1", features = ["derive"] }
+serde_json  = "1"
+
+# --- EPUB / XML / HTML ---
+zip         = { version = "8.6", default-features = false, features = ["deflate", "deflate64", "bzip2", "lzma"] }  # 8.6.0 stable on rustc 1.95 (NOT 9.x prerelease, NOT 4.x)
+roxmltree   = "0.21"                                                       # namespace-aware OPF/NCX/nav parsing
+scraper     = "0.27"                                                       # html5ever 0.39 XHTML->markdown walk
+ego-tree    = "0.11"                                                       # MUST be direct: scraper does not re-export it; needed for NodeRef recursion
+
+# --- text processing ---
+regex       = "1.12"
+once_cell   = "1.21.4"                                                          # Lazy statics for compiled regexes + response_format payloads
+
+# --- infra ---
+anyhow      = "1"
+thiserror   = "2"                                                          # 2.x
+walkdir     = "2.5"
+directories = "6"                                                          # default working-dir discovery
+chrono      = { version = "0.4.45", features = ["clock", "serde"] }           # timestamps in PROJECT.md/run logs
+
+# Verified: entire superset resolves with `cargo generate-lockfile` (382 crates) and the
+# TUI/EPUB/cleanse/LLM probes all `cargo build` clean on rustc 1.95.0 edition 2024.
+# Exactly ONE crossterm (0.29.0) and ONE zip (8.6.0) in the lockfile.
+# quick-xml is intentionally OMITTED: roxmltree covers all XML, JSON-in-comment blocks cover metadata.

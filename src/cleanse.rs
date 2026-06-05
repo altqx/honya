@@ -1,0 +1,589 @@
+//! src/cleanse.rs — XHTML/HTML -> clean Markdown for honya's raw chapter files.
+//!
+//! Self-contained: depends on NOTHING in this crate (only scraper, ego_tree,
+//! regex, once_cell). The output feeds the Translator and the Reader verbatim.
+//!
+//! CLEANSE RULES (exact, load-bearing):
+//!   * `<br>` / `<br/>`                       -> the literal text `&nbsp;`
+//!   * `<b>` / `<strong>` / `<span class="b">`-> `**...**`
+//!   * `<i>` / `<em>` / `<span class="em">`   -> `*...*`
+//!   * `「」`                                  -> `“”`  (U+201C / U+201D)
+//!   * `『』`                                  -> `‘’`  (U+2018 / U+2019)
+//!   * `<ruby>Base<rt>Furigana</rt></ruby>`   -> `Base (Furigana)`
+//!         (`<rb>` is transparent; `<rp>` parens are stripped)
+//!   * `<img src=X>`                          -> `![ภาพประกอบ](../../images/FILE.png)`
+//!         FILE resolved via image_map (src key -> basename key -> raw basename);
+//!         the OUTPUT PREFIX IS ALWAYS `../../images/` (chapter md lives at
+//!         Vol_NN/raw|translated/, two dirs under project root).
+//!   * any other tag                          -> stripped (text kept)
+//!   * block elements                         -> a blank line between blocks
+//!   * 3+ consecutive newlines                -> collapsed to 2
+//!
+//! ORDERING (do not reorder): bold/italic/ruby/img happen during the DOM walk
+//! (structural). Quote conversion + whitespace normalization happen in a textual
+//! post-pass, guarded by IMG_OPEN/IMG_CLOSE sentinels so they never touch the
+//! image alt text or URL. We do NOT re-decode entities — html5ever already did.
+
+use std::collections::HashMap;
+use std::sync::OnceLock;
+
+use ego_tree::NodeRef;
+use regex::Regex;
+use scraper::node::Node;
+use scraper::Html;
+
+/// The fixed chapter-relative prefix for relocated images (hard spec).
+const IMAGE_PREFIX: &str = "../../images/";
+/// Default image alt text (Thai: "illustration").
+const IMAGE_ALT: &str = "ภาพประกอบ";
+
+// Private-use sentinels wrapping emitted image markdown. They survive the
+// textual post-pass intact and are stripped at the very end, so quote/whitespace
+// normalization can never corrupt an image alt/URL.
+const IMG_OPEN: char = '\u{E000}';
+const IMG_CLOSE: char = '\u{E001}';
+
+/// Block-level HTML elements: each forces a paragraph break in the output.
+fn is_block(tag: &str) -> bool {
+    matches!(
+        tag,
+        "p" | "div"
+            | "section"
+            | "article"
+            | "header"
+            | "footer"
+            | "aside"
+            | "nav"
+            | "blockquote"
+            | "ul"
+            | "ol"
+            | "li"
+            | "dl"
+            | "dt"
+            | "dd"
+            | "table"
+            | "tr"
+            | "h1"
+            | "h2"
+            | "h3"
+            | "h4"
+            | "h5"
+            | "h6"
+            | "figure"
+            | "figcaption"
+            | "hr"
+            | "pre"
+    )
+}
+
+/// Convert an XHTML/HTML fragment into clean Markdown per the honya cleanse rules.
+pub fn xhtml_to_markdown(html: &str, image_map: &HashMap<String, String>) -> String {
+    let doc = Html::parse_fragment(html);
+
+    // ---- structural pass: walk the DOM, emit emphasis/ruby/img/blocks -------
+    let mut out = String::with_capacity(html.len());
+    walk(doc.tree.root(), image_map, &mut out);
+
+    // ---- textual post-pass: quotes + whitespace (sentinel-guarded) ----------
+    post_process(&out)
+}
+
+/// Recursively render a node and its subtree into `out`.
+fn walk(node: NodeRef<'_, Node>, image_map: &HashMap<String, String>, out: &mut String) {
+    match node.value() {
+        Node::Text(text) => {
+            out.push_str(text);
+        }
+        Node::Element(el) => {
+            let tag = el.name();
+            match tag {
+                // Non-rendered metadata containers: drop their content entirely
+                // (scraper's fragment parsing may surface a <head>; script/style
+                // text must never leak into the chapter markdown).
+                "head" | "script" | "style" | "title" => {}
+                "br" => {
+                    // The literal text `&nbsp;` (NOT a real non-breaking space).
+                    out.push_str("&nbsp;");
+                }
+                "img" => {
+                    let src = el.attr("src").unwrap_or("");
+                    let file = resolve_image(src, image_map);
+                    // Wrap in sentinels so the post-pass leaves the markdown alone.
+                    out.push(IMG_OPEN);
+                    out.push_str("![");
+                    out.push_str(IMAGE_ALT);
+                    out.push_str("](");
+                    out.push_str(IMAGE_PREFIX);
+                    out.push_str(&file);
+                    out.push(')');
+                    out.push(IMG_CLOSE);
+                }
+                // SVG-wrapped illustration (the standard LN cover/frontispiece
+                // encoding: <svg><image xlink:href="cover.png"/></svg>). The href
+                // may be namespaced (xlink:href); scraper exposes attrs by local
+                // name, so match "href" or any ":href"-suffixed key.
+                "image" => {
+                    let src = el
+                        .attrs()
+                        .find(|(k, _)| *k == "href" || k.ends_with(":href"))
+                        .map(|(_, v)| v)
+                        .unwrap_or("");
+                    let file = resolve_image(src, image_map);
+                    out.push(IMG_OPEN);
+                    out.push_str("![");
+                    out.push_str(IMAGE_ALT);
+                    out.push_str("](");
+                    out.push_str(IMAGE_PREFIX);
+                    out.push_str(&file);
+                    out.push(')');
+                    out.push(IMG_CLOSE);
+                }
+                "b" | "strong" => {
+                    out.push_str("**");
+                    walk_children(node, image_map, out);
+                    out.push_str("**");
+                }
+                "i" | "em" => {
+                    out.push('*');
+                    walk_children(node, image_map, out);
+                    out.push('*');
+                }
+                "span" => match span_emphasis(el) {
+                    SpanEmphasis::Bold => {
+                        out.push_str("**");
+                        walk_children(node, image_map, out);
+                        out.push_str("**");
+                    }
+                    SpanEmphasis::Italic => {
+                        out.push('*');
+                        walk_children(node, image_map, out);
+                        out.push('*');
+                    }
+                    SpanEmphasis::None => walk_children(node, image_map, out),
+                },
+                "ruby" => {
+                    render_ruby(node, image_map, out);
+                }
+                // rt/rp are handled inside render_ruby; if they appear loose,
+                // drop their content (rp) / keep it (rt) conservatively: strip.
+                "rt" | "rp" => {
+                    // Loose ruby annotation outside a <ruby>: ignore quietly.
+                }
+                _ => {
+                    // Any other element: transparent. Block elements get a
+                    // surrounding blank line so paragraphs separate.
+                    if is_block(tag) {
+                        ensure_block_break(out);
+                        walk_children(node, image_map, out);
+                        ensure_block_break(out);
+                    } else {
+                        walk_children(node, image_map, out);
+                    }
+                }
+            }
+        }
+        // Document / Fragment roots, doctype, comments, PIs: just descend.
+        _ => walk_children(node, image_map, out),
+    }
+}
+
+/// Walk every child of `node`.
+fn walk_children(node: NodeRef<'_, Node>, image_map: &HashMap<String, String>, out: &mut String) {
+    for child in node.children() {
+        walk(child, image_map, out);
+    }
+}
+
+/// Render `<ruby>`: base text followed by " (furigana)". `<rb>` is transparent,
+/// `<rp>` (parenthesis fallbacks) are dropped, `<rt>` is the annotation.
+fn render_ruby(node: NodeRef<'_, Node>, image_map: &HashMap<String, String>, out: &mut String) {
+    let mut base = String::new();
+    let mut furigana = String::new();
+
+    collect_ruby(node, image_map, &mut base, &mut furigana);
+
+    let base = base.trim();
+    let furigana = furigana.trim();
+    out.push_str(base);
+    if !furigana.is_empty() {
+        out.push_str(" (");
+        out.push_str(furigana);
+        out.push(')');
+    }
+}
+
+/// Split a ruby subtree's content into base text and furigana (rt) text.
+fn collect_ruby(
+    node: NodeRef<'_, Node>,
+    image_map: &HashMap<String, String>,
+    base: &mut String,
+    furigana: &mut String,
+) {
+    for child in node.children() {
+        match child.value() {
+            Node::Text(t) => base.push_str(t),
+            Node::Element(el) => match el.name() {
+                "rt" => {
+                    // Annotation: collect its text into furigana.
+                    let mut sub = String::new();
+                    walk_children(child, image_map, &mut sub);
+                    furigana.push_str(&sub);
+                }
+                "rp" => {
+                    // Parenthesis fallback for non-ruby readers: drop entirely.
+                }
+                "rb" => {
+                    // Ruby base container: transparent, contributes to base.
+                    collect_ruby(child, image_map, base, furigana);
+                }
+                _ => {
+                    // Other inline content inside ruby goes to base.
+                    walk(child, image_map, base);
+                }
+            },
+            _ => {}
+        }
+    }
+}
+
+enum SpanEmphasis {
+    Bold,
+    Italic,
+    None,
+}
+
+/// Classify a `<span>` by its `class` tokens: "b" => bold, "em" => italic.
+fn span_emphasis(el: &scraper::node::Element) -> SpanEmphasis {
+    if let Some(class) = el.attr("class") {
+        for tok in class.split_whitespace() {
+            match tok {
+                "b" => return SpanEmphasis::Bold,
+                "em" => return SpanEmphasis::Italic,
+                _ => {}
+            }
+        }
+    }
+    SpanEmphasis::None
+}
+
+/// Ensure the output ends with exactly a paragraph break (two newlines), without
+/// piling up blank lines (the final collapse pass will tidy anything remaining).
+fn ensure_block_break(out: &mut String) {
+    if out.is_empty() {
+        return;
+    }
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    if !out.ends_with("\n\n") {
+        out.push('\n');
+    }
+}
+
+/// Resolve an `<img src>` to a relocated basename. Lookup order:
+///   1. exact `src` key in image_map,
+///   2. basename of `src` as a key in image_map,
+///   3. raw basename of `src` (when no map entry exists).
+fn resolve_image(src: &str, image_map: &HashMap<String, String>) -> String {
+    if let Some(mapped) = image_map.get(src) {
+        return mapped.clone();
+    }
+    let base = basename(src);
+    if let Some(mapped) = image_map.get(base) {
+        return mapped.clone();
+    }
+    base.to_string()
+}
+
+/// Last path segment, splitting on both '/' and '\\' and dropping any fragment/query.
+fn basename(src: &str) -> &str {
+    let no_frag = src.split('#').next().unwrap_or(src);
+    let no_query = no_frag.split('?').next().unwrap_or(no_frag);
+    no_query
+        .rsplit(|c| c == '/' || c == '\\')
+        .next()
+        .unwrap_or(no_query)
+}
+
+// ---------------------------------------------------------------------------
+// Textual post-pass: quotes + whitespace, never touching sentinel-wrapped imgs.
+// ---------------------------------------------------------------------------
+
+fn ws_collapse_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    // Three or more newlines (optionally with interleaved spaces/tabs) -> two.
+    RE.get_or_init(|| Regex::new(r"\n{3,}").unwrap())
+}
+
+fn blank_line_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    // A line consisting only of spaces/tabs (between newlines) -> empty line.
+    RE.get_or_init(|| Regex::new(r"(?m)^[ \t]+$").unwrap())
+}
+
+fn trailing_ws_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    // Trailing spaces/tabs at end of any line.
+    RE.get_or_init(|| Regex::new(r"(?m)[ \t]+$").unwrap())
+}
+
+fn run_spaces_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    // Runs of 2+ ASCII spaces/tabs (mid-line) -> single space.
+    RE.get_or_init(|| Regex::new(r"[ \t]{2,}").unwrap())
+}
+
+/// Apply quote conversion + whitespace normalization. Image markdown lives
+/// inside IMG_OPEN..IMG_CLOSE sentinels: we split on those, normalize ONLY the
+/// non-image segments, then reassemble (sentinels removed).
+fn post_process(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+
+    let mut rest = input;
+    while let Some(open_idx) = rest.find(IMG_OPEN) {
+        // Normalize the text before the image.
+        let (before, after_open) = rest.split_at(open_idx);
+        result.push_str(&normalize_text(before));
+
+        // Skip the sentinel, capture the image markdown verbatim.
+        let after_open = &after_open[IMG_OPEN.len_utf8()..];
+        match after_open.find(IMG_CLOSE) {
+            Some(close_idx) => {
+                let (img_md, after_close) = after_open.split_at(close_idx);
+                result.push_str(img_md); // verbatim, no normalization
+                rest = &after_close[IMG_CLOSE.len_utf8()..];
+            }
+            None => {
+                // Unterminated sentinel (shouldn't happen): emit rest as text.
+                result.push_str(&normalize_text(after_open));
+                rest = "";
+            }
+        }
+    }
+    // Remaining tail after the last image.
+    result.push_str(&normalize_text(rest));
+
+    // Final whitespace pass over the WHOLE assembled string: strip blank-only
+    // lines BEFORE collapsing runs of newlines, then cap block breaks at 2.
+    let mut s = result;
+    s = blank_line_re().replace_all(&s, "").into_owned();
+    s = trailing_ws_re().replace_all(&s, "").into_owned();
+    s = ws_collapse_re().replace_all(&s, "\n\n").into_owned();
+
+    s.trim_matches('\n').to_string()
+}
+
+/// Normalize ONE non-image text segment: convert CJK corner quotes to curly
+/// quotes and squeeze runs of intra-line ASCII spaces. (Newline collapsing is
+/// done once globally in `post_process`, after sentinels are gone.)
+fn normalize_text(seg: &str) -> String {
+    if seg.is_empty() {
+        return String::new();
+    }
+    let mut s = String::with_capacity(seg.len());
+    for ch in seg.chars() {
+        match ch {
+            '「' => s.push('\u{201C}'), // “
+            '」' => s.push('\u{201D}'), // ”
+            '『' => s.push('\u{2018}'), // ‘
+            '』' => s.push('\u{2019}'), // ’
+            other => s.push(other),
+        }
+    }
+    run_spaces_re().replace_all(&s, " ").into_owned()
+}
+
+// ---------------------------------------------------------------------------
+// Image-only detection.
+// ---------------------------------------------------------------------------
+
+/// A chapter is "image-only" if, after removing image markdown links, no
+/// meaningful residual text remains (using the default threshold of 0 chars).
+pub fn is_image_only(markdown: &str) -> bool {
+    is_image_only_with_threshold(markdown, 0)
+}
+
+fn img_md_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    // Matches a markdown image: ![alt](url)
+    RE.get_or_init(|| Regex::new(r"!\[[^\]]*\]\([^)]*\)").unwrap())
+}
+
+/// `is_image_only` with a configurable residual-character budget. The chapter
+/// must contain at least one image, and after stripping all image links the
+/// remaining non-whitespace character count must be <= `max_residual_chars`.
+pub fn is_image_only_with_threshold(markdown: &str, max_residual_chars: usize) -> bool {
+    let has_image = img_md_re().is_match(markdown);
+    if !has_image {
+        return false;
+    }
+    let residual = img_md_re().replace_all(markdown, "");
+    let residual_chars = residual.chars().filter(|c| !c.is_whitespace()).count();
+    residual_chars <= max_residual_chars
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn md(html: &str) -> String {
+        xhtml_to_markdown(html, &HashMap::new())
+    }
+
+    #[test]
+    fn br_becomes_literal_nbsp() {
+        assert_eq!(md("a<br/>b"), "a&nbsp;b");
+        assert_eq!(md("a<br>b"), "a&nbsp;b");
+    }
+
+    #[test]
+    fn bold_variants() {
+        assert_eq!(md("<b>x</b>"), "**x**");
+        assert_eq!(md("<strong>x</strong>"), "**x**");
+        assert_eq!(md(r#"<span class="b">x</span>"#), "**x**");
+    }
+
+    #[test]
+    fn italic_variants() {
+        assert_eq!(md("<i>x</i>"), "*x*");
+        assert_eq!(md("<em>x</em>"), "*x*");
+        assert_eq!(md(r#"<span class="em">x</span>"#), "*x*");
+    }
+
+    #[test]
+    fn plain_span_is_transparent() {
+        assert_eq!(md(r#"<span class="other">x</span>"#), "x");
+        assert_eq!(md("<span>x</span>"), "x");
+    }
+
+    #[test]
+    fn corner_quotes_to_curly() {
+        assert_eq!(md("「やあ」"), "\u{201C}やあ\u{201D}");
+    }
+
+    #[test]
+    fn double_corner_quotes_to_single_curly() {
+        assert_eq!(md("『心の声』"), "\u{2018}心の声\u{2019}");
+    }
+
+    #[test]
+    fn ruby_base_furigana() {
+        assert_eq!(md("<ruby>漢<rt>かん</rt></ruby>"), "漢 (かん)");
+    }
+
+    #[test]
+    fn ruby_with_rp_and_rb() {
+        // rb transparent, rp stripped.
+        let html = "<ruby><rb>漢字</rb><rp>(</rp><rt>かんじ</rt><rp>)</rp></ruby>";
+        assert_eq!(md(html), "漢字 (かんじ)");
+    }
+
+    #[test]
+    fn img_uses_fixed_prefix_and_alt() {
+        assert_eq!(
+            md(r#"<img src="i001.png"/>"#),
+            "![ภาพประกอบ](../../images/i001.png)"
+        );
+    }
+
+    #[test]
+    fn img_resolves_via_map_src_key() {
+        let mut map = HashMap::new();
+        map.insert("../Images/a.png".to_string(), "a_1.png".to_string());
+        let out = xhtml_to_markdown(r#"<img src="../Images/a.png"/>"#, &map);
+        assert_eq!(out, "![ภาพประกอบ](../../images/a_1.png)");
+    }
+
+    #[test]
+    fn svg_image_is_rendered() {
+        let map = HashMap::new();
+        // The standard light-novel cover encoding (namespaced xlink:href).
+        let out = xhtml_to_markdown(
+            r#"<svg xmlns:xlink="http://www.w3.org/1999/xlink"><image xlink:href="cover.png"/></svg>"#,
+            &map,
+        );
+        assert_eq!(out, "![ภาพประกอบ](../../images/cover.png)");
+        assert!(is_image_only(&out));
+    }
+
+    #[test]
+    fn img_resolves_via_basename_key() {
+        let mut map = HashMap::new();
+        map.insert("cover.png".to_string(), "cover_2.png".to_string());
+        let out = xhtml_to_markdown(r#"<img src="OEBPS/Images/cover.png"/>"#, &map);
+        assert_eq!(out, "![ภาพประกอบ](../../images/cover_2.png)");
+    }
+
+    #[test]
+    fn img_alt_and_url_survive_quote_pass() {
+        // A corner quote adjacent to an image must NOT bleed into the image md.
+        let out = md(r#"「<img src="x.png"/>」"#);
+        assert_eq!(out, "\u{201C}![ภาพประกอบ](../../images/x.png)\u{201D}");
+    }
+
+    #[test]
+    fn other_tags_stripped_text_kept() {
+        assert_eq!(md(r#"<a href="x">link</a>"#), "link");
+    }
+
+    #[test]
+    fn block_elements_separate_paragraphs() {
+        assert_eq!(md("<p>one</p><p>two</p>"), "one\n\ntwo");
+    }
+
+    #[test]
+    fn collapses_excess_blank_lines() {
+        // div nesting could produce extra breaks; cap at two newlines.
+        let out = md("<div>a</div><div></div><div></div><div>b</div>");
+        assert_eq!(out, "a\n\nb");
+    }
+
+    #[test]
+    fn does_not_redecode_entities() {
+        // html5ever decodes &amp; to & ; we must not double-process. A literal
+        // ampersand passes through untouched.
+        assert_eq!(md("Tom &amp; Jerry"), "Tom & Jerry");
+    }
+
+    #[test]
+    fn is_image_only_true_for_pure_image() {
+        let m = "![ภาพประกอบ](../../images/i.png)";
+        assert!(is_image_only(m));
+    }
+
+    #[test]
+    fn is_image_only_false_with_prose() {
+        let m = "![ภาพประกอบ](../../images/i.png)\n\nここに本文がある。";
+        assert!(!is_image_only(m));
+    }
+
+    #[test]
+    fn is_image_only_false_without_image() {
+        assert!(!is_image_only("ただのテキスト"));
+    }
+
+    #[test]
+    fn is_image_only_threshold_allows_small_residual() {
+        let m = "![ภาพประกอบ](../../images/i.png)\n*"; // 1 stray char
+        assert!(!is_image_only(m)); // strict: 0 budget
+        assert!(is_image_only_with_threshold(m, 2)); // tolerant
+    }
+
+    #[test]
+    fn nested_emphasis() {
+        assert_eq!(md("<b>a<i>b</i>c</b>"), "**a*b*c**");
+    }
+
+    #[test]
+    fn intra_line_space_runs_squeezed() {
+        // multiple ASCII spaces in text collapse to one.
+        assert_eq!(md("a    b"), "a b");
+    }
+
+    #[test]
+    fn mixed_paragraph_with_ruby_and_quote() {
+        let html = "<p>「<ruby>君<rt>きみ</rt></ruby>」</p>";
+        assert_eq!(md(html), "\u{201C}君 (きみ)\u{201D}");
+    }
+}
+
