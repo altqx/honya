@@ -70,8 +70,27 @@ useful commands: `honya --version`, `honya --help`.
 | `4` | **読 Reader** | Synced side-by-side JA ↔ TH proofreading, both panes rendered from Markdown. `[ ]` chapters · `z` sync · `o` layout. |
 | `5` | **辞 Lexicon** | Browse/edit Glossary, Characters, Style. `n` new · `e` edit · `d` delete · `/` search. |
 
-Global keys are always shown in the footer: `?` help · `:` command palette · `l` activity log ·
-`1`–`5`/`Tab` switch tabs · `Esc` close overlay · `q` quit.
+Global keys (always available; the footer shows `?`/`:`/`q`, and `?` lists the full table):
+`?` help · `:` command palette · `Ctrl-T` theme · `l` activity log · `1`–`5`/`Tab` switch tabs ·
+`Esc` close overlay · `q` quit.
+
+## Themes
+
+honya ships a curated palette set and a **live-preview** picker — open it with `Ctrl-T` (or
+`:` → *Theme*). Arrow / `j` `k` through the list and the **whole UI recolors as you move**;
+`Enter` applies and saves, `Esc` reverts. The choice persists to `config.json` (`"theme"`), so
+honya reopens in the theme you picked.
+
+| | Themes |
+|----|--------|
+| **Light** | Washi 和紙 (paper + sumi ink, the default) · Solarized Light |
+| **Native dark** | Sumi 墨 (warm ink, indigo 藍 accent) |
+| **Adaptive** | Terminal — uses your terminal's own ANSI colors, so honya matches whatever scheme it's already set to |
+| **Popular schemes** | Gruvbox · Nord · Tokyo Night · Dracula · Catppuccin Mocha · Solarized Dark · Everforest · Rosé Pine |
+
+Every palette honors one semantic contract: a single accent for focus/nav, green = done,
+amber = caution, and red reserved **only** for failure — so status always reads the same way
+across themes.
 
 ## Project layout
 

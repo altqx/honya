@@ -124,6 +124,14 @@ fn renders_overlays_without_panic() {
             let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
             term.draw(|f| app.render(f)).unwrap();
         }
+        // The theme picker must render every theme's swatch row at any size.
+        for id in crate::theme::ALL_THEMES {
+            let mut app = fresh_app();
+            app.theme = id.build();
+            app.overlay = Overlay::theme(*id);
+            let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+            term.draw(|f| app.render(f)).unwrap();
+        }
         // Import wizard, name step, with a candidate epub.
         let mut app = fresh_app();
         app.overlay = Overlay::Import(ImportState {
@@ -178,6 +186,75 @@ fn confirm_modal_closes_on_yes() {
     assert!(
         matches!(app.overlay, Overlay::None),
         "confirm modal should close on y"
+    );
+}
+
+/// The theme picker live-previews on navigation, commits on Enter, and reverts
+/// on Esc — all driven through the real key router.
+#[test]
+fn theme_picker_preview_commit_and_revert() {
+    use crate::app::overlay::Overlay;
+    use crate::model::ThemeId;
+
+    // Redirect config writes to a throwaway dir so committing a theme can't
+    // clobber the real ~/.config/honya/config.json. No other test touches it.
+    let tmp = std::env::temp_dir().join(format!("honya-test-cfg-{}", std::process::id()));
+    unsafe {
+        std::env::set_var("XDG_CONFIG_HOME", &tmp);
+    }
+    // Fail loud if the redirect didn't take, rather than clobber the real config.
+    assert!(
+        crate::config::config_dir().starts_with(&tmp),
+        "config writes must be redirected into the throwaway dir"
+    );
+
+    let mut app = fresh_app();
+    assert_eq!(app.cfg.theme, ThemeId::Washi, "fresh config defaults to Washi");
+
+    // Open via Ctrl-T.
+    app.on_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+    assert!(matches!(app.overlay, Overlay::Theme(_)), "Ctrl-T opens picker");
+
+    // Navigate down once: the live theme must change, but config stays put.
+    let baseline_bg = app.theme.bg;
+    app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::empty()));
+    assert_ne!(app.theme.bg, baseline_bg, "preview recolors the live theme");
+    assert_eq!(app.cfg.theme, ThemeId::Washi, "preview does not persist");
+
+    // Esc reverts the live theme back to the saved one and closes.
+    app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
+    assert!(matches!(app.overlay, Overlay::None), "Esc closes the picker");
+    assert_eq!(app.theme.bg, baseline_bg, "Esc reverts the preview");
+
+    // Reopen, move down twice, and commit with Enter — config persists.
+    app.on_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+    app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::empty()));
+    app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::empty()));
+    let committed = crate::theme::ALL_THEMES[2];
+    app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+    assert!(matches!(app.overlay, Overlay::None), "Enter closes the picker");
+    assert_eq!(app.cfg.theme, committed, "Enter persists the selected theme");
+    assert_eq!(app.theme.bg, committed.build().bg, "live theme matches commit");
+
+    // Restore the process-wide env so no later config-touching test inherits it.
+    unsafe {
+        std::env::remove_var("XDG_CONFIG_HOME");
+    }
+}
+
+/// Ctrl-T must open the theme picker even while the Settings overlay is focused
+/// (the panel advertises it, and an open overlay otherwise swallows the global).
+#[test]
+fn ctrl_t_opens_theme_picker_from_settings() {
+    use crate::app::overlay::Overlay;
+
+    let mut app = fresh_app();
+    app.overlay = Overlay::settings(&app.cfg.clone());
+    assert!(matches!(app.overlay, Overlay::Settings(_)));
+    app.on_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+    assert!(
+        matches!(app.overlay, Overlay::Theme(_)),
+        "Ctrl-T inside Settings opens the theme picker"
     );
 }
 

@@ -9,14 +9,14 @@
 use std::path::PathBuf;
 
 use ratatui::Frame;
-use ratatui::crossterm::event::{KeyCode, KeyEvent};
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
-use crate::model::{AppConfig, LogLevel};
-use crate::theme::{self, Theme};
+use crate::model::{AppConfig, LogLevel, ThemeId};
+use crate::theme::{self, ALL_THEMES, Theme};
 use crate::ui::layout::{centered_modal, centered_pct};
 use crate::ui::text::truncate_cols;
 use crate::ui::widgets::render_gauge;
@@ -98,6 +98,26 @@ impl SettingsState {
     }
 }
 
+/// Theme picker; navigating live-previews via `PreviewTheme`, so the whole UI
+/// behind the modal recolors as the selection moves.
+#[derive(Debug, Clone)]
+pub struct ThemePickerState {
+    /// Index into [`ALL_THEMES`].
+    pub sel: usize,
+}
+
+impl ThemePickerState {
+    fn new(current: ThemeId) -> Self {
+        Self {
+            sel: current.index(),
+        }
+    }
+
+    fn current(&self) -> ThemeId {
+        ALL_THEMES.get(self.sel).copied().unwrap_or_default()
+    }
+}
+
 /// Command palette: a fuzzy-ish filtered list of navigation commands.
 #[derive(Debug, Clone)]
 pub struct PaletteState {
@@ -138,6 +158,10 @@ impl PaletteState {
             PaletteItem {
                 label: "Settings",
                 action: Action::show_overlay(Overlay::settings_placeholder()),
+            },
+            PaletteItem {
+                label: "Theme 配色",
+                action: Action::show_overlay(Overlay::theme_placeholder()),
             },
             PaletteItem {
                 label: "Help",
@@ -191,6 +215,8 @@ pub enum Overlay {
     None,
     Import(ImportState),
     Settings(SettingsState),
+    /// Live-preview color theme picker.
+    Theme(ThemePickerState),
     /// Activity log; the `u16` is the scroll-back offset (0 = newest tail).
     Log(u16),
     /// Keybinding reference; the `u16` is the vertical scroll offset.
@@ -208,6 +234,16 @@ impl Overlay {
 
     pub fn settings(cfg: &AppConfig) -> Self {
         Overlay::Settings(SettingsState::from_cfg(cfg))
+    }
+
+    pub fn theme(current: ThemeId) -> Self {
+        Overlay::Theme(ThemePickerState::new(current))
+    }
+
+    /// Placeholder picker for the palette (no `ThemeId` handle); the App swaps in
+    /// the live `cfg.theme` on show.
+    fn theme_placeholder() -> Self {
+        Overlay::Theme(ThemePickerState { sel: 0 })
     }
 
     pub fn palette() -> Self {
@@ -264,6 +300,7 @@ impl Overlay {
             Overlay::None => Action::None,
             Overlay::Import(_) => self.handle_import_key(key),
             Overlay::Settings(_) => self.handle_settings_key(key),
+            Overlay::Theme(_) => self.handle_theme_key(key),
             Overlay::Palette(_) => self.handle_palette_key(key),
             Overlay::Modal(_) => self.handle_modal_key(key),
             Overlay::Log(off) => match key.code {
@@ -404,6 +441,11 @@ impl Overlay {
         };
         match key.code {
             KeyCode::Esc => Action::CloseOverlay,
+            // Honor the advertised "Ctrl-T to change" here, since an open overlay
+            // swallows keys before the global Ctrl-T router is reached.
+            KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                Action::show_overlay(Overlay::theme_placeholder())
+            }
             KeyCode::Enter => Action::SaveSettings {
                 base_url: st.base_url.clone(),
                 orchestrator: st.orchestrator.clone(),
@@ -426,6 +468,30 @@ impl Overlay {
                 st.field_mut().push(c);
                 Action::None
             }
+            _ => Action::None,
+        }
+    }
+
+    fn handle_theme_key(&mut self, key: KeyEvent) -> Action {
+        let Overlay::Theme(st) = self else {
+            return Action::None;
+        };
+        match key.code {
+            // Move + live-preview (App applies PreviewTheme to `app.theme`).
+            KeyCode::Up | KeyCode::Char('k') => {
+                st.sel = st.sel.saturating_sub(1);
+                Action::PreviewTheme(st.current())
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if st.sel + 1 < ALL_THEMES.len() {
+                    st.sel += 1;
+                }
+                Action::PreviewTheme(st.current())
+            }
+            // Commit: persist + close.
+            KeyCode::Enter => Action::SaveTheme(st.current()),
+            // Abandon: restore the previously-saved theme + close.
+            KeyCode::Esc | KeyCode::Char('q') => Action::CancelTheme,
             _ => Action::None,
         }
     }
@@ -499,6 +565,7 @@ impl Overlay {
                 _ => &[("Esc", "close")],
             },
             Overlay::Settings(_) => &[("Tab", "field"), ("type", "edit"), ("Esc/↵", "close")],
+            Overlay::Theme(_) => &[("jk/↑↓", "preview"), ("↵", "apply"), ("Esc", "revert")],
             Overlay::Palette(_) => &[
                 ("type", "filter"),
                 ("↑↓", "move"),
@@ -525,13 +592,13 @@ impl Overlay {
         match self {
             Overlay::None => {}
             Overlay::Import(st) => self.render_import(f, area, theme, st),
-            Overlay::Settings(st) => self.render_settings(f, area, theme, st),
+            Overlay::Settings(st) => self.render_settings(f, area, theme, cfg, st),
+            Overlay::Theme(st) => self.render_theme(f, area, theme, st),
             Overlay::Palette(st) => self.render_palette(f, area, theme, st),
             Overlay::Log(off) => self.render_log(f, area, theme, log, *off),
             Overlay::Help(off) => self.render_help(f, area, theme, *off),
             Overlay::Modal(dlg) => self.render_modal(f, area, theme, dlg),
         }
-        let _ = cfg;
     }
 
     fn modal_block<'a>(&self, title: &'a str, theme: &Theme) -> Block<'a> {
@@ -730,7 +797,14 @@ impl Overlay {
         render_gauge(f, indent(rows[2], 2), done, total.max(1), theme);
     }
 
-    fn render_settings(&self, f: &mut Frame, area: Rect, theme: &Theme, st: &SettingsState) {
+    fn render_settings(
+        &self,
+        f: &mut Frame,
+        area: Rect,
+        theme: &Theme,
+        cfg: &AppConfig,
+        st: &SettingsState,
+    ) {
         let modal = centered_modal(72, 16, area);
         f.render_widget(Clear, modal);
         let block = self.modal_block("Settings", theme);
@@ -782,6 +856,17 @@ impl Overlay {
             ),
             key_state,
         ]));
+        lines.push(Line::from(vec![
+            Span::styled(
+                "   Theme               ",
+                Style::default().fg(theme.ink_faint),
+            ),
+            Span::styled(cfg.theme.label(), Style::default().fg(theme.accent)),
+            Span::styled(
+                "   Ctrl-T to change",
+                Style::default().fg(theme.ink_faint),
+            ),
+        ]));
         lines.push(Line::raw(""));
         lines.push(Line::from(Span::styled(
             "   Set HONYA_API_KEY or OPENROUTER_API_KEY in your environment.",
@@ -790,6 +875,76 @@ impl Overlay {
         f.render_widget(
             Paragraph::new(lines).style(Style::default().bg(theme.bg_panel)),
             inner,
+        );
+    }
+
+    /// Render the theme picker: a name list plus a swatch row of the focused
+    /// theme's key colors. Drawn with the live `theme`, so the modal recolors too.
+    fn render_theme(&self, f: &mut Frame, area: Rect, theme: &Theme, st: &ThemePickerState) {
+        let modal = centered_modal(60, 20, area);
+        f.render_widget(Clear, modal);
+        let block = self.modal_block("Theme 配色", theme);
+        let inner = block.inner(modal);
+        f.render_widget(block, modal);
+
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(0), Constraint::Length(2)])
+            .split(inner);
+
+        // Windowed so the selected row stays visible when the modal is clamped short.
+        let cap = (rows[0].height as usize).max(1);
+        let start = if st.sel >= cap {
+            st.sel + 1 - cap
+        } else {
+            0
+        };
+        let end = (start + cap).min(ALL_THEMES.len());
+        let mut lines = Vec::with_capacity(end - start);
+        for (i, id) in ALL_THEMES.iter().enumerate().take(end).skip(start) {
+            let selected = i == st.sel;
+            let bar = if selected {
+                theme::SELECT_BAR.to_string()
+            } else {
+                " ".to_string()
+            };
+            let name_style = if selected {
+                Style::default().fg(theme.ink).bg(theme.accent_bg)
+            } else {
+                Style::default().fg(theme.ink_soft)
+            };
+            lines.push(Line::from(vec![
+                Span::styled(format!(" {bar} "), Style::default().fg(theme.accent)),
+                Span::styled(format!("{:<22}", id.label()), name_style),
+                Span::styled(
+                    format!(" {}", id.tone()),
+                    Style::default().fg(theme.ink_faint),
+                ),
+            ]));
+        }
+        f.render_widget(
+            Paragraph::new(lines).style(Style::default().bg(theme.bg_panel)),
+            rows[0],
+        );
+
+        // Swatch row: ● accent ◐ working ● done ✗ failed ‖ warn ▣ image.
+        let swatch = |glyph: &str, color, label: &str| -> Vec<Span<'static>> {
+            vec![
+                Span::styled(format!(" {glyph} "), Style::default().fg(color)),
+                Span::styled(format!("{label}  "), Style::default().fg(theme.ink_faint)),
+            ]
+        };
+        let mut chips = Vec::new();
+        chips.extend(swatch("●", theme.accent, "accent"));
+        chips.extend(swatch("◐", theme.status_working, "live"));
+        chips.extend(swatch("●", theme.status_done, "done"));
+        chips.extend(swatch("✗", theme.status_failed, "fail"));
+        chips.extend(swatch("‖", theme.status_warn, "warn"));
+        chips.extend(swatch("▣", theme.status_image, "img"));
+        f.render_widget(
+            Paragraph::new(vec![Line::raw(""), Line::from(chips)])
+                .style(Style::default().bg(theme.bg_panel)),
+            rows[1],
         );
     }
 
@@ -914,6 +1069,7 @@ impl Overlay {
                     ("1–5 / Tab", "switch primary tab"),
                     ("?", "toggle this help"),
                     (": / Ctrl-P", "command palette"),
+                    ("Ctrl-T", "theme picker"),
                     ("l / `", "activity log"),
                     ("Esc", "back / close overlay"),
                     ("q", "quit        Ctrl-C hard quit"),

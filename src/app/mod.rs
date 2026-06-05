@@ -23,7 +23,7 @@ use ratatui::widgets::Paragraph;
 
 use crate::llm::client::LlmClient;
 use crate::model::{
-    AppConfig, AppEvent, ChapterStatus, EventTx, LogLevel, ModelSet, Project, UsageStats,
+    AppConfig, AppEvent, ChapterStatus, EventTx, LogLevel, ModelSet, Project, ThemeId, UsageStats,
 };
 use crate::theme::Theme;
 use crate::ui::chrome::{self, StatusTally};
@@ -106,6 +106,12 @@ pub enum Action {
         translator: String,
         reviewer: String,
     },
+    /// Live-preview a theme without persisting (theme picker navigation).
+    PreviewTheme(ThemeId),
+    /// Commit a theme: apply, persist to config, close the picker.
+    SaveTheme(ThemeId),
+    /// Abandon the picker: restore the previously-saved theme, close.
+    CancelTheme,
     /// Boxed to break the `Action → Overlay → Dialog → Action` size cycle.
     ShowOverlay(Box<Overlay>),
     CloseOverlay,
@@ -194,6 +200,7 @@ impl App {
         if !projects.is_empty() {
             shelf.select_first();
         }
+        let theme = cfg.theme.build();
         Self {
             running: true,
             screen: Screen::Shelf,
@@ -201,7 +208,7 @@ impl App {
             frame: 0,
             tx,
             cfg,
-            theme: Theme::washi(),
+            theme,
             projects,
             active: None,
             shelf,
@@ -405,6 +412,11 @@ impl App {
             return Action::show_overlay(Overlay::palette());
         }
 
+        // 2a) Ctrl-T opens the theme picker from anywhere.
+        if k.modifiers.contains(KeyModifiers::CONTROL) && k.code == KeyCode::Char('t') {
+            return Action::show_overlay(Overlay::theme(self.cfg.theme));
+        }
+
         // 2b) A focused screen text field (Lexicon search/editor) captures all keys.
         if self.screen_is_capturing() {
             return self.route_to_screen(k);
@@ -479,9 +491,10 @@ impl App {
                 self.toast = None;
             }
             Action::ShowOverlay(ov) => {
-                // Palette emits a placeholder Settings overlay; rebuild from live config.
+                // Palette placeholders carry no config; rebuild from live config.
                 self.overlay = match *ov {
                     Overlay::Settings(_) => Overlay::settings(&self.cfg),
+                    Overlay::Theme(_) => Overlay::theme(self.cfg.theme),
                     other => other,
                 };
             }
@@ -546,6 +559,24 @@ impl App {
                     Ok(()) => self.toast = Some(Toast::info("settings saved")),
                     Err(e) => self.toast = Some(Toast::error(format!("save failed: {e}"))),
                 }
+                self.overlay = Overlay::None;
+            }
+            Action::PreviewTheme(id) => {
+                // Live recolor only; picker stays open, config untouched.
+                self.theme = id.build();
+            }
+            Action::SaveTheme(id) => {
+                self.cfg.theme = id;
+                self.theme = id.build();
+                match crate::config::save(&self.cfg) {
+                    Ok(()) => self.toast = Some(Toast::info(format!("theme → {}", id.label()))),
+                    Err(e) => self.toast = Some(Toast::error(format!("save failed: {e}"))),
+                }
+                self.overlay = Overlay::None;
+            }
+            Action::CancelTheme => {
+                // Revert any preview to the saved theme and close.
+                self.theme = self.cfg.theme.build();
                 self.overlay = Overlay::None;
             }
         }

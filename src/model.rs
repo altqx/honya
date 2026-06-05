@@ -163,6 +163,27 @@ impl Default for ModelSet {
     }
 }
 
+/// Selectable color theme. Pure data (keeps `model.rs` dependency-free); the
+/// palettes and labels live in `theme.rs`, keyed by `ThemeId::build`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum ThemeId {
+    #[default]
+    Washi,
+    SolarizedLight,
+    Sumi,
+    /// Adaptive: inherits the host terminal's own ANSI colors.
+    Terminal,
+    Gruvbox,
+    Nord,
+    TokyoNight,
+    Dracula,
+    Catppuccin,
+    SolarizedDark,
+    Everforest,
+    RosePine,
+}
+
 /// Global, persisted app configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -185,6 +206,9 @@ pub struct AppConfig {
     /// variables HONYA_API_KEY / OPENROUTER_API_KEY override this when set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
+    /// Active color theme (serde default keeps pre-theme configs loading).
+    #[serde(default)]
+    pub theme: ThemeId,
 }
 
 impl Default for AppConfig {
@@ -199,6 +223,7 @@ impl Default for AppConfig {
             referer: Some("https://github.com/altqx/honya".into()),
             title: Some("honya".into()),
             api_key: None,
+            theme: ThemeId::default(),
         }
     }
 }
