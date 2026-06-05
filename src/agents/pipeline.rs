@@ -252,11 +252,14 @@ async fn gate(ctx: &PipelineCtx, chapter: u32) -> bool {
     true
 }
 
+const MAX_GLOSSARY_IN_CTX: usize = 80;
+const MAX_CHARACTERS_IN_CTX: usize = 40;
+
 /// Assemble the reference context bundled into every Translator/Reviewer call:
 /// the locked glossary, the character roster (pronouns/register), and the
 /// PROJECT/STYLE prose — each in its own clearly-delimited section. Re-read per
 /// chunk so mid-chapter glossary/character additions take effect immediately.
-fn build_reference_ctx(ws: &Workspace) -> String {
+fn build_reference_ctx(ws: &Workspace, chunk_text: &str) -> String {
     fn section(out: &mut String, open: &str, body: &str, close: &str) {
         let b = body.trim();
         if !b.is_empty() {
@@ -278,14 +281,26 @@ fn build_reference_ctx(ws: &Workspace) -> String {
     }
 
     let mut s = String::new();
-    let terms = glossary::load(ws);
+    let mut terms = glossary::load(ws);
+    // Keep only terms the chunk actually uses, so the injected glossary tracks
+    // the chunk rather than the whole, ever-growing volume.
+    terms.retain(|t| {
+        let jp = t.jp_term.trim();
+        !jp.is_empty() && chunk_text.contains(jp)
+    });
+    terms.truncate(MAX_GLOSSARY_IN_CTX);
     section(
         &mut s,
         "<<GLOSSARY: คำศัพท์ที่ล็อกไว้ ต้องใช้ให้ตรง>>",
         &glossary::render_context_blurb(&terms),
         "<<END_GLOSSARY>>",
     );
-    let chars = characters::load(ws);
+    let mut chars = characters::load(ws);
+    chars.retain(|c| {
+        let jp = c.jp_name.trim();
+        !jp.is_empty() && chunk_text.contains(jp)
+    });
+    chars.truncate(MAX_CHARACTERS_IN_CTX);
     section(
         &mut s,
         "<<CHARACTERS: สรรพนาม/น้ำเสียงที่กำหนด>>",
@@ -340,7 +355,7 @@ async fn process_chunk(
 
     // Reference context (glossary + characters + project + style) and the
     // continuity tail are stable across this chunk's attempts.
-    let reference_ctx = build_reference_ctx(&ctx.ws);
+    let reference_ctx = build_reference_ctx(&ctx.ws, &chunk.text);
     let mut prev_thai =
         continuity::last_thai_sentences(&ctx.ws, chapter, ctx.cfg.continuity_sentences).await;
     // Seed chunk 0 from the previous chapter's tail when this chapter has no
@@ -579,4 +594,67 @@ async fn run_orchestrator_metadata_turn(
         .map_err(|e| anyhow::anyhow!("orchestrator tool loop failed: {e}"))?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{Character, GlossaryTerm};
+
+    fn temp_ws(tag: &str) -> (std::path::PathBuf, Workspace) {
+        let base = std::env::temp_dir().join(format!("honya_ctx_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let ws = Workspace::new(base.clone(), 1);
+        (base, ws)
+    }
+
+    fn term(jp: &str, th: &str) -> GlossaryTerm {
+        GlossaryTerm {
+            jp_term: jp.into(),
+            thai_term: th.into(),
+            romaji: None,
+            category: None,
+            gloss: None,
+            do_not_translate: None,
+            first_seen_chapter: None,
+        }
+    }
+
+    /// The reference context injected per chunk must scope to terms/characters the
+    /// chunk actually uses — otherwise it balloons with the whole accumulated
+    /// roster as a volume progresses.
+    #[test]
+    fn reference_ctx_scopes_to_chunk() {
+        let (base, ws) = temp_ws("ref");
+        glossary::upsert(&ws, term("聖剣", "ดาบศักดิ์สิทธิ์")).unwrap();
+        glossary::upsert(&ws, term("王都", "ราชธานี")).unwrap();
+        characters::upsert(
+            &ws,
+            Character {
+                id: "subaru".into(),
+                jp_name: "スバル".into(),
+                thai_name: "สบารุ".into(),
+                romaji: None,
+                gender: None,
+                honorific: None,
+                speech_style: None,
+                relationships: Vec::new(),
+                notes: None,
+                first_seen_chapter: None,
+            },
+        )
+        .unwrap();
+
+        // The chunk references 聖剣 and スバル, but never 王都.
+        let ctx = build_reference_ctx(&ws, "スバルは聖剣を抜いた。");
+        assert!(ctx.contains("聖剣"), "in-chunk term must be injected:\n{ctx}");
+        assert!(ctx.contains("スバル"), "in-chunk character must be injected");
+        assert!(
+            !ctx.contains("王都") && !ctx.contains("ราชธานี"),
+            "absent term must NOT balloon the context:\n{ctx}"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }
