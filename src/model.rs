@@ -66,6 +66,32 @@ pub struct Chapter {
     /// Last time this chapter's status changed.
     #[serde(default)]
     pub last_run: Option<DateTime<Utc>>,
+    /// Cumulative lifetime usage (tokens / cost / tool calls) charged to this
+    /// chapter across every run. Loaded from VOLUME.md's data block on scan.
+    #[serde(default)]
+    pub usage: UsageStats,
+}
+
+impl Volume {
+    /// Lifetime usage for the volume = sum of every chapter's usage.
+    pub fn usage_total(&self) -> UsageStats {
+        let mut t = UsageStats::default();
+        for c in &self.chapters {
+            t.add(&c.usage);
+        }
+        t
+    }
+}
+
+impl Project {
+    /// Lifetime usage for the project = sum of every volume's usage.
+    pub fn usage_total(&self) -> UsageStats {
+        let mut t = UsageStats::default();
+        for v in &self.volumes {
+            t.add(&v.usage_total());
+        }
+        t
+    }
 }
 
 /// What sort of content a chapter holds — decides whether agents run.
@@ -295,6 +321,10 @@ pub struct VolumeData {
     /// chapter number (as string key) -> one-line summary.
     #[serde(default)]
     pub chapters: BTreeMap<String, String>,
+    /// chapter number (as string key) -> cumulative lifetime usage. The volume
+    /// total is the sum of these; the project total is the sum across volumes.
+    #[serde(default)]
+    pub chapter_usage: BTreeMap<String, UsageStats>,
     #[serde(default)]
     pub notes: Vec<ContinuityNote>,
 }
@@ -362,6 +392,40 @@ pub struct TokenUsage {
     pub prompt: u32,
     pub completion: u32,
     pub total: u32,
+}
+
+/// Persisted usage accounting at one aggregation level (chapter; summed for
+/// volume/project). Costs are cumulative "lifetime spend" — re-translating a
+/// chapter adds to it.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct UsageStats {
+    #[serde(default)]
+    pub tokens: TokenUsage,
+    /// Total USD (BYOK-aware: OpenRouter fee + upstream provider charge).
+    #[serde(default)]
+    pub cost_usd: f64,
+    #[serde(default)]
+    pub tool_calls: u32,
+}
+
+impl UsageStats {
+    /// True when nothing has been recorded yet (drives "hide if empty" UI).
+    pub fn is_zero(&self) -> bool {
+        self.tokens.total == 0
+            && self.tokens.prompt == 0
+            && self.tokens.completion == 0
+            && self.tool_calls == 0
+            && self.cost_usd == 0.0
+    }
+
+    /// Fold another record into this one (saturating tokens/tool-calls, summed USD).
+    pub fn add(&mut self, o: &UsageStats) {
+        self.tokens.prompt = self.tokens.prompt.saturating_add(o.tokens.prompt);
+        self.tokens.completion = self.tokens.completion.saturating_add(o.tokens.completion);
+        self.tokens.total = self.tokens.total.saturating_add(o.tokens.total);
+        self.cost_usd += o.cost_usd;
+        self.tool_calls = self.tool_calls.saturating_add(o.tool_calls);
+    }
 }
 
 /// The background -> UI channel payload, sent over `tokio::sync::mpsc`. Raw crossterm
@@ -477,10 +541,16 @@ pub enum AppEvent {
         delta: String,
     },
     UsageUpdate {
-        total: TokenUsage,
-        cost_usd: f64,
-        /// Cumulative Orchestrator tool calls executed this run.
-        tool_calls: u32,
+        /// Whole-run cumulative usage (drives the run meter).
+        run: UsageStats,
+        /// Current chapter's running sub-total (drives the chapter meter).
+        chapter: UsageStats,
+    },
+    /// One chapter finished a run: fold `delta` (this run's spend on the chapter)
+    /// into the in-memory chapter total. Mirrors the VOLUME.md persistence.
+    ChapterUsage {
+        chapter: u32,
+        delta: UsageStats,
     },
 
     Log {

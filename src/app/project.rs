@@ -9,7 +9,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 
-use crate::model::{Chapter, ChapterKind, ChapterStatus, Volume};
+use crate::model::{Chapter, ChapterKind, ChapterStatus, UsageStats, Volume};
 use crate::theme::{self, Theme, status_glyph};
 use crate::ui::text::{col_width, pad_to_cols, truncate_cols};
 use crate::ui::widgets::status_cell;
@@ -314,6 +314,16 @@ impl ProjectScreen {
                 Span::styled(note, Style::default().fg(theme.ink_faint)),
             ]));
         }
+        // Always-visible project usage roll-up (sum of every volume's chapters).
+        let pu = active.project.usage_total();
+        lines.push(Line::from(vec![
+            Span::styled(" Σ ", Style::default().fg(theme.accent)),
+            Span::styled(pad_to_cols("project", 15), Style::default().fg(theme.ink)),
+            Span::styled(
+                format!("${:.4} · {} tok", pu.cost_usd, human_num(pu.tokens.total)),
+                Style::default().fg(theme.ink_faint),
+            ),
+        ]));
         f.render_widget(
             Paragraph::new(lines).style(Style::default().bg(theme.bg_panel)),
             inner,
@@ -362,6 +372,13 @@ impl ProjectScreen {
                     Style::default().fg(theme.ink_soft),
                 ),
             ]));
+            // Lifetime usage at all three levels (chapter → volume → project).
+            lines.push(Line::raw(""));
+            lines.push(usage_line("chapter", &c.usage, theme));
+            if let Some(vol) = find_volume(active, c.number) {
+                lines.push(usage_line("volume", &vol.usage_total(), theme));
+            }
+            lines.push(usage_line("project", &active.project.usage_total(), theme));
             if !self.selected.is_empty() {
                 lines.push(Line::from(vec![
                     Span::styled(" marked  ", Style::default().fg(theme.ink_faint)),
@@ -377,6 +394,8 @@ impl ProjectScreen {
                 Span::styled("  e edit context ", Style::default().fg(theme.ink_soft)),
             ]));
         } else {
+            lines.push(usage_line("project", &active.project.usage_total(), theme));
+            lines.push(Line::raw(""));
             lines.push(Line::from(Span::styled(
                 " Select a chapter to see its detail.",
                 Style::default().fg(theme.ink_faint),
@@ -532,6 +551,40 @@ fn find_chapter(active: &ActiveProject, number: u32) -> Option<&Chapter> {
         }
     }
     None
+}
+
+/// The volume that owns `chapter`, for per-volume usage roll-ups.
+fn find_volume(active: &ActiveProject, chapter: u32) -> Option<&Volume> {
+    active
+        .project
+        .volumes
+        .iter()
+        .find(|v| v.chapters.iter().any(|c| c.number == chapter))
+}
+
+/// Compact token count: `1.2k` past a thousand, else the raw number.
+fn human_num(n: u32) -> String {
+    if n >= 1000 {
+        format!("{:.1}k", n as f64 / 1000.0)
+    } else {
+        n.to_string()
+    }
+}
+
+/// One labelled usage line for the detail card: `label  N tok · M tools · $C`.
+fn usage_line(label: &str, u: &UsageStats, theme: &Theme) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(format!(" {label:<8}"), Style::default().fg(theme.ink_faint)),
+        Span::styled(
+            format!(
+                "{} tok · {} tools · ${:.4}",
+                human_num(u.tokens.total),
+                u.tool_calls,
+                u.cost_usd
+            ),
+            Style::default().fg(theme.ink_soft),
+        ),
+    ])
 }
 
 fn translatable(ch: &Chapter) -> bool {

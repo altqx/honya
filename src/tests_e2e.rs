@@ -41,6 +41,77 @@ fn renders_all_screens_without_panic() {
     }
 }
 
+/// The usage surfaces (Project detail card + context roll-up, split Translate
+/// meter) render with realistic nonzero data, at a range of sizes, panic-free.
+#[test]
+fn renders_usage_surfaces_without_panic() {
+    use crate::app::ActiveProject;
+    use crate::model::{
+        AppEvent, Chapter, ChapterKind, ChapterStatus, Project, TokenUsage, UsageStats, Volume,
+    };
+    use crate::workspace::Workspace;
+
+    let usage = UsageStats {
+        tokens: TokenUsage {
+            prompt: 1234,
+            completion: 567,
+            total: 1801,
+        },
+        cost_usd: 0.0421,
+        tool_calls: 7,
+    };
+    let dir = std::env::temp_dir().join("honya_usage_render");
+    let chapter = Chapter {
+        number: 1,
+        title: "第一章".to_string(),
+        kind: ChapterKind::Prose,
+        status: ChapterStatus::Done,
+        source_segments: 42,
+        total_chunks: 3,
+        committed_chunks: 3,
+        last_run: None,
+        usage,
+    };
+    let project = Project {
+        id: "novel".to_string(),
+        dir: dir.clone(),
+        title: "Novel".to_string(),
+        created: None,
+        touched: None,
+        volumes: vec![Volume {
+            number: 1,
+            dir: dir.join("Vol_01"),
+            label: None,
+            chapters: vec![chapter],
+        }],
+        models: None,
+    };
+
+    let sizes = [(120u16, 40u16), (80, 24), (50, 16), (30, 10)];
+    for &(w, h) in &sizes {
+        let mut app = fresh_app();
+        app.active = Some(ActiveProject {
+            project: project.clone(),
+            workspace: Workspace::new(dir.clone(), 1),
+            client: Arc::new(crate::llm::mock::MockClient::default())
+                as Arc<dyn crate::llm::client::LlmClient>,
+            models: ModelSet::default(),
+        });
+        // Drive the Translate split meter with run + chapter sub-totals.
+        app.translate.on_app_event(&AppEvent::ChapterStarted { chapter: 1 });
+        app.translate.on_app_event(&AppEvent::UsageUpdate {
+            run: usage,
+            chapter: usage,
+        });
+
+        for screen in [Screen::Project, Screen::Translate] {
+            app.screen = screen;
+            let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+            term.draw(|f| app.render(f)).unwrap();
+        }
+    }
+}
+
 /// Overlays render over their base screen at small sizes without panicking.
 #[test]
 fn renders_overlays_without_panic() {
@@ -240,29 +311,67 @@ async fn end_to_end_import_and_mock_translate() {
 
     // Drain the event channel and confirm cost accounting reached the UI: the
     // last UsageUpdate must carry the BYOK-aware running total, not a hardcoded 0.
-    let mut last_cost = None;
-    let mut last_total_tokens = 0u32;
+    let mut last_run = None;
+    let mut chapter_delta = None;
     while let Ok(ev) = rx.try_recv() {
-        if let crate::model::AppEvent::UsageUpdate {
-            total, cost_usd, ..
-        } = ev
-        {
-            last_cost = Some(cost_usd);
-            last_total_tokens = total.total;
+        match ev {
+            crate::model::AppEvent::UsageUpdate { run, .. } => last_run = Some(run),
+            crate::model::AppEvent::ChapterUsage { chapter: 1, delta } => {
+                chapter_delta = Some(delta)
+            }
+            _ => {}
         }
     }
-    let last_cost = last_cost.expect("at least one UsageUpdate emitted");
+    let last_run = last_run.expect("at least one UsageUpdate emitted");
     assert!(
-        last_cost > 0.0,
-        "cost should accumulate from API usage, got {last_cost}"
+        last_run.cost_usd > 0.0,
+        "run cost should accumulate from API usage, got {}",
+        last_run.cost_usd
     );
     // Total tokens must accumulate from prompt+completion across every call.
-    assert!(last_total_tokens > 0, "token total should accumulate");
+    assert!(last_run.tokens.total > 0, "run token total should accumulate");
+
+    // The chapter's spend is emitted for the in-memory roll-up...
+    let delta = chapter_delta.expect("ChapterUsage emitted for chapter 1");
+    assert!(delta.cost_usd > 0.0 && delta.tokens.total > 0);
+
+    // ...and persisted into VOLUME.md's data block (per-chapter, cumulative).
+    let vol_data = crate::workspace::volume::load(&Workspace::new(project_root.clone(), 1));
+    let ch1 = vol_data
+        .chapter_usage
+        .get("1")
+        .expect("chapter 1 usage persisted");
+    assert!(
+        ch1.cost_usd > 0.0 && ch1.tokens.total > 0,
+        "persisted per-chapter usage should be nonzero: {ch1:?}"
+    );
 
     let translated = project_root.join("Vol_01/translated/ch_001.md");
     let out = std::fs::read_to_string(&translated).expect("translated file written");
     assert!(out.contains("honya:chunk"), "chunk marker present: {out}");
     assert!(out.contains("ข้อความแปลจำลอง"), "mock Thai appended: {out}");
+    // VOLUME.md re-renders a Usage & Cost table from the data block.
+    let vol_md = std::fs::read_to_string(project_root.join("Vol_01/VOLUME.md")).unwrap();
+    assert!(vol_md.contains("Usage & Cost"), "usage table rendered");
+
+    // Re-scan from disk: the persisted usage must round-trip into the in-memory
+    // model and roll up to identical volume and project totals (the path that
+    // makes per-project cost survive across sessions).
+    let projects = crate::workspace::scan::scan_projects(&base);
+    let project = projects
+        .iter()
+        .find(|p| p.dir == project_root)
+        .expect("project re-scanned");
+    let scanned = project.volumes[0]
+        .chapters
+        .iter()
+        .find(|c| c.number == 1)
+        .expect("chapter 1 scanned");
+    let approx = |a: f64, b: f64| (a - b).abs() < 1e-9;
+    assert!(approx(scanned.usage.cost_usd, ch1.cost_usd));
+    assert_eq!(scanned.usage.tokens.total, ch1.tokens.total);
+    assert!(approx(project.volumes[0].usage_total().cost_usd, ch1.cost_usd));
+    assert!(approx(project.usage_total().cost_usd, ch1.cost_usd));
 
     let _ = std::fs::remove_dir_all(&base);
 }

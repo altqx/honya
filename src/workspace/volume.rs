@@ -1,7 +1,7 @@
 //! Read/update VOLUME.md. The data block is the full `VolumeData` JSON; the
 //! Markdown body above it is re-rendered from that payload on every write.
 
-use crate::model::{ContinuityNote, VolumeData};
+use crate::model::{ContinuityNote, UsageStats, VolumeData};
 use crate::workspace::Workspace;
 use crate::workspace::data_block;
 
@@ -32,6 +32,18 @@ pub fn add_note(ws: &Workspace, note: ContinuityNote) -> std::io::Result<()> {
     write(ws, &data)
 }
 
+/// Add one run's usage `delta` to a chapter's cumulative lifetime total and
+/// persist. The volume total is the sum over all chapters; the project total is
+/// the sum over all volumes — neither is stored separately, so they never drift.
+pub fn add_chapter_usage(ws: &Workspace, chapter: u32, delta: &UsageStats) -> std::io::Result<()> {
+    let mut data = load(ws);
+    data.chapter_usage
+        .entry(chapter.to_string())
+        .or_default()
+        .add(delta);
+    write(ws, &data)
+}
+
 /// Render the human-readable Markdown body for VOLUME.md.
 pub fn render_body(data: &VolumeData) -> String {
     let mut s = String::new();
@@ -58,6 +70,39 @@ pub fn render_body(data: &VolumeData) -> String {
         for (chapter, summary) in entries {
             s.push_str(&format!("| {} | {} |\n", cell(chapter), cell(summary)));
         }
+    }
+    s.push('\n');
+
+    // Usage & cost, per chapter, with a volume total row.
+    s.push_str("## การใช้งาน/ค่าใช้จ่าย (Usage & Cost)\n\n");
+    if data.chapter_usage.values().all(UsageStats::is_zero) {
+        s.push_str("_ยังไม่มีการใช้งาน_\n");
+    } else {
+        let mut entries: Vec<(&String, &UsageStats)> = data.chapter_usage.iter().collect();
+        entries.sort_by_key(|(k, _)| k.parse::<u64>().unwrap_or(u64::MAX));
+        s.push_str("| บท | tokens (in/out/total) | tool calls | ค่าใช้จ่าย (USD) |\n");
+        s.push_str("|----|-----------------------|-----------:|----------------:|\n");
+        let mut total = UsageStats::default();
+        for (chapter, u) in entries {
+            total.add(u);
+            s.push_str(&format!(
+                "| {} | {}/{}/{} | {} | ${:.4} |\n",
+                cell(chapter),
+                u.tokens.prompt,
+                u.tokens.completion,
+                u.tokens.total,
+                u.tool_calls,
+                u.cost_usd,
+            ));
+        }
+        s.push_str(&format!(
+            "| **รวม/Total** | {}/{}/{} | {} | ${:.4} |\n",
+            total.tokens.prompt,
+            total.tokens.completion,
+            total.tokens.total,
+            total.tool_calls,
+            total.cost_usd,
+        ));
     }
     s.push('\n');
 

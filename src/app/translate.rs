@@ -11,7 +11,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
-use crate::model::{AgentRole, AppEvent, ReviewVerdict, TokenUsage};
+use crate::model::{AgentRole, AppEvent, ReviewVerdict, UsageStats};
 use crate::theme::{self, Theme, agent_badge, spinner_frame};
 use crate::ui::text::truncate_cols;
 use crate::ui::widgets::render_line_gauge;
@@ -43,10 +43,10 @@ pub struct TranslateScreen {
     chunk: (usize, usize),
     /// Accumulated Thai preview text.
     preview: String,
-    tokens: TokenUsage,
-    cost_usd: f64,
-    /// Cumulative Orchestrator tool calls this run (from `UsageUpdate`).
-    tool_calls: u32,
+    /// Whole-run cumulative usage (tokens / cost / tool calls), from `UsageUpdate`.
+    run: UsageStats,
+    /// Current chapter's running usage sub-total, from `UsageUpdate`.
+    chapter: UsageStats,
     retries: u32,
     last_note: String,
     /// Idle until a run starts; drives the header, border, and spinners.
@@ -65,9 +65,8 @@ impl TranslateScreen {
             chapter_title: String::new(),
             chunk: (0, 0),
             preview: String::new(),
-            tokens: TokenUsage::default(),
-            cost_usd: 0.0,
-            tool_calls: 0,
+            run: UsageStats::default(),
+            chapter: UsageStats::default(),
             retries: 0,
             last_note: String::new(),
             phase: RunPhase::Idle,
@@ -83,14 +82,14 @@ impl TranslateScreen {
     pub fn on_app_event(&mut self, ev: &AppEvent) {
         match ev {
             AppEvent::ChapterStarted { chapter } => {
-                // A fresh run (we were idle): zero the run-scoped meters so they
-                // don't carry tokens / cost / tool calls / retries from the last run.
+                // A fresh run (we were idle): zero the run meter + retries so they
+                // don't carry over from the last run.
                 if self.phase == RunPhase::Idle {
-                    self.tokens = TokenUsage::default();
-                    self.cost_usd = 0.0;
-                    self.tool_calls = 0;
+                    self.run = UsageStats::default();
                     self.retries = 0;
                 }
+                // The chapter sub-total always resets at a chapter boundary.
+                self.chapter = UsageStats::default();
                 self.phase = RunPhase::Running;
                 self.current_chapter = Some(*chapter);
                 self.preview.clear();
@@ -207,14 +206,9 @@ impl TranslateScreen {
                     self.append_preview(delta);
                 }
             }
-            AppEvent::UsageUpdate {
-                total,
-                cost_usd,
-                tool_calls,
-            } => {
-                self.tokens = *total;
-                self.cost_usd = *cost_usd;
-                self.tool_calls = *tool_calls;
+            AppEvent::UsageUpdate { run, chapter } => {
+                self.run = *run;
+                self.chapter = *chapter;
             }
             AppEvent::ChapterCompleted { chapter } => {
                 self.last_note = format!("chapter {chapter} done");
@@ -361,7 +355,7 @@ impl TranslateScreen {
                 Constraint::Length(1), // chunk header
                 Constraint::Length(1), // gauge
                 Constraint::Length(3), // 3 agent lines
-                Constraint::Length(1), // tokens meter
+                Constraint::Length(2), // usage meter (run + chapter)
                 Constraint::Min(0),
             ])
             .split(inner);
@@ -455,39 +449,49 @@ impl TranslateScreen {
             );
         }
 
-        // Token / tool-call / retry / cost meter.
+        // Usage meter: whole-run total (row 1) + current-chapter sub-total (row 2),
+        // each showing tokens (in/out/total), tool calls, and BYOK-aware USD.
         let sep = || Span::styled("   ·   ", Style::default().fg(theme.rule));
-        let meter = Line::from(vec![
-            Span::styled(" tokens  ", Style::default().fg(theme.ink_faint)),
-            Span::styled(
-                format!(
-                    "in {} · out {} · total {}",
-                    human_tok(self.tokens.prompt),
-                    human_tok(self.tokens.completion),
-                    human_tok(self.tokens.total)
+        let usage_spans = |label: &str, u: &UsageStats| {
+            vec![
+                Span::styled(format!(" {label:<7}"), Style::default().fg(theme.ink_faint)),
+                Span::styled(
+                    format!(
+                        "in {} · out {} · total {}",
+                        human_tok(u.tokens.prompt),
+                        human_tok(u.tokens.completion),
+                        human_tok(u.tokens.total)
+                    ),
+                    Style::default().fg(theme.ink_soft),
                 ),
-                Style::default().fg(theme.ink_soft),
-            ),
-            sep(),
-            Span::styled(
-                format!("tools {}", self.tool_calls),
-                Style::default().fg(theme.ink_soft),
-            ),
-            sep(),
-            Span::styled(
-                format!("retries {}", self.retries),
-                Style::default().fg(if self.retries > 0 {
-                    theme.status_warn
-                } else {
-                    theme.ink_soft
-                }),
-            ),
-            sep(),
-            Span::styled(
-                format!("${:.4}", self.cost_usd),
-                Style::default().fg(theme.ink_faint),
-            ),
-        ]);
+                sep(),
+                Span::styled(
+                    format!("tools {}", u.tool_calls),
+                    Style::default().fg(theme.ink_soft),
+                ),
+                sep(),
+                Span::styled(
+                    format!("${:.4}", u.cost_usd),
+                    Style::default().fg(theme.ink_faint),
+                ),
+            ]
+        };
+
+        let mut run_spans = usage_spans("run", &self.run);
+        run_spans.push(sep());
+        run_spans.push(Span::styled(
+            format!("retries {}", self.retries),
+            Style::default().fg(if self.retries > 0 {
+                theme.status_warn
+            } else {
+                theme.ink_soft
+            }),
+        ));
+
+        let meter = vec![
+            Line::from(run_spans),
+            Line::from(usage_spans("chap", &self.chapter)),
+        ];
         f.render_widget(
             Paragraph::new(meter).style(Style::default().bg(theme.bg_panel)),
             parts[3],

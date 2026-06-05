@@ -26,9 +26,9 @@ use crate::llm::tool_loop::run_tool_loop;
 use crate::llm::{ChatRequest, Message, Tool, Usage};
 use crate::model::{
     AppConfig, AppEvent, ChapterStatus, ChunkState, EventTx, LogLevel, ModelSet, ReviewVerdict,
-    TokenUsage, TranslatorOut,
+    TokenUsage, TranslatorOut, UsageStats,
 };
-use crate::workspace::{Workspace, characters, data_block, glossary, translation};
+use crate::workspace::{Workspace, characters, data_block, glossary, translation, volume};
 
 /// Shared, cheap-to-clone run control toggled by the UI (p pause / s stop) and
 /// polled by the pipeline between chunks. 0 = running, 1 = paused, 2 = stopped.
@@ -104,7 +104,7 @@ impl PipelineCtx {
 pub async fn run_pipeline(ctx: PipelineCtx, chapters: Vec<u32>) -> anyhow::Result<()> {
     let mut done = 0u32;
     let mut failed = 0u32;
-    let mut acc = RunAcc::default();
+    let mut acc = Acc::default();
 
     for chapter in chapters {
         if ctx.ctl.is_stopped() {
@@ -120,7 +120,25 @@ pub async fn run_pipeline(ctx: PipelineCtx, chapters: Vec<u32>) -> anyhow::Resul
             state: ChapterStatus::Chunking,
         });
 
-        match process_chapter(&ctx, chapter, &mut acc).await {
+        let outcome = process_chapter(&ctx, chapter, &mut acc).await;
+
+        // Persist this chapter's spend to VOLUME.md (cumulative lifetime accounting)
+        // however it ended, then reset the per-chapter sub-total for the next one.
+        if !acc.chapter.is_zero() {
+            if let Err(e) = volume::add_chapter_usage(&ctx.ws, chapter, &acc.chapter) {
+                ctx.tx.send(AppEvent::Log {
+                    level: LogLevel::Warn,
+                    msg: format!("could not persist usage for chapter {chapter}: {e}"),
+                });
+            }
+            ctx.tx.send(AppEvent::ChapterUsage {
+                chapter,
+                delta: acc.chapter,
+            });
+        }
+        acc.chapter = UsageStats::default();
+
+        match outcome {
             Ok(Outcome::Completed) => {
                 done += 1;
                 ctx.tx.send(AppEvent::ChapterStateChanged {
@@ -168,7 +186,7 @@ pub async fn run_pipeline(ctx: PipelineCtx, chapters: Vec<u32>) -> anyhow::Resul
 async fn process_chapter(
     ctx: &PipelineCtx,
     chapter: u32,
-    acc: &mut RunAcc,
+    acc: &mut Acc,
 ) -> anyhow::Result<Outcome> {
     let raw_path = ctx.ws.raw(chapter);
     let raw = tokio::fs::read_to_string(&raw_path)
@@ -338,28 +356,36 @@ fn to_tokens(u: &Usage) -> TokenUsage {
     }
 }
 
-/// Fold a delta into the running accumulator (saturating).
-fn add_tokens(acc: &mut TokenUsage, d: &TokenUsage) {
-    acc.prompt = acc.prompt.saturating_add(d.prompt);
-    acc.completion = acc.completion.saturating_add(d.completion);
-    acc.total = acc.total.saturating_add(d.total);
+/// Build a `UsageStats` from one API call's token + BYOK-aware cost usage.
+fn stats_from_usage(u: &Usage) -> UsageStats {
+    UsageStats {
+        tokens: to_tokens(u),
+        cost_usd: u.cost_usd(),
+        tool_calls: 0,
+    }
 }
 
-/// Running totals for one pipeline run: cumulative tokens, cumulative USD, and the
-/// number of Orchestrator tool calls — summed across every Translator / Reviewer /
-/// Orchestrator call in the run.
+/// The two running totals one pipeline run maintains in parallel: `run` spans the
+/// whole run (drives the run meter), `chapter` resets at each chapter boundary
+/// (drives the chapter meter and the persisted per-chapter total).
 #[derive(Default)]
-struct RunAcc {
-    tokens: TokenUsage,
-    cost_usd: f64,
-    tool_calls: u32,
+struct Acc {
+    run: UsageStats,
+    chapter: UsageStats,
 }
 
-impl RunAcc {
-    /// Fold one API call's usage (tokens + BYOK-aware cost) into the run totals.
+impl Acc {
+    /// Fold one API call's token + cost usage into both totals.
     fn fold(&mut self, u: &Usage) {
-        add_tokens(&mut self.tokens, &to_tokens(u));
-        self.cost_usd += u.cost_usd();
+        let s = stats_from_usage(u);
+        self.run.add(&s);
+        self.chapter.add(&s);
+    }
+
+    /// Fold `n` Orchestrator tool calls into both totals.
+    fn add_tool_calls(&mut self, n: u32) {
+        self.run.tool_calls = self.run.tool_calls.saturating_add(n);
+        self.chapter.tool_calls = self.chapter.tool_calls.saturating_add(n);
     }
 }
 
@@ -370,7 +396,7 @@ async fn process_chunk(
     ctx: &PipelineCtx,
     chapter: u32,
     chunk: &Chunk,
-    acc: &mut RunAcc,
+    acc: &mut Acc,
 ) -> anyhow::Result<()> {
     ctx.tx.send(AppEvent::ChunkStateChanged {
         chapter,
@@ -445,9 +471,8 @@ async fn process_chunk(
             tokens: tok,
         });
         ctx.tx.send(AppEvent::UsageUpdate {
-            total: acc.tokens,
-            cost_usd: acc.cost_usd,
-            tool_calls: acc.tool_calls,
+            run: acc.run,
+            chapter: acc.chapter,
         });
 
         // ---- Reviewer ----
@@ -486,9 +511,8 @@ async fn process_chunk(
         };
         acc.fold(&r_usage);
         ctx.tx.send(AppEvent::UsageUpdate {
-            total: acc.tokens,
-            cost_usd: acc.cost_usd,
-            tool_calls: acc.tool_calls,
+            run: acc.run,
+            chapter: acc.chapter,
         });
 
         let approved = review.approved();
@@ -536,11 +560,10 @@ async fn process_chunk(
             match run_orchestrator_metadata_turn(ctx, chapter, &out).await {
                 Ok((o_usage, n_tool_calls)) => {
                     acc.fold(&o_usage);
-                    acc.tool_calls = acc.tool_calls.saturating_add(n_tool_calls as u32);
+                    acc.add_tool_calls(n_tool_calls as u32);
                     ctx.tx.send(AppEvent::UsageUpdate {
-                        total: acc.tokens,
-                        cost_usd: acc.cost_usd,
-                        tool_calls: acc.tool_calls,
+                        run: acc.run,
+                        chapter: acc.chapter,
                     });
                 }
                 // Metadata persistence is best-effort; never fail the chunk on it.

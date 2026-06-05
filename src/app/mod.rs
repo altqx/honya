@@ -22,7 +22,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use crate::llm::client::LlmClient;
-use crate::model::{AppConfig, AppEvent, ChapterStatus, EventTx, LogLevel, ModelSet, Project};
+use crate::model::{
+    AppConfig, AppEvent, ChapterStatus, EventTx, LogLevel, ModelSet, Project, UsageStats,
+};
 use crate::theme::Theme;
 use crate::ui::chrome::{self, StatusTally};
 use crate::ui::layout::{self, Skeleton};
@@ -247,6 +249,9 @@ impl App {
                 self.set_chapter_status(*chapter, ChapterStatus::Done);
                 self.push_log(LogLevel::Info, format!("chapter {chapter} done"));
             }
+            AppEvent::ChapterUsage { chapter, delta } => {
+                self.add_chapter_usage(*chapter, delta);
+            }
             AppEvent::ChapterFailed { chapter, reason } => {
                 self.set_chapter_status(*chapter, ChapterStatus::Failed);
                 self.toast = Some(Toast::error(format!("ch {chapter} failed · {reason}")));
@@ -348,6 +353,21 @@ impl App {
                 for ch in vol.chapters.iter_mut() {
                     if ch.number == chapter {
                         ch.committed_chunks = ch.committed_chunks.saturating_add(1);
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Fold a finished chapter's run usage into its in-memory lifetime total,
+    /// mirroring the VOLUME.md persistence so the Project screen stays live.
+    fn add_chapter_usage(&mut self, chapter: u32, delta: &UsageStats) {
+        if let Some(active) = self.active.as_mut() {
+            for vol in active.project.volumes.iter_mut() {
+                for ch in vol.chapters.iter_mut() {
+                    if ch.number == chapter {
+                        ch.usage.add(delta);
                         return;
                     }
                 }

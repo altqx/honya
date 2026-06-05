@@ -9,7 +9,8 @@ use chrono::{DateTime, Utc};
 use walkdir::WalkDir;
 
 use crate::cleanse;
-use crate::model::{Chapter, ChapterKind, ChapterStatus, Project, Volume};
+use crate::model::{Chapter, ChapterKind, ChapterStatus, Project, Volume, VolumeData};
+use crate::workspace::data_block;
 
 /// Discover projects one level under `root` (a child dir with `PROJECT.md`),
 /// ascending by id, each fully populated with volumes and chapters.
@@ -78,7 +79,9 @@ pub fn scan_volumes(project_dir: &Path) -> Vec<Volume> {
             None => continue,
         };
 
-        let chapters = scan_chapters(&dir);
+        // VOLUME.md's data block carries the persisted per-chapter usage totals.
+        let vol_data: VolumeData = data_block::read_data_block(&dir.join("VOLUME.md"));
+        let chapters = scan_chapters(&dir, &vol_data);
         let label = read_volume_label(&dir);
         volumes.push(Volume {
             number,
@@ -93,8 +96,9 @@ pub fn scan_volumes(project_dir: &Path) -> Vec<Volume> {
 }
 
 /// Discover chapters from `raw/ch_NNN.md`, ascending. Title defaults to
-/// "Chapter NNN" since the EPUB TOC title is not persisted on disk.
-pub fn scan_chapters(vol_dir: &Path) -> Vec<Chapter> {
+/// "Chapter NNN" since the EPUB TOC title is not persisted on disk. `vol_data`
+/// supplies each chapter's persisted lifetime usage.
+pub fn scan_chapters(vol_dir: &Path, vol_data: &VolumeData) -> Vec<Chapter> {
     let raw_dir = vol_dir.join("raw");
     let mut numbers: Vec<u32> = Vec::new();
 
@@ -146,6 +150,11 @@ pub fn scan_chapters(vol_dir: &Path) -> Vec<Chapter> {
                 total_chunks: 0,
                 committed_chunks: count_committed_chunks(vol_dir, number),
                 last_run,
+                usage: vol_data
+                    .chapter_usage
+                    .get(&number.to_string())
+                    .copied()
+                    .unwrap_or_default(),
             }
         })
         .collect()
