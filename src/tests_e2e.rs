@@ -243,7 +243,10 @@ async fn end_to_end_import_and_mock_translate() {
     let mut last_cost = None;
     let mut last_total_tokens = 0u32;
     while let Ok(ev) = rx.try_recv() {
-        if let crate::model::AppEvent::UsageUpdate { total, cost_usd } = ev {
+        if let crate::model::AppEvent::UsageUpdate {
+            total, cost_usd, ..
+        } = ev
+        {
             last_cost = Some(cost_usd);
             last_total_tokens = total.total;
         }
@@ -253,6 +256,7 @@ async fn end_to_end_import_and_mock_translate() {
         last_cost > 0.0,
         "cost should accumulate from API usage, got {last_cost}"
     );
+    // Total tokens must accumulate from prompt+completion across every call.
     assert!(last_total_tokens > 0, "token total should accumulate");
 
     let translated = project_root.join("Vol_01/translated/ch_001.md");

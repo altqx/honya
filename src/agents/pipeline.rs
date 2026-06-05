@@ -322,12 +322,19 @@ fn build_reference_ctx(ws: &Workspace, chunk_text: &str) -> String {
     s
 }
 
-/// Convert API token `Usage` into the UI's `TokenUsage`.
+/// Convert API token `Usage` into the UI's `TokenUsage`. Falls back to
+/// `prompt + completion` when a provider omits `total_tokens` (some BYOK
+/// providers do) so the running total never silently stalls.
 fn to_tokens(u: &Usage) -> TokenUsage {
+    let total = if u.total_tokens != 0 {
+        u.total_tokens
+    } else {
+        u.prompt_tokens.saturating_add(u.completion_tokens)
+    };
     TokenUsage {
         prompt: u.prompt_tokens,
         completion: u.completion_tokens,
-        total: u.total_tokens,
+        total,
     }
 }
 
@@ -338,12 +345,14 @@ fn add_tokens(acc: &mut TokenUsage, d: &TokenUsage) {
     acc.total = acc.total.saturating_add(d.total);
 }
 
-/// Running totals for one pipeline run: cumulative tokens and cumulative USD,
-/// summed across every Translator / Reviewer / Orchestrator call in the run.
+/// Running totals for one pipeline run: cumulative tokens, cumulative USD, and the
+/// number of Orchestrator tool calls — summed across every Translator / Reviewer /
+/// Orchestrator call in the run.
 #[derive(Default)]
 struct RunAcc {
     tokens: TokenUsage,
     cost_usd: f64,
+    tool_calls: u32,
 }
 
 impl RunAcc {
@@ -438,6 +447,7 @@ async fn process_chunk(
         ctx.tx.send(AppEvent::UsageUpdate {
             total: acc.tokens,
             cost_usd: acc.cost_usd,
+            tool_calls: acc.tool_calls,
         });
 
         // ---- Reviewer ----
@@ -478,6 +488,7 @@ async fn process_chunk(
         ctx.tx.send(AppEvent::UsageUpdate {
             total: acc.tokens,
             cost_usd: acc.cost_usd,
+            tool_calls: acc.tool_calls,
         });
 
         let approved = review.approved();
@@ -523,11 +534,13 @@ async fn process_chunk(
 
             // ---- Orchestrator metadata turn (everything-uses-tools) ----
             match run_orchestrator_metadata_turn(ctx, chapter, &out).await {
-                Ok(o_usage) => {
+                Ok((o_usage, n_tool_calls)) => {
                     acc.fold(&o_usage);
+                    acc.tool_calls = acc.tool_calls.saturating_add(n_tool_calls as u32);
                     ctx.tx.send(AppEvent::UsageUpdate {
                         total: acc.tokens,
                         cost_usd: acc.cost_usd,
+                        tool_calls: acc.tool_calls,
                     });
                 }
                 // Metadata persistence is best-effort; never fail the chunk on it.
@@ -591,7 +604,7 @@ async fn run_orchestrator_metadata_turn(
     ctx: &PipelineCtx,
     chapter: u32,
     out: &TranslatorOut,
-) -> anyhow::Result<Usage> {
+) -> anyhow::Result<(Usage, usize)> {
     let user = build_orchestrator_metadata_msg(chapter, out);
 
     let tools: Vec<Tool> = serde_json::from_value(orchestrator_tools())
@@ -614,11 +627,11 @@ async fn run_orchestrator_metadata_turn(
         chapter,
     );
 
-    let (_resp, usage) = run_tool_loop(ctx.client.as_ref(), req, &executor, 8)
+    let outcome = run_tool_loop(ctx.client.as_ref(), req, &executor, 8)
         .await
         .map_err(|e| anyhow::anyhow!("orchestrator tool loop failed: {e}"))?;
 
-    Ok(usage)
+    Ok((outcome.usage, outcome.tool_calls))
 }
 
 #[cfg(test)]

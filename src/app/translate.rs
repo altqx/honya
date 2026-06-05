@@ -45,6 +45,8 @@ pub struct TranslateScreen {
     preview: String,
     tokens: TokenUsage,
     cost_usd: f64,
+    /// Cumulative Orchestrator tool calls this run (from `UsageUpdate`).
+    tool_calls: u32,
     retries: u32,
     last_note: String,
     /// Idle until a run starts; drives the header, border, and spinners.
@@ -65,6 +67,7 @@ impl TranslateScreen {
             preview: String::new(),
             tokens: TokenUsage::default(),
             cost_usd: 0.0,
+            tool_calls: 0,
             retries: 0,
             last_note: String::new(),
             phase: RunPhase::Idle,
@@ -80,6 +83,14 @@ impl TranslateScreen {
     pub fn on_app_event(&mut self, ev: &AppEvent) {
         match ev {
             AppEvent::ChapterStarted { chapter } => {
+                // A fresh run (we were idle): zero the run-scoped meters so they
+                // don't carry tokens / cost / tool calls / retries from the last run.
+                if self.phase == RunPhase::Idle {
+                    self.tokens = TokenUsage::default();
+                    self.cost_usd = 0.0;
+                    self.tool_calls = 0;
+                    self.retries = 0;
+                }
                 self.phase = RunPhase::Running;
                 self.current_chapter = Some(*chapter);
                 self.preview.clear();
@@ -196,9 +207,14 @@ impl TranslateScreen {
                     self.append_preview(delta);
                 }
             }
-            AppEvent::UsageUpdate { total, cost_usd } => {
+            AppEvent::UsageUpdate {
+                total,
+                cost_usd,
+                tool_calls,
+            } => {
                 self.tokens = *total;
                 self.cost_usd = *cost_usd;
+                self.tool_calls = *tool_calls;
             }
             AppEvent::ChapterCompleted { chapter } => {
                 self.last_note = format!("chapter {chapter} done");
@@ -439,18 +455,25 @@ impl TranslateScreen {
             );
         }
 
-        // Token / retry meter.
+        // Token / tool-call / retry / cost meter.
+        let sep = || Span::styled("   ·   ", Style::default().fg(theme.rule));
         let meter = Line::from(vec![
             Span::styled(" tokens  ", Style::default().fg(theme.ink_faint)),
             Span::styled(
                 format!(
-                    "in {} · out {}",
+                    "in {} · out {} · total {}",
                     human_tok(self.tokens.prompt),
-                    human_tok(self.tokens.completion)
+                    human_tok(self.tokens.completion),
+                    human_tok(self.tokens.total)
                 ),
                 Style::default().fg(theme.ink_soft),
             ),
-            Span::styled("   ·   ", Style::default().fg(theme.rule)),
+            sep(),
+            Span::styled(
+                format!("tools {}", self.tool_calls),
+                Style::default().fg(theme.ink_soft),
+            ),
+            sep(),
             Span::styled(
                 format!("retries {}", self.retries),
                 Style::default().fg(if self.retries > 0 {
@@ -459,7 +482,7 @@ impl TranslateScreen {
                     theme.ink_soft
                 }),
             ),
-            Span::styled("   ·   ", Style::default().fg(theme.rule)),
+            sep(),
             Span::styled(
                 format!("${:.4}", self.cost_usd),
                 Style::default().fg(theme.ink_faint),

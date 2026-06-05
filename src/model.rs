@@ -479,6 +479,8 @@ pub enum AppEvent {
     UsageUpdate {
         total: TokenUsage,
         cost_usd: f64,
+        /// Cumulative Orchestrator tool calls executed this run.
+        tool_calls: u32,
     },
 
     Log {
