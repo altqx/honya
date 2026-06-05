@@ -1,6 +1,8 @@
 //! XHTML/HTML -> clean Markdown for honya's raw chapter files. Self-contained.
 //!
-//! Load-bearing cleanse rules: `<br>`->literal `&nbsp;`; b/strong/span.b->`**..**`;
+//! Load-bearing cleanse rules: `<br>`->`---` thematic break (an empty `<p><br></p>`
+//! scene-break spacer, or a stacked run of them, becomes a single divider — never a
+//! literal token); b/strong/span.b->`**..**`;
 //! i/em/span.em->`*..*`; 「」->“”, 『』->‘’; ruby->`Base (Furigana)`;
 //! `<img>`->`![ภาพประกอบ](../../images/FILE.png)`; other tags stripped; block elements
 //! separated by a blank line; 3+ newlines collapsed to 2.
@@ -81,8 +83,14 @@ fn walk(node: NodeRef<'_, Node>, image_map: &HashMap<String, String>, out: &mut 
                 // Drop metadata containers wholesale: script/style text must never leak into the markdown.
                 "head" | "script" | "style" | "title" => {}
                 "br" => {
-                    // Literal text `&nbsp;`, NOT a real non-breaking space.
-                    out.push_str("&nbsp;");
+                    // Scene-break divider. Light novels use empty <p><br></p> paragraphs
+                    // (often stacked) as vertical scene gaps; render each as a Markdown
+                    // thematic break `---`, emitted block-level so it always parses as a
+                    // rule. A run of them collapses to a single rule in post_process. This
+                    // leaves no inline token for the LLM translator to over-replicate.
+                    ensure_block_break(out);
+                    out.push_str("---");
+                    ensure_block_break(out);
                 }
                 "img" => {
                     let src = el.attr("src").unwrap_or("");
@@ -292,6 +300,12 @@ fn run_spaces_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"[ \t]{2,}").unwrap())
 }
 
+fn rule_run_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    // Two or more `---` thematic breaks separated only by a blank line -> one.
+    RE.get_or_init(|| Regex::new(r"---(?:\n\n---)+").unwrap())
+}
+
 /// Apply quote conversion + whitespace normalization. Image markdown lives
 /// inside IMG_OPEN..IMG_CLOSE sentinels: we split on those, normalize ONLY the
 /// non-image segments, then reassemble (sentinels removed).
@@ -324,6 +338,8 @@ fn post_process(input: &str) -> String {
     s = blank_line_re().replace_all(&s, "").into_owned();
     s = trailing_ws_re().replace_all(&s, "").into_owned();
     s = ws_collapse_re().replace_all(&s, "\n\n").into_owned();
+    // Collapse a run of consecutive thematic breaks (stacked <br> spacers) into one.
+    s = rule_run_re().replace_all(&s, "---").into_owned();
 
     s.trim_matches('\n').to_string()
 }
@@ -382,9 +398,25 @@ mod tests {
     }
 
     #[test]
-    fn br_becomes_literal_nbsp() {
-        assert_eq!(md("a<br/>b"), "a&nbsp;b");
-        assert_eq!(md("a<br>b"), "a&nbsp;b");
+    fn br_becomes_thematic_break() {
+        assert_eq!(md("a<br/>b"), "a\n\n---\n\nb");
+        assert_eq!(md("a<br>b"), "a\n\n---\n\nb");
+    }
+
+    #[test]
+    fn br_paragraph_spacer_becomes_one_rule() {
+        // `<p><br/></p>` scene-break spacers become a single `---` divider, never a
+        // literal `&nbsp;` token (which the LLM translator otherwise replicates all
+        // over the output).
+        let out = md("<p>a</p><p><br/></p><p>b</p>");
+        assert_eq!(out, "a\n\n---\n\nb");
+        assert!(!out.contains("nbsp"));
+        // Several stacked spacers collapse to ONE divider, not a stack of rules.
+        assert_eq!(md("<p>a</p><p><br/></p><p><br/></p><p>b</p>"), "a\n\n---\n\nb");
+        assert_eq!(
+            md("<p>a</p><p><br/></p><p><br/></p><p><br/></p><p>b</p>"),
+            "a\n\n---\n\nb"
+        );
     }
 
     #[test]

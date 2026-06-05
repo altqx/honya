@@ -4,9 +4,10 @@
 //!
 //! Scope is the honya Markdown vocabulary (see [`crate::cleanse`]): emphasis
 //! (`**`/`*`, `__`/`_`), inline code, fenced code, ATX headings, blockquotes,
-//! unordered/ordered lists, thematic breaks, links and images, plus the honya
-//! `&nbsp;` line-break sentinel that `<br>` cleanses to. It is line-oriented and
-//! returns one [`Line`] per logical row; the caller's `Paragraph::wrap` reflows
+//! unordered/ordered lists, thematic breaks, links and images. `<br>` now cleanses
+//! to a `---` thematic break (rendered as a rule); the legacy `&nbsp;` sentinel is
+//! still split into line breaks for chapters translated before that change. It is
+//! line-oriented and returns one [`Line`] per logical row; the caller's `Paragraph::wrap` reflows
 //! long rows. Every emitted text run passes through [`thai_display_safe`] so
 //! Thai SARA AM never smears (the one width invariant the whole UI relies on).
 //!
@@ -35,10 +36,10 @@ pub fn render(md: &str, base: Color, theme: &Theme, width: usize) -> Vec<Line<'s
     // `Some((fence_char, len))` while inside a fenced code block.
     let mut fence: Option<(char, usize)> = None;
 
-    // Split into block lines on REAL newlines only. honya's `<br>` cleanses to a
-    // literal `&nbsp;` sentinel; we keep it intact through inline parsing (so an
-    // emphasis/link/code span can straddle it) and only break it into display
-    // lines afterwards, in `emit_block` → `split_on_break`.
+    // Split into block lines on REAL newlines. The legacy `&nbsp;` sentinel (from
+    // chapters cleansed before `<br>`->`---`) is kept intact through inline parsing —
+    // so an emphasis/link/code span can straddle it — and only broken into display
+    // lines afterwards, in `emit_block`.
     for raw in md.split('\n') {
         let trimmed = raw.trim_start();
 
@@ -99,9 +100,10 @@ pub fn render(md: &str, base: Color, theme: &Theme, width: usize) -> Vec<Line<'s
     out
 }
 
-/// Emit one logical block as one-or-more display lines, breaking at honya's
-/// `&nbsp;` (`<br>`) sentinels while carrying each span's style across the break.
-/// A span run that holds no sentinel becomes exactly one line.
+/// Emit one logical block as one-or-more display lines, breaking at any legacy
+/// `&nbsp;` sentinel while carrying each span's style across the break (for chapters
+/// translated before `<br>`->`---`). A span run that holds no sentinel becomes
+/// exactly one line.
 fn emit_block(spans: Vec<Span<'static>>, out: &mut Vec<Line<'static>>) {
     let mut current: Vec<Span<'static>> = Vec::new();
     for span in spans {
