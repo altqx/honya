@@ -66,10 +66,19 @@ impl Default for RunControl {
     }
 }
 
-/// How a chapter finished: ran to completion, or the user stopped the run.
+/// How a chapter finished: ran to completion, completed with ≥1 chunk committed
+/// unreviewed (flagged for a human), or the user stopped the run.
 enum Outcome {
     Completed,
+    NeedsReview,
     Stopped,
+}
+
+/// How a single chunk resolved: committed after approval, or committed unreviewed
+/// after exhausting its review attempts (the resilient path).
+enum ChunkOutcome {
+    Committed,
+    NeedsReview,
 }
 
 /// Everything one pipeline run needs: the shared LLM client, the project
@@ -104,6 +113,7 @@ impl PipelineCtx {
 pub async fn run_pipeline(ctx: PipelineCtx, chapters: Vec<u32>) -> anyhow::Result<()> {
     let mut done = 0u32;
     let mut failed = 0u32;
+    let mut need_review = 0u32;
     let mut acc = Acc::default();
 
     for chapter in chapters {
@@ -147,6 +157,23 @@ pub async fn run_pipeline(ctx: PipelineCtx, chapters: Vec<u32>) -> anyhow::Resul
                 });
                 ctx.tx.send(AppEvent::ChapterCompleted { chapter });
             }
+            Ok(Outcome::NeedsReview) => {
+                // The chapter is fully written, but ≥1 chunk was committed without
+                // passing review. It "completed" (counts toward `done`) yet stays
+                // flagged `NeedsReview` instead of `Done` so a human can fix it.
+                done += 1;
+                need_review += 1;
+                ctx.tx.send(AppEvent::ChapterStateChanged {
+                    chapter,
+                    state: ChapterStatus::NeedsReview,
+                });
+                ctx.tx.send(AppEvent::Log {
+                    level: LogLevel::Warn,
+                    msg: format!(
+                        "chapter {chapter} completed with chunk(s) needing manual review"
+                    ),
+                });
+            }
             Ok(Outcome::Stopped) => {
                 ctx.tx.send(AppEvent::Log {
                     level: LogLevel::Warn,
@@ -176,6 +203,7 @@ pub async fn run_pipeline(ctx: PipelineCtx, chapters: Vec<u32>) -> anyhow::Resul
     ctx.tx.send(AppEvent::PipelineFinished {
         chapters_done: done,
         chapters_failed: failed,
+        chapters_need_review: need_review,
     });
     Ok(())
 }
@@ -225,6 +253,7 @@ async fn process_chapter(
     });
 
     let total = chunks.len();
+    let mut any_needs_review = false;
     for chunk in &chunks {
         // Honor pause/stop between chunks ("current chunk finishes, then halts").
         if !gate(ctx, chapter).await {
@@ -236,14 +265,23 @@ async fn process_chapter(
             total,
             est_tokens: chunk.est_tokens,
         });
-        process_chunk(ctx, chapter, chunk, acc).await?;
+        match process_chunk(ctx, chapter, chunk, acc).await? {
+            ChunkOutcome::Committed => {}
+            ChunkOutcome::NeedsReview => any_needs_review = true,
+        }
     }
 
+    // All chunks are written either way; the run loop maps the outcome to the
+    // chapter's final status (Done vs NeedsReview).
     ctx.tx.send(AppEvent::ChapterStateChanged {
         chapter,
         state: ChapterStatus::Appended,
     });
-    Ok(Outcome::Completed)
+    if any_needs_review {
+        Ok(Outcome::NeedsReview)
+    } else {
+        Ok(Outcome::Completed)
+    }
 }
 
 /// Block while paused; return `false` if the run is (or becomes) stopped so the
@@ -397,13 +435,15 @@ impl Acc {
 
 /// Translate → review one chunk, retrying up to `cfg.max_attempts`. On approval
 /// the Thai is deterministically appended and the Orchestrator metadata turn
-/// runs. Exhausting the attempts fails the chunk (and bubbles to chapter fail).
+/// runs (`ChunkOutcome::Committed`). Exhausting the attempts no longer fails the
+/// chapter: the last attempt is committed unreviewed and flagged in-file
+/// (`ChunkOutcome::NeedsReview`). A hard Translator/Reviewer error still bails.
 async fn process_chunk(
     ctx: &PipelineCtx,
     chapter: u32,
     chunk: &Chunk,
     acc: &mut Acc,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<ChunkOutcome> {
     ctx.tx.send(AppEvent::ChunkStateChanged {
         chapter,
         chunk: chunk.index,
@@ -581,7 +621,7 @@ async fn process_chunk(
                 }
             }
 
-            return Ok(());
+            return Ok(ChunkOutcome::Committed);
         }
 
         // ---- Rejected ----
@@ -600,26 +640,56 @@ async fn process_chunk(
             });
             feedback = Some(fb_text);
         } else {
+            // ---- Retries exhausted: commit the last attempt unreviewed ----
+            // Resilience: rather than fail the whole chapter on one stubborn
+            // chunk, append the last attempt's Thai with a visible
+            // `[REVIEW NEEDED]` banner so the chapter completes and a human can
+            // fix this one spot later. We deliberately SKIP the Orchestrator
+            // metadata turn so an unreviewed translation can't pollute the
+            // glossary/character roster.
+            let reason = if fb_text.is_empty() {
+                "reviewer rejected after max attempts".to_string()
+            } else {
+                fb_text
+            };
+
+            let bytes = translation::append_chunk_needs_review(
+                &ctx.ws,
+                chapter,
+                chunk.index as u32,
+                &thai,
+                max,
+                &reason,
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!("append needs-review chunk {} failed: {e}", chunk.index)
+            })?;
+
             ctx.tx.send(AppEvent::ChunkStateChanged {
                 chapter,
                 chunk: chunk.index,
-                state: ChunkState::Failed,
+                state: ChunkState::NeedsReview,
             });
-            ctx.tx.send(AppEvent::ChunkFailed {
+            // Count it as committed (it IS on disk) so the chapter's chunk
+            // progress reads as fully written.
+            ctx.tx.send(AppEvent::ChunkCommitted {
+                chapter,
+                chunk: chunk.index,
+                bytes_written: bytes,
+            });
+            ctx.tx.send(AppEvent::ChunkNeedsReview {
                 chapter,
                 chunk: chunk.index,
                 attempts: attempt,
-                reason: if fb_text.is_empty() {
-                    "reviewer rejected after max attempts".to_string()
-                } else {
-                    fb_text
-                },
+                reason,
             });
-            anyhow::bail!("chunk {} rejected after {max} attempt(s)", chunk.index);
+
+            return Ok(ChunkOutcome::NeedsReview);
         }
     }
 
-    // Unreachable: the loop either returns Ok on approve or bails on final reject.
+    // Unreachable: the loop returns Ok on approve and on the final rejection.
     anyhow::bail!(
         "chunk {} exhausted attempts without resolution",
         chunk.index

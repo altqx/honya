@@ -604,7 +604,9 @@ fn vol_tally(v: &Volume) -> (u32, u32, u32, u32) {
     let mut failed = 0;
     for ch in &v.chapters {
         match ch.status {
-            ChapterStatus::Done | ChapterStatus::Appended => done += 1,
+            // NeedsReview is fully written (content exists), so it counts as done
+            // for progress; the per-chapter row still shows the warn glyph/label.
+            ChapterStatus::Done | ChapterStatus::Appended | ChapterStatus::NeedsReview => done += 1,
             ChapterStatus::Failed => failed += 1,
             s if s.is_active() || s == ChapterStatus::Paused => working += 1,
             _ => pending += 1,
@@ -621,6 +623,7 @@ fn status_word(s: ChapterStatus) -> &'static str {
         ChapterStatus::Reviewing => "reviewing",
         ChapterStatus::Appended => "appended",
         ChapterStatus::Done => "done",
+        ChapterStatus::NeedsReview => "needs review",
         ChapterStatus::Failed => "failed",
         ChapterStatus::Paused => "paused",
     }

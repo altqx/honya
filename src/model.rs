@@ -116,13 +116,17 @@ pub enum ChapterStatus {
     Reviewing,   // active chunk at Reviewer
     Appended,    // all chunks approved + written
     Done,        // metadata finalized (recap etc.)
+    NeedsReview, // completed, but ≥1 chunk was committed without passing review
     Failed,      // a chunk hit max retries / hard error
     Paused,      // run paused with this chapter mid-flight
 }
 
 impl ChapterStatus {
     pub fn is_terminal(self) -> bool {
-        matches!(self, ChapterStatus::Done | ChapterStatus::Failed)
+        matches!(
+            self,
+            ChapterStatus::Done | ChapterStatus::NeedsReview | ChapterStatus::Failed
+        )
     }
     pub fn is_active(self) -> bool {
         matches!(
@@ -141,8 +145,8 @@ pub enum ChunkState {
     Reviewing,
     Rejected, // transient: feedback received, about to retry
     Approved,
-    Committed, // appended to ch_NNN.md
-    Failed,    // exceeded max attempts
+    Committed,   // appended to ch_NNN.md
+    NeedsReview, // committed unreviewed after exhausting attempts (flagged in-file)
 }
 
 /// The three model ids used by the pipeline.
@@ -535,7 +539,10 @@ pub enum AppEvent {
         chunk: usize,
         bytes_written: usize,
     },
-    ChunkFailed {
+    /// A chunk exhausted its review attempts but was committed anyway (the last
+    /// attempt's Thai, flagged in-file with a `[REVIEW NEEDED]` banner) so the
+    /// chapter can still complete. `reason` is the reviewer's final objection.
+    ChunkNeedsReview {
         chapter: u32,
         chunk: usize,
         attempts: u32,
@@ -594,6 +601,8 @@ pub enum AppEvent {
     PipelineFinished {
         chapters_done: u32,
         chapters_failed: u32,
+        /// Of the `chapters_done`, how many completed with ≥1 chunk needing review.
+        chapters_need_review: u32,
     },
     Error {
         context: String,

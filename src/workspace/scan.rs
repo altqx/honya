@@ -226,14 +226,14 @@ pub fn derive_status(vol_dir: &Path, chapter: u32, kind: ChapterKind) -> Chapter
         };
     }
 
-    let translated_non_empty = std::fs::read_to_string(&translated)
-        .map(|t| !t.trim().is_empty())
-        .unwrap_or(false);
-
-    if translated_non_empty {
-        ChapterStatus::Done
-    } else {
+    let content = std::fs::read_to_string(&translated).unwrap_or_default();
+    if content.trim().is_empty() {
         ChapterStatus::Pending
+    } else if content.contains(super::translation::REVIEW_NEEDED_MARKER) {
+        // A chunk was committed unreviewed: keep the chapter flagged across reopens.
+        ChapterStatus::NeedsReview
+    } else {
+        ChapterStatus::Done
     }
 }
 
@@ -316,4 +316,47 @@ fn dir_times(dir: &Path) -> (Option<DateTime<Utc>>, Option<DateTime<Utc>>) {
 fn file_modified(path: &Path) -> Option<DateTime<Utc>> {
     let meta = std::fs::metadata(path).ok()?;
     meta.modified().ok().map(DateTime::<Utc>::from)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::workspace::translation::REVIEW_NEEDED_MARKER;
+
+    /// Resting status from disk distinguishes a clean translation from one that
+    /// carries the review-needed marker, so a `NeedsReview` chapter stays flagged
+    /// across a project re-scan instead of reverting to `Done`.
+    #[test]
+    fn derive_status_flags_review_needed_marker() {
+        let base = std::env::temp_dir().join(format!("honya_scan_status_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let tdir = base.join("translated");
+        std::fs::create_dir_all(&tdir).unwrap();
+
+        // Plain committed content → Done.
+        std::fs::write(tdir.join("ch_001.md"), "<!-- honya:chunk 0 -->\nเนื้อหา\n").unwrap();
+        assert_eq!(
+            derive_status(&base, 1, ChapterKind::Prose),
+            ChapterStatus::Done
+        );
+
+        // Carries the review-needed marker → NeedsReview.
+        std::fs::write(
+            tdir.join("ch_002.md"),
+            format!("<!-- honya:chunk 0 -->\n{REVIEW_NEEDED_MARKER}\nเนื้อหา\n"),
+        )
+        .unwrap();
+        assert_eq!(
+            derive_status(&base, 2, ChapterKind::Prose),
+            ChapterStatus::NeedsReview
+        );
+
+        // Absent translated file → Pending.
+        assert_eq!(
+            derive_status(&base, 3, ChapterKind::Prose),
+            ChapterStatus::Pending
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }

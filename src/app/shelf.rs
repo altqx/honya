@@ -318,6 +318,7 @@ fn project_row(p: &Project, selected: bool, name_w: usize, theme: &Theme) -> Lis
 fn overall_glyph(p: &Project, theme: &Theme) -> (char, ratatui::style::Color) {
     let mut any_working = false;
     let mut any_failed = false;
+    let mut any_needs_review = false;
     let mut any_pending = false;
     let mut all_done = true;
     let mut any = false;
@@ -326,11 +327,17 @@ fn overall_glyph(p: &Project, theme: &Theme) -> (char, ratatui::style::Color) {
             any = true;
             match ch.status {
                 ChapterStatus::Failed => any_failed = true,
+                ChapterStatus::NeedsReview => any_needs_review = true,
                 s if s.is_active() || s == ChapterStatus::Paused => any_working = true,
                 ChapterStatus::Done | ChapterStatus::Appended => {}
                 _ => any_pending = true,
             }
-            if !matches!(ch.status, ChapterStatus::Done | ChapterStatus::Appended) {
+            // NeedsReview is written content, so it doesn't keep a project looking
+            // perpetually incomplete — it surfaces via the warn glyph below.
+            if !matches!(
+                ch.status,
+                ChapterStatus::Done | ChapterStatus::Appended | ChapterStatus::NeedsReview
+            ) {
                 all_done = false;
             }
         }
@@ -341,6 +348,8 @@ fn overall_glyph(p: &Project, theme: &Theme) -> (char, ratatui::style::Color) {
         ChapterStatus::Failed
     } else if any_working {
         ChapterStatus::Translating
+    } else if any_needs_review {
+        ChapterStatus::NeedsReview
     } else if all_done {
         ChapterStatus::Done
     } else if any_pending {
@@ -360,7 +369,9 @@ fn tally_of(p: &Project) -> (u32, u32, u32, u32) {
     for vol in &p.volumes {
         for ch in &vol.chapters {
             match ch.status {
-                ChapterStatus::Done | ChapterStatus::Appended => done += 1,
+                ChapterStatus::Done | ChapterStatus::Appended | ChapterStatus::NeedsReview => {
+                    done += 1
+                }
                 ChapterStatus::Failed => failed += 1,
                 s if s.is_active() || s == ChapterStatus::Paused => working += 1,
                 _ => pending += 1,

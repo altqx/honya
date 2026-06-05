@@ -416,6 +416,7 @@ pub fn status_glyph(kind: ChapterKind, status: ChapterStatus, t: &Theme) -> (cha
         ChapterStatus::Reviewing => ('◑', t.status_working),
         ChapterStatus::Appended => ('◕', t.status_working),
         ChapterStatus::Done => ('●', t.status_done),
+        ChapterStatus::NeedsReview => ('⚑', t.status_warn),
         ChapterStatus::Failed => ('✗', t.status_failed),
         ChapterStatus::Paused => ('‖', t.status_warn),
     }

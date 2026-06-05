@@ -180,17 +180,18 @@ impl TranslateScreen {
             } => {
                 self.last_note = format!("chunk {} committed · {bytes_written} B", chunk + 1);
             }
-            AppEvent::ChunkFailed {
+            AppEvent::ChunkNeedsReview {
                 chunk,
                 attempts,
                 reason,
                 ..
             } => {
                 self.agent_lines[2] = format!(
-                    "✗ chunk {} failed after {attempts} · {}",
+                    "⚑ chunk {} committed unreviewed after {attempts} · {}",
                     chunk + 1,
-                    truncate_one_line(reason, 40)
+                    truncate_one_line(reason, 36)
                 );
+                self.last_note = format!("chunk {} needs review", chunk + 1);
             }
             AppEvent::ToolInvoked { tool, summary, .. } => {
                 self.active_agent = 0;
@@ -222,10 +223,17 @@ impl TranslateScreen {
             AppEvent::PipelineFinished {
                 chapters_done,
                 chapters_failed,
+                chapters_need_review,
             } => {
                 self.phase = RunPhase::Idle;
-                self.last_note =
-                    format!("run finished · {chapters_done} done · {chapters_failed} failed");
+                let review = if *chapters_need_review > 0 {
+                    format!(" · {chapters_need_review} need review")
+                } else {
+                    String::new()
+                };
+                self.last_note = format!(
+                    "run finished · {chapters_done} done · {chapters_failed} failed{review}"
+                );
             }
             _ => {}
         }

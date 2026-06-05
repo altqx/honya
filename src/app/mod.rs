@@ -265,6 +265,24 @@ impl App {
             AppEvent::ChunkCommitted { chapter, .. } => {
                 self.bump_committed(*chapter);
             }
+            AppEvent::ChunkNeedsReview {
+                chapter,
+                chunk,
+                attempts,
+                reason,
+            } => {
+                self.toast = Some(Toast::warn(format!(
+                    "ch {chapter} chunk {} committed unreviewed · needs manual review",
+                    chunk + 1
+                )));
+                self.push_log(
+                    LogLevel::Warn,
+                    format!(
+                        "ch {chapter} chunk {} committed unreviewed after {attempts} attempt(s): {reason}",
+                        chunk + 1
+                    ),
+                );
+            }
             AppEvent::ChapterCompleted { chapter } => {
                 self.set_chapter_status(*chapter, ChapterStatus::Done);
                 self.push_log(LogLevel::Info, format!("chapter {chapter} done"));
@@ -295,15 +313,23 @@ impl App {
             AppEvent::PipelineFinished {
                 chapters_done,
                 chapters_failed,
+                chapters_need_review,
             } => {
                 self.run_active = false;
                 self.run_ctl = None;
+                let review = if *chapters_need_review > 0 {
+                    format!(" · {chapters_need_review} need review")
+                } else {
+                    String::new()
+                };
                 self.toast = Some(Toast::info(format!(
-                    "run finished · {chapters_done} done · {chapters_failed} failed"
+                    "run finished · {chapters_done} done · {chapters_failed} failed{review}"
                 )));
                 self.push_log(
                     LogLevel::Info,
-                    format!("pipeline finished: {chapters_done} done, {chapters_failed} failed"),
+                    format!(
+                        "pipeline finished: {chapters_done} done, {chapters_failed} failed, {chapters_need_review} need review"
+                    ),
                 );
             }
             AppEvent::Error { context, msg } => {
@@ -965,7 +991,9 @@ impl App {
             for vol in &active.project.volumes {
                 for ch in &vol.chapters {
                     match ch.status {
-                        ChapterStatus::Done | ChapterStatus::Appended => t.done += 1,
+                        ChapterStatus::Done
+                        | ChapterStatus::Appended
+                        | ChapterStatus::NeedsReview => t.done += 1,
                         ChapterStatus::Failed => t.failed += 1,
                         s if s.is_active() => t.working += 1,
                         ChapterStatus::Paused => t.working += 1,
@@ -979,7 +1007,9 @@ impl App {
                 for vol in &p.volumes {
                     for ch in &vol.chapters {
                         match ch.status {
-                            ChapterStatus::Done | ChapterStatus::Appended => t.done += 1,
+                            ChapterStatus::Done
+                            | ChapterStatus::Appended
+                            | ChapterStatus::NeedsReview => t.done += 1,
                             ChapterStatus::Failed => t.failed += 1,
                             s if s.is_active() => t.working += 1,
                             _ => t.pending += 1,
