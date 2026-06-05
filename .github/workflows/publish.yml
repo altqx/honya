@@ -1,0 +1,69 @@
+name: publish
+
+# Auto-tag + release when Cargo.toml's version changes on main.
+#
+# Bump the `version` in Cargo.toml and push to main; this creates the matching
+# vX.Y.Z tag and runs the release. (A tag pushed with GITHUB_TOKEN does NOT
+# trigger release.yml's tag-push trigger — GitHub's recursion guard — so we call
+# release.yml directly via workflow_call. No PAT required.)
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "Cargo.toml"
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    outputs:
+      created: ${{ steps.decide.outputs.created }}
+      version: ${{ steps.decide.outputs.version }}
+    steps:
+      - name: Checkout (full history + tags)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Tag when the version changed
+        id: decide
+        run: |
+          set -u
+          read_ver() { grep -m1 '^version' | sed -E 's/.*"([^"]+)".*/\1/'; }
+          new="$(read_ver < Cargo.toml)"
+          old="$(git show HEAD~1:Cargo.toml 2>/dev/null | read_ver || true)"
+          tag="v${new}"
+          echo "version=${new}" >> "$GITHUB_OUTPUT"
+
+          if [ -z "${new}" ]; then
+            echo "::error::could not read version from Cargo.toml"; exit 1
+          fi
+          if [ "${new}" = "${old}" ]; then
+            echo "version unchanged (${new}); nothing to tag."
+            echo "created=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
+            echo "tag ${tag} already exists on the remote; skipping."
+            echo "created=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${tag}" -m "honya ${tag}"
+          if ! git push origin "${tag}"; then
+            echo "::error::failed to push ${tag}"; exit 1
+          fi
+          echo "Created and pushed ${tag}."
+          echo "created=true" >> "$GITHUB_OUTPUT"
+
+  release:
+    needs: tag
+    if: needs.tag.outputs.created == 'true'
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: v${{ needs.tag.outputs.version }}
+    secrets: inherit

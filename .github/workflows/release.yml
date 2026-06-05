@@ -15,6 +15,13 @@ on:
         description: "Existing tag to release"
         required: true
         type: string
+  # Invoked by publish.yml right after it auto-creates the tag on a version bump.
+  workflow_call:
+    inputs:
+      tag:
+        description: "Tag to release (e.g. v0.1.0)"
+        required: true
+        type: string
 
 permissions:
   contents: write
