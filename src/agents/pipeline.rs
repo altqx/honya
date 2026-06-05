@@ -327,6 +327,12 @@ fn build_reference_ctx(ws: &Workspace, chunk_text: &str) -> String {
     );
     section(
         &mut s,
+        "<<VOLUME_SYNOPSIS: เรื่องย่อของเล่มนี้ ใช้เป็นบริบทภาพรวม>>",
+        &excerpt(volume::load(ws).synopsis_th, 1200),
+        "<<END_VOLUME_SYNOPSIS>>",
+    );
+    section(
+        &mut s,
         "<<PROJECT: บริบท/โครงเรื่องโดยรวม>>",
         &excerpt(data_block::read_body(&ws.project_md()), 1400),
         "<<END_PROJECT>>",
@@ -720,6 +726,26 @@ mod tests {
         assert!(
             !ctx.contains("王都") && !ctx.contains("ราชธานี"),
             "absent term must NOT balloon the context:\n{ctx}"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn synopsis_injected_into_context_and_round_trips() {
+        let (base, ws) = temp_ws("syn");
+        volume::set_synopsis(&ws, "原文のあらすじ", "เรื่องย่อสำหรับบริบท").unwrap();
+
+        // Round-trips both fields on disk.
+        let loaded = volume::load(&ws);
+        assert_eq!(loaded.synopsis_raw, "原文のあらすじ");
+        assert_eq!(loaded.synopsis_th, "เรื่องย่อสำหรับบริบท");
+
+        // The Thai synopsis is injected into every chunk's reference context.
+        let ctx = build_reference_ctx(&ws, "無関係なテキスト");
+        assert!(
+            ctx.contains("VOLUME_SYNOPSIS") && ctx.contains("เรื่องย่อสำหรับบริบท"),
+            "synopsis must be injected as context:\n{ctx}"
         );
 
         let _ = std::fs::remove_dir_all(&base);

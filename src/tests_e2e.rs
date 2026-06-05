@@ -10,7 +10,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::app::App;
 use crate::app::Screen;
-use crate::app::overlay::{ImportState, Overlay};
+use crate::app::overlay::{ImportState, Overlay, SynopsisState};
 use crate::model::{AppConfig, EventTx, ModelSet};
 
 fn fresh_app() -> App {
@@ -140,8 +140,32 @@ fn renders_overlays_without_panic() {
             sel: 0,
             name: "Test Novel".to_string(),
             vol: 1,
+            syn: SynopsisState::new(String::new(), String::new()),
             progress: Some((7, 22, "cleansing ch 7/22".to_string())),
         });
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| app.render(f)).unwrap();
+
+        // Import wizard, synopsis step (raw entered + a translation in hand).
+        let mut app = fresh_app();
+        app.overlay = Overlay::Import(ImportState {
+            step: 3,
+            epubs: vec![PathBuf::from("/tmp/sample.epub")],
+            sel: 0,
+            name: "Test Novel".to_string(),
+            vol: 1,
+            syn: SynopsisState::new("主人公は故郷に帰る。".to_string(), "พระเอกกลับบ้านเกิด".to_string()),
+            progress: None,
+        });
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| app.render(f)).unwrap();
+
+        // Standalone synopsis editor overlay.
+        let mut app = fresh_app();
+        app.overlay = Overlay::synopsis_edit(
+            "あらすじの原文".to_string(),
+            "เรื่องย่อภาษาไทย".to_string(),
+        );
         let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
         term.draw(|f| app.render(f)).unwrap();
     }

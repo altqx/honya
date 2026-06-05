@@ -84,6 +84,19 @@ pub enum Action {
         epub: PathBuf,
         title: String,
         vol: u32,
+        synopsis_raw: String,
+        synopsis_th: String,
+    },
+    /// Translate a volume synopsis with the Translator agent; `attempt` rises on
+    /// each reroll to vary the sampling temperature. Result returns as an AppEvent.
+    TranslateSynopsis {
+        raw: String,
+        attempt: u32,
+    },
+    /// Persist the active volume's synopsis (standalone editor accept).
+    SaveSynopsis {
+        raw: String,
+        th: String,
     },
     OpenProject(String),
     OpenChapter {
@@ -312,6 +325,15 @@ impl App {
                 self.push_log(LogLevel::Info, format!("imported {project_id}"));
                 self.open_project(project_id.clone());
             }
+            AppEvent::SynopsisTranslated { text } => {
+                self.overlay.set_synopsis_result(Ok(text.clone()));
+                self.toast = Some(Toast::info("synopsis translated"));
+            }
+            AppEvent::SynopsisFailed { msg } => {
+                self.overlay.set_synopsis_result(Err(msg.clone()));
+                self.push_log(LogLevel::Error, format!("synopsis: {msg}"));
+                self.toast = Some(Toast::error(format!("synopsis: {msg}")));
+            }
             AppEvent::CharacterUpserted { thai_name, .. } => {
                 self.toast = Some(Toast::info(format!("character → {thai_name}")));
             }
@@ -507,8 +529,20 @@ impl App {
             Action::OpenChapter { chapter } => {
                 self.open_chapter(chapter);
             }
-            Action::ImportEpub { epub, title, vol } => {
-                self.start_import(epub, title, vol);
+            Action::ImportEpub {
+                epub,
+                title,
+                vol,
+                synopsis_raw,
+                synopsis_th,
+            } => {
+                self.start_import(epub, title, vol, synopsis_raw, synopsis_th);
+            }
+            Action::TranslateSynopsis { raw, attempt } => {
+                self.translate_synopsis(raw, attempt);
+            }
+            Action::SaveSynopsis { raw, th } => {
+                self.save_synopsis(raw, th);
             }
             Action::StartTranslation { chapters } => {
                 self.start_translation(chapters);
@@ -690,7 +724,14 @@ impl App {
         )));
     }
 
-    fn start_import(&mut self, epub: PathBuf, title: String, vol: u32) {
+    fn start_import(
+        &mut self,
+        epub: PathBuf,
+        title: String,
+        vol: u32,
+        synopsis_raw: String,
+        synopsis_th: String,
+    ) {
         if self.run_active {
             self.toast = Some(Toast::warn("a run is already in progress"));
             return;
@@ -702,7 +743,18 @@ impl App {
         self.run_active = true;
         self.toast = Some(Toast::info(format!("importing {slug} …")));
         tokio::spawn(async move {
-            match run_import(epub, dest, title, vol, models, &tx).await {
+            match run_import(
+                epub,
+                dest,
+                title,
+                vol,
+                models,
+                synopsis_raw,
+                synopsis_th,
+                &tx,
+            )
+            .await
+            {
                 Ok(project_id) => tx.send(AppEvent::ImportFinished { project_id }),
                 Err(e) => tx.send(AppEvent::Error {
                     context: "import".to_string(),
@@ -710,6 +762,49 @@ impl App {
                 }),
             }
         });
+    }
+
+    /// Spawn a background Translator round-trip for a volume synopsis. Uses the
+    /// active project's client when one is open, else builds from config (the
+    /// import wizard runs from the Shelf with no project open yet).
+    fn translate_synopsis(&mut self, raw: String, attempt: u32) {
+        let (client, model) = match self.active.as_ref() {
+            Some(a) => (Arc::clone(&a.client), a.models.translator.clone()),
+            None => match crate::build_client(&self.cfg) {
+                Ok(c) => (c, self.cfg.models.translator.clone()),
+                Err(e) => {
+                    // No client → report failure so the editor leaves Translating.
+                    self.tx.send(AppEvent::SynopsisFailed { msg: e.to_string() });
+                    return;
+                }
+            },
+        };
+        let temperature = crate::agents::synopsis::reroll_temperature(attempt);
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            match crate::agents::synopsis::translate_synopsis(
+                client.as_ref(),
+                &model,
+                &raw,
+                temperature,
+            )
+            .await
+            {
+                Ok((text, _usage)) => tx.send(AppEvent::SynopsisTranslated { text }),
+                Err(e) => tx.send(AppEvent::SynopsisFailed { msg: e.to_string() }),
+            }
+        });
+    }
+
+    /// Persist the active volume's synopsis (from the standalone editor) and close.
+    fn save_synopsis(&mut self, raw: String, th: String) {
+        if let Some(active) = self.active.as_ref() {
+            match crate::workspace::volume::set_synopsis(&active.workspace, &raw, &th) {
+                Ok(()) => self.toast = Some(Toast::info("synopsis saved")),
+                Err(e) => self.toast = Some(Toast::error(format!("save failed: {e}"))),
+            }
+        }
+        self.overlay = Overlay::None;
     }
 
     fn refresh_projects(&mut self) {
@@ -943,12 +1038,15 @@ pub fn slugify(title: &str) -> String {
 
 /// Import driver: scaffold the tree, extract+relocate media, cleanse each spine doc to
 /// markdown, write raw/ (+ translated/ for image-only), emit ImportProgress. Returns the slug.
+#[allow(clippy::too_many_arguments)]
 async fn run_import(
     epub: PathBuf,
     dest: PathBuf,
     title: String,
     vol: u32,
     models: ModelSet,
+    synopsis_raw: String,
+    synopsis_th: String,
     tx: &EventTx,
 ) -> anyhow::Result<String> {
     use crate::epub::import::import_with_media;
@@ -966,7 +1064,13 @@ async fn run_import(
         let title = title.clone();
         let models = models.clone();
         tokio::task::spawn_blocking(move || {
-            crate::workspace::scaffold::create_project(&dest, &title, &models, vol)
+            crate::workspace::scaffold::create_project(&dest, &title, &models, vol)?;
+            // Persist the volume synopsis (if any) onto the freshly-scaffolded volume.
+            if !synopsis_raw.trim().is_empty() || !synopsis_th.trim().is_empty() {
+                let ws = Workspace::new(dest.clone(), vol);
+                crate::workspace::volume::set_synopsis(&ws, &synopsis_raw, &synopsis_th)?;
+            }
+            Ok::<(), std::io::Error>(())
         })
         .await??;
     }

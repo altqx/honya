@@ -192,6 +192,11 @@ impl ProjectScreen {
                 }
             }
             KeyCode::Char('e') => Action::Goto(Screen::Lexicon),
+            // Re-open the synopsis editor for the active volume (raw → translate → reroll).
+            KeyCode::Char('y') => {
+                let data = crate::workspace::volume::load(&active.workspace);
+                Action::show_overlay(Overlay::synopsis_edit(data.synopsis_raw, data.synopsis_th))
+            }
             _ => Action::None,
         }
     }
@@ -414,6 +419,7 @@ impl ProjectScreen {
             ("T", "whole vol"),
             ("Space", "select"),
             ("e", "edit ctx"),
+            ("y", "synopsis"),
         ]
     }
 }

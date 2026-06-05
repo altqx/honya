@@ -10,6 +10,14 @@ pub fn load(ws: &Workspace) -> VolumeData {
     data_block::read_data_block(&ws.volume_md())
 }
 
+/// Set the volume synopsis (raw source + Thai translation) and persist.
+pub fn set_synopsis(ws: &Workspace, raw: &str, thai: &str) -> std::io::Result<()> {
+    let mut data = load(ws);
+    data.synopsis_raw = raw.trim().to_string();
+    data.synopsis_th = thai.trim().to_string();
+    write(ws, &data)
+}
+
 /// Replace the running recap and persist.
 pub fn set_recap(ws: &Workspace, recap: &str) -> std::io::Result<()> {
     let mut data = load(ws);
@@ -48,6 +56,23 @@ pub fn add_chapter_usage(ws: &Workspace, chapter: u32, delta: &UsageStats) -> st
 pub fn render_body(data: &VolumeData) -> String {
     let mut s = String::new();
     s.push_str("# บันทึกเล่ม / Volume Notes\n\n");
+
+    // Volume synopsis (เรื่องย่อ): Thai used as context; raw source kept for reference/reroll.
+    s.push_str("## เรื่องย่อเล่ม / Volume Synopsis\n\n");
+    if data.synopsis_th.trim().is_empty() && data.synopsis_raw.trim().is_empty() {
+        s.push_str("_ยังไม่มีเรื่องย่อ_\n");
+    } else {
+        if !data.synopsis_th.trim().is_empty() {
+            s.push_str(data.synopsis_th.trim());
+            s.push('\n');
+        }
+        if !data.synopsis_raw.trim().is_empty() {
+            s.push_str("\n<details><summary>ต้นฉบับ / Source</summary>\n\n");
+            s.push_str(data.synopsis_raw.trim());
+            s.push_str("\n</details>\n");
+        }
+    }
+    s.push('\n');
 
     s.push_str("## เนื้อเรื่องสะสม (Running Recap)\n\n");
     if data.running_recap.trim().is_empty() {

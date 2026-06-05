@@ -9,6 +9,7 @@ pub mod continuity;
 pub mod pipeline;
 pub mod prompts;
 pub mod reviewer;
+pub mod synopsis;
 pub mod tokenize;
 pub mod tools;
 pub mod translator;

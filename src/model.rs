@@ -341,6 +341,13 @@ pub struct GlossaryTerm {
 /// VOLUME.md honya:data payload.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct VolumeData {
+    /// User-provided volume synopsis (เรื่องย่อ), raw untranslated source text.
+    #[serde(default)]
+    pub synopsis_raw: String,
+    /// Thai translation of `synopsis_raw` — injected into every chunk's reference
+    /// context so the agents share the volume's overall arc.
+    #[serde(default)]
+    pub synopsis_th: String,
     #[serde(default)]
     pub running_recap: String,
     /// chapter number (as string key) -> one-line summary.
@@ -604,6 +611,15 @@ pub enum AppEvent {
     },
     ImportFinished {
         project_id: String,
+    },
+
+    /// A volume-synopsis translation finished — folded into the open synopsis
+    /// editor (import wizard step or standalone overlay).
+    SynopsisTranslated {
+        text: String,
+    },
+    SynopsisFailed {
+        msg: String,
     },
 }
 

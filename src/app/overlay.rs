@@ -27,15 +27,134 @@ use super::{Action, Screen, slugify};
 // STATE STRUCTS
 // ============================================================================
 
-/// The 3-step import wizard: pick epub → name + slug preview → volume.
+/// Where a synopsis editor sits in its lifecycle.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SynPhase {
+    /// Typing the raw source text.
+    Editing,
+    /// Awaiting a Translator round-trip (reroll or first translation).
+    Translating,
+    /// A Thai translation is in hand; can accept / reroll / edit.
+    Done,
+    /// The last translation attempt errored (message in `error`).
+    Failed,
+}
+
+/// Shared state for the synopsis input + translate/reroll loop, embedded both in
+/// the import wizard (step 3) and the standalone `Overlay::Synopsis` editor.
+#[derive(Debug, Clone)]
+pub struct SynopsisState {
+    /// Raw, untranslated source synopsis (multi-line allowed).
+    pub raw: String,
+    /// Latest Thai translation (empty until a roll lands).
+    pub th: String,
+    pub phase: SynPhase,
+    /// Error text shown while `phase == Failed`.
+    pub error: String,
+    /// Reroll counter — drives rising translation temperature.
+    pub attempt: u32,
+}
+
+impl SynopsisState {
+    pub fn new(raw: String, th: String) -> Self {
+        let phase = if th.trim().is_empty() {
+            SynPhase::Editing
+        } else {
+            SynPhase::Done
+        };
+        Self {
+            raw,
+            th,
+            phase,
+            error: String::new(),
+            attempt: 0,
+        }
+    }
+}
+
+/// What a synopsis keypress means to the embedding overlay.
+enum SynKey {
+    None,
+    /// Start translating the current `raw` (phase already set to Translating).
+    Translate,
+    /// Accept the current (raw, th) pair.
+    Accept,
+    /// Proceed without a synopsis.
+    Skip,
+    /// Esc out of the editor (caller decides: prev step / close).
+    Back,
+}
+
+/// Fold one keypress into a [`SynopsisState`], returning the embedder's next move.
+fn handle_synopsis_keys(st: &mut SynopsisState, key: KeyEvent) -> SynKey {
+    match st.phase {
+        // Mid-translation keys are ignored (the result arrives via set_synopsis_result),
+        // except Esc, which bails back to editing — a late result is then dropped by the
+        // phase guard in set_synopsis_result.
+        SynPhase::Translating => match key.code {
+            KeyCode::Esc => {
+                st.phase = SynPhase::Editing;
+                SynKey::None
+            }
+            _ => SynKey::None,
+        },
+        SynPhase::Editing => match key.code {
+            KeyCode::Esc => SynKey::Back,
+            KeyCode::Tab => {
+                if st.raw.trim().is_empty() {
+                    // Nothing to translate → proceed without a synopsis.
+                    SynKey::Skip
+                } else {
+                    st.phase = SynPhase::Translating;
+                    SynKey::Translate
+                }
+            }
+            KeyCode::Enter => {
+                st.raw.push('\n');
+                SynKey::None
+            }
+            KeyCode::Backspace => {
+                st.raw.pop();
+                SynKey::None
+            }
+            KeyCode::Char(c) => {
+                st.raw.push(c);
+                SynKey::None
+            }
+            _ => SynKey::None,
+        },
+        SynPhase::Done | SynPhase::Failed => match key.code {
+            KeyCode::Char('r') | KeyCode::Char('R') => {
+                st.attempt += 1;
+                st.phase = SynPhase::Translating;
+                SynKey::Translate
+            }
+            KeyCode::Char('e') | KeyCode::Char('E') => {
+                st.phase = SynPhase::Editing;
+                SynKey::None
+            }
+            KeyCode::Char('s') | KeyCode::Char('S') => SynKey::Skip,
+            KeyCode::Enter if st.phase == SynPhase::Done => SynKey::Accept,
+            KeyCode::Esc => {
+                st.phase = SynPhase::Editing;
+                SynKey::None
+            }
+            _ => SynKey::None,
+        },
+    }
+}
+
+/// The import wizard: pick epub → name → volume → synopsis → importing.
 #[derive(Debug, Clone)]
 pub struct ImportState {
-    /// 0 = pick, 1 = name, 2 = volume, 3 = importing (gauge).
+    /// 0 = pick, 1 = name, 2 = volume, 3 = synopsis, 4 = importing (gauge).
     pub step: u8,
     pub epubs: Vec<PathBuf>,
     pub sel: usize,
     pub name: String,
     pub vol: u32,
+    /// Synopsis input + translate/reroll loop (wizard step 3).
+    pub syn: SynopsisState,
     /// Live preprocessing progress (done, total, label) once the import starts.
     pub progress: Option<(usize, usize, String)>,
 }
@@ -55,6 +174,7 @@ impl ImportState {
             sel: 0,
             name,
             vol: 1,
+            syn: SynopsisState::new(String::new(), String::new()),
             progress: None,
         }
     }
@@ -223,6 +343,8 @@ pub enum Overlay {
     Help(u16),
     Palette(PaletteState),
     Modal(Dialog),
+    /// Standalone volume-synopsis editor (re-opened from the Project screen).
+    Synopsis(SynopsisState),
 }
 
 impl Overlay {
@@ -250,6 +372,11 @@ impl Overlay {
         Overlay::Palette(PaletteState::new())
     }
 
+    /// Standalone synopsis editor seeded from a volume's stored raw/Thai.
+    pub fn synopsis_edit(raw: String, th: String) -> Self {
+        Overlay::Synopsis(SynopsisState::new(raw, th))
+    }
+
     pub fn confirm(title: impl Into<String>, body: impl Into<String>, confirm: Action) -> Self {
         Overlay::Modal(Dialog {
             title: title.into(),
@@ -275,8 +402,35 @@ impl Overlay {
 
     pub fn set_import_progress(&mut self, done: usize, total: usize, label: &str) {
         if let Overlay::Import(st) = self {
-            st.step = 3;
+            st.step = 4;
             st.progress = Some((done, total, label.to_string()));
+        }
+    }
+
+    // ---- synopsis result passthrough (called from App::on_app_event) -------
+
+    /// Fold a finished translation (or its error) into whichever synopsis editor
+    /// is open. Ignored unless that editor is still awaiting (so a stale result
+    /// after the user edited or moved on is dropped).
+    pub fn set_synopsis_result(&mut self, result: std::result::Result<String, String>) {
+        let st = match self {
+            Overlay::Import(s) if s.step == 3 => &mut s.syn,
+            Overlay::Synopsis(s) => s,
+            _ => return,
+        };
+        if st.phase != SynPhase::Translating {
+            return;
+        }
+        match result {
+            Ok(text) => {
+                st.th = text;
+                st.error.clear();
+                st.phase = SynPhase::Done;
+            }
+            Err(msg) => {
+                st.error = msg;
+                st.phase = SynPhase::Failed;
+            }
         }
     }
 
@@ -286,9 +440,12 @@ impl Overlay {
     #[allow(dead_code)]
     pub fn is_input_capturing(&self) -> bool {
         match self {
-            Overlay::Import(st) => st.step == 1, // name field
-            Overlay::Settings(_) => true,        // always editing a field
-            Overlay::Palette(_) => true,         // query field
+            Overlay::Import(st) => {
+                st.step == 1 || (st.step == 3 && st.syn.phase == SynPhase::Editing)
+            }
+            Overlay::Synopsis(st) => st.phase == SynPhase::Editing,
+            Overlay::Settings(_) => true, // always editing a field
+            Overlay::Palette(_) => true,  // query field
             _ => false,
         }
     }
@@ -303,6 +460,7 @@ impl Overlay {
             Overlay::Theme(_) => self.handle_theme_key(key),
             Overlay::Palette(_) => self.handle_palette_key(key),
             Overlay::Modal(_) => self.handle_modal_key(key),
+            Overlay::Synopsis(_) => self.handle_synopsis_overlay_key(key),
             Overlay::Log(off) => match key.code {
                 KeyCode::Esc | KeyCode::Char('l') | KeyCode::Char('q') => Action::CloseOverlay,
                 KeyCode::Char('k') | KeyCode::Up => {
@@ -418,16 +576,58 @@ impl Overlay {
                     Action::None
                 }
                 KeyCode::Enter => {
-                    let epub = st.selected_epub().cloned().unwrap_or_default();
-                    let title = st.name.trim().to_string();
-                    let vol = st.vol.max(1);
+                    // Advance to the synopsis step rather than importing immediately.
                     st.step = 3;
-                    st.progress = Some((0, 0, "starting".to_string()));
-                    Action::ImportEpub { epub, title, vol }
+                    Action::None
                 }
                 _ => Action::None,
             },
-            // ---- step 3: importing (gauge) — Esc cancels by closing ----
+            // ---- step 3: volume synopsis (raw → translate → reroll/accept) ----
+            3 => {
+                let intent = handle_synopsis_keys(&mut st.syn, key);
+                match intent {
+                    SynKey::None => Action::None,
+                    SynKey::Translate => Action::TranslateSynopsis {
+                        raw: st.syn.raw.clone(),
+                        attempt: st.syn.attempt,
+                    },
+                    SynKey::Back => {
+                        st.step = 2;
+                        Action::None
+                    }
+                    SynKey::Accept => {
+                        let epub = st.selected_epub().cloned().unwrap_or_default();
+                        let title = st.name.trim().to_string();
+                        let vol = st.vol.max(1);
+                        let synopsis_raw = st.syn.raw.trim().to_string();
+                        let synopsis_th = st.syn.th.trim().to_string();
+                        st.step = 4;
+                        st.progress = Some((0, 0, "starting".to_string()));
+                        Action::ImportEpub {
+                            epub,
+                            title,
+                            vol,
+                            synopsis_raw,
+                            synopsis_th,
+                        }
+                    }
+                    SynKey::Skip => {
+                        let epub = st.selected_epub().cloned().unwrap_or_default();
+                        let title = st.name.trim().to_string();
+                        let vol = st.vol.max(1);
+                        st.step = 4;
+                        st.progress = Some((0, 0, "starting".to_string()));
+                        Action::ImportEpub {
+                            epub,
+                            title,
+                            vol,
+                            synopsis_raw: String::new(),
+                            synopsis_th: String::new(),
+                        }
+                    }
+                }
+            }
+            // ---- step 4: importing (gauge) — Esc cancels by closing ----
             _ => match key.code {
                 KeyCode::Esc => Action::CloseOverlay,
                 _ => Action::None,
@@ -554,6 +754,25 @@ impl Overlay {
         }
     }
 
+    fn handle_synopsis_overlay_key(&mut self, key: KeyEvent) -> Action {
+        let Overlay::Synopsis(st) = self else {
+            return Action::None;
+        };
+        match handle_synopsis_keys(st, key) {
+            SynKey::None => Action::None,
+            SynKey::Translate => Action::TranslateSynopsis {
+                raw: st.raw.clone(),
+                attempt: st.attempt,
+            },
+            SynKey::Accept => Action::SaveSynopsis {
+                raw: st.raw.clone(),
+                th: st.th.clone(),
+            },
+            // Skip/back leave the stored synopsis untouched.
+            SynKey::Skip | SynKey::Back => Action::CloseOverlay,
+        }
+    }
+
     // ---- hints -------------------------------------------------------------
 
     pub fn hints(&self) -> &'static [(&'static str, &'static str)] {
@@ -561,9 +780,11 @@ impl Overlay {
             Overlay::Import(st) => match st.step {
                 0 => &[("↑↓", "pick"), ("↵", "next"), ("Esc", "cancel")],
                 1 => &[("type", "name"), ("↵/Tab", "next"), ("Esc", "back")],
-                2 => &[("↑↓", "volume"), ("↵", "import"), ("Esc", "back")],
+                2 => &[("↑↓", "volume"), ("↵", "next"), ("Esc", "back")],
+                3 => synopsis_hints(&st.syn),
                 _ => &[("Esc", "close")],
             },
+            Overlay::Synopsis(st) => synopsis_hints(st),
             Overlay::Settings(_) => &[("Tab", "field"), ("type", "edit"), ("Esc/↵", "close")],
             Overlay::Theme(_) => &[("jk/↑↓", "preview"), ("↵", "apply"), ("Esc", "revert")],
             Overlay::Palette(_) => &[
@@ -598,6 +819,7 @@ impl Overlay {
             Overlay::Log(off) => self.render_log(f, area, theme, log, *off),
             Overlay::Help(off) => self.render_help(f, area, theme, *off),
             Overlay::Modal(dlg) => self.render_modal(f, area, theme, dlg),
+            Overlay::Synopsis(st) => self.render_synopsis(f, area, theme, st),
         }
     }
 
@@ -616,10 +838,13 @@ impl Overlay {
     }
 
     fn render_import(&self, f: &mut Frame, area: Rect, theme: &Theme, st: &ImportState) {
-        let modal = centered_modal(74, 18, area);
+        let height = if st.step == 3 { 24 } else { 18 };
+        let modal = centered_modal(76, height, area);
         f.render_widget(Clear, modal);
-        let step_no = st.step.min(2) + 1;
-        let title = format!("Import EPUB — step {step_no} / 3");
+        let title = match st.step {
+            4 => "Import EPUB — importing".to_string(),
+            s => format!("Import EPUB — step {} / 4", s.min(3) + 1),
+        };
         let block = self.modal_block(&title, theme);
         let inner = block.inner(modal);
         f.render_widget(block, modal);
@@ -628,8 +853,19 @@ impl Overlay {
             0 => self.render_import_pick(f, inner, theme, st),
             1 => self.render_import_name(f, inner, theme, st),
             2 => self.render_import_volume(f, inner, theme, st),
+            3 => render_synopsis_body(f, inner, theme, &st.syn),
             _ => self.render_import_progress(f, inner, theme, st),
         }
+    }
+
+    /// Standalone synopsis editor modal (re-opened from the Project screen).
+    fn render_synopsis(&self, f: &mut Frame, area: Rect, theme: &Theme, st: &SynopsisState) {
+        let modal = centered_modal(76, 24, area);
+        f.render_widget(Clear, modal);
+        let block = self.modal_block("Volume synopsis · เรื่องย่อเล่ม", theme);
+        let inner = block.inner(modal);
+        f.render_widget(block, modal);
+        render_synopsis_body(f, inner, theme, st);
     }
 
     fn render_import_pick(&self, f: &mut Frame, area: Rect, theme: &Theme, st: &ImportState) {
@@ -1091,6 +1327,7 @@ impl Overlay {
                     ("Space / a", "select · translate selected"),
                     ("h / l", "collapse · expand / focus"),
                     ("e", "edit context (Lexicon)"),
+                    ("y", "volume synopsis (translate/reroll)"),
                 ],
             ),
             (
@@ -1185,6 +1422,138 @@ impl Overlay {
 // ============================================================================
 // HELPERS
 // ============================================================================
+
+/// Phase-dependent footer hints for the synopsis editor (shared by the wizard
+/// step and the standalone overlay).
+fn synopsis_hints(st: &SynopsisState) -> &'static [(&'static str, &'static str)] {
+    match st.phase {
+        SynPhase::Editing => {
+            if st.raw.trim().is_empty() {
+                &[("type", "raw"), ("Tab", "skip"), ("Esc", "back")]
+            } else {
+                &[("type", "raw"), ("Tab", "translate"), ("Esc", "back")]
+            }
+        }
+        SynPhase::Translating => &[("Esc", "cancel"), ("…", "translating")],
+        SynPhase::Done => &[("r", "reroll"), ("e", "edit"), ("↵", "accept"), ("s", "skip")],
+        SynPhase::Failed => &[("r", "retry"), ("e", "edit"), ("s", "skip")],
+    }
+}
+
+/// Render the synopsis editor body (raw input box, status line, translation) into
+/// `area`. Shared verbatim by the import wizard's step 3 and `render_synopsis`.
+fn render_synopsis_body(f: &mut Frame, area: Rect, theme: &Theme, st: &SynopsisState) {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // label
+            Constraint::Length(8), // raw input box (incl. border)
+            Constraint::Length(1), // status line
+            Constraint::Length(1), // divider
+            Constraint::Min(0),    // translation / error
+        ])
+        .split(area);
+
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            "  เรื่องย่อเล่ม (ต้นฉบับ) / Volume synopsis — raw source",
+            Style::default().fg(theme.ink_soft),
+        ))
+        .style(Style::default().bg(theme.bg_panel)),
+        rows[0],
+    );
+
+    // --- raw input box (multi-line, wraps; caret only while editing) ---
+    let editing = st.phase == SynPhase::Editing;
+    let border_color = if editing { theme.accent_soft } else { theme.rule };
+    let input_block = Block::default()
+        .borders(Borders::ALL)
+        .border_set(theme::hairline_set())
+        .border_style(Style::default().fg(border_color))
+        .style(Style::default().bg(theme.bg_inset));
+    let mut text_lines: Vec<Line> = Vec::new();
+    if st.raw.is_empty() {
+        text_lines.push(Line::from(vec![
+            Span::styled(
+                "พิมพ์หรือวางเรื่องย่อภาษาต้นฉบับ…",
+                Style::default().fg(theme.ink_faint),
+            ),
+            if editing {
+                Span::styled("▏", Style::default().fg(theme.stream_cursor))
+            } else {
+                Span::raw("")
+            },
+        ]));
+    } else {
+        let parts: Vec<&str> = st.raw.split('\n').collect();
+        let last = parts.len().saturating_sub(1);
+        for (i, part) in parts.iter().enumerate() {
+            let mut spans = vec![Span::styled(part.to_string(), Style::default().fg(theme.ink))];
+            if editing && i == last {
+                spans.push(Span::styled("▏", Style::default().fg(theme.stream_cursor)));
+            }
+            text_lines.push(Line::from(spans));
+        }
+    }
+    f.render_widget(
+        Paragraph::new(Text::from(text_lines))
+            .wrap(Wrap { trim: false })
+            .block(input_block),
+        indent(rows[1], 2),
+    );
+
+    // --- status line ---
+    let status = match st.phase {
+        SynPhase::Editing => Span::styled(
+            if st.raw.trim().is_empty() {
+                "  Tab ข้าม (ไม่ใส่เรื่องย่อ) · Esc กลับ"
+            } else {
+                "  Tab แปล · Enter ขึ้นบรรทัด · Esc กลับ"
+            },
+            Style::default().fg(theme.ink_faint),
+        ),
+        SynPhase::Translating => Span::styled(
+            "  ◐ กำลังแปลด้วย Translator agent …",
+            Style::default().fg(theme.status_working),
+        ),
+        SynPhase::Done => Span::styled(
+            format!("  ✓ แปลแล้ว (roll {})", st.attempt + 1),
+            Style::default().fg(theme.status_done),
+        ),
+        SynPhase::Failed => {
+            Span::styled("  ✗ แปลไม่สำเร็จ", Style::default().fg(theme.status_failed))
+        }
+    };
+    f.render_widget(
+        Paragraph::new(status).style(Style::default().bg(theme.bg_panel)),
+        rows[2],
+    );
+
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            "  ── คำแปลภาษาไทย / Thai ──",
+            Style::default().fg(theme.ink_faint),
+        ))
+        .style(Style::default().bg(theme.bg_panel)),
+        rows[3],
+    );
+
+    // --- translation / error / placeholder ---
+    let (body, color) = match st.phase {
+        SynPhase::Failed => (st.error.clone(), theme.status_failed),
+        _ if st.th.trim().is_empty() => (
+            "(ยังไม่มีคำแปล — กด Tab เพื่อแปล)".to_string(),
+            theme.ink_faint,
+        ),
+        _ => (st.th.clone(), theme.ink),
+    };
+    f.render_widget(
+        Paragraph::new(crate::ui::text::thai_display_safe(&body))
+            .wrap(Wrap { trim: false })
+            .style(Style::default().fg(color).bg(theme.bg_panel)),
+        indent(rows[4], 2),
+    );
+}
 
 /// Indent a Rect from the left/right by `pad` columns (keeps modals breathing).
 fn indent(area: Rect, pad: u16) -> Rect {
