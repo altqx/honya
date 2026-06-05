@@ -2,8 +2,8 @@ name: release
 
 # Build cross-platform release binaries and attach them to the GitHub Release.
 # Asset convention (must match web/public/install.sh exactly):
-#   honya-<target>.tar.gz          (gzip tar containing a single executable named `honya`)
-#   honya-<target>.tar.gz.sha256   (sha256 checksum line for the .tar.gz)
+#   honya-<target>.tar.gz   (gzip tar containing a single executable named `honya`)
+#   honya-<target>.sha256   (sha256 checksum line for the .tar.gz; note: no .tar.gz in the name)
 
 on:
   push:

@@ -148,7 +148,9 @@ pub async fn run_self_update() -> Result<()> {
         .with_context(|| format!("downloading {archive}"))?;
 
     // Verify the sha256 sidecar — fail closed, the same trust model as install.sh.
-    let sumfile = download_text(&format!("{base}/{archive}.sha256"))
+    // The checksum asset is named honya-<target>.sha256 (no .tar.gz), matching
+    // taiki-e/upload-rust-binary-action's output.
+    let sumfile = download_text(&format!("{base}/honya-{target}.sha256"))
         .await
         .with_context(|| {
             format!("could not fetch the checksum for {archive}; refusing to install an unverified binary")

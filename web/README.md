@@ -68,8 +68,8 @@ target triple and attaches, per target, exactly two assets to the GitHub
 Release:
 
 ```
-honya-<target>.tar.gz          gzip tar with a single executable named honya
-honya-<target>.tar.gz.sha256   sha256 checksum line for the .tar.gz
+honya-<target>.tar.gz   gzip tar with a single executable named honya
+honya-<target>.sha256   sha256 checksum line for the .tar.gz (no .tar.gz in the name)
 ```
 
 Shipped target triples:

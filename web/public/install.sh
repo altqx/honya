@@ -243,7 +243,9 @@ install_from_release() {
 
   tarball="${BIN}-${TARGET}.tar.gz"
   url="${DL_BASE}/${VERSION}/${tarball}"
-  sum_url="${url}.sha256"
+  # The release checksum is named honya-<target>.sha256 (no .tar.gz), matching
+  # taiki-e/upload-rust-binary-action's output.
+  sum_url="${DL_BASE}/${VERSION}/${BIN}-${TARGET}.sha256"
 
   TMPDIR_HONYA="$(mktemp -d 2>/dev/null || mktemp -d -t honya)"
   tar_path="${TMPDIR_HONYA}/${tarball}"
