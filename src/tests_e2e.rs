@@ -227,7 +227,7 @@ async fn end_to_end_import_and_mock_translate() {
 
     crate::workspace::translation::write_raw(&ws, 1, &md).unwrap();
 
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let ctx = PipelineCtx {
         client: Arc::new(MockClient::default()) as Arc<dyn crate::llm::client::LlmClient>,
         ws,
@@ -237,6 +237,23 @@ async fn end_to_end_import_and_mock_translate() {
         ctl: RunControl::new(),
     };
     run_pipeline(ctx, vec![1]).await.expect("run_pipeline");
+
+    // Drain the event channel and confirm cost accounting reached the UI: the
+    // last UsageUpdate must carry the BYOK-aware running total, not a hardcoded 0.
+    let mut last_cost = None;
+    let mut last_total_tokens = 0u32;
+    while let Ok(ev) = rx.try_recv() {
+        if let crate::model::AppEvent::UsageUpdate { total, cost_usd } = ev {
+            last_cost = Some(cost_usd);
+            last_total_tokens = total.total;
+        }
+    }
+    let last_cost = last_cost.expect("at least one UsageUpdate emitted");
+    assert!(
+        last_cost > 0.0,
+        "cost should accumulate from API usage, got {last_cost}"
+    );
+    assert!(last_total_tokens > 0, "token total should accumulate");
 
     let translated = project_root.join("Vol_01/translated/ch_001.md");
     let out = std::fs::read_to_string(&translated).expect("translated file written");

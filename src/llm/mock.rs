@@ -7,7 +7,9 @@
 use async_trait::async_trait;
 
 use super::client::{LlmClient, Result};
-use super::{ChatRequest, ChatResponse, Choice, ResponseFormat, ResponseMessage, Usage};
+use super::{
+    ChatRequest, ChatResponse, Choice, CostDetails, ResponseFormat, ResponseMessage, Usage,
+};
 
 /// Offline canned-response client.
 pub struct MockClient {
@@ -44,7 +46,17 @@ impl MockClient {
                 },
                 finish_reason: Some("stop".to_string()),
             }],
-            usage: Some(Usage::default()),
+            // Nonzero, BYOK-shaped usage so the cost-accounting chain is exercised
+            // end-to-end (OpenRouter fee in `cost`, provider charge in upstream).
+            usage: Some(Usage {
+                prompt_tokens: 10,
+                completion_tokens: 5,
+                total_tokens: 15,
+                cost: 0.001,
+                cost_details: Some(CostDetails {
+                    upstream_inference_cost: 0.01,
+                }),
+            }),
         }
     }
 }

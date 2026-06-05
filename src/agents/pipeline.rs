@@ -104,7 +104,7 @@ impl PipelineCtx {
 pub async fn run_pipeline(ctx: PipelineCtx, chapters: Vec<u32>) -> anyhow::Result<()> {
     let mut done = 0u32;
     let mut failed = 0u32;
-    let mut acc = TokenUsage::default();
+    let mut acc = RunAcc::default();
 
     for chapter in chapters {
         if ctx.ctl.is_stopped() {
@@ -168,7 +168,7 @@ pub async fn run_pipeline(ctx: PipelineCtx, chapters: Vec<u32>) -> anyhow::Resul
 async fn process_chapter(
     ctx: &PipelineCtx,
     chapter: u32,
-    acc: &mut TokenUsage,
+    acc: &mut RunAcc,
 ) -> anyhow::Result<Outcome> {
     let raw_path = ctx.ws.raw(chapter);
     let raw = tokio::fs::read_to_string(&raw_path)
@@ -338,6 +338,22 @@ fn add_tokens(acc: &mut TokenUsage, d: &TokenUsage) {
     acc.total = acc.total.saturating_add(d.total);
 }
 
+/// Running totals for one pipeline run: cumulative tokens and cumulative USD,
+/// summed across every Translator / Reviewer / Orchestrator call in the run.
+#[derive(Default)]
+struct RunAcc {
+    tokens: TokenUsage,
+    cost_usd: f64,
+}
+
+impl RunAcc {
+    /// Fold one API call's usage (tokens + BYOK-aware cost) into the run totals.
+    fn fold(&mut self, u: &Usage) {
+        add_tokens(&mut self.tokens, &to_tokens(u));
+        self.cost_usd += u.cost_usd();
+    }
+}
+
 /// Translate → review one chunk, retrying up to `cfg.max_attempts`. On approval
 /// the Thai is deterministically appended and the Orchestrator metadata turn
 /// runs. Exhausting the attempts fails the chunk (and bubbles to chapter fail).
@@ -345,7 +361,7 @@ async fn process_chunk(
     ctx: &PipelineCtx,
     chapter: u32,
     chunk: &Chunk,
-    acc: &mut TokenUsage,
+    acc: &mut RunAcc,
 ) -> anyhow::Result<()> {
     ctx.tx.send(AppEvent::ChunkStateChanged {
         chapter,
@@ -408,7 +424,7 @@ async fn process_chunk(
 
         let thai = out.translated_text.clone();
         let tok = to_tokens(&t_usage);
-        add_tokens(acc, &tok);
+        acc.fold(&t_usage);
         ctx.tx.send(AppEvent::TranslatorReturned {
             chapter,
             chunk: chunk.index,
@@ -420,8 +436,8 @@ async fn process_chunk(
             tokens: tok,
         });
         ctx.tx.send(AppEvent::UsageUpdate {
-            total: *acc,
-            cost_usd: 0.0,
+            total: acc.tokens,
+            cost_usd: acc.cost_usd,
         });
 
         // ---- Reviewer ----
@@ -458,10 +474,10 @@ async fn process_chunk(
                 anyhow::bail!("reviewer failed on chunk {}: {e}", chunk.index);
             }
         };
-        add_tokens(acc, &to_tokens(&r_usage));
+        acc.fold(&r_usage);
         ctx.tx.send(AppEvent::UsageUpdate {
-            total: *acc,
-            cost_usd: 0.0,
+            total: acc.tokens,
+            cost_usd: acc.cost_usd,
         });
 
         let approved = review.approved();
@@ -506,12 +522,21 @@ async fn process_chunk(
             });
 
             // ---- Orchestrator metadata turn (everything-uses-tools) ----
-            if let Err(e) = run_orchestrator_metadata_turn(ctx, chapter, &out).await {
+            match run_orchestrator_metadata_turn(ctx, chapter, &out).await {
+                Ok(o_usage) => {
+                    acc.fold(&o_usage);
+                    ctx.tx.send(AppEvent::UsageUpdate {
+                        total: acc.tokens,
+                        cost_usd: acc.cost_usd,
+                    });
+                }
                 // Metadata persistence is best-effort; never fail the chunk on it.
-                ctx.tx.send(AppEvent::Error {
-                    context: format!("orchestrator ch{chapter} chunk{}", chunk.index),
-                    msg: e.to_string(),
-                });
+                Err(e) => {
+                    ctx.tx.send(AppEvent::Error {
+                        context: format!("orchestrator ch{chapter} chunk{}", chunk.index),
+                        msg: e.to_string(),
+                    });
+                }
             }
 
             return Ok(());
@@ -566,7 +591,7 @@ async fn run_orchestrator_metadata_turn(
     ctx: &PipelineCtx,
     chapter: u32,
     out: &TranslatorOut,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Usage> {
     let user = build_orchestrator_metadata_msg(chapter, out);
 
     let tools: Vec<Tool> = serde_json::from_value(orchestrator_tools())
@@ -589,11 +614,11 @@ async fn run_orchestrator_metadata_turn(
         chapter,
     );
 
-    run_tool_loop(ctx.client.as_ref(), req, &executor, 8)
+    let (_resp, usage) = run_tool_loop(ctx.client.as_ref(), req, &executor, 8)
         .await
         .map_err(|e| anyhow::anyhow!("orchestrator tool loop failed: {e}"))?;
 
-    Ok(())
+    Ok(usage)
 }
 
 #[cfg(test)]
