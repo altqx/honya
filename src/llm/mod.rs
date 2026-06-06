@@ -282,11 +282,15 @@ impl Usage {
     /// single logical step can make (e.g. the Orchestrator's multi-round tool loop).
     pub fn add(&mut self, other: &Usage) {
         self.prompt_tokens = self.prompt_tokens.saturating_add(other.prompt_tokens);
-        self.completion_tokens = self.completion_tokens.saturating_add(other.completion_tokens);
+        self.completion_tokens = self
+            .completion_tokens
+            .saturating_add(other.completion_tokens);
         self.total_tokens = self.total_tokens.saturating_add(other.total_tokens);
         self.cost += other.cost;
         let upstream = self.cost_details.map_or(0.0, |d| d.upstream_inference_cost)
-            + other.cost_details.map_or(0.0, |d| d.upstream_inference_cost);
+            + other
+                .cost_details
+                .map_or(0.0, |d| d.upstream_inference_cost);
         if upstream != 0.0 {
             self.cost_details = Some(CostDetails {
                 upstream_inference_cost: upstream,

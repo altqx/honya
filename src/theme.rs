@@ -137,14 +137,14 @@ impl Theme {
 
     pub fn nord() -> Self {
         Self {
-            bg: rgb(46, 52, 64),     // nord0
+            bg: rgb(46, 52, 64), // nord0
             bg_panel: rgb(53, 60, 74),
             bg_inset: rgb(67, 76, 94), // nord2 (distinct from accent_bg, visible track)
             ink: rgb(236, 239, 244),   // nord6
             ink_soft: rgb(216, 222, 233), // nord4
             ink_faint: rgb(123, 136, 161),
-            rule: rgb(67, 76, 94), // nord2
-            accent: rgb(136, 192, 208),  // nord8 frost
+            rule: rgb(67, 76, 94),           // nord2
+            accent: rgb(136, 192, 208),      // nord8 frost
             accent_soft: rgb(129, 161, 193), // nord9
             accent_bg: rgb(59, 66, 82),
             status_pending: rgb(123, 136, 161),
@@ -154,7 +154,7 @@ impl Theme {
             status_warn: rgb(235, 203, 139),  // nord13
             status_image: rgb(208, 135, 112), // nord12
             ja_text: rgb(236, 239, 244),
-            th_text: rgb(229, 233, 240),       // nord5
+            th_text: rgb(229, 233, 240), // nord5
             stream_cursor: rgb(136, 192, 208),
         }
     }
@@ -190,11 +190,11 @@ impl Theme {
             bg_inset: rgb(68, 72, 92), // lifted so the gauge track is visible
             ink: rgb(248, 248, 242),
             ink_soft: rgb(197, 198, 208),
-            ink_faint: rgb(98, 114, 164),  // comment
-            rule: rgb(68, 71, 90),         // current line
-            accent: rgb(189, 147, 249),    // purple (signature)
+            ink_faint: rgb(98, 114, 164), // comment
+            rule: rgb(68, 71, 90),        // current line
+            accent: rgb(189, 147, 249),   // purple (signature)
             accent_soft: rgb(255, 121, 198),
-            accent_bg: rgb(68, 71, 90),    // canonical selection
+            accent_bg: rgb(68, 71, 90), // canonical selection
             status_pending: rgb(98, 114, 164),
             status_working: rgb(139, 233, 253), // cyan (live)
             status_done: rgb(80, 250, 123),
@@ -209,13 +209,13 @@ impl Theme {
 
     pub fn catppuccin() -> Self {
         Self {
-            bg: rgb(30, 30, 46),     // base
+            bg: rgb(30, 30, 46), // base
             bg_panel: rgb(37, 37, 57),
-            bg_inset: rgb(49, 50, 68), // surface0
-            ink: rgb(205, 214, 244),   // text
-            ink_soft: rgb(186, 194, 222), // subtext1
+            bg_inset: rgb(49, 50, 68),     // surface0
+            ink: rgb(205, 214, 244),       // text
+            ink_soft: rgb(186, 194, 222),  // subtext1
             ink_faint: rgb(108, 112, 134), // overlay0
-            rule: rgb(69, 71, 90),     // surface1
+            rule: rgb(69, 71, 90),         // surface1
             accent: rgb(137, 180, 250),
             accent_soft: rgb(180, 190, 254), // lavender
             accent_bg: rgb(49, 50, 68),
@@ -233,13 +233,13 @@ impl Theme {
 
     pub fn solarized_dark() -> Self {
         Self {
-            bg: rgb(0, 43, 54),      // base03
+            bg: rgb(0, 43, 54), // base03
             bg_panel: rgb(3, 48, 59),
             bg_inset: rgb(12, 62, 75), // lifted above base02 so the gauge track reads
-            ink: rgb(147, 161, 161),  // base1
+            ink: rgb(147, 161, 161),   // base1
             ink_soft: rgb(131, 148, 150), // base0
             ink_faint: rgb(88, 110, 117), // base01
-            rule: rgb(45, 72, 80),    // visible hairline (base02 alone is ~invisible on base03)
+            rule: rgb(45, 72, 80),     // visible hairline (base02 alone is ~invisible on base03)
             accent: rgb(38, 139, 210),
             accent_soft: rgb(42, 161, 152),
             accent_bg: rgb(16, 68, 82), // visible selection band
@@ -257,11 +257,11 @@ impl Theme {
 
     pub fn solarized_light() -> Self {
         Self {
-            bg: rgb(253, 246, 227),  // base3
+            bg: rgb(253, 246, 227),       // base3
             bg_panel: rgb(238, 232, 213), // base2
             bg_inset: rgb(227, 220, 196),
-            ink: rgb(88, 110, 117),   // base01 (primary on light)
-            ink_soft: rgb(101, 123, 131), // base00
+            ink: rgb(88, 110, 117),        // base01 (primary on light)
+            ink_soft: rgb(101, 123, 131),  // base00
             ink_faint: rgb(147, 161, 161), // base1
             rule: rgb(214, 205, 178),
             accent: rgb(38, 139, 210),
@@ -281,13 +281,13 @@ impl Theme {
 
     pub fn everforest() -> Self {
         Self {
-            bg: rgb(45, 53, 59),     // bg0
-            bg_panel: rgb(52, 63, 68), // bg1
-            bg_inset: rgb(61, 72, 77), // bg2
-            ink: rgb(211, 198, 170),   // fg
-            ink_soft: rgb(157, 169, 160), // grey2
+            bg: rgb(45, 53, 59),           // bg0
+            bg_panel: rgb(52, 63, 68),     // bg1
+            bg_inset: rgb(61, 72, 77),     // bg2
+            ink: rgb(211, 198, 170),       // fg
+            ink_soft: rgb(157, 169, 160),  // grey2
             ink_faint: rgb(122, 132, 120), // grey0
-            rule: rgb(71, 82, 88),     // bg3
+            rule: rgb(71, 82, 88),         // bg3
             accent: rgb(127, 187, 179),
             accent_soft: rgb(131, 192, 146), // aqua
             accent_bg: rgb(61, 72, 77),
@@ -306,14 +306,14 @@ impl Theme {
     /// Rosé Pine. No true green in the scheme, so success reads as `foam` cyan.
     pub fn rose_pine() -> Self {
         Self {
-            bg: rgb(25, 23, 36),     // base
-            bg_panel: rgb(31, 29, 46), // surface
-            bg_inset: rgb(50, 47, 72), // lifted above overlay so the gauge track reads
-            ink: rgb(224, 222, 244),   // text
-            ink_soft: rgb(144, 140, 170), // subtle
+            bg: rgb(25, 23, 36),           // base
+            bg_panel: rgb(31, 29, 46),     // surface
+            bg_inset: rgb(50, 47, 72),     // lifted above overlay so the gauge track reads
+            ink: rgb(224, 222, 244),       // text
+            ink_soft: rgb(144, 140, 170),  // subtle
             ink_faint: rgb(110, 106, 134), // muted
-            rule: rgb(64, 61, 82),     // highlight med
-            accent: rgb(196, 167, 231),  // iris (signature)
+            rule: rgb(64, 61, 82),         // highlight med
+            accent: rgb(196, 167, 231),    // iris (signature)
             accent_soft: rgb(212, 191, 240),
             accent_bg: rgb(38, 35, 58),
             status_pending: rgb(110, 106, 134),

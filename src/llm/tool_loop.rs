@@ -101,7 +101,12 @@ mod tests {
     #[async_trait]
     impl LlmClient for ScriptedClient {
         async fn chat(&self, _req: &ChatRequest) -> Result<ChatResponse> {
-            Ok(self.responses.lock().unwrap().pop_front().expect("script exhausted"))
+            Ok(self
+                .responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("script exhausted"))
         }
     }
 
@@ -183,6 +188,9 @@ mod tests {
 
         assert_eq!(out.tool_calls, 1, "one tool call executed across the loop");
         assert_eq!(out.usage.total_tokens, 30, "tokens summed over both rounds");
-        assert!((out.usage.cost_usd() - 0.033).abs() < 1e-9, "fees + upstream over both rounds");
+        assert!(
+            (out.usage.cost_usd() - 0.033).abs() < 1e-9,
+            "fees + upstream over both rounds"
+        );
     }
 }

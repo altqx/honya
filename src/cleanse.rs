@@ -412,7 +412,10 @@ mod tests {
         assert_eq!(out, "a\n\n---\n\nb");
         assert!(!out.contains("nbsp"));
         // Several stacked spacers collapse to ONE divider, not a stack of rules.
-        assert_eq!(md("<p>a</p><p><br/></p><p><br/></p><p>b</p>"), "a\n\n---\n\nb");
+        assert_eq!(
+            md("<p>a</p><p><br/></p><p><br/></p><p>b</p>"),
+            "a\n\n---\n\nb"
+        );
         assert_eq!(
             md("<p>a</p><p><br/></p><p><br/></p><p><br/></p><p>b</p>"),
             "a\n\n---\n\nb"

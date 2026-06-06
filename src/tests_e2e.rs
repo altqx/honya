@@ -97,7 +97,8 @@ fn renders_usage_surfaces_without_panic() {
             models: ModelSet::default(),
         });
         // Drive the Translate split meter with run + chapter sub-totals.
-        app.translate.on_app_event(&AppEvent::ChapterStarted { chapter: 1 });
+        app.translate
+            .on_app_event(&AppEvent::ChapterStarted { chapter: 1 });
         app.translate.on_app_event(&AppEvent::UsageUpdate {
             run: usage,
             chapter: usage,
@@ -153,7 +154,10 @@ fn renders_overlays_without_panic() {
             sel: 0,
             name: "Test Novel".to_string(),
             vol: 1,
-            syn: SynopsisState::new("主人公は故郷に帰る。".to_string(), "พระเอกกลับบ้านเกิด".to_string()),
+            syn: SynopsisState::new(
+                "主人公は故郷に帰る。".to_string(),
+                "พระเอกกลับบ้านเกิด".to_string(),
+            ),
             progress: None,
         });
         let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
@@ -161,10 +165,8 @@ fn renders_overlays_without_panic() {
 
         // Standalone synopsis editor overlay.
         let mut app = fresh_app();
-        app.overlay = Overlay::synopsis_edit(
-            "あらすじの原文".to_string(),
-            "เรื่องย่อภาษาไทย".to_string(),
-        );
+        app.overlay =
+            Overlay::synopsis_edit("あらすじの原文".to_string(), "เรื่องย่อภาษาไทย".to_string());
         let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
         term.draw(|f| app.render(f)).unwrap();
     }
@@ -239,7 +241,9 @@ fn backspace_dismisses_toast_only_when_not_captured() {
 
 #[test]
 fn project_l_key_is_not_shadowed_by_activity_log() {
-    use crate::model::{Chapter, ChapterKind, ChapterStatus, Project, TokenUsage, UsageStats, Volume};
+    use crate::model::{
+        Chapter, ChapterKind, ChapterStatus, Project, TokenUsage, UsageStats, Volume,
+    };
     use crate::workspace::Workspace;
 
     let dir = std::env::temp_dir().join("honya_project_l_key");
@@ -332,11 +336,18 @@ fn theme_picker_preview_commit_and_revert() {
     );
 
     let mut app = fresh_app();
-    assert_eq!(app.cfg.theme, ThemeId::Washi, "fresh config defaults to Washi");
+    assert_eq!(
+        app.cfg.theme,
+        ThemeId::Washi,
+        "fresh config defaults to Washi"
+    );
 
     // Open via Ctrl-T.
     app.on_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
-    assert!(matches!(app.overlay, Overlay::Theme(_)), "Ctrl-T opens picker");
+    assert!(
+        matches!(app.overlay, Overlay::Theme(_)),
+        "Ctrl-T opens picker"
+    );
 
     // Navigate down once: the live theme must change, but config stays put.
     let baseline_bg = app.theme.bg;
@@ -346,7 +357,10 @@ fn theme_picker_preview_commit_and_revert() {
 
     // Esc reverts the live theme back to the saved one and closes.
     app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
-    assert!(matches!(app.overlay, Overlay::None), "Esc closes the picker");
+    assert!(
+        matches!(app.overlay, Overlay::None),
+        "Esc closes the picker"
+    );
     assert_eq!(app.theme.bg, baseline_bg, "Esc reverts the preview");
 
     // Reopen, move down twice, and commit with Enter — config persists.
@@ -355,9 +369,19 @@ fn theme_picker_preview_commit_and_revert() {
     app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::empty()));
     let committed = crate::theme::ALL_THEMES[2];
     app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
-    assert!(matches!(app.overlay, Overlay::None), "Enter closes the picker");
-    assert_eq!(app.cfg.theme, committed, "Enter persists the selected theme");
-    assert_eq!(app.theme.bg, committed.build().bg, "live theme matches commit");
+    assert!(
+        matches!(app.overlay, Overlay::None),
+        "Enter closes the picker"
+    );
+    assert_eq!(
+        app.cfg.theme, committed,
+        "Enter persists the selected theme"
+    );
+    assert_eq!(
+        app.theme.bg,
+        committed.build().bg,
+        "live theme matches commit"
+    );
 
     // Restore the process-wide env so no later config-touching test inherits it.
     unsafe {
@@ -529,7 +553,10 @@ async fn end_to_end_import_and_mock_translate() {
         last_run.cost_usd
     );
     // Total tokens must accumulate from prompt+completion across every call.
-    assert!(last_run.tokens.total > 0, "run token total should accumulate");
+    assert!(
+        last_run.tokens.total > 0,
+        "run token total should accumulate"
+    );
 
     // The chapter's spend is emitted for the in-memory roll-up...
     let delta = chapter_delta.expect("ChapterUsage emitted for chapter 1");
@@ -570,7 +597,10 @@ async fn end_to_end_import_and_mock_translate() {
     let approx = |a: f64, b: f64| (a - b).abs() < 1e-9;
     assert!(approx(scanned.usage.cost_usd, ch1.cost_usd));
     assert_eq!(scanned.usage.tokens.total, ch1.tokens.total);
-    assert!(approx(project.volumes[0].usage_total().cost_usd, ch1.cost_usd));
+    assert!(approx(
+        project.volumes[0].usage_total().cost_usd,
+        ch1.cost_usd
+    ));
     assert!(approx(project.usage_total().cost_usd, ch1.cost_usd));
 
     let _ = std::fs::remove_dir_all(&base);

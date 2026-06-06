@@ -508,7 +508,9 @@ impl App {
             }
             KeyCode::Char('?') => return Action::show_overlay(Overlay::Help(0)),
             KeyCode::Char(':') => return Action::show_overlay(Overlay::palette()),
-            KeyCode::Char('l') if matches!(self.screen, Screen::Project) && self.active.is_some() => {
+            KeyCode::Char('l')
+                if matches!(self.screen, Screen::Project) && self.active.is_some() =>
+            {
                 return self.route_to_screen(k);
             }
             KeyCode::Char('l') | KeyCode::Char('`') => {
