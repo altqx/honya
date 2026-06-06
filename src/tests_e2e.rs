@@ -485,9 +485,7 @@ fn ctrl_t_opens_theme_picker_from_settings() {
 fn recovery_prompt_appears_and_discards() {
     use crate::workspace::session::{self, SessionCheckpoint};
 
-    let _guard = ENV_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
     let tmp = std::env::temp_dir().join(format!("honya_recover_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
@@ -556,9 +554,7 @@ fn pipeline_finished_clears_checkpoint() {
     use crate::model::AppEvent;
     use crate::workspace::session::{self, SessionCheckpoint};
 
-    let _guard = ENV_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
     let tmp = std::env::temp_dir().join(format!("honya_recover_fin_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
@@ -577,7 +573,10 @@ fn pipeline_finished_clears_checkpoint() {
         vec![1],
     );
     session::save(&cp).expect("write checkpoint");
-    assert!(session::load().is_some(), "checkpoint present before finish");
+    assert!(
+        session::load().is_some(),
+        "checkpoint present before finish"
+    );
 
     let mut app = fresh_app();
     app.pending_recovery = Some(cp);
@@ -886,6 +885,156 @@ async fn qa_overlay_gathers_and_navigates() {
         Screen::Reader,
         "Enter on a finding jumps to the Reader"
     );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `collect()` reads continuity notes from VOLUME.md (skipping info, keeping
+/// warning/conflict, case-insensitively), and the overlay handles edge keys:
+/// Enter on an unanchored note is a no-op, and j/k clamp at the list ends.
+#[test]
+fn qa_collect_continuity_and_key_edges() {
+    use crate::app::qa::{self, QaKind, Severity};
+    use crate::model::{
+        Chapter, ChapterKind, ChapterStatus, ContinuityNote, Project, UsageStats, Volume,
+    };
+    use crate::workspace::Workspace;
+
+    let dir = std::env::temp_dir().join(format!("honya_qa_cont_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("Vol_01")).unwrap();
+    let ws = Workspace::new(dir.clone(), 1);
+
+    let note = |chapter: Option<u32>, severity: &str, text: &str| ContinuityNote {
+        chapter,
+        severity: severity.to_string(),
+        kind: None,
+        note: text.to_string(),
+    };
+    // Warning + conflict are QA issues; info is not; severity match is case-insensitive.
+    crate::workspace::volume::add_note(&ws, note(Some(3), "warning", "glossary drift")).unwrap();
+    crate::workspace::volume::add_note(&ws, note(Some(3), "conflict", "name romanization"))
+        .unwrap();
+    crate::workspace::volume::add_note(&ws, note(Some(3), "info", "trivial aside")).unwrap();
+    crate::workspace::volume::add_note(&ws, note(None, "Warning", "timeline ambiguity")).unwrap();
+
+    let chapter = Chapter {
+        number: 3,
+        title: "第三章".to_string(),
+        kind: ChapterKind::Prose,
+        status: ChapterStatus::Done,
+        source_segments: 1,
+        total_chunks: 0,
+        committed_chunks: 0,
+        last_run: None,
+        usage: UsageStats::default(),
+    };
+    let active = ActiveProject {
+        project: Project {
+            id: "novel".to_string(),
+            dir: dir.clone(),
+            title: "Novel".to_string(),
+            created: None,
+            touched: None,
+            volumes: vec![Volume {
+                number: 1,
+                dir: dir.join("Vol_01"),
+                label: None,
+                chapters: vec![chapter],
+            }],
+            models: None,
+        },
+        workspace: Workspace::new(dir.clone(), 1),
+        client: Arc::new(crate::llm::mock::MockClient::default())
+            as Arc<dyn crate::llm::client::LlmClient>,
+        models: ModelSet::default(),
+        vol: 1,
+    };
+
+    let report = qa::collect(&active);
+    // Info note dropped; warning + conflict (anchored) + warning (unanchored) kept.
+    assert_eq!(
+        report.issues.len(),
+        3,
+        "info note skipped: {:?}",
+        report.issues
+    );
+    assert_eq!(report.done, 1);
+    assert_eq!(report.review, 0);
+    assert!(
+        report.issues.iter().any(|i| i.chapter == Some(3)
+            && matches!(
+                i.kind,
+                QaKind::Continuity {
+                    severity: Severity::Conflict
+                }
+            )),
+        "conflict note surfaced"
+    );
+    // The anchored notes resolve their chapter title; the unanchored note has none.
+    assert!(
+        report
+            .issues
+            .iter()
+            .any(|i| i.chapter == Some(3) && i.title == "第三章"),
+        "anchored note carries the chapter title"
+    );
+    let unanchored = report
+        .issues
+        .iter()
+        .find(|i| i.chapter.is_none())
+        .expect("unanchored warning surfaced (case-insensitive)");
+    assert!(matches!(
+        unanchored.kind,
+        QaKind::Continuity {
+            severity: Severity::Warning
+        }
+    ));
+    // Chapter-sorted: the unanchored (None → u32::MAX) note sorts last.
+    assert!(report.issues.last().unwrap().chapter.is_none());
+
+    // Drive the overlay through the real router. Selecting the last (unanchored)
+    // finding and pressing Enter is a no-op: the overlay stays open, no jump.
+    let n = report.issues.len();
+    let mut app = fresh_app();
+    app.active = Some(active);
+    app.screen = Screen::Project;
+    app.overlay = Overlay::qa("Novel · Vol.01".to_string(), report);
+
+    let sel = |app: &App| match &app.overlay {
+        Overlay::Qa(st) => st.sel,
+        _ => usize::MAX,
+    };
+    // j past the end clamps at n-1.
+    for _ in 0..(n + 2) {
+        app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::empty()));
+    }
+    assert_eq!(sel(&app), n - 1, "j clamps at the last finding");
+
+    app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+    assert!(
+        matches!(app.overlay, Overlay::Qa(_)),
+        "Enter on an unanchored note keeps the overlay open"
+    );
+    assert_eq!(
+        app.screen,
+        Screen::Project,
+        "Enter on an unanchored note does not navigate"
+    );
+
+    // k past the top clamps at 0.
+    for _ in 0..(n + 2) {
+        app.on_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::empty()));
+    }
+    assert_eq!(sel(&app), 0, "k clamps at the first finding");
+
+    // An empty report tolerates j/k/Enter without panicking.
+    let mut empty = fresh_app();
+    empty.overlay = Overlay::qa("Novel · Vol.01".to_string(), qa::QaReport::default());
+    for code in [KeyCode::Char('j'), KeyCode::Char('k'), KeyCode::Enter] {
+        empty.on_key(KeyEvent::new(code, KeyModifiers::empty()));
+    }
+    assert!(matches!(empty.overlay, Overlay::Qa(_)));
 
     let _ = std::fs::remove_dir_all(&dir);
 }

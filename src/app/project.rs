@@ -100,11 +100,13 @@ impl ProjectScreen {
 
     pub fn handle_key(&mut self, key: KeyEvent, active: Option<&ActiveProject>) -> Action {
         let Some(active) = active else {
-            // No project: only `e` (go to lexicon) is live.
-            if matches!(key.code, KeyCode::Char('e')) {
-                return Action::Goto(Screen::Lexicon);
-            }
-            return Action::None;
+            // No project: `e` (go to lexicon) and `Q` (QA inbox, shows the
+            // "no project" state) are the only live keys.
+            return match key.code {
+                KeyCode::Char('e') => Action::Goto(Screen::Lexicon),
+                KeyCode::Char('Q') => Action::show_overlay(Overlay::qa_placeholder()),
+                _ => Action::None,
+            };
         };
 
         let rows = self.rows(active);

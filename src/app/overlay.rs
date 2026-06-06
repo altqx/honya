@@ -18,7 +18,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use crate::model::{AppConfig, LogLevel, ThemeId};
 use crate::theme::{self, ALL_THEMES, Theme};
 use crate::ui::layout::{centered_modal, centered_pct};
-use crate::ui::text::{thai_display_safe, truncate_cols};
+use crate::ui::text::{pad_to_cols, thai_display_safe, truncate_cols};
 use crate::ui::widgets::render_gauge;
 
 use super::qa;
@@ -926,7 +926,7 @@ impl Overlay {
             ],
             Overlay::Log(_) => &[("jk", "scroll"), ("Esc/l", "close")],
             Overlay::Help(_) => &[("jk", "scroll"), ("Esc/?", "close")],
-            Overlay::Qa(_) => &[("jk", "move"), ("↵", "open in Reader"), ("Esc", "close")],
+            Overlay::Qa(_) => &[("jk", "move"), ("↵", "jump to chapter"), ("Esc", "close")],
             Overlay::Modal(dlg) if dlg.alternate.is_some() => {
                 // The two alternate-key modals differ by their alternate key, so
                 // pick a matching footer instead of a single hardcoded label set.
@@ -1636,7 +1636,10 @@ impl Overlay {
                     theme.ink_faint,
                 )
             } else {
-                ("   ✓ All clear — no QA issues for this volume.", theme.status_done)
+                (
+                    "   ✓ All clear — no QA issues for this volume.",
+                    theme.status_done,
+                )
             };
             f.render_widget(
                 Paragraph::new(Line::from(Span::styled(msg, Style::default().fg(color))))
@@ -1647,7 +1650,12 @@ impl Overlay {
         }
 
         let sel = st.sel.min(n - 1);
-        let detail_w = (list_area.width as usize).saturating_sub(14);
+        // Each finding row's fixed prefix is "  {bar} " (4) + "{glyph} " (2) +
+        // pad_to_cols(tag, TAG_W)+space (TAG_W+1) columns; the rest is the detail.
+        // TAG_W = 9 fits the widest real tag ("chunk 999", "conflict") without
+        // clipping a chunk number — only the unreachable ≥1000-chunk case clips.
+        const TAG_W: usize = 9;
+        let detail_w = (list_area.width as usize).saturating_sub(7 + TAG_W);
 
         let mut lines: Vec<Line> = Vec::new();
         let mut sel_line = 0usize;
@@ -1667,13 +1675,13 @@ impl Overlay {
                         .add_modifier(Modifier::BOLD),
                 )];
                 if !issue.title.is_empty() {
+                    // The header's own fixed parts (" ch NNN", the "  " title lead,
+                    // and "  (count)") are ~14 cols; `detail_w` (= width − 15) is a
+                    // safe budget that leaves the count badge visible.
                     head.push(Span::styled(
                         format!(
                             "  {}",
-                            truncate_cols(
-                                &thai_display_safe(&issue.title),
-                                detail_w.saturating_sub(8),
-                            )
+                            truncate_cols(&thai_display_safe(&issue.title), detail_w)
                         ),
                         Style::default().fg(theme.ink_faint),
                     ));
@@ -1696,11 +1704,12 @@ impl Overlay {
             };
             let (glyph, color, tag) = qa_visual(issue, theme);
             let bar = if selected { theme::SELECT_BAR } else { ' ' };
-            let detail = if issue.detail.trim().is_empty() {
+            let detail_src = if issue.detail.trim().is_empty() {
                 qa_default_detail(issue).to_string()
             } else {
-                truncate_cols(&thai_display_safe(&issue.detail), detail_w)
+                thai_display_safe(&issue.detail)
             };
+            let detail = truncate_cols(&detail_src, detail_w);
             lines.push(Line::from(vec![
                 Span::styled(
                     format!("  {bar} "),
@@ -1708,7 +1717,8 @@ impl Overlay {
                 ),
                 Span::styled(format!("{glyph} "), Style::default().fg(color).bg(row_bg)),
                 Span::styled(
-                    format!("{tag:<8} "),
+                    // Column-pad (and clip) so a long tag can't shove the detail over.
+                    format!("{} ", pad_to_cols(&tag, TAG_W)),
                     Style::default().fg(theme.ink_soft).bg(row_bg),
                 ),
                 Span::styled(detail, Style::default().fg(theme.ink).bg(row_bg)),
@@ -1924,9 +1934,7 @@ fn render_synopsis_body(f: &mut Frame, area: Rect, theme: &Theme, st: &SynopsisS
 fn qa_visual(issue: &qa::QaIssue, theme: &Theme) -> (&'static str, ratatui::style::Color, String) {
     use qa::{QaKind, Severity};
     match &issue.kind {
-        QaKind::ReviewChunk { chunk } => {
-            ("⚠", theme.status_warn, format!("chunk {}", chunk + 1))
-        }
+        QaKind::ReviewChunk { chunk } => ("⚠", theme.status_warn, format!("chunk {}", chunk + 1)),
         QaKind::ChapterFailed => ("✗", theme.status_failed, "failed".to_string()),
         QaKind::Continuity {
             severity: Severity::Conflict,
