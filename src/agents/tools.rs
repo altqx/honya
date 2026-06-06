@@ -59,7 +59,7 @@ pub fn orchestrator_tools() -> serde_json::Value {
             "type": "function",
             "function": {
                 "name": "upsert_glossary_term",
-                "description": "Create or update a glossary term in GLOSSARY.md (skills, places, organizations, items, titles, concepts, sound effects).",
+                "description": "Create or update a glossary term in GLOSSARY.md (skills, places, organizations, items, titles, concepts, sound effects). Existing protected terms are terminology locks and will not be overwritten by automatic Orchestrator updates.",
                 "parameters": {
                     "type": "object",
                     "additionalProperties": false,
@@ -70,6 +70,7 @@ pub fn orchestrator_tools() -> serde_json::Value {
                         "romaji": {"type": "string"},
                         "category": {"type": "string", "enum": ["skill", "place", "org", "item", "title", "concept", "sfx", "other"]},
                         "gloss": {"type": "string", "description": "Short clarifying note about meaning or usage."},
+                        "protected": {"type": "boolean", "description": "True only for a human-confirmed terminology lock; protected existing terms cannot be automatically overwritten."},
                         "do_not_translate": {"type": "boolean", "description": "True to keep the term verbatim / romanized."},
                         "first_seen_chapter": {"type": "integer"}
                     }
@@ -132,7 +133,7 @@ pub fn orchestrator_tools() -> serde_json::Value {
             "type": "function",
             "function": {
                 "name": "get_glossary",
-                "description": "Read glossary terms from GLOSSARY.md, optionally filtered by query/category, to check existing locked terminology before inventing new terms.",
+                "description": "Read glossary terms from GLOSSARY.md, optionally filtered by query/category/protected_only, to check existing locked terminology before inventing new terms.",
                 "parameters": {
                     "type": "object",
                     "additionalProperties": false,
@@ -140,6 +141,7 @@ pub fn orchestrator_tools() -> serde_json::Value {
                     "properties": {
                         "query": {"type": "string"},
                         "category": {"type": "string", "enum": ["skill", "place", "org", "item", "title", "concept", "sfx", "other"]},
+                        "protected_only": {"type": "boolean", "description": "True to return only protected terminology locks."},
                         "limit": {"type": "integer"}
                     }
                 }
@@ -199,6 +201,8 @@ struct UpsertGlossaryArgs {
     #[serde(default)]
     gloss: Option<String>,
     #[serde(default)]
+    protected: Option<bool>,
+    #[serde(default)]
     do_not_translate: Option<bool>,
     #[serde(default)]
     first_seen_chapter: Option<u32>,
@@ -236,6 +240,8 @@ struct GetGlossaryArgs {
     query: Option<String>,
     #[serde(default)]
     category: Option<String>,
+    #[serde(default)]
+    protected_only: Option<bool>,
     #[serde(default)]
     limit: Option<usize>,
 }
@@ -331,11 +337,13 @@ pub async fn dispatch_tool(
                 romaji: a.romaji,
                 category: a.category,
                 gloss: a.gloss,
+                protected: a.protected,
                 do_not_translate: a.do_not_translate,
                 first_seen_chapter: a.first_seen_chapter.or(Some(chapter)),
             };
-            match glossary::upsert(ws, term) {
-                Ok(()) => {
+            match glossary::upsert_from_orchestrator(ws, term) {
+                Ok(glossary::GlossaryUpsertOutcome::Inserted)
+                | Ok(glossary::GlossaryUpsertOutcome::Updated) => {
                     tx.send(AppEvent::GlossaryUpserted {
                         jp_term: a.jp_term.clone(),
                         thai_term: a.thai_term.clone(),
@@ -346,6 +354,35 @@ pub async fn dispatch_tool(
                         summary: format!("term {} → {}", a.jp_term, a.thai_term),
                     });
                     ToolResult::ok(format!("Upserted term {} → {}", a.jp_term, a.thai_term))
+                }
+                Ok(glossary::GlossaryUpsertOutcome::Protected { existing, conflict }) => {
+                    let summary = format!(
+                        "protected term {} kept as {}",
+                        existing.jp_term, existing.thai_term
+                    );
+                    tx.send(AppEvent::ToolInvoked {
+                        chapter,
+                        tool: name.to_string(),
+                        summary: summary.clone(),
+                    });
+                    ToolResult::data(
+                        if conflict {
+                            format!(
+                                "Term {} is protected; kept locked Thai '{}'. Do not overwrite it; flag a term conflict if this chunk needs a different rendering.",
+                                existing.jp_term, existing.thai_term
+                            )
+                        } else {
+                            format!(
+                                "Term {} is protected; no automatic update was applied.",
+                                existing.jp_term
+                            )
+                        },
+                        json!({
+                            "protected": true,
+                            "conflict": conflict,
+                            "existing": existing,
+                        }),
+                    )
                 }
                 Err(e) => ToolResult::err(format!("failed to write glossary term: {e}")),
             }
@@ -443,11 +480,22 @@ pub async fn dispatch_tool(
                 Err(e) => return ToolResult::err(format!("invalid get_glossary args: {e}")),
             };
             let limit = a.limit.unwrap_or(50);
-            let terms = glossary::get(ws, a.query.as_deref(), a.category.as_deref(), limit);
+            let protected_only = a.protected_only.unwrap_or(false);
+            let terms = glossary::get(
+                ws,
+                a.query.as_deref(),
+                a.category.as_deref(),
+                protected_only,
+                limit,
+            );
             tx.send(AppEvent::ToolInvoked {
                 chapter,
                 tool: name.to_string(),
-                summary: format!("read {} glossary term(s)", terms.len()),
+                summary: if protected_only {
+                    format!("read {} protected glossary term(s)", terms.len())
+                } else {
+                    format!("read {} glossary term(s)", terms.len())
+                },
             });
             let data = serde_json::to_value(&terms).unwrap_or(serde_json::Value::Null);
             ToolResult::data(
@@ -508,5 +556,125 @@ impl ToolExecutor for WorkspaceTools {
         let ws = self.workspace();
         let result = dispatch_tool(&ws, &self.tx, self.chapter, name, arguments_json).await;
         Ok(serde_json::to_string(&result)?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_ws(tag: &str) -> (std::path::PathBuf, Workspace) {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let base = std::env::temp_dir().join(format!(
+            "honya_tools_{tag}_{}_{}",
+            std::process::id(),
+            stamp
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+        let ws = Workspace::new(base.clone(), 1);
+        (base, ws)
+    }
+
+    fn term(jp: &str, th: &str, protected: Option<bool>) -> GlossaryTerm {
+        GlossaryTerm {
+            jp_term: jp.to_string(),
+            thai_term: th.to_string(),
+            romaji: None,
+            category: Some("item".to_string()),
+            gloss: None,
+            protected,
+            do_not_translate: Some(false),
+            first_seen_chapter: Some(1),
+        }
+    }
+
+    #[tokio::test]
+    async fn orchestrator_upsert_respects_protected_glossary_term() {
+        let (base, ws) = temp_ws("protected_upsert");
+        glossary::upsert(&ws, term("聖剣", "ดาบศักดิ์สิทธิ์", Some(true))).unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let result = dispatch_tool(
+            &ws,
+            &EventTx(tx),
+            3,
+            "upsert_glossary_term",
+            r#"{"jp_term":"聖剣","thai_term":"ดาบเทพ","do_not_translate":true}"#,
+        )
+        .await;
+
+        assert!(
+            result.ok,
+            "protected skip should be a recoverable tool result"
+        );
+        assert!(result.message.contains("protected"));
+        assert_eq!(
+            result
+                .data
+                .as_ref()
+                .and_then(|d| d.get("conflict"))
+                .and_then(|v| v.as_bool()),
+            Some(true)
+        );
+
+        let terms = glossary::load(&ws);
+        let saved = terms.iter().find(|t| t.jp_term == "聖剣").unwrap();
+        assert_eq!(saved.thai_term, "ดาบศักดิ์สิทธิ์");
+        assert_eq!(saved.do_not_translate, Some(false));
+        assert_eq!(saved.protected, Some(true));
+
+        let mut saw_protected_log = false;
+        let mut saw_upsert_event = false;
+        while let Ok(ev) = rx.try_recv() {
+            match ev {
+                AppEvent::ToolInvoked { summary, .. } => {
+                    saw_protected_log |= summary.contains("protected term");
+                }
+                AppEvent::GlossaryUpserted { .. } => saw_upsert_event = true,
+                _ => {}
+            }
+        }
+        assert!(saw_protected_log);
+        assert!(
+            !saw_upsert_event,
+            "blocked protected terms must not emit upsert UI events"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn get_glossary_filters_protected_only() {
+        let (base, ws) = temp_ws("protected_filter");
+        glossary::upsert(&ws, term("聖剣", "ดาบศักดิ์สิทธิ์", Some(true))).unwrap();
+        glossary::upsert(&ws, term("王都", "ราชธานี", None)).unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let result = dispatch_tool(
+            &ws,
+            &EventTx(tx),
+            3,
+            "get_glossary",
+            r#"{"protected_only":true,"limit":10}"#,
+        )
+        .await;
+
+        assert!(result.ok);
+        let terms = result
+            .data
+            .as_ref()
+            .and_then(|d| d.get("terms"))
+            .and_then(|v| v.as_array())
+            .expect("terms array");
+        assert_eq!(terms.len(), 1);
+        assert_eq!(
+            terms[0].get("jp_term").and_then(|v| v.as_str()),
+            Some("聖剣")
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

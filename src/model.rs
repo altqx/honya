@@ -336,6 +336,10 @@ pub struct GlossaryTerm {
     pub category: Option<String>,
     #[serde(default)]
     pub gloss: Option<String>,
+    /// Human-confirmed terminology lock: automatic Orchestrator upserts must not
+    /// rewrite the canonical rendering or flags for this term.
+    #[serde(default, alias = "locked")]
+    pub protected: Option<bool>,
     #[serde(default)]
     pub do_not_translate: Option<bool>,
     #[serde(default)]
@@ -368,6 +372,9 @@ pub struct VolumeData {
     pub run_history: Vec<RunHistoryEntry>,
     #[serde(default)]
     pub notes: Vec<ContinuityNote>,
+    /// Human proofreading notes anchored to Reader lines in translated chapters.
+    #[serde(default)]
+    pub annotations: Vec<ReaderAnnotation>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -378,6 +385,19 @@ pub struct ContinuityNote {
     #[serde(default)]
     pub kind: Option<String>,
     pub note: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReaderAnnotation {
+    /// Chapter number within this volume.
+    pub chapter: u32,
+    /// 1-based translated-file line anchor. The Reader inserts the note after this line.
+    pub line: u32,
+    /// Human note text, e.g. "awkward phrasing" or "check honorific".
+    pub note: String,
+    /// Creation timestamp for sorting/display. Optional keeps old/manual data tolerant.
+    #[serde(default)]
+    pub created_at: Option<DateTime<Utc>>,
 }
 
 /// Result every backend tool handler returns (serialized into the role:"tool" message).

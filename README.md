@@ -31,7 +31,7 @@ telemetry — just a quiet workspace in your terminal.
 
 - **EPUB in, Thai out** — spine-ordered import, illustration relocation, and HTML→Markdown cleanse, all automatic.
 - **Three specialized agents** — Translator and Reviewer iterate per chunk; the Orchestrator persists new terms and characters.
-- **Continuity that holds** — per-chunk glossary/character context plus the previous chunk's tail keep voice and terminology consistent across a whole volume.
+- **Continuity that holds** — per-chunk glossary/character context, protected terminology locks, and the previous chunk's tail keep voice and terms consistent across a whole volume.
 - **Cost transparency** — live token + USD meter during a run, rolled up per chapter, volume, and project.
 - **Side-by-side proofreading** — synced JA ↔ TH reader, both panes rendered from Markdown.
 - **12 themes** with a live-preview picker (`Ctrl-T`), from Washi 和紙 paper to Tokyo Night.
@@ -120,6 +120,8 @@ On first run, honya prompts for your OpenRouter key and saves it — see [API ke
 | `4` | **読 Reader** | Synced side-by-side JA ↔ TH proofreading, both panes rendered from Markdown. `[ ]` chapters · `z` sync · `o` layout. |
 | `5` | **辞 Lexicon** | Browse/edit Glossary, Characters, Style. `n` new · `e` edit · `d` delete · `/` search. |
 
+In **Lexicon → Glossary**, set `Protected` to `yes` to lock a human-approved term. Protected terms are shown in GLOSSARY.md and surfaced to the Orchestrator when term discoveries are processed; automatic upserts cannot overwrite them.
+
 **Global keys** (always available — `?` lists the full table):
 `?` help · `:` command palette · `Ctrl-T` theme · `l` activity log · `1`–`5` / `Tab` switch tabs ·
 `Esc` close overlay · `Esc` / `Backspace` dismiss notification · `q` quit.
@@ -195,7 +197,7 @@ and characters whose Japanese form actually appears in this chunk, capped at 80 
 
 - On *reject*, the reviewer's itemized feedback is routed back for a retry (up to a configurable cap, default 3).
 - On *approve*, the Thai is appended **deterministically, app-side** — not via an LLM tool — and the
-  **Orchestrator** runs a tool turn to persist any new characters/terms/notes and advance the recap.
+  **Orchestrator** runs a tool turn to persist any new characters/terms/notes and advance the recap, while respecting protected glossary locks.
 - If retries are exhausted, the best attempt is committed with a `[REVIEW NEEDED]` marker and the chapter
   is flagged **NeedsReview** (rather than failing the whole chapter); the Orchestrator metadata turn is
   skipped so an unverified pass can't pollute your glossary.
@@ -224,7 +226,7 @@ A project directory mirrors the spec exactly:
 your_project/
 ├── PROJECT.md        # synopsis, world-building, localization guide
 ├── CHARACTERS.md     # roster: self/target pronouns, speech style, relationships
-├── GLOSSARY.md       # locked terms, skills, item names, honorifics
+├── GLOSSARY.md       # locked/protected terms, skills, item names, honorifics
 ├── STYLE.md          # translation-memory notes / reference examples
 ├── images/           # all illustrations, relocated here on import
 └── Vol_01/

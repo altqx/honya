@@ -11,6 +11,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
+use crate::model::ReaderAnnotation;
 use crate::theme::{self, Theme};
 use crate::workspace::Workspace;
 
@@ -31,6 +32,8 @@ pub struct ReaderScreen {
     layout_mode: u8,
     ja: String,
     th: String,
+    annotations: Vec<ReaderAnnotation>,
+    show_annotations: bool,
     chapter: u32,
 }
 
@@ -44,6 +47,8 @@ impl ReaderScreen {
             layout_mode: MODE_SPLIT,
             ja: String::new(),
             th: String::new(),
+            annotations: Vec::new(),
+            show_annotations: true,
             chapter: 0,
         }
     }
@@ -62,6 +67,15 @@ impl ReaderScreen {
         // Decompose Thai SARA AM so it never lands as a width-2 single cell that
         // desyncs the terminal and smears ำ across the screen on the next redraw.
         self.th = crate::ui::text::thai_display_safe(&th);
+        self.reload_annotations(ws);
+    }
+
+    pub fn reload_annotations(&mut self, ws: &Workspace) {
+        self.annotations = if self.chapter == 0 {
+            Vec::new()
+        } else {
+            crate::workspace::volume::reader_annotations(ws, self.chapter)
+        };
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Action {
@@ -111,6 +125,14 @@ impl ReaderScreen {
                 self.layout_mode = (self.layout_mode + 1) % 3;
                 Action::None
             }
+            KeyCode::Char('n') => {
+                let line = self.current_annotation_line();
+                Action::show_overlay(Overlay::reader_note(self.chapter, line))
+            }
+            KeyCode::Char('N') => {
+                self.show_annotations = !self.show_annotations;
+                Action::None
+            }
             KeyCode::Char('y') => {
                 // Copy is environment-dependent; we acknowledge via a no-op Action
                 // and let the App surface a toast through its normal channels. We
@@ -157,6 +179,7 @@ impl ReaderScreen {
                     theme.ja_text,
                     self.scroll,
                     false,
+                    None,
                 );
             }
             MODE_TH => {
@@ -169,6 +192,7 @@ impl ReaderScreen {
                     theme.th_text,
                     self.effective_th_scroll(),
                     true,
+                    Some(&self.annotations),
                 );
             }
             _ => {
@@ -185,6 +209,7 @@ impl ReaderScreen {
                     theme.ja_text,
                     self.scroll,
                     false,
+                    None,
                 );
                 self.render_pane(
                     f,
@@ -195,6 +220,7 @@ impl ReaderScreen {
                     theme.th_text,
                     self.effective_th_scroll(),
                     true,
+                    Some(&self.annotations),
                 );
             }
         }
@@ -210,6 +236,11 @@ impl ReaderScreen {
         }
     }
 
+    fn current_annotation_line(&self) -> u32 {
+        let line_count = self.th.lines().count().max(1) as u32;
+        (u32::from(self.effective_th_scroll()) + 1).clamp(1, line_count)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn render_pane(
         &self,
@@ -221,6 +252,7 @@ impl ReaderScreen {
         fg: ratatui::style::Color,
         scroll: u16,
         is_thai: bool,
+        annotations: Option<&[ReaderAnnotation]>,
     ) {
         let block = Block::default()
             .borders(Borders::ALL)
@@ -236,7 +268,18 @@ impl ReaderScreen {
 
         // Render the chapter Markdown as styled prose (bold/italic, headings,
         // image chips, …) rather than leaking raw `**`/`![]()` syntax.
-        let lines = crate::ui::markdown::render(content, fg, theme, inner.width as usize);
+        let annotated;
+        let render_content = if is_thai && self.show_annotations {
+            if let Some(annotations) = annotations.filter(|notes| !notes.is_empty()) {
+                annotated = annotate_markdown(content, annotations);
+                annotated.as_str()
+            } else {
+                content
+            }
+        } else {
+            content
+        };
+        let lines = crate::ui::markdown::render(render_content, fg, theme, inner.width as usize);
 
         let mut para = Paragraph::new(lines)
             .scroll((scroll, 0))
@@ -254,6 +297,7 @@ impl ReaderScreen {
     fn render_status(&self, f: &mut Frame, area: Rect, theme: &Theme) {
         let sync_glyph = if self.sync { "●" } else { "○" };
         let wrap_glyph = if self.wrap { "●" } else { "○" };
+        let note_glyph = if self.show_annotations { "●" } else { "○" };
         let mode = match self.layout_mode {
             MODE_JA => "JA",
             MODE_TH => "TH",
@@ -280,6 +324,20 @@ impl ReaderScreen {
             ),
             Span::styled(" · layout ", Style::default().fg(theme.ink_faint)),
             Span::styled(mode, Style::default().fg(theme.accent_soft)),
+            Span::styled(" · notes ", Style::default().fg(theme.ink_faint)),
+            Span::styled(
+                format!("{} {}", note_glyph, self.annotations.len()),
+                Style::default().fg(if self.show_annotations {
+                    theme.status_done
+                } else {
+                    theme.ink_faint
+                }),
+            ),
+            Span::styled(" · line ", Style::default().fg(theme.ink_faint)),
+            Span::styled(
+                self.current_annotation_line().to_string(),
+                Style::default().fg(theme.accent_soft),
+            ),
             Span::styled(" · ch ", Style::default().fg(theme.ink_faint)),
             Span::styled(
                 format!("{:03}", self.chapter),
@@ -301,7 +359,8 @@ impl ReaderScreen {
             ("z", "sync"),
             ("o", "layout"),
             ("w", "wrap"),
-            ("y", "copy"),
+            ("n", "note"),
+            ("N", "notes"),
             ("Q", "QA"),
         ]
     }

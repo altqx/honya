@@ -3,7 +3,9 @@
 
 use chrono::{DateTime, Utc};
 
-use crate::model::{ContinuityNote, RunHistoryEntry, RunHistoryStatus, UsageStats, VolumeData};
+use crate::model::{
+    ContinuityNote, ReaderAnnotation, RunHistoryEntry, RunHistoryStatus, UsageStats, VolumeData,
+};
 use crate::workspace::data_block;
 use crate::workspace::Workspace;
 
@@ -40,6 +42,35 @@ pub fn add_note(ws: &Workspace, note: ContinuityNote) -> std::io::Result<()> {
     let mut data = load(ws);
     data.notes.push(note);
     write(ws, &data)
+}
+
+/// Append a human Reader annotation and persist. Empty notes are ignored so an
+/// accidental Enter in the editor never dirties VOLUME.md.
+pub fn add_reader_annotation(
+    ws: &Workspace,
+    mut annotation: ReaderAnnotation,
+) -> std::io::Result<()> {
+    let note = annotation.note.trim();
+    if note.is_empty() {
+        return Ok(());
+    }
+    annotation.note = note.to_string();
+    annotation.line = annotation.line.max(1);
+
+    let mut data = load(ws);
+    data.annotations.push(annotation);
+    write(ws, &data)
+}
+
+/// Return this chapter's Reader annotations in stable on-page order.
+pub fn reader_annotations(ws: &Workspace, chapter: u32) -> Vec<ReaderAnnotation> {
+    let mut annotations: Vec<ReaderAnnotation> = load(ws)
+        .annotations
+        .into_iter()
+        .filter(|annotation| annotation.chapter == chapter)
+        .collect();
+    annotations.sort_by_key(|annotation| (annotation.line, annotation.created_at));
+    annotations
 }
 
 /// Add one run's usage `delta` to a chapter's cumulative lifetime total and
@@ -276,6 +307,30 @@ pub fn render_body(data: &VolumeData) -> String {
                     .map(cell)
                     .unwrap_or_else(|| "—".to_string()),
                 cell(&note.note),
+            ));
+        }
+    }
+    s.push('\n');
+
+    s.push_str("## บันทึกผู้อ่าน (Reader Annotations)\n\n");
+    if data.annotations.is_empty() {
+        s.push_str("_ยังไม่มีโน้ตพิสูจน์อักษร_\n");
+    } else {
+        let mut annotations: Vec<&ReaderAnnotation> = data.annotations.iter().collect();
+        annotations.sort_by_key(|annotation| (annotation.chapter, annotation.line, annotation.created_at));
+        s.push_str("| บท | บรรทัด | เวลา | บันทึก |\n");
+        s.push_str("|----|---------:|------|--------|\n");
+        for annotation in annotations {
+            let created = annotation
+                .created_at
+                .map(short_time)
+                .unwrap_or_else(|| "—".to_string());
+            s.push_str(&format!(
+                "| {} | {} | {} | {} |\n",
+                annotation.chapter,
+                annotation.line,
+                cell(&created),
+                cell(&annotation.note),
             ));
         }
     }

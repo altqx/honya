@@ -2,20 +2,20 @@
 //! files. Tab cycles Glossary ↔ Characters ↔ Style. Entries can be added / edited /
 //! deleted inline, persisting via workspace::{glossary,characters}::upsert.
 
-use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::Frame;
 
 use crate::model::{Character, GlossaryTerm};
 use crate::theme::{self, Theme};
 use crate::ui::text::{pad_to_cols, thai_display_safe, truncate_cols};
 use crate::workspace::Workspace;
 
-use super::Action;
 use super::overlay::Overlay;
+use super::Action;
 
 const SUB_GLOSSARY: u8 = 0;
 const SUB_CHARACTERS: u8 = 1;
@@ -41,6 +41,7 @@ impl EditForm {
             romaji: None,
             category: None,
             gloss: None,
+            protected: None,
             do_not_translate: None,
             first_seen_chapter: None,
         });
@@ -51,6 +52,8 @@ impl EditForm {
                 ("Thai term", g.thai_term),
                 ("Category", g.category.unwrap_or_default()),
                 ("Gloss", g.gloss.unwrap_or_default()),
+                ("Do not trans", bool_field(g.do_not_translate)),
+                ("Protected", bool_field(g.protected)),
             ],
             field: 0,
             is_new: seed.is_none(),
@@ -106,7 +109,8 @@ impl EditForm {
             romaji: None,
             category: opt(get(2)),
             gloss: opt(get(3)),
-            do_not_translate: None,
+            protected: bool_opt(get(5)),
+            do_not_translate: bool_opt(get(4)),
             first_seen_chapter: None,
         }
     }
@@ -515,17 +519,18 @@ impl LexiconScreen {
         // Header row.
         let head = Line::from(Span::styled(
             format!(
-                "   {} {} {} {}  Gloss",
+                "   {} {} {} {} {}  Gloss",
                 pad_to_cols("JP term", 12),
                 pad_to_cols("Thai term", 16),
                 pad_to_cols("Cat", 8),
+                "Lock",
                 "DNT"
             ),
             Style::default().fg(theme.ink_faint),
         ));
 
         let mut items = vec![ListItem::new(head)];
-        let gloss_w = area.width.saturating_sub(48).max(8) as usize;
+        let gloss_w = area.width.saturating_sub(55).max(8) as usize;
         for (i, t) in terms.iter().enumerate() {
             let selected = i == sel;
             let bar = if selected { theme::SELECT_BAR } else { ' ' };
@@ -533,6 +538,11 @@ impl LexiconScreen {
                 theme.accent_bg
             } else {
                 theme.bg_panel
+            };
+            let lock = if t.protected.unwrap_or(false) {
+                "✓"
+            } else {
+                "·"
             };
             let dnt = if t.do_not_translate.unwrap_or(false) {
                 "✓"
@@ -554,6 +564,10 @@ impl LexiconScreen {
                 Span::styled(
                     pad_to_cols(&thai_display_safe(t.category.as_deref().unwrap_or("—")), 8),
                     Style::default().fg(theme.ink_soft).bg(bg),
+                ),
+                Span::styled(
+                    format!(" {lock}    "),
+                    Style::default().fg(theme.ink_faint).bg(bg),
                 ),
                 Span::styled(
                     format!(" {dnt}   "),
@@ -761,6 +775,26 @@ fn opt(s: String) -> Option<String> {
         None
     } else {
         Some(t.to_string())
+    }
+}
+
+fn bool_field(v: Option<bool>) -> String {
+    match v {
+        Some(true) => "yes".to_string(),
+        Some(false) => "no".to_string(),
+        None => String::new(),
+    }
+}
+
+fn bool_opt(s: String) -> Option<bool> {
+    match s.trim().to_lowercase().as_str() {
+        "" => None,
+        "1" | "true" | "t" | "yes" | "y" | "on" | "lock" | "locked" | "protect" | "protected"
+        | "✓" => Some(true),
+        "0" | "false" | "f" | "no" | "n" | "off" | "unlock" | "unlocked" | "-" | "—" | "·" => {
+            Some(false)
+        }
+        _ => None,
     }
 }
 

@@ -1,7 +1,7 @@
 //! The three agent system prompts plus the runtime user-message builders.
 //! (The Translator user message lives in `continuity.rs` — it needs prior Thai.)
 
-use crate::model::TranslatorOut;
+use crate::model::{GlossaryTerm, TranslatorOut};
 
 /// Agent A — Orchestrator (English, TOOLS). Runtime role: the metadata-update turn.
 pub const ORCHESTRATOR_SYSTEM: &str = r#"You are the master Orchestrator AI for an autonomous Japanese-to-Thai Light Novel translation pipeline. Your role is to manage project integrity, coordinate the chunk-by-chunk flow, and update meta-documentation across volumes.
@@ -15,8 +15,9 @@ Your Operational Parameters:
 6. If the Reviewer issues a correction list, repackage the chunk with the feedback and route it back to the Translator for a retry.
 7. Upon final approval, append the completed Thai text string directly to the corresponding file in /translated/.
 8. Dynamic Updating Tool Requirement: You must constantly monitor the text for changes. If a new character enters a scene, a new term is introduced, or character relationships shift, you must immediately call your metadata tools to update the global CHARACTERS.md, GLOSSARY.md, or the volume's VOLUME.md files.
+9. Terminology Lock Requirement: GLOSSARY terms with protected=true are human-confirmed locks. Never overwrite their Thai rendering or do_not_translate flag. Use get_glossary with protected_only=true when a new discovery may conflict. If a discovery conflicts with a protected term, do NOT upsert it; call flag_continuity_note with severity="conflict" and kind="term" instead.
 
-For THIS turn: you are given the chapter number and the discoveries from the chunk just approved (new characters, new terms, continuity notes). Call the appropriate tools (upsert_character, upsert_glossary_term, update_volume_recap, flag_continuity_note) to persist them. Do not re-translate. When there is nothing left to record, stop."#;
+For THIS turn: you are given the chapter number, protected terminology locks, and the discoveries from the chunk just approved (new characters, new terms, continuity notes). Call the appropriate tools (upsert_character, upsert_glossary_term, update_volume_recap, flag_continuity_note) to persist them. Do not re-translate. When there is nothing left to record, stop."#;
 
 /// Agent B — Translator (Thai, json_schema `translation_result`).
 pub const TRANSLATOR_SYSTEM: &str = r#"คุณคือเอไอผู้เชี่ยวชาญการแปลนิยายไลท์โนเวลและมังงะมืออาชีพ หน้าที่ของคุณคือการแปลข้อความภาษาญี่ปุ่นที่ผ่านการแปลงเป็นรูปแบบ Markdown พื้นฐานมาแล้ว ให้กลายเป็นภาษาไทยที่สละสลวย เป็นธรรมชาติ และเข้าถึงอารมณ์ของต้นฉบับอย่างสมบูรณ์ที่สุด โดยยึดข้อกำหนดและไฟล์อ้างอิงจากคลังข้อมูลระบบเป็นสำคัญ
@@ -103,15 +104,51 @@ pub fn build_reviewer_user(
     s
 }
 
+fn format_protected_term(t: &GlossaryTerm) -> String {
+    let dnt = if matches!(t.do_not_translate, Some(true)) {
+        "yes"
+    } else {
+        "no"
+    };
+    let mut line = format!(
+        "- jp_term: {} | locked_thai: {} | do_not_translate: {}",
+        t.jp_term.trim(),
+        t.thai_term.trim(),
+        dnt,
+    );
+    if let Some(cat) = t.category.as_deref().filter(|c| !c.trim().is_empty()) {
+        line.push_str(&format!(" | category: {}", cat.trim()));
+    }
+    if let Some(gloss) = t.gloss.as_deref().filter(|g| !g.trim().is_empty()) {
+        line.push_str(&format!(" | note: {}", gloss.trim()));
+    }
+    line.push('\n');
+    line
+}
+
 /// Build the Orchestrator metadata-turn user message: a concise listing of the
 /// discoveries from the just-approved chunk, instructing the model to persist
 /// them with its tools. When there is nothing to record we say so explicitly so
 /// a cooperative model simply stops without calling tools.
-pub fn build_orchestrator_metadata_msg(chapter: u32, out: &TranslatorOut) -> String {
+pub fn build_orchestrator_metadata_msg(
+    chapter: u32,
+    out: &TranslatorOut,
+    protected_terms: &[GlossaryTerm],
+) -> String {
     let mut s = String::new();
     s.push_str(&format!(
         "Chapter {chapter} — a chunk was just approved and appended. Persist any new metadata it surfaced using your tools.\n",
     ));
+
+    if !protected_terms.is_empty() {
+        s.push_str(
+            "\nProtected terminology locks (do NOT overwrite; use these exact Thai/DNT values):\n",
+        );
+        for t in protected_terms {
+            s.push_str(&format_protected_term(t));
+        }
+        s.push_str("If a discovery conflicts with a protected lock, record a term conflict instead of changing GLOSSARY.md. Use get_glossary(protected_only=true, query=...) if you need to inspect more locks.\n");
+    }
 
     if out.new_characters.is_empty() && out.new_terms.is_empty() && out.continuity_notes.is_empty()
     {
@@ -153,4 +190,38 @@ pub fn build_orchestrator_metadata_msg(chapter: u32, out: &TranslatorOut) -> Str
         "\nAlso consider calling update_volume_recap (chapter {chapter}) if the running recap or this chapter's summary should advance. When everything is recorded, stop.\n",
     ));
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn orchestrator_metadata_message_includes_protected_locks() {
+        let out = TranslatorOut {
+            thought_process: Default::default(),
+            translated_text: String::new(),
+            new_characters: Vec::new(),
+            new_terms: Vec::new(),
+            continuity_notes: Vec::new(),
+        };
+        let protected = vec![GlossaryTerm {
+            jp_term: "聖剣".to_string(),
+            thai_term: "ดาบศักดิ์สิทธิ์".to_string(),
+            romaji: None,
+            category: Some("item".to_string()),
+            gloss: Some("canonical weapon name".to_string()),
+            protected: Some(true),
+            do_not_translate: Some(true),
+            first_seen_chapter: Some(1),
+        }];
+
+        let msg = build_orchestrator_metadata_msg(7, &out, &protected);
+
+        assert!(msg.contains("Protected terminology locks"));
+        assert!(msg.contains("聖剣"));
+        assert!(msg.contains("ดาบศักดิ์สิทธิ์"));
+        assert!(msg.contains("do_not_translate: yes"));
+        assert!(msg.contains("record a term conflict"));
+    }
 }

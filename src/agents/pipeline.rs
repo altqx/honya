@@ -26,8 +26,8 @@ use crate::llm::client::LlmClient;
 use crate::llm::tool_loop::run_tool_loop;
 use crate::llm::{ChatRequest, Message, Tool, Usage};
 use crate::model::{
-    AgentRole, AppConfig, AppEvent, ChapterStatus, ChunkState, EventTx, LogLevel, ModelSet,
-    ReviewVerdict, ReviewerOut, TokenUsage, TranslatorOut, UsageStats,
+    AgentRole, AppConfig, AppEvent, ChapterStatus, ChunkState, EventTx, GlossaryTerm, LogLevel,
+    ModelSet, ReviewVerdict, ReviewerOut, TokenUsage, TranslatorOut, UsageStats,
 };
 use crate::workspace::{Workspace, characters, data_block, glossary, translation, volume};
 
@@ -352,6 +352,7 @@ async fn gate(ctx: &PipelineCtx, chapter: u32) -> bool {
 
 const MAX_GLOSSARY_IN_CTX: usize = 80;
 const MAX_CHARACTERS_IN_CTX: usize = 40;
+const MAX_PROTECTED_TERMS_FOR_ORCH: usize = 40;
 
 /// Assemble the reference context bundled into every Translator/Reviewer call:
 /// the locked glossary, the character roster (pronouns/register), and the
@@ -769,6 +770,37 @@ async fn process_chunk(
     )
 }
 
+fn protected_terms_for_orchestrator(ws: &Workspace, out: &TranslatorOut) -> Vec<GlossaryTerm> {
+    if out.new_terms.is_empty() {
+        return Vec::new();
+    }
+
+    let mut terms: Vec<GlossaryTerm> = glossary::load(ws)
+        .into_iter()
+        .filter(glossary::is_protected)
+        .collect();
+
+    // Prioritize locks that resemble this chunk's reported discoveries, then
+    // include a bounded fallback list so the Orchestrator can still reason about
+    // nearby terminology without ballooning the prompt.
+    terms.sort_by_key(|t| !protected_term_matches_discovery(t, out));
+    terms.truncate(MAX_PROTECTED_TERMS_FOR_ORCH);
+    terms
+}
+
+fn protected_term_matches_discovery(term: &GlossaryTerm, out: &TranslatorOut) -> bool {
+    let jp = term.jp_term.trim();
+    let th = term.thai_term.trim();
+    out.new_terms.iter().any(|new| {
+        let new_jp = new.jp_term.trim();
+        let new_th = new.thai_term.trim();
+        (!jp.is_empty() && !new_jp.is_empty() && (jp.contains(new_jp) || new_jp.contains(jp)))
+            || (!th.is_empty()
+                && !new_th.is_empty()
+                && (th.contains(new_th) || new_th.contains(th)))
+    })
+}
+
 /// Run the Orchestrator metadata turn for a just-approved chunk: a single tool
 /// loop that lets the Orchestrator persist new characters / terms / continuity
 /// notes and advance the volume recap through the backend tools.
@@ -777,7 +809,8 @@ async fn run_orchestrator_metadata_turn(
     chapter: u32,
     out: &TranslatorOut,
 ) -> anyhow::Result<(Usage, usize)> {
-    let user = build_orchestrator_metadata_msg(chapter, out);
+    let protected_terms = protected_terms_for_orchestrator(&ctx.ws, out);
+    let user = build_orchestrator_metadata_msg(chapter, out, &protected_terms);
 
     let tools: Vec<Tool> = serde_json::from_value(orchestrator_tools())
         .map_err(|e| anyhow::anyhow!("failed to build orchestrator tools: {e}"))?;
@@ -826,6 +859,7 @@ mod tests {
             romaji: None,
             category: None,
             gloss: None,
+            protected: None,
             do_not_translate: None,
             first_seen_chapter: None,
         }

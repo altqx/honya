@@ -21,16 +21,59 @@ pub fn load(ws: &Workspace) -> Vec<GlossaryTerm> {
     block.terms
 }
 
+/// Result of a glossary upsert that may be blocked by a protected terminology lock.
+#[derive(Debug, Clone)]
+pub enum GlossaryUpsertOutcome {
+    Inserted,
+    Updated,
+    /// The matching existing term is protected, so an automatic Orchestrator
+    /// write was skipped. `conflict` means the attempted canonical Thai/DNT flag
+    /// differed from the protected value.
+    Protected {
+        existing: GlossaryTerm,
+        conflict: bool,
+    },
+}
+
 /// Insert or merge a term (matched on normalized `jp_term`) and re-render; on a
 /// match, non-empty incoming fields overwrite, missing fields are preserved.
+/// This is the trusted/manual path used by the Lexicon and tests; it may edit or
+/// clear a protected flag.
 pub fn upsert(ws: &Workspace, t: GlossaryTerm) -> std::io::Result<()> {
+    upsert_inner(ws, t, false).map(|_| ())
+}
+
+/// Orchestrator-safe upsert: protected existing terms are terminology locks and
+/// are never overwritten by automatic metadata turns.
+pub fn upsert_from_orchestrator(
+    ws: &Workspace,
+    t: GlossaryTerm,
+) -> std::io::Result<GlossaryUpsertOutcome> {
+    upsert_inner(ws, t, true)
+}
+
+fn upsert_inner(
+    ws: &Workspace,
+    t: GlossaryTerm,
+    respect_protection: bool,
+) -> std::io::Result<GlossaryUpsertOutcome> {
     let key = normalize(&t.jp_term);
     let mut terms = load(ws);
+    let outcome;
 
     if let Some(existing) = terms.iter_mut().find(|e| normalize(&e.jp_term) == key) {
+        if respect_protection && is_protected(existing) {
+            let conflict = protected_conflict(existing, &t);
+            return Ok(GlossaryUpsertOutcome::Protected {
+                existing: existing.clone(),
+                conflict,
+            });
+        }
         merge_into(existing, t);
+        outcome = GlossaryUpsertOutcome::Updated;
     } else {
         terms.push(t);
+        outcome = GlossaryUpsertOutcome::Inserted;
     }
 
     // Stable order: category then jp_term.
@@ -42,7 +85,8 @@ pub fn upsert(ws: &Workspace, t: GlossaryTerm) -> std::io::Result<()> {
 
     let body = render_table(&terms);
     let block = GlossaryBlock { terms };
-    data_block::write_with_data(&ws.glossary_md(), &body, &block)
+    data_block::write_with_data(&ws.glossary_md(), &body, &block)?;
+    Ok(outcome)
 }
 
 /// Remove the term whose normalized `jp_term` matches. No-op if absent.
@@ -60,11 +104,13 @@ pub fn remove(ws: &Workspace, jp_term: &str) -> std::io::Result<()> {
 }
 
 /// Query terms by case-insensitive substring `query` (jp_term/thai_term/romaji/
-/// gloss) and optional exact `category`, capped at `limit` (0 means no cap).
+/// gloss) and optional exact `category` / protected-only flag, capped at `limit`
+/// (0 means no cap).
 pub fn get(
     ws: &Workspace,
     query: Option<&str>,
     category: Option<&str>,
+    protected_only: bool,
     limit: usize,
 ) -> Vec<GlossaryTerm> {
     let terms = load(ws);
@@ -77,6 +123,7 @@ pub fn get(
 
     let mut out: Vec<GlossaryTerm> = terms
         .into_iter()
+        .filter(|t| !protected_only || is_protected(t))
         .filter(|t| match &cat {
             Some(want) => t
                 .category
@@ -108,19 +155,21 @@ pub fn render_table(terms: &[GlossaryTerm]) -> String {
         return s;
     }
 
-    s.push_str("| 日本語 | ไทย | Romaji | หมวด | ห้ามแปล | บทแรก | คำอธิบาย |\n");
-    s.push_str("|--------|-----|--------|------|---------|-------|----------|\n");
+    s.push_str("| 日本語 | ไทย | Romaji | หมวด | ล็อก | ห้ามแปล | บทแรก | คำอธิบาย |\n");
+    s.push_str("|--------|-----|--------|------|------|---------|-------|----------|\n");
     for t in terms {
+        let locked = if is_protected(t) { "✓" } else { "—" };
         let dnt = match t.do_not_translate {
             Some(true) => "✓",
             _ => "—",
         };
         s.push_str(&format!(
-            "| {} | {} | {} | {} | {} | {} | {} |\n",
+            "| {} | {} | {} | {} | {} | {} | {} | {} |\n",
             cell(&t.jp_term),
             cell(&t.thai_term),
             opt(&t.romaji),
             opt(&t.category),
+            locked,
             dnt,
             t.first_seen_chapter
                 .map(|n| n.to_string())
@@ -132,13 +181,14 @@ pub fn render_table(terms: &[GlossaryTerm]) -> String {
 }
 
 /// Render the locked-terms blurb for the Translator prompt: one `日本語 → ไทย`
-/// bullet per term (romaji hint, `[หมวด]` tag, `[ห้ามแปล]` flag); empty list → "".
+/// bullet per term (romaji hint, `[หมวด]` tag, `[ล็อก]` / `[ห้ามแปล]` flags);
+/// empty list → "".
 pub fn render_context_blurb(terms: &[GlossaryTerm]) -> String {
     if terms.is_empty() {
         return String::new();
     }
     let mut s = String::new();
-    s.push_str("คำศัพท์ที่กำหนดไว้ (บังคับใช้ให้ตรงกัน):\n");
+    s.push_str("คำศัพท์ที่กำหนดไว้ (บังคับใช้ให้ตรงกัน; [ล็อก] ห้ามเปลี่ยนอัตโนมัติ):\n");
     for t in terms {
         let jp = t.jp_term.trim();
         let th = t.thai_term.trim();
@@ -154,6 +204,9 @@ pub fn render_context_blurb(terms: &[GlossaryTerm]) -> String {
         s.push_str(if th.is_empty() { "—" } else { th });
         if let Some(cat) = t.category.as_deref().filter(|c| !c.trim().is_empty()) {
             s.push_str(&format!(" [{}]", cat.trim()));
+        }
+        if is_protected(t) {
+            s.push_str(" [ล็อก/ห้ามเปลี่ยน]");
         }
         if matches!(t.do_not_translate, Some(true)) {
             s.push_str(" [ห้ามแปล/คงคำเดิม]");
@@ -173,6 +226,9 @@ fn merge_into(target: &mut GlossaryTerm, incoming: GlossaryTerm) {
     merge_opt(&mut target.romaji, incoming.romaji);
     merge_opt(&mut target.category, incoming.category);
     merge_opt(&mut target.gloss, incoming.gloss);
+    if incoming.protected.is_some() {
+        target.protected = incoming.protected;
+    }
     if incoming.do_not_translate.is_some() {
         target.do_not_translate = incoming.do_not_translate;
     }
@@ -183,6 +239,23 @@ fn merge_into(target: &mut GlossaryTerm, incoming: GlossaryTerm) {
             (a, None) => a,
         };
     }
+}
+
+pub fn is_protected(t: &GlossaryTerm) -> bool {
+    matches!(t.protected, Some(true))
+}
+
+fn protected_conflict(existing: &GlossaryTerm, incoming: &GlossaryTerm) -> bool {
+    let incoming_thai = incoming.thai_term.trim();
+    if !incoming_thai.is_empty() && incoming_thai != existing.thai_term.trim() {
+        return true;
+    }
+    if let Some(incoming_dnt) = incoming.do_not_translate
+        && incoming_dnt != existing.do_not_translate.unwrap_or(false)
+    {
+        return true;
+    }
+    false
 }
 
 fn merge_opt(slot: &mut Option<String>, incoming: Option<String>) {
