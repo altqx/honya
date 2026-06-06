@@ -340,7 +340,9 @@
 
   /* body split — two panes. Fixed row counts so the box never grows. */
   .tui-body{display:grid; grid-template-columns:minmax(0,1fr)}
-  @media (min-width:620px){ .tui-body{grid-template-columns:40% minmax(0,1fr)} }
+  /* the run pane carries the wide two-row usage meter, so give it the larger
+     share; the chapter tree truncates titles cleanly in the slimmer column. */
+  @media (min-width:620px){ .tui-body{grid-template-columns:31% minmax(0,1fr)} }
 
   .pane{padding:14px 15px; min-width:0}
   .pane + .pane{border-top:1px solid var(--rule)}
@@ -389,14 +391,32 @@
   .agent .msg{color:var(--ink-soft); overflow:hidden; text-overflow:ellipsis; min-width:0}
   .agent.idle .msg{color:var(--ink-faint)}
 
-  /* token meter: tabular-nums + fixed-width value cells so digits never reflow */
-  .meter{display:flex; gap:12px 16px; flex-wrap:wrap; font-size:11.5px; color:var(--ink-faint-text); margin-bottom:10px; height:18px; align-items:center}
+  /* usage meter — mirrors the app's two-row run/chapter readout: in · out ·
+     total tokens, tool calls, BYOK cost, and run retries. Fixed cell widths +
+     tabular-nums + nowrap so streaming digits never reflow or wrap the row. */
+  .meter{display:flex; gap:0 6px; flex-wrap:nowrap; white-space:nowrap; overflow:hidden;
+    font-size:10.5px; color:var(--ink-faint-text); height:15px; align-items:center}
+  .meter.run{margin-top:2px}
+  .meter.chap{margin-bottom:10px}
+  .meter .ml{font-family:var(--mono); font-size:9px; letter-spacing:.06em; text-transform:uppercase; color:var(--ink-faint); width:22px; flex:none}
   .meter b{color:var(--ink-soft); font-weight:500}
   .meter .v{color:var(--ink); font-weight:500; font-variant-numeric:tabular-nums; display:inline-block; text-align:right}
-  .meter .v.tok{width:4.2em}
-  .meter .v.retry{width:1.2em}
-  .meter .v.verdict{width:4.4em; text-align:left}
-  .meter .v.cost{width:3.4em}
+  .meter .v.tk{width:2.5em}
+  .meter .v.tk2{width:3.1em}
+  .meter .v.n{width:1.2em}
+  .meter .v.cost{width:3.6em}
+  /* tightest phones: the panes stack full-width but the run row is still dense,
+     so shrink it a notch (em cells scale with it) to keep retries on screen. */
+  @media (max-width:480px){
+    .meter{font-size:9.5px; gap:0 5px}
+    .meter .ml{font-size:8px; width:20px}
+  }
+  /* below that, let the dense row wrap rather than clip a value off-screen —
+     harmless in the stacked layout where the meter is just normal flow. */
+  @media (max-width:400px){
+    .meter{flex-wrap:wrap; white-space:normal; overflow:visible; height:auto; column-gap:7px; row-gap:0}
+    .meter .ml{width:auto}
+  }
 
   /* streaming preview — FIXED height reserved up front for the worst-case
      wrap (src line + up to 2 wrapped Thai lines). Each row is a fixed box
@@ -608,6 +628,7 @@
   .moon-legend .g.pending{color:var(--ink-faint-text)}
   .moon-legend .g.work{color:#8C6C30}
   .moon-legend .g.done{color:var(--sage)}
+  .moon-legend .g.review{color:var(--amber)}
   .moon-legend .g.fail{color:var(--vermilion)}
   .moon-legend .g.img{color:var(--clay)}
 
@@ -890,10 +911,22 @@
                       <div class="agent rev idle" id="ag2"><span class="badge">■ Review</span><span class="sp"> </span><span class="msg">idle</span></div>
                     </div>
 
-                    <div class="meter" aria-hidden="true">
-                      <span><b>tok</b> <span class="v tok" id="m-tok">0</span></span>
-                      <span><b>retry</b> <span class="v retry" id="m-retry">0</span></span>
-                      <span><b>verdict</b> <span class="v verdict" id="m-verdict">—</span></span>
+                    <div class="meter run" aria-hidden="true">
+                      <span class="ml">run</span>
+                      <span><b>in</b> <span class="v tk" id="m-in">0</span></span>
+                      <span><b>out</b> <span class="v tk" id="m-out">0</span></span>
+                      <span><b>total</b> <span class="v tk2" id="m-tok">0</span></span>
+                      <span><b>tools</b> <span class="v n" id="m-tools">0</span></span>
+                      <span><b>$</b><span class="v cost" id="m-cost">0.0000</span></span>
+                      <span><b>retries</b> <span class="v n" id="m-retry">0</span></span>
+                    </div>
+                    <div class="meter chap" aria-hidden="true">
+                      <span class="ml">chap</span>
+                      <span><b>in</b> <span class="v tk" id="mc-in">0</span></span>
+                      <span><b>out</b> <span class="v tk" id="mc-out">0</span></span>
+                      <span><b>total</b> <span class="v tk2" id="mc-total">0</span></span>
+                      <span><b>tools</b> <span class="v n" id="mc-tools">0</span></span>
+                      <span><b>$</b><span class="v cost" id="mc-cost">0.0000</span></span>
                     </div>
 
                     <div class="preview" id="preview" aria-hidden="true">
@@ -1030,9 +1063,9 @@
             <div class="scr-mock-bar"><span class="dots"><i></i><i></i><i></i></span><span class="ja" lang="ja">訳</span> ch_003 · live</div>
             <div class="scr-mock-body">
               <div class="scr-mock-row"><span class="mmeta">chunk</span> <span class="scr-mock-gauge"><span class="gf">▰▰▰▰▰▰▰▰▰▰▰▰▰</span><span class="gt">▱▱▱▱▱▱▱▱▱</span></span> <span class="mmeta">4/7</span></div>
-              <div class="scr-mock-row"><span class="maccent">◆ Orch</span> <span class="mmeta">persisting terms · recap</span></div>
-              <div class="scr-mock-row"><span class="maccent">▲ Trans</span> <span class="mmeta">chunk 4 · drafting…</span></div>
-              <div class="scr-mock-row"><span class="maccent">■ Review</span> <span class="msage">approve</span></div>
+              <div class="scr-mock-row"><span class="maccent">◆ Orch</span> <span class="mmeta">term 月 → จันทร์</span></div>
+              <div class="scr-mock-row"><span class="maccent">▲ Trans</span> <span class="mmeta">returned · 1.4k tok</span></div>
+              <div class="scr-mock-row"><span class="maccent">■ Review</span> <span class="msage">✓ approved</span></div>
               <div class="scr-mock-row"><span class="msrc" lang="ja">少年は静かに本を閉じた。</span></div>
               <div class="scr-mock-row"><span class="mth" lang="th">เด็กหนุ่มปิดหนังสือลงอย่างเงียบ ๆ</span><span class="maccent">▏</span></div>
             </div>
@@ -1040,11 +1073,12 @@
         </div>
       </div>
 
-      <div class="moon-legend" role="img" aria-label="คำอธิบายสถานะบทรูปดวงจันทร์ข้างขึ้น: วงกลมว่างคือรอดำเนินการ; จันทร์เสี้ยว ครึ่งดวง และค่อนดวงคือขั้นตอนกำลังทำงาน; วงกลมทึบคือเสร็จสิ้น; กากบาทคือล้มเหลว">
+      <div class="moon-legend" role="img" aria-label="คำอธิบายสถานะบทรูปดวงจันทร์ข้างขึ้น: วงกลมว่างคือรอดำเนินการ; จันทร์เสี้ยว ครึ่งดวง และค่อนดวงคือขั้นตอนกำลังทำงาน; วงกลมทึบคือเสร็จสิ้น; ธงคือผนวกแล้วแต่ยังต้องตรวจทาน; กากบาทคือล้มเหลว">
         <span class="lbl">สถานะ</span>
         <span class="mi"><span class="g pending ja" aria-hidden="true">○</span> รอดำเนินการ</span>
         <span class="mi"><span class="g work ja" aria-hidden="true">◔</span><span class="g work ja" aria-hidden="true">◐</span><span class="g work ja" aria-hidden="true">◑</span><span class="g work ja" aria-hidden="true">◕</span> กำลังทำงาน</span>
         <span class="mi"><span class="g done ja" aria-hidden="true">●</span> เสร็จสิ้น</span>
+        <span class="mi"><span class="g review ja" aria-hidden="true">⚑</span> ต้องตรวจทาน</span>
         <span class="mi"><span class="g fail ja" aria-hidden="true">✗</span> ล้มเหลว</span>
       </div>
     </div>
@@ -1520,9 +1554,17 @@
   var gTrack = document.getElementById("gauge-track");
   var gPct = document.getElementById("gauge-pct");
   var ag = [document.getElementById("ag0"),document.getElementById("ag1"),document.getElementById("ag2")];
-  var mTok = document.getElementById("m-tok");
+  var mIn = document.getElementById("m-in");
+  var mOut = document.getElementById("m-out");
+  var mTok = document.getElementById("m-tok");        // run total
+  var mTools = document.getElementById("m-tools");
+  var mCost = document.getElementById("m-cost");
   var mRetry = document.getElementById("m-retry");
-  var mVerdict = document.getElementById("m-verdict");
+  var mcIn = document.getElementById("mc-in");
+  var mcOut = document.getElementById("mc-out");
+  var mcTotal = document.getElementById("mc-total");
+  var mcTools = document.getElementById("mc-tools");
+  var mcCost = document.getElementById("mc-cost");
   var srcActive = document.getElementById("src-active");
   var thStream = document.getElementById("th-stream");
   var histRow = document.getElementById("prow-hist");
@@ -1537,12 +1579,26 @@
   function setMsg(i, text){
     var el = ag[i]; if(!el) return;
     el.classList.remove("idle");
-    el.querySelector(".msg").textContent = text;
+    var m = el.querySelector(".msg");
+    m.textContent = text;
+    m.style.color = "";
   }
   function setIdle(i, text){
     var el = ag[i]; if(!el) return;
     el.classList.add("idle");
-    el.querySelector(".msg").textContent = text || "idle";
+    var m = el.querySelector(".msg");
+    m.textContent = text || "idle";
+    m.style.color = "";
+  }
+  /* The reviewer's verdict now rides on its own agent line (the app moved it off
+     the meter): ✓ approved in sage, ✗ rejected / retry in vermilion. */
+  function setReview(text, kind){
+    var el = ag[2]; if(!el) return;
+    el.classList.remove("idle");
+    var m = el.querySelector(".msg");
+    m.textContent = text;
+    m.style.color = kind === "approve" ? "var(--sage-text)"
+                  : kind === "reject"  ? "var(--vermilion)" : "";
   }
   function setSpin(i, on){
     for(var k=0;k<3;k++){
@@ -1568,10 +1624,19 @@
     moon.textContent = MOONS[stage];
     moon.className = "moon " + (stage===5 ? "done" : "work");
   }
-  function verdictColor(v){
-    if(v==="approve"){ mVerdict.style.color="var(--sage-text)"; }
-    else if(v==="reject"){ mVerdict.style.color="var(--vermilion)"; }
-    else { mVerdict.style.color="var(--ink)"; }
+  /* tokens render like the app's human_tok: ≥1000 → "1.4k", else the integer. */
+  function fmtTok(n){ return n >= 1000 ? (n/1000).toFixed(1)+"k" : String(Math.round(n)); }
+  var TOK_RATE = 0.0000018; // ≈ blended $/token, for a plausible BYOK cost readout
+  /* paint both meter rows from state; run and chapter share values in this
+     single-chapter demo (the app resets `chap` at each chapter boundary). */
+  function drawMeter(){
+    var total = state.tin + state.tout;
+    var ti = fmtTok(state.tin), to = fmtTok(state.tout), tt = fmtTok(total);
+    var cost = (total * TOK_RATE).toFixed(4), tools = String(state.tools);
+    mIn.textContent = ti;  mOut.textContent = to;  mTok.textContent = tt;
+    mTools.textContent = tools; mCost.textContent = cost; mRetry.textContent = state.retry;
+    mcIn.textContent = ti; mcOut.textContent = to; mcTotal.textContent = tt;
+    mcTools.textContent = tools; mcCost.textContent = cost;
   }
   /* write into pre-allocated boxes — never innerHTML, never new rows */
   function setActive(ja, th, showCaret){
@@ -1599,11 +1664,14 @@
   if(reduce){
     drawGauge(1);
     gPct.textContent = "7/7";
-    setMsg(0,"persisted 2 terms · recap advanced");
-    setMsg(1,"chunk 7 · drafted");
-    setMsg(2,"approved");
-    mTok.textContent = "12,480"; mRetry.textContent = "1"; mVerdict.textContent = "approve";
-    verdictColor("approve");
+    setMsg(0,"volume recap updated for ch 3");
+    setMsg(1,"returned · 1.4k tok");
+    setReview("✓ approved","approve");
+    // run + chapter totals for a finished single chapter (state isn't built yet)
+    mIn.textContent="7.2k"; mOut.textContent="5.3k"; mTok.textContent="12.5k";
+    mTools.textContent="9"; mCost.textContent="0.0225"; mRetry.textContent="1";
+    mcIn.textContent="7.2k"; mcOut.textContent="5.3k"; mcTotal.textContent="12.5k";
+    mcTools.textContent="9"; mcCost.textContent="0.0225";
     setMoon(5);
     setHistory(LINES[3][0], LINES[3][1]);
     setActive(LINES[4][0], LINES[4][1], false);
@@ -1612,11 +1680,19 @@
 
   /* ── animated state machine ── */
   var state = {
-    chunk:0, tok:0, retry:0,
+    chunk:0, tin:0, tout:0, tools:0, retry:0,
+    chunkOut:0, toolIdx:0,
     lineIdx:0, charIdx:0,
     histJa:" ", histTh:" ",
     phase:"start", phaseT:0
   };
+  /* authentic orchestrator tool summaries (see src/agents/tools.rs) */
+  var ORCH_TOOLS = [
+    "term 月 → จันทร์",
+    "character 02 (リオ → ริโอ)",
+    "continuity [low] kept honorific",
+    "term 王都 → เมืองหลวง"
+  ];
   var spinFrame = 0, lastSpin = 0;
 
   function startChunk(){
@@ -1624,11 +1700,11 @@
     drawGauge(state.chunk / TOTAL);
     gPct.textContent = state.chunk + "/" + TOTAL;
     if(state.chunk===0) setMoon(1); else setMoon(Math.min(4, 1+Math.floor((state.chunk/TOTAL)*3)));
-    setMsg(1, "chunk "+(state.chunk+1)+" · translating…");
+    setMsg(1, "requesting chunk "+(state.chunk+1)+" (attempt 1)");
     setIdle(2, "waiting");
     setIdle(0, "idle");
     setSpin(1,true);
-    mVerdict.textContent = "—"; verdictColor("—");
+    state.chunkOut = 0;
     state.phase = "translate"; state.phaseT = 0;
   }
   function beginType(){
@@ -1653,8 +1729,9 @@
         break;
 
       case "translate":
-        state.tok += Math.round(dt*0.9);
-        mTok.textContent = state.tok.toLocaleString();
+        // requesting the chunk: prompt (input) tokens accrue first
+        state.tin += Math.round(dt*0.9);
+        drawMeter();
         if(state.phaseT > 620){ beginType(); }
         break;
 
@@ -1664,12 +1741,14 @@
         state.charIdx = Math.min(th.length, state.charIdx + 2);
         state.charIdx = thaiClusterEnd(th, state.charIdx);
         setActive(ln[0], th.slice(0, state.charIdx), true);
-        state.tok += Math.round(dt*0.4);
-        mTok.textContent = state.tok.toLocaleString();
+        // streaming the draft: completion (output) tokens accrue
+        var d = Math.round(dt*0.5);
+        state.tout += d; state.chunkOut += d;
+        drawMeter();
         if(state.charIdx >= th.length){
           setSpin(2,true);
-          setMsg(2,"reviewing chunk "+(state.chunk+1)+"…");
-          setMsg(1,"chunk "+(state.chunk+1)+" · drafted");
+          setMsg(2,"reviewing …");
+          setMsg(1,"returned · "+fmtTok(state.chunkOut)+" tok");
           state.phase = "review"; state.phaseT = 0;
         }
         break;
@@ -1680,15 +1759,14 @@
           var doReject = (state.chunk === 2 && state.retry === 0);
           if(doReject){
             state.retry += 1;
-            mRetry.textContent = state.retry;
-            mVerdict.textContent = "reject"; verdictColor("reject");
-            setMsg(2,"reject · pronoun consistency");
-            setMsg(1,"retry "+state.retry+" · re-drafting…");
+            drawMeter();
+            // the reviewer's verdict + the retry both ride the reviewer line now
+            setReview("retry "+state.retry+"/3 · pronoun consistency","reject");
+            setMsg(1,"requesting chunk "+(state.chunk+1)+" (attempt 2)");
             setSpin(1,true);
             state.phase = "retry"; state.phaseT = 0;
           } else {
-            mVerdict.textContent = "approve"; verdictColor("approve");
-            setMsg(2,"approve");
+            setReview("✓ approved","approve");
             setSpin(2,false);
             var ln = LINES[state.lineIdx % LINES.length];
             // commit the line into the (single) history row — no new boxes
@@ -1706,8 +1784,11 @@
       }
 
       case "retry": {
+        // re-drafting the rejected chunk: a fresh request's input tokens
+        state.tin += Math.round(dt*0.5);
+        drawMeter();
         if(state.phaseT > 560){
-          setMsg(2,"reviewing chunk "+(state.chunk+1)+"…");
+          setReview("reviewing …", null);
           setSpin(2,true);
           state.phase = "review"; state.phaseT = 0;
         }
@@ -1718,8 +1799,12 @@
         state.chunk += 1;
         drawGauge(state.chunk / TOTAL);
         gPct.textContent = state.chunk + "/" + TOTAL;
-        setMsg(0,"appended → translated/ch_003.md");
-        setSpin(0,false);
+        // Thai was appended app-side; the Orchestrator then persists any new
+        // metadata (terms/characters/continuity) via a tool call.
+        setSpin(0,true);
+        setMsg(0, ORCH_TOOLS[state.toolIdx % ORCH_TOOLS.length]);
+        state.toolIdx += 1; state.tools += 1;
+        drawMeter();
         state.phase = (state.chunk >= TOTAL) ? "orch" : "next";
         state.phaseT = 0;
         break;
@@ -1727,6 +1812,7 @@
 
       case "next":
         if(state.phaseT > 420){
+          setSpin(0,false);
           setMoon(Math.min(4, 1 + Math.floor((state.chunk/TOTAL)*3)));
           startChunk();
         }
@@ -1734,10 +1820,10 @@
 
       case "orch": {
         setSpin(0,true);
-        setMsg(0,"persisting terms · advancing recap…");
+        setMsg(0,"volume recap updated for ch 3");
         if(state.phaseT > 1000){
           setSpin(0,false);
-          setMsg(0,"persisted 2 terms · recap advanced");
+          state.tools += 1; drawMeter();
           setMsg(1,"done"); setMsg(2,"done");
           drawGauge(1); gPct.textContent = TOTAL+"/"+TOTAL;
           setMoon(5);
@@ -1748,9 +1834,9 @@
 
       case "done":
         if(state.phaseT > 2600){
-          state.chunk = 0; state.tok = 0; state.retry = 0; state.lineIdx = 0;
-          mRetry.textContent = "0"; mVerdict.textContent="—"; verdictColor("—");
-          mTok.textContent = "0";
+          state.chunk = 0; state.tin = 0; state.tout = 0; state.tools = 0;
+          state.retry = 0; state.toolIdx = 0; state.lineIdx = 0;
+          drawMeter();
           setIdle(0,"idle"); setIdle(1,"idle"); setIdle(2,"idle");
           setSpin(0,false);
           setHistory(" "," ");
@@ -1766,6 +1852,7 @@
   // init visuals (the box is already sized; this only sets glyph content)
   drawGauge(0);
   gPct.textContent = "0/"+TOTAL;
+  drawMeter();
   setHistory(" "," ");
   setActive(LINES[0][0], "", true);
 
