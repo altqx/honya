@@ -102,7 +102,17 @@ pub enum Action {
     OpenChapter {
         chapter: u32,
     },
+    /// User request to translate these chapters. The App may first ask whether
+    /// to resume existing chunk markers or restart from scratch.
     StartTranslation {
+        chapters: Vec<u32>,
+    },
+    /// Confirmed resume: keep existing translated chunks and continue at gaps.
+    ContinueTranslation {
+        chapters: Vec<u32>,
+    },
+    /// Confirmed restart: delete translated outputs before translating.
+    RestartTranslation {
         chapters: Vec<u32>,
     },
     PauseRun,
@@ -262,8 +272,12 @@ impl App {
             } => {
                 self.set_chapter_chunks(*chapter, *total_chunks as u32, None);
             }
-            AppEvent::ChunkCommitted { chapter, .. } => {
-                self.bump_committed(*chapter);
+            AppEvent::ChunkCommitted {
+                chapter,
+                bytes_written,
+                ..
+            } => {
+                self.bump_committed(*chapter, *bytes_written);
             }
             AppEvent::ChunkNeedsReview {
                 chapter,
@@ -394,6 +408,8 @@ impl App {
                         ch.total_chunks = total;
                         if let Some(c) = committed {
                             ch.committed_chunks = c;
+                        } else if total > 0 {
+                            ch.committed_chunks = ch.committed_chunks.min(total);
                         }
                         return;
                     }
@@ -402,12 +418,18 @@ impl App {
         }
     }
 
-    fn bump_committed(&mut self, chapter: u32) {
+    fn bump_committed(&mut self, chapter: u32, bytes_written: usize) {
+        if bytes_written == 0 {
+            return;
+        }
         if let Some(active) = self.active.as_mut() {
             for vol in active.project.volumes.iter_mut() {
                 for ch in vol.chapters.iter_mut() {
                     if ch.number == chapter {
                         ch.committed_chunks = ch.committed_chunks.saturating_add(1);
+                        if ch.total_chunks > 0 {
+                            ch.committed_chunks = ch.committed_chunks.min(ch.total_chunks);
+                        }
                         return;
                     }
                 }
@@ -571,7 +593,13 @@ impl App {
                 self.save_synopsis(raw, th);
             }
             Action::StartTranslation { chapters } => {
-                self.start_translation(chapters);
+                self.request_translation(chapters);
+            }
+            Action::ContinueTranslation { chapters } => {
+                self.begin_translation(chapters, false);
+            }
+            Action::RestartTranslation { chapters } => {
+                self.begin_translation(chapters, true);
             }
             Action::PauseRun => match &self.run_ctl {
                 Some(ctl) => {
@@ -708,12 +736,57 @@ impl App {
             .map(|c| c.title.clone())
     }
 
-    fn start_translation(&mut self, chapters: Vec<u32>) {
+    fn request_translation(&mut self, chapters: Vec<u32>) {
         if self.run_active {
             self.toast = Some(Toast::warn("a run is already in progress"));
             return;
         }
-        let Some(active) = self.active.as_ref() else {
+        if self.active.is_none() {
+            self.toast = Some(Toast::warn("no project open"));
+            return;
+        }
+        if chapters.is_empty() {
+            self.toast = Some(Toast::warn("nothing selected"));
+            return;
+        }
+
+        let resumable = self.chapters_with_translation_progress(&chapters);
+        if resumable.is_empty() {
+            self.begin_translation(chapters, false);
+            return;
+        }
+
+        let list = chapter_list_preview(&resumable);
+        let body = format!(
+            "{} chapter(s) already have translated chunks or a failed/paused state ({list}). Continue skips committed chunks and resumes at the next gap. Restart deletes translated output for the requested chapter(s) and starts over.",
+            resumable.len()
+        );
+        self.overlay = Overlay::confirm_with_alternate(
+            "Continue previous translation?",
+            body,
+            "continue",
+            Action::ContinueTranslation {
+                chapters: chapters.clone(),
+            },
+            'r',
+            "restart",
+            Action::RestartTranslation { chapters },
+        );
+    }
+
+    fn begin_translation(&mut self, chapters: Vec<u32>, restart: bool) {
+        if self.run_active {
+            self.toast = Some(Toast::warn("a run is already in progress"));
+            return;
+        }
+        let Some((vol, project_dir, client, models)) = self.active.as_ref().map(|active| {
+            (
+                active.active_vol(),
+                active.project.dir.clone(),
+                Arc::clone(&active.client),
+                active.models.clone(),
+            )
+        }) else {
             self.toast = Some(Toast::warn("no project open"));
             return;
         };
@@ -721,12 +794,25 @@ impl App {
             self.toast = Some(Toast::warn("nothing selected"));
             return;
         }
-        let vol = active.active_vol();
+
+        let ws = Workspace::new(project_dir, vol);
+        if restart {
+            for chapter in &chapters {
+                if let Err(e) = crate::workspace::translation::reset_chapter(&ws, *chapter) {
+                    self.toast = Some(Toast::error(format!(
+                        "restart failed for ch {chapter}: {e}"
+                    )));
+                    return;
+                }
+            }
+            self.reset_in_memory_translation_progress(&chapters);
+        }
+
         let ctl = crate::agents::pipeline::RunControl::new();
         let ctx = crate::agents::pipeline::PipelineCtx {
-            client: Arc::clone(&active.client),
-            ws: Workspace::new(active.project.dir.clone(), vol),
-            models: active.models.clone(),
+            client,
+            ws,
+            models,
             cfg: self.cfg.clone(),
             tx: self.tx.clone(),
             ctl: ctl.clone(),
@@ -745,9 +831,49 @@ impl App {
         self.run_active = true;
         self.screen = Screen::Translate;
         self.toast = Some(Toast::info(format!(
-            "translating {} chapter(s)",
+            "{} {} chapter(s)",
+            if restart { "restarting" } else { "translating" },
             chapters.len()
         )));
+    }
+
+    fn chapters_with_translation_progress(&self, chapters: &[u32]) -> Vec<u32> {
+        let Some(active) = self.active.as_ref() else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for chapter in chapters {
+            if let Some(ch) = active
+                .project
+                .volumes
+                .iter()
+                .flat_map(|v| v.chapters.iter())
+                .find(|ch| ch.number == *chapter)
+                && (ch.committed_chunks > 0
+                    || matches!(ch.status, ChapterStatus::Failed | ChapterStatus::Paused))
+            {
+                out.push(*chapter);
+            }
+        }
+        out
+    }
+
+    fn reset_in_memory_translation_progress(&mut self, chapters: &[u32]) {
+        if let Some(active) = self.active.as_mut() {
+            for ch in active
+                .project
+                .volumes
+                .iter_mut()
+                .flat_map(|v| v.chapters.iter_mut())
+            {
+                if chapters.contains(&ch.number) {
+                    ch.status = ChapterStatus::Pending;
+                    ch.total_chunks = 0;
+                    ch.committed_chunks = 0;
+                    ch.last_run = None;
+                }
+            }
+        }
     }
 
     fn start_import(
@@ -800,7 +926,8 @@ impl App {
                 Ok(c) => (c, self.cfg.models.translator.clone()),
                 Err(e) => {
                     // No client → report failure so the editor leaves Translating.
-                    self.tx.send(AppEvent::SynopsisFailed { msg: e.to_string() });
+                    self.tx
+                        .send(AppEvent::SynopsisFailed { msg: e.to_string() });
                     return;
                 }
             },
@@ -1032,6 +1159,26 @@ impl App {
             Screen::Reader => self.reader.hints(),
             Screen::Lexicon => self.lexicon.hints(),
         }
+    }
+}
+
+fn chapter_list_preview(chapters: &[u32]) -> String {
+    let mut chapters = chapters.to_vec();
+    chapters.sort_unstable();
+    chapters.dedup();
+    let shown: Vec<String> = chapters
+        .iter()
+        .take(5)
+        .map(|chapter| format!("ch {chapter:03}"))
+        .collect();
+    if chapters.len() > shown.len() {
+        format!(
+            "{} +{} more",
+            shown.join(", "),
+            chapters.len() - shown.len()
+        )
+    } else {
+        shown.join(", ")
     }
 }
 

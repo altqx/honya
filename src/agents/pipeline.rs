@@ -169,9 +169,7 @@ pub async fn run_pipeline(ctx: PipelineCtx, chapters: Vec<u32>) -> anyhow::Resul
                 });
                 ctx.tx.send(AppEvent::Log {
                     level: LogLevel::Warn,
-                    msg: format!(
-                        "chapter {chapter} completed with chunk(s) needing manual review"
-                    ),
+                    msg: format!("chapter {chapter} completed with chunk(s) needing manual review"),
                 });
             }
             Ok(Outcome::Stopped) => {
@@ -253,8 +251,43 @@ async fn process_chapter(
     });
 
     let total = chunks.len();
-    let mut any_needs_review = false;
+
+    // Resume support: translated files are append-only, chunk-marked logs. If a
+    // previous run failed after committing chunk N, a re-run should start at the
+    // next missing marker instead of re-spending tokens on chunks already on disk.
+    let existing_translation = translation::read_translated(&ctx.ws, chapter).await;
+    let committed = translation::committed_chunk_indices_in(&existing_translation);
+    let needs_review = translation::review_needed_chunk_indices_in(&existing_translation);
+    let clean_committed: std::collections::BTreeSet<u32> =
+        committed.difference(&needs_review).copied().collect();
+    let skipped = chunks
+        .iter()
+        .filter(|chunk| clean_committed.contains(&(chunk.index as u32)))
+        .count();
+    if skipped > 0 {
+        ctx.tx.send(AppEvent::Log {
+            level: LogLevel::Info,
+            msg: format!(
+                "chapter {chapter}: resuming from translated file · skipping {skipped}/{total} committed chunk(s)"
+            ),
+        });
+    }
+
+    if !needs_review.is_empty() {
+        ctx.tx.send(AppEvent::Log {
+            level: LogLevel::Info,
+            msg: format!(
+                "chapter {chapter}: rechecking {} review-needed chunk(s)",
+                needs_review.len()
+            ),
+        });
+    }
+
     for chunk in &chunks {
+        if clean_committed.contains(&(chunk.index as u32)) {
+            continue;
+        }
+
         // Honor pause/stop between chunks ("current chunk finishes, then halts").
         if !gate(ctx, chapter).await {
             return Ok(Outcome::Stopped);
@@ -266,10 +299,13 @@ async fn process_chapter(
             est_tokens: chunk.est_tokens,
         });
         match process_chunk(ctx, chapter, chunk, acc).await? {
-            ChunkOutcome::Committed => {}
-            ChunkOutcome::NeedsReview => any_needs_review = true,
+            ChunkOutcome::Committed | ChunkOutcome::NeedsReview => {}
         }
     }
+
+    let any_needs_review = translation::read_translated(&ctx.ws, chapter)
+        .await
+        .contains(translation::REVIEW_NEEDED_MARKER);
 
     // All chunks are written either way; the run loop maps the outcome to the
     // chapter's final status (Done vs NeedsReview).
@@ -756,6 +792,156 @@ mod tests {
             do_not_translate: None,
             first_seen_chapter: None,
         }
+    }
+
+    #[derive(Default)]
+    struct CountingClient {
+        schemas: std::sync::Mutex<Vec<Option<String>>>,
+    }
+
+    impl CountingClient {
+        fn schema_calls(&self, name: &str) -> usize {
+            self.schemas
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|schema| schema.as_deref() == Some(name))
+                .count()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::llm::client::LlmClient for CountingClient {
+        async fn chat(
+            &self,
+            req: &crate::llm::ChatRequest,
+        ) -> crate::llm::client::Result<crate::llm::ChatResponse> {
+            let schema_name = match &req.response_format {
+                Some(crate::llm::ResponseFormat::JsonSchema { json_schema }) => {
+                    Some(json_schema.name.clone())
+                }
+                _ => None,
+            };
+            self.schemas.lock().unwrap().push(schema_name.clone());
+
+            let content = match schema_name.as_deref() {
+                Some("translation_result") => serde_json::json!({
+                    "thought_process": {
+                        "scene_analysis": "(test)",
+                        "glossary_check": "(test)"
+                    },
+                    "translated_text": "ข้อความแปลต่อ",
+                    "new_characters": [],
+                    "new_terms": [],
+                    "continuity_notes": []
+                })
+                .to_string(),
+                Some("review_result") => serde_json::json!({
+                    "status": "approve",
+                    "feedback": []
+                })
+                .to_string(),
+                _ => "(test orchestrator: no tools)".to_string(),
+            };
+
+            Ok(crate::llm::ChatResponse {
+                id: Some("counting-client".to_string()),
+                model: Some("honya/test".to_string()),
+                choices: vec![crate::llm::Choice {
+                    index: 0,
+                    message: crate::llm::ResponseMessage {
+                        role: Some("assistant".to_string()),
+                        content: Some(content),
+                        tool_calls: None,
+                    },
+                    finish_reason: Some("stop".to_string()),
+                }],
+                usage: Some(crate::llm::Usage {
+                    prompt_tokens: 1,
+                    completion_tokens: 1,
+                    total_tokens: 2,
+                    cost: 0.0,
+                    cost_details: None,
+                }),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn pipeline_resumes_from_committed_chunk_markers() {
+        let (base, ws) = temp_ws("resume");
+        let raw =
+            "# 第一章\n\n一文目。\n\n二文目。\n\n三文目。\n\n四文目。\n\n五文目。\n\n六文目。";
+        let cfg = crate::model::AppConfig {
+            chunk_target_tokens: 4,
+            chunk_hard_cap_tokens: 8,
+            ..crate::model::AppConfig::default()
+        };
+        let chunks = chunk_chapter(raw, cfg.chunk_target_tokens, cfg.chunk_hard_cap_tokens);
+        assert!(
+            chunks.len() >= 3,
+            "test raw should create multiple chunks: {chunks:?}"
+        );
+
+        translation::write_raw(&ws, 1, raw).unwrap();
+        translation::append_chunk(&ws, 1, 0, "ข้อความเดิม")
+            .await
+            .unwrap();
+        translation::append_chunk_needs_review(&ws, 1, 1, "คำแปลที่ต้องตรวจ", 3, "still rough")
+            .await
+            .unwrap();
+
+        let client = std::sync::Arc::new(CountingClient::default());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = PipelineCtx {
+            client: client.clone() as std::sync::Arc<dyn crate::llm::client::LlmClient>,
+            ws: ws.clone(),
+            models: crate::model::ModelSet::default(),
+            cfg,
+            tx: crate::model::EventTx(tx),
+            ctl: RunControl::new(),
+        };
+
+        run_pipeline(ctx, vec![1]).await.expect("run_pipeline");
+
+        assert_eq!(
+            client.schema_calls("translation_result"),
+            chunks.len() - 1,
+            "only the clean existing marker should be skipped; review-needed chunks rerun"
+        );
+        let translated = translation::read_translated(&ws, 1).await;
+        assert!(translated.contains("ข้อความเดิม"));
+        assert!(
+            !translated.contains(translation::REVIEW_NEEDED_MARKER),
+            "approved retranslation should remove stale review-needed markers"
+        );
+        assert!(translation::review_needed_chunk_indices_in(&translated).is_empty());
+        let committed = translation::committed_chunk_indices_in(&translated);
+        assert_eq!(
+            committed.len(),
+            chunks.len(),
+            "all chunks should be present after resume"
+        );
+
+        let mut saw_resume_log = false;
+        let mut saw_recheck_log = false;
+        while let Ok(ev) = rx.try_recv() {
+            if let AppEvent::Log { msg, .. } = ev {
+                if msg.contains("resuming from translated file") {
+                    saw_resume_log = true;
+                }
+                if msg.contains("rechecking") {
+                    saw_recheck_log = true;
+                }
+            }
+        }
+        assert!(saw_resume_log, "resume should be visible in the run log");
+        assert!(
+            saw_recheck_log,
+            "review-needed chunks should be visibly rerun"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// The reference context injected per chunk must scope to terms/characters the

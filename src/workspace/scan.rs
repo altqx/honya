@@ -237,9 +237,9 @@ pub fn derive_status(vol_dir: &Path, chapter: u32, kind: ChapterKind) -> Chapter
     }
 }
 
-/// Count `<!-- honya:chunk N -->` markers in translated text.
+/// Count committed chunk markers in translated text.
 fn count_chunk_markers(text: &str) -> usize {
-    text.matches("<!-- honya:chunk ").count()
+    super::translation::committed_chunk_indices_in(text).len()
 }
 
 fn count_committed_chunks(vol_dir: &Path, chapter: u32) -> u32 {

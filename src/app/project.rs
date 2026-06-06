@@ -81,6 +81,23 @@ impl ProjectScreen {
         }
     }
 
+    fn marked_chapters(&self, active: &ActiveProject) -> Vec<u32> {
+        let known: HashSet<u32> = active
+            .project
+            .volumes
+            .iter()
+            .flat_map(|v| v.chapters.iter().map(|ch| ch.number))
+            .collect();
+        let mut chapters: Vec<u32> = self
+            .selected
+            .iter()
+            .copied()
+            .filter(|ch| known.contains(ch))
+            .collect();
+        chapters.sort_unstable();
+        chapters
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent, active: Option<&ActiveProject>) -> Action {
         let Some(active) = active else {
             // No project: only `e` (go to lexicon) is live.
@@ -148,7 +165,11 @@ impl ProjectScreen {
                 Action::None
             }
             KeyCode::Char('t') => {
-                if let Some(ch) = self.selected_chapter(active) {
+                let marked = self.marked_chapters(active);
+                if !marked.is_empty() {
+                    self.selected.clear();
+                    Action::StartTranslation { chapters: marked }
+                } else if let Some(ch) = self.selected_chapter(active) {
                     Action::StartTranslation { chapters: vec![ch] }
                 } else {
                     Action::None
@@ -183,11 +204,11 @@ impl ProjectScreen {
                 }
             }
             KeyCode::Char('a') => {
-                if self.selected.is_empty() {
+                let chapters = self.marked_chapters(active);
+                if chapters.is_empty() {
                     Action::None
                 } else {
-                    let mut chapters: Vec<u32> = self.selected.iter().copied().collect();
-                    chapters.sort_unstable();
+                    self.selected.clear();
                     Action::StartTranslation { chapters }
                 }
             }
@@ -363,12 +384,18 @@ impl ProjectScreen {
                 Span::raw(" "),
                 Span::styled(status_word(c.status), Style::default().fg(color)),
             ]));
+            let chunk_progress = if c.total_chunks == 0 {
+                format!("{} done", c.committed_chunks)
+            } else {
+                format!(
+                    "{} / {} done",
+                    c.committed_chunks.min(c.total_chunks),
+                    c.total_chunks
+                )
+            };
             lines.push(Line::from(vec![
                 Span::styled(" chunks  ", Style::default().fg(theme.ink_faint)),
-                Span::styled(
-                    format!("{} · {} done", c.total_chunks, c.committed_chunks),
-                    Style::default().fg(theme.ink_soft),
-                ),
+                Span::styled(chunk_progress, Style::default().fg(theme.ink_soft)),
             ]));
             lines.push(Line::from(vec![
                 Span::styled(" source  ", Style::default().fg(theme.ink_faint)),
@@ -415,9 +442,9 @@ impl ProjectScreen {
     pub fn hints(&self) -> &'static [(&'static str, &'static str)] {
         &[
             ("↵", "read"),
-            ("t", "translate"),
+            ("t", "marked/current"),
             ("T", "whole vol"),
-            ("Space", "select"),
+            ("Space", "mark"),
             ("e", "edit ctx"),
             ("y", "synopsis"),
         ]
@@ -594,7 +621,8 @@ fn usage_line(label: &str, u: &UsageStats, theme: &Theme) -> Line<'static> {
 }
 
 fn translatable(ch: &Chapter) -> bool {
-    matches!(ch.kind, ChapterKind::Prose) && !ch.status.is_terminal()
+    matches!(ch.kind, ChapterKind::Prose)
+        && (!ch.status.is_terminal() || ch.status == ChapterStatus::Failed)
 }
 
 fn vol_tally(v: &Volume) -> (u32, u32, u32, u32) {
@@ -626,5 +654,93 @@ fn status_word(s: ChapterStatus) -> &'static str {
         ChapterStatus::NeedsReview => "needs review",
         ChapterStatus::Failed => "failed",
         ChapterStatus::Paused => "paused",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{ModelSet, Project};
+    use crate::workspace::Workspace;
+    use ratatui::crossterm::event::{KeyEvent, KeyModifiers};
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::empty())
+    }
+
+    fn chapter(number: u32) -> Chapter {
+        Chapter {
+            number,
+            title: format!("Chapter {number:03}"),
+            kind: ChapterKind::Prose,
+            status: ChapterStatus::Pending,
+            source_segments: 1,
+            total_chunks: 0,
+            committed_chunks: 0,
+            last_run: None,
+            usage: UsageStats::default(),
+        }
+    }
+
+    fn active_project() -> ActiveProject {
+        let dir = std::env::temp_dir().join(format!("honya_project_screen_{}", std::process::id()));
+        ActiveProject {
+            project: Project {
+                id: "novel".to_string(),
+                dir: dir.clone(),
+                title: "Novel".to_string(),
+                created: None,
+                touched: None,
+                volumes: vec![Volume {
+                    number: 1,
+                    dir: dir.join("Vol_01"),
+                    label: None,
+                    chapters: vec![chapter(1), chapter(2)],
+                }],
+                models: None,
+            },
+            workspace: Workspace::new(dir, 1),
+            client: std::sync::Arc::new(crate::llm::mock::MockClient::default())
+                as std::sync::Arc<dyn crate::llm::client::LlmClient>,
+            models: ModelSet::default(),
+        }
+    }
+
+    #[test]
+    fn t_prefers_marked_chapters_and_clears_marks() {
+        let active = active_project();
+        let mut screen = ProjectScreen::new();
+
+        // Row 0 is the volume header; move to chapter 1 and mark it with Space.
+        assert!(matches!(
+            screen.handle_key(key(KeyCode::Down), Some(&active)),
+            Action::None
+        ));
+        assert!(matches!(
+            screen.handle_key(key(KeyCode::Char(' ')), Some(&active)),
+            Action::None
+        ));
+        assert!(screen.selected.contains(&1));
+
+        // Move the cursor to chapter 2. Pressing `t` must translate the marked
+        // chapter, not the cursor row, then clear the mark state.
+        assert!(matches!(
+            screen.handle_key(key(KeyCode::Down), Some(&active)),
+            Action::None
+        ));
+        match screen.handle_key(key(KeyCode::Char('t')), Some(&active)) {
+            Action::StartTranslation { chapters } => assert_eq!(chapters, vec![1]),
+            other => panic!("expected StartTranslation, got {other:?}"),
+        }
+        assert!(
+            screen.selected.is_empty(),
+            "marks clear after queueing translation"
+        );
+
+        // With no marks, `t` remains the single-chapter shortcut for the cursor row.
+        match screen.handle_key(key(KeyCode::Char('t')), Some(&active)) {
+            Action::StartTranslation { chapters } => assert_eq!(chapters, vec![2]),
+            other => panic!("expected StartTranslation, got {other:?}"),
+        }
     }
 }

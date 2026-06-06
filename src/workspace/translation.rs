@@ -3,6 +3,7 @@
 //! and replays stay idempotent (risks.txt #11). Append/read are async (pipeline
 //! task); write_raw/write_image_only are sync (import path).
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use tokio::fs::OpenOptions;
@@ -10,8 +11,75 @@ use tokio::io::AsyncWriteExt;
 
 use crate::workspace::Workspace;
 
+const CHUNK_MARKER_PREFIX: &str = "<!-- honya:chunk ";
+const CHUNK_MARKER_SUFFIX: &str = " -->";
+
 fn chunk_marker(n: u32) -> String {
-    format!("<!-- honya:chunk {} -->", n)
+    format!("{CHUNK_MARKER_PREFIX}{n}{CHUNK_MARKER_SUFFIX}")
+}
+
+fn parse_chunk_marker(line: &str) -> Option<u32> {
+    let trimmed = line.trim();
+    let n = trimmed
+        .strip_prefix(CHUNK_MARKER_PREFIX)?
+        .strip_suffix(CHUNK_MARKER_SUFFIX)?
+        .trim();
+    n.parse().ok()
+}
+
+/// Return every committed chunk index found in translated chapter text.
+///
+/// The pipeline uses this to resume a failed run without spending tokens on
+/// chunks that already landed on disk. A set (rather than a count) matters: old
+/// or hand-edited files can have gaps, and resume must skip only the chunks whose
+/// exact marker is present.
+pub fn committed_chunk_indices_in(text: &str) -> BTreeSet<u32> {
+    text.lines().filter_map(parse_chunk_marker).collect()
+}
+
+/// Return chunk indices whose committed block still carries the review-needed
+/// marker. These chunks are *not* clean for resume purposes: a later run should
+/// retranslate them and replace the flagged block.
+pub fn review_needed_chunk_indices_in(text: &str) -> BTreeSet<u32> {
+    let mut out = BTreeSet::new();
+    for (idx, start, end) in chunk_block_ranges(text) {
+        if text[start..end].contains(REVIEW_NEEDED_MARKER) {
+            out.insert(idx);
+        }
+    }
+    out
+}
+
+fn chunk_block_ranges(text: &str) -> Vec<(u32, usize, usize)> {
+    let mut starts = Vec::new();
+    let mut offset = 0usize;
+    for line in text.split_inclusive('\n') {
+        if let Some(idx) = parse_chunk_marker(line) {
+            starts.push((idx, offset));
+        }
+        offset += line.len();
+    }
+    let mut ranges = Vec::with_capacity(starts.len());
+    for i in 0..starts.len() {
+        let (idx, start) = starts[i];
+        let end = starts.get(i + 1).map(|(_, s)| *s).unwrap_or(text.len());
+        ranges.push((idx, start, end));
+    }
+    ranges
+}
+
+fn replace_review_needed_block(existing: &str, marker: &str, block: &str) -> Option<String> {
+    for (_, start, end) in chunk_block_ranges(existing) {
+        let existing_block = &existing[start..end];
+        if existing_block.starts_with(marker) && existing_block.contains(REVIEW_NEEDED_MARKER) {
+            let mut replaced = String::with_capacity(existing.len() - (end - start) + block.len());
+            replaced.push_str(&existing[..start]);
+            replaced.push_str(block);
+            replaced.push_str(&existing[end..]);
+            return Some(replaced);
+        }
+    }
+    None
 }
 
 /// Machine-detectable marker embedded for chunks committed without passing
@@ -30,10 +98,16 @@ async fn append_guarded(
 ) -> std::io::Result<usize> {
     let path = ws.translated(chapter);
 
-    // Idempotency: skip if the chunk's marker already exists.
+    // Idempotency: skip if the chunk's marker already exists, except when the
+    // existing block is a prior review-needed commit. In that case a successful
+    // retranslation must replace the flagged block so the chapter can become
+    // clean/done again instead of staying NeedsReview forever.
     if let Ok(existing) = tokio::fs::read_to_string(&path).await
         && existing.contains(marker)
     {
+        if let Some(replaced) = replace_review_needed_block(&existing, marker, block) {
+            tokio::fs::write(&path, replaced).await?;
+        }
         return Ok(0);
     }
 
@@ -120,6 +194,16 @@ fn sanitize_reason(reason: &str) -> String {
     }
 }
 
+/// Delete the translated output for `chapter`, if any, so a user-requested
+/// restart begins from chunk 0 instead of resuming from existing markers.
+pub fn reset_chapter(ws: &Workspace, chapter: u32) -> std::io::Result<()> {
+    match std::fs::remove_file(ws.translated(chapter)) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
 /// Read the full accumulated Thai for `chapter` (empty string when absent).
 pub async fn read_translated(ws: &Workspace, chapter: u32) -> String {
     tokio::fs::read_to_string(ws.translated(chapter))
@@ -183,22 +267,46 @@ mod tests {
         assert!(n > 0, "first write returns bytes written");
 
         let body = read_translated(&ws, 5).await;
-        assert!(body.contains(REVIEW_NEEDED_MARKER), "machine marker present");
-        assert!(body.contains("<!-- honya:chunk 8 -->"), "chunk marker present");
+        assert!(
+            body.contains(REVIEW_NEEDED_MARKER),
+            "machine marker present"
+        );
+        assert!(
+            body.contains("<!-- honya:chunk 8 -->"),
+            "chunk marker present"
+        );
         assert!(body.contains("[REVIEW NEEDED]"), "visible banner present");
-        assert!(body.contains("chunk 9"), "banner shows the 1-based chunk number");
+        assert!(
+            body.contains("chunk 9"),
+            "banner shows the 1-based chunk number"
+        );
         assert!(
             body.contains("คำแปลที่ยังไม่ผ่านการตรวจ"),
             "the last attempt's Thai is committed, not dropped"
         );
         assert!(body.contains("meaning drift"), "reviewer's reason surfaced");
 
-        // Idempotent across both append paths: the chunk marker guards re-writes,
-        // so a replay never duplicates the block.
-        let again = append_chunk_needs_review(&ws, 5, 8, "x", 3, "y").await.unwrap();
-        assert_eq!(again, 0, "re-flagging the same chunk is a no-op");
-        let plain = append_chunk(&ws, 5, 8, "x").await.unwrap();
-        assert_eq!(plain, 0, "plain append of the same index is a no-op too");
+        assert_eq!(
+            review_needed_chunk_indices_in(&body),
+            BTreeSet::from([8]),
+            "review-needed chunk index is detectable"
+        );
+
+        // Re-flagging the same chunk is idempotent in marker count.
+        let again = append_chunk_needs_review(&ws, 5, 8, "x", 3, "y")
+            .await
+            .unwrap();
+        assert_eq!(again, 0, "re-flagging the same chunk adds no new marker");
+
+        // A later approved retranslation replaces the flagged block in-place,
+        // removes the review marker, and still keeps exactly one chunk marker.
+        let plain = append_chunk(&ws, 5, 8, "คำแปลที่ผ่านแล้ว").await.unwrap();
+        assert_eq!(plain, 0, "clean replacement adds no new marker");
+        let cleaned = read_translated(&ws, 5).await;
+        assert!(!cleaned.contains(REVIEW_NEEDED_MARKER));
+        assert!(cleaned.contains("คำแปลที่ผ่านแล้ว"));
+        assert_eq!(committed_chunk_indices_in(&cleaned), BTreeSet::from([8]));
+        assert!(review_needed_chunk_indices_in(&cleaned).is_empty());
 
         let _ = std::fs::remove_dir_all(&base);
     }

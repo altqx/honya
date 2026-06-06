@@ -318,12 +318,22 @@ impl PaletteState {
     }
 }
 
-/// A generic confirm modal wrapping the action to run on confirm.
+/// A generic confirm modal wrapping the action to run on confirm, optionally
+/// with one alternate key/action (used for Continue vs Restart decisions).
 #[derive(Debug, Clone)]
 pub struct Dialog {
     pub title: String,
     pub body: String,
+    pub confirm_label: String,
     pub confirm: Action,
+    pub alternate: Option<DialogAlternate>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DialogAlternate {
+    pub key: char,
+    pub label: String,
+    pub action: Action,
 }
 
 // ============================================================================
@@ -381,7 +391,31 @@ impl Overlay {
         Overlay::Modal(Dialog {
             title: title.into(),
             body: body.into(),
+            confirm_label: "confirm".to_string(),
             confirm,
+            alternate: None,
+        })
+    }
+
+    pub fn confirm_with_alternate(
+        title: impl Into<String>,
+        body: impl Into<String>,
+        confirm_label: impl Into<String>,
+        confirm: Action,
+        alternate_key: char,
+        alternate_label: impl Into<String>,
+        alternate_action: Action,
+    ) -> Self {
+        Overlay::Modal(Dialog {
+            title: title.into(),
+            body: body.into(),
+            confirm_label: confirm_label.into(),
+            confirm,
+            alternate: Some(DialogAlternate {
+                key: alternate_key,
+                label: alternate_label.into(),
+                action: alternate_action,
+            }),
         })
     }
 
@@ -750,6 +784,25 @@ impl Overlay {
                 action
             }
             KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => Action::CloseOverlay,
+            KeyCode::Char(c) => {
+                let action = match self {
+                    Overlay::Modal(dlg)
+                        if dlg
+                            .alternate
+                            .as_ref()
+                            .is_some_and(|alt| alt.key.eq_ignore_ascii_case(&c)) =>
+                    {
+                        dlg.alternate.as_ref().map(|alt| alt.action.clone())
+                    }
+                    _ => None,
+                };
+                if let Some(action) = action {
+                    *self = Overlay::None;
+                    action
+                } else {
+                    Action::None
+                }
+            }
             _ => Action::None,
         }
     }
@@ -795,6 +848,9 @@ impl Overlay {
             ],
             Overlay::Log(_) => &[("jk", "scroll"), ("Esc/l", "close")],
             Overlay::Help(_) => &[("jk", "scroll"), ("Esc/?", "close")],
+            Overlay::Modal(dlg) if dlg.alternate.is_some() => {
+                &[("y/↵", "continue"), ("r", "restart"), ("n/Esc", "cancel")]
+            }
             Overlay::Modal(_) => &[("y", "confirm"), ("n/Esc", "cancel")],
             Overlay::None => &[],
         }
@@ -1098,10 +1154,7 @@ impl Overlay {
                 Style::default().fg(theme.ink_faint),
             ),
             Span::styled(cfg.theme.label(), Style::default().fg(theme.accent)),
-            Span::styled(
-                "   Ctrl-T to change",
-                Style::default().fg(theme.ink_faint),
-            ),
+            Span::styled("   Ctrl-T to change", Style::default().fg(theme.ink_faint)),
         ]));
         lines.push(Line::raw(""));
         lines.push(Line::from(Span::styled(
@@ -1130,11 +1183,7 @@ impl Overlay {
 
         // Windowed so the selected row stays visible when the modal is clamped short.
         let cap = (rows[0].height as usize).max(1);
-        let start = if st.sel >= cap {
-            st.sel + 1 - cap
-        } else {
-            0
-        };
+        let start = if st.sel >= cap { st.sel + 1 - cap } else { 0 };
         let end = (start + cap).min(ALL_THEMES.len());
         let mut lines = Vec::with_capacity(end - start);
         for (i, id) in ALL_THEMES.iter().enumerate().take(end).skip(start) {
@@ -1323,8 +1372,9 @@ impl Overlay {
                 "Project 棚",
                 &[
                     ("↵", "read chapter"),
-                    ("t / T", "translate chapter · whole volume"),
-                    ("Space / a", "select · translate selected"),
+                    ("t / a", "translate marked/current"),
+                    ("T", "whole volume"),
+                    ("Space", "mark chapter"),
                     ("h / l", "collapse · expand / focus"),
                     ("e", "edit context (Lexicon)"),
                     ("y", "volume synopsis (translate/reroll)"),
@@ -1388,7 +1438,7 @@ impl Overlay {
     }
 
     fn render_modal(&self, f: &mut Frame, area: Rect, theme: &Theme, dlg: &Dialog) {
-        let modal = centered_modal(56, 9, area);
+        let modal = centered_modal(64, if dlg.alternate.is_some() { 11 } else { 9 }, area);
         f.render_widget(Clear, modal);
         let block = self.modal_block(&dlg.title, theme);
         let inner = block.inner(modal);
@@ -1407,13 +1457,24 @@ impl Overlay {
             .style(Style::default().bg(theme.bg_panel)),
             rows[0],
         );
+        let mut controls = vec![Span::styled(
+            format!("  [ y/↵ ] {}", dlg.confirm_label),
+            Style::default().fg(theme.accent),
+        )];
+        if let Some(alt) = &dlg.alternate {
+            controls.push(Span::raw("     "));
+            controls.push(Span::styled(
+                format!("[ {} ] {}", alt.key, alt.label),
+                Style::default().fg(theme.status_warn),
+            ));
+        }
+        controls.push(Span::raw("     "));
+        controls.push(Span::styled(
+            "[ n / Esc ] cancel",
+            Style::default().fg(theme.ink_faint),
+        ));
         f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled("  [ y ] confirm", Style::default().fg(theme.accent)),
-                Span::raw("     "),
-                Span::styled("[ n / Esc ] cancel", Style::default().fg(theme.ink_faint)),
-            ]))
-            .style(Style::default().bg(theme.bg_panel)),
+            Paragraph::new(Line::from(controls)).style(Style::default().bg(theme.bg_panel)),
             rows[1],
         );
     }
@@ -1435,7 +1496,12 @@ fn synopsis_hints(st: &SynopsisState) -> &'static [(&'static str, &'static str)]
             }
         }
         SynPhase::Translating => &[("Esc", "cancel"), ("…", "translating")],
-        SynPhase::Done => &[("r", "reroll"), ("e", "edit"), ("↵", "accept"), ("s", "skip")],
+        SynPhase::Done => &[
+            ("r", "reroll"),
+            ("e", "edit"),
+            ("↵", "accept"),
+            ("s", "skip"),
+        ],
         SynPhase::Failed => &[("r", "retry"), ("e", "edit"), ("s", "skip")],
     }
 }
@@ -1465,7 +1531,11 @@ fn render_synopsis_body(f: &mut Frame, area: Rect, theme: &Theme, st: &SynopsisS
 
     // --- raw input box (multi-line, wraps; caret only while editing) ---
     let editing = st.phase == SynPhase::Editing;
-    let border_color = if editing { theme.accent_soft } else { theme.rule };
+    let border_color = if editing {
+        theme.accent_soft
+    } else {
+        theme.rule
+    };
     let input_block = Block::default()
         .borders(Borders::ALL)
         .border_set(theme::hairline_set())
@@ -1488,7 +1558,10 @@ fn render_synopsis_body(f: &mut Frame, area: Rect, theme: &Theme, st: &SynopsisS
         let parts: Vec<&str> = st.raw.split('\n').collect();
         let last = parts.len().saturating_sub(1);
         for (i, part) in parts.iter().enumerate() {
-            let mut spans = vec![Span::styled(part.to_string(), Style::default().fg(theme.ink))];
+            let mut spans = vec![Span::styled(
+                part.to_string(),
+                Style::default().fg(theme.ink),
+            )];
             if editing && i == last {
                 spans.push(Span::styled("▏", Style::default().fg(theme.stream_cursor)));
             }
@@ -1541,10 +1614,9 @@ fn render_synopsis_body(f: &mut Frame, area: Rect, theme: &Theme, st: &SynopsisS
     // --- translation / error / placeholder ---
     let (body, color) = match st.phase {
         SynPhase::Failed => (st.error.clone(), theme.status_failed),
-        _ if st.th.trim().is_empty() => (
-            "(ยังไม่มีคำแปล — กด Tab เพื่อแปล)".to_string(),
-            theme.ink_faint,
-        ),
+        _ if st.th.trim().is_empty() => {
+            ("(ยังไม่มีคำแปล — กด Tab เพื่อแปล)".to_string(), theme.ink_faint)
+        }
         _ => (st.th.clone(), theme.ink),
     };
     f.render_widget(
