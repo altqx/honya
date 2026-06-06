@@ -6,8 +6,8 @@ use chrono::{DateTime, Utc};
 use crate::model::{
     ContinuityNote, ReaderAnnotation, RunHistoryEntry, RunHistoryStatus, UsageStats, VolumeData,
 };
-use crate::workspace::Workspace;
 use crate::workspace::data_block;
+use crate::workspace::Workspace;
 
 /// Load the volume metadata (defaults when VOLUME.md is absent/empty).
 pub fn load(ws: &Workspace) -> VolumeData {

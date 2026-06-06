@@ -4,19 +4,19 @@
 //! shared scroll position drives both panes; `z` decouples; `[`/`]` move between
 //! chapters; `o` cycles split / JA-only / TH-only; `w` toggles wrap.
 
-use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::Frame;
 
 use crate::model::ReaderAnnotation;
 use crate::theme::{self, Theme};
 use crate::workspace::Workspace;
 
-use super::Action;
 use super::overlay::Overlay;
+use super::Action;
 
 /// Layout modes for `o`.
 const MODE_SPLIT: u8 = 0;
@@ -365,6 +365,7 @@ impl ReaderScreen {
             ("w", "wrap"),
             ("n", "note"),
             ("N", "notes"),
+            ("y", "copy"),
             ("Q", "QA"),
         ]
     }
@@ -381,28 +382,31 @@ fn annotate_markdown(content: &str, annotations: &[ReaderAnnotation]) -> String 
     }
 
     let mut out = String::new();
+    let mut wrote_line = false;
     let mut line_no = 1u32;
-    for line in content.lines() {
-        if !out.is_empty() {
-            out.push('\n');
-        }
-        out.push_str(line);
-        push_annotations_for_line(&mut out, line_no, &mut by_line);
-        line_no = line_no.saturating_add(1);
-    }
-
     if content.is_empty() {
         push_annotations_for_line(&mut out, 1, &mut by_line);
+    } else {
+        for line in content.split('\n') {
+            if wrote_line {
+                out.push('\n');
+            }
+            out.push_str(line);
+            wrote_line = true;
+            push_annotations_for_line(&mut out, line_no, &mut by_line);
+            line_no = line_no.saturating_add(1);
+        }
     }
 
     // Notes anchored past EOF (for example after a hand edit shrank the file) stay
     // visible at the tail with their original line number.
     for (line, notes) in by_line {
         for note in notes {
-            if !out.is_empty() {
+            if wrote_line || !out.is_empty() {
                 out.push('\n');
             }
             out.push_str(&format!("> 📝 L{line}: {}", inline_note_text(&note.note)));
+            wrote_line = true;
         }
     }
 

@@ -1634,6 +1634,7 @@ impl Overlay {
                     ("[ ]", "prev · next chapter"),
                     ("z / w / o", "sync · wrap · layout"),
                     ("n / N", "add note · show/hide notes"),
+                    ("y", "copy visible Thai"),
                     ("Q", "QA review (flagged issues)"),
                 ],
             ),
