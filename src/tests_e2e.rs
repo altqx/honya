@@ -8,10 +8,9 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::app::App;
-use crate::app::Screen;
 use crate::app::overlay::{ImportState, Overlay, SynopsisState};
-use crate::model::{AppConfig, EventTx, ModelSet};
+use crate::app::{ActiveProject, App, Screen, Toast};
+use crate::model::{AppConfig, EventTx, LogLevel, ModelSet};
 
 fn fresh_app() -> App {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -196,6 +195,106 @@ fn key_routing_without_panic() {
         term.draw(|f| app.render(f)).unwrap();
         assert!(app.running, "navigation keys must not quit the app");
     }
+}
+
+#[test]
+fn backspace_dismisses_toast_only_when_not_captured() {
+    let mut app = fresh_app();
+    app.toast = Some(Toast {
+        msg: "saved".to_string(),
+        level: LogLevel::Info,
+    });
+    app.on_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::empty()));
+    assert!(
+        app.toast.is_none(),
+        "Backspace should dismiss a visible toast when no input owns the key"
+    );
+
+    let mut app = fresh_app();
+    app.overlay = Overlay::palette();
+    app.toast = Some(Toast {
+        msg: "still visible".to_string(),
+        level: LogLevel::Info,
+    });
+    app.on_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::empty()));
+    assert!(
+        app.toast.is_some(),
+        "overlay text fields keep Backspace instead of dismissing the toast"
+    );
+    assert!(matches!(app.overlay, Overlay::Palette(_)));
+
+    let mut app = fresh_app();
+    app.screen = Screen::Lexicon;
+    app.on_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::empty()));
+    app.toast = Some(Toast {
+        msg: "still visible".to_string(),
+        level: LogLevel::Info,
+    });
+    app.on_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::empty()));
+    assert!(
+        app.toast.is_some(),
+        "captured Lexicon text input keeps Backspace instead of dismissing the toast"
+    );
+}
+
+#[test]
+fn project_l_key_is_not_shadowed_by_activity_log() {
+    use crate::model::{Chapter, ChapterKind, ChapterStatus, Project, TokenUsage, UsageStats, Volume};
+    use crate::workspace::Workspace;
+
+    let dir = std::env::temp_dir().join("honya_project_l_key");
+    let usage = UsageStats {
+        tokens: TokenUsage::default(),
+        cost_usd: 0.0,
+        tool_calls: 0,
+    };
+    let chapter = Chapter {
+        number: 1,
+        title: "第一章".to_string(),
+        kind: ChapterKind::Prose,
+        status: ChapterStatus::Pending,
+        source_segments: 1,
+        total_chunks: 0,
+        committed_chunks: 0,
+        last_run: None,
+        usage,
+    };
+    let project = Project {
+        id: "novel".to_string(),
+        dir: dir.clone(),
+        title: "Novel".to_string(),
+        created: None,
+        touched: None,
+        volumes: vec![Volume {
+            number: 1,
+            dir: dir.join("Vol_01"),
+            label: None,
+            chapters: vec![chapter],
+        }],
+        models: None,
+    };
+
+    let mut app = fresh_app();
+    app.screen = Screen::Project;
+    app.active = Some(ActiveProject {
+        project,
+        workspace: Workspace::new(dir, 1),
+        client: Arc::new(crate::llm::mock::MockClient::default())
+            as Arc<dyn crate::llm::client::LlmClient>,
+        models: ModelSet::default(),
+    });
+
+    app.on_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::empty()));
+    assert!(
+        matches!(app.overlay, Overlay::None),
+        "Project l should reach the Project screen instead of opening the activity log"
+    );
+
+    app.on_key(KeyEvent::new(KeyCode::Char('`'), KeyModifiers::empty()));
+    assert!(
+        matches!(app.overlay, Overlay::Log(_)),
+        "Backtick remains the unambiguous activity-log key on Project"
+    );
 }
 
 /// A confirm modal must dismiss itself when the user presses `y`/Enter, even when

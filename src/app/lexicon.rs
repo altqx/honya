@@ -447,9 +447,10 @@ impl LexiconScreen {
             _ => "—".to_string(),
         };
         let filter_str = if self.searching || !self.filter.is_empty() {
+            let filter = thai_display_safe(&self.filter);
             format!(
                 "/ filter: {}{}   ",
-                self.filter,
+                filter,
                 if self.searching { "▏" } else { "" }
             )
         } else {
@@ -551,7 +552,7 @@ impl LexiconScreen {
                 ),
                 Span::styled(" ", Style::default().bg(bg)),
                 Span::styled(
-                    pad_to_cols(t.category.as_deref().unwrap_or("—"), 8),
+                    pad_to_cols(&thai_display_safe(t.category.as_deref().unwrap_or("—")), 8),
                     Style::default().fg(theme.ink_soft).bg(bg),
                 ),
                 Span::styled(
@@ -559,7 +560,10 @@ impl LexiconScreen {
                     Style::default().fg(theme.ink_faint).bg(bg),
                 ),
                 Span::styled(
-                    truncate_cols(t.gloss.as_deref().unwrap_or(""), gloss_w),
+                    truncate_cols(
+                        &thai_display_safe(t.gloss.as_deref().unwrap_or("")),
+                        gloss_w,
+                    ),
                     Style::default().fg(theme.ink_soft).bg(bg),
                 ),
             ])));
@@ -621,12 +625,15 @@ impl LexiconScreen {
                 ),
                 Span::styled(" ", Style::default().bg(bg)),
                 Span::styled(
-                    pad_to_cols(c.gender.as_deref().unwrap_or("—"), 8),
+                    pad_to_cols(&thai_display_safe(c.gender.as_deref().unwrap_or("—")), 8),
                     Style::default().fg(theme.ink_soft).bg(bg),
                 ),
                 Span::styled("  ", Style::default().bg(bg)),
                 Span::styled(
-                    truncate_cols(c.notes.as_deref().unwrap_or(""), notes_w),
+                    truncate_cols(
+                        &thai_display_safe(c.notes.as_deref().unwrap_or("")),
+                        notes_w,
+                    ),
                     Style::default().fg(theme.ink_soft).bg(bg),
                 ),
             ])));
@@ -700,7 +707,10 @@ impl LexiconScreen {
                 Span::styled(format!(" {marker} "), Style::default().fg(theme.accent)),
                 Span::styled(pad_to_cols(label, 12), Style::default().fg(theme.ink_faint)),
                 Span::styled(
-                    truncate_cols(value, inner.width.saturating_sub(18) as usize),
+                    truncate_cols(
+                        &thai_display_safe(value),
+                        inner.width.saturating_sub(18) as usize,
+                    ),
                     val_style,
                 ),
                 if focused {

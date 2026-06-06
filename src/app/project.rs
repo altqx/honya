@@ -11,7 +11,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 
 use crate::model::{Chapter, ChapterKind, ChapterStatus, UsageStats, Volume};
 use crate::theme::{self, Theme, status_glyph};
-use crate::ui::text::{col_width, pad_to_cols, truncate_cols};
+use crate::ui::text::{col_width, pad_to_cols, thai_display_safe, truncate_cols};
 use crate::ui::widgets::status_cell;
 
 use super::Screen;
@@ -362,7 +362,10 @@ impl ProjectScreen {
 
         let title = match &chapter {
             Some(c) if !c.title.is_empty() => {
-                format!(" Selected — {} ", truncate_cols(&c.title, 16))
+                format!(
+                    " Selected — {} ",
+                    truncate_cols(&thai_display_safe(&c.title), 16)
+                )
             }
             _ => " Selected ".to_string(),
         };
@@ -445,6 +448,7 @@ impl ProjectScreen {
             ("t", "marked/current"),
             ("T", "whole vol"),
             ("Space", "mark"),
+            ("h/l", "tree/focus"),
             ("e", "edit ctx"),
             ("y", "synopsis"),
         ]
@@ -477,7 +481,7 @@ fn volume_row(
         theme.bg_panel
     };
     let label = match &v.label {
-        Some(l) => format!("Vol.{:02} {l}", v.number),
+        Some(l) => format!("Vol.{:02} {}", v.number, thai_display_safe(l)),
         None => format!("Vol.{:02}", v.number),
     };
     let tally_str = format!("●{} ◐{} ○{} ✗{}", tally.0, tally.1, tally.2, tally.3);
@@ -520,7 +524,10 @@ fn chapter_row(
     } else {
         theme.bg_panel
     };
-    let name = pad_to_cols(&truncate_cols(&ch.title, name_w), name_w);
+    let name = pad_to_cols(
+        &truncate_cols(&thai_display_safe(&ch.title), name_w),
+        name_w,
+    );
     let status = status_word(ch.status);
     let time = ch
         .last_run

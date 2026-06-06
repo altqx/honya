@@ -809,6 +809,12 @@ mod tests {
     }
 
     #[test]
+    fn thai_sara_am_after_tone_mark_is_reordered() {
+        let line = first("น้ำ");
+        assert_eq!(line_text(&line), "น\u{0E4D}\u{0E49}\u{0E32}");
+    }
+
+    #[test]
     fn plain_prose_passes_through() {
         let line = first("ただのテキストです。");
         assert_eq!(line_text(&line), "ただのテキストです。");

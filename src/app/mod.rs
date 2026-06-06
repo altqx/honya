@@ -508,11 +508,14 @@ impl App {
             }
             KeyCode::Char('?') => return Action::show_overlay(Overlay::Help(0)),
             KeyCode::Char(':') => return Action::show_overlay(Overlay::palette()),
+            KeyCode::Char('l') if matches!(self.screen, Screen::Project) && self.active.is_some() => {
+                return self.route_to_screen(k);
+            }
             KeyCode::Char('l') | KeyCode::Char('`') => {
                 return Action::show_overlay(Overlay::Log(0));
             }
             KeyCode::Char('q') => return Action::Quit,
-            KeyCode::Esc if self.toast.is_some() => {
+            KeyCode::Esc | KeyCode::Backspace if self.toast.is_some() => {
                 self.toast = None;
                 return Action::None;
             }

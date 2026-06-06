@@ -11,7 +11,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 
 use crate::model::{ChapterKind, ChapterStatus, Project};
 use crate::theme::{self, Theme, status_glyph};
-use crate::ui::text::{col_width, pad_to_cols, truncate_cols};
+use crate::ui::text::{col_width, pad_to_cols, thai_display_safe, truncate_cols};
 
 use super::Action;
 use super::overlay::Overlay;
@@ -240,7 +240,7 @@ impl ShelfScreen {
         for (path, size) in &self.unimported {
             let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("?");
             let size_h = human_size(*size);
-            let label = format!("        · {}", pad_to_cols(name, 28),);
+            let label = format!("        · {}", pad_to_cols(&thai_display_safe(name), 28),);
             items.push(ListItem::new(Line::from(vec![
                 Span::styled(label, Style::default().fg(theme.ink_soft)),
                 Span::styled(size_h, Style::default().fg(theme.ink_faint)),
@@ -290,7 +290,7 @@ fn project_row(p: &Project, selected: bool, name_w: usize, theme: &Theme) -> Lis
         Style::default().fg(theme.ink).bg(row_bg)
     };
 
-    let name = truncate_cols(&p.title, name_w);
+    let name = truncate_cols(&thai_display_safe(&p.title), name_w);
     let name_padded = pad_to_cols(&name, name_w);
 
     let spans = vec![

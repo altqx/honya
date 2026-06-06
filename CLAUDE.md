@@ -29,7 +29,7 @@ The hard rule: **background tasks never touch `App` state directly.** Long-runni
 
 `App` owns everything: the five screens (`Shelf`/`Project`/`Translate`/`Reader`/`Lexicon`), the current `Overlay`, config, theme, and the active project. Key handling is a strict three-step funnel:
 
-1. `App::on_key` → `route_key` decides what a key *means* given overlay/screen/capture state and returns an **`Action`** (it generally must not mutate state itself). Overlays get first refusal; a focused text field (`screen_is_capturing`) swallows single-letter globals; then global keys (`1`-`5`, Tab, `?`, `:`, `q`); then the active screen.
+1. `App::on_key` → `route_key` decides what a key *means* given overlay/screen/capture state and returns an **`Action`** (it generally must not mutate state itself). Overlays get first refusal; a focused text field (`screen_is_capturing`) swallows single-letter globals; then global keys (`1`-`5`, Tab, `?`, `:`, `` ` ``, `q`) and toast dismissal (`Esc`/`Backspace`); then the active screen. `l` opens the activity log except on the Project tab, where it is the screen-local expand/focus key.
 2. `apply(action)` is the **single mutation funnel** — every state change and every spawn of background work goes through here.
 
 Each screen module (`shelf.rs`, `project.rs`, `translate.rs`, `reader.rs`, `lexicon.rs`) owns its own sub-state, `handle_key` (returns an `Action`), `render`, and `hints`. `Screen` enum variant **order is load-bearing** (`ui::chrome` and digit routing depend on it). The `TranslateScreen` observes *every* `AppEvent` so its live panel stays current even when off-tab.

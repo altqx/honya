@@ -18,7 +18,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use crate::model::{AppConfig, LogLevel, ThemeId};
 use crate::theme::{self, ALL_THEMES, Theme};
 use crate::ui::layout::{centered_modal, centered_pct};
-use crate::ui::text::truncate_cols;
+use crate::ui::text::{thai_display_safe, truncate_cols};
 use crate::ui::widgets::render_gauge;
 
 use super::{Action, Screen, slugify};
@@ -965,7 +965,10 @@ impl Overlay {
             lines.push(Line::from(vec![
                 Span::styled(format!(" {bar} "), Style::default().fg(theme.accent)),
                 Span::styled(
-                    truncate_cols(name, area.width.saturating_sub(6) as usize),
+                    truncate_cols(
+                        &thai_display_safe(name),
+                        area.width.saturating_sub(6) as usize,
+                    ),
                     style,
                 ),
             ]));
@@ -998,7 +1001,7 @@ impl Overlay {
         f.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled("  Source:  ", Style::default().fg(theme.ink_faint)),
-                Span::styled(src, Style::default().fg(theme.ink_soft)),
+                Span::styled(thai_display_safe(src), Style::default().fg(theme.ink_soft)),
             ]))
             .style(Style::default().bg(theme.bg_panel)),
             rows[0],
@@ -1018,7 +1021,7 @@ impl Overlay {
             .border_style(Style::default().fg(theme.accent_soft))
             .style(Style::default().bg(theme.bg_inset));
         let caret_line = Line::from(vec![
-            Span::styled(st.name.clone(), Style::default().fg(theme.ink)),
+            Span::styled(thai_display_safe(&st.name), Style::default().fg(theme.ink)),
             Span::styled("▏", Style::default().fg(theme.stream_cursor)),
         ]);
         f.render_widget(
@@ -1028,7 +1031,10 @@ impl Overlay {
         f.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled("  Slug:  ", Style::default().fg(theme.ink_faint)),
-                Span::styled(slug, Style::default().fg(theme.accent_soft)),
+                Span::styled(
+                    thai_display_safe(&slug),
+                    Style::default().fg(theme.accent_soft),
+                ),
             ]))
             .style(Style::default().bg(theme.bg_panel)),
             rows[4],
@@ -1039,7 +1045,7 @@ impl Overlay {
         let lines = vec![
             Line::raw(""),
             Line::from(Span::styled(
-                format!("  Project:  {}", st.name.trim()),
+                format!("  Project:  {}", thai_display_safe(st.name.trim())),
                 Style::default().fg(theme.ink_soft),
             )),
             Line::raw(""),
@@ -1081,7 +1087,10 @@ impl Overlay {
         f.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled("  Preprocessing  ", Style::default().fg(theme.ink_soft)),
-                Span::styled(label, Style::default().fg(theme.accent_soft)),
+                Span::styled(
+                    thai_display_safe(&label),
+                    Style::default().fg(theme.accent_soft),
+                ),
             ]))
             .style(Style::default().bg(theme.bg_panel)),
             rows[1],
@@ -1249,7 +1258,7 @@ impl Overlay {
         f.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled("  : ", Style::default().fg(theme.accent)),
-                Span::styled(st.query.clone(), Style::default().fg(theme.ink)),
+                Span::styled(thai_display_safe(&st.query), Style::default().fg(theme.ink)),
                 Span::styled("▏", Style::default().fg(theme.stream_cursor)),
             ]))
             .style(Style::default().bg(theme.bg_panel)),
@@ -1355,8 +1364,8 @@ impl Overlay {
                     ("?", "toggle this help"),
                     (": / Ctrl-P", "command palette"),
                     ("Ctrl-T", "theme picker"),
-                    ("l / `", "activity log"),
-                    ("Esc", "back / close overlay"),
+                    ("` / l", "activity log (Project keeps l)"),
+                    ("Esc / Backspace", "close overlay / dismiss toast"),
                     ("q", "quit        Ctrl-C hard quit"),
                 ],
             ),
@@ -1450,7 +1459,7 @@ impl Overlay {
             .split(inner);
         f.render_widget(
             Paragraph::new(Span::styled(
-                format!("  {}", dlg.body),
+                format!("  {}", thai_display_safe(&dlg.body)),
                 Style::default().fg(theme.ink_soft),
             ))
             .wrap(Wrap { trim: false })
@@ -1559,7 +1568,7 @@ fn render_synopsis_body(f: &mut Frame, area: Rect, theme: &Theme, st: &SynopsisS
         let last = parts.len().saturating_sub(1);
         for (i, part) in parts.iter().enumerate() {
             let mut spans = vec![Span::styled(
-                part.to_string(),
+                thai_display_safe(part),
                 Style::default().fg(theme.ink),
             )];
             if editing && i == last {

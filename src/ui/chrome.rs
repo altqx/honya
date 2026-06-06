@@ -12,7 +12,7 @@ use ratatui::widgets::{Paragraph, Tabs};
 
 use crate::app::Screen;
 use crate::theme::{self, Theme};
-use crate::ui::text::col_width;
+use crate::ui::text::{col_width, thai_display_safe};
 
 /// Aggregate chapter counts shown in the header's right-aligned tally.
 #[derive(Debug, Clone, Copy, Default)]
@@ -85,9 +85,9 @@ pub fn render_header(f: &mut Frame, area: Rect, crumb: &str, tally: &StatusTally
 
     let right_cols: usize = right.iter().map(|s| col_width(s.content.as_ref())).sum();
 
-    let crumb = crumb.trim();
+    let crumb = thai_display_safe(crumb.trim());
     let left_budget = total_cols.saturating_sub(right_cols + 2);
-    let crumb_trunc = crate::ui::text::truncate_cols(crumb, left_budget);
+    let crumb_trunc = crate::ui::text::truncate_cols(&crumb, left_budget);
     let crumb_cols = col_width(&crumb_trunc);
 
     let mut spans: Vec<Span> = Vec::with_capacity(right.len() + 2);

@@ -67,21 +67,36 @@ pub fn pad_to_cols(s: &str, cols: usize) -> String {
 /// Decompose Thai SARA AM (U+0E33) into NIKHAHIT (U+0E4D) + SARA AA (U+0E32):
 /// many terminals advance only one column for the composed form while ratatui
 /// treats it as two, so stale glyphs smear; splitting it keeps every cell at one
-/// column while preserving total width. No-op (fast path) when no SARA AM.
+/// column while preserving total width. When a tone/above mark precedes SARA AM
+/// (for example `น้ำ`), move that mark after NIKHAHIT so the decomposed cluster
+/// renders in the same stable order as Unicode normalization.
 pub fn thai_display_safe(s: &str) -> String {
     if !s.contains('\u{0E33}') {
         return s.to_string();
     }
-    let mut out = String::with_capacity(s.len() + 2);
+    let mut out: Vec<char> = Vec::with_capacity(s.chars().count() + 2);
     for ch in s.chars() {
         if ch == '\u{0E33}' {
+            let mark_start = out
+                .iter()
+                .rposition(|&prev| !is_thai_above_mark(prev))
+                .map_or(0, |idx| idx + 1);
+            let marks: Vec<char> = out.drain(mark_start..).collect();
             out.push('\u{0E4D}');
+            out.extend(marks);
             out.push('\u{0E32}');
         } else {
             out.push(ch);
         }
     }
-    out
+    out.into_iter().collect()
+}
+
+fn is_thai_above_mark(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{0E31}' | '\u{0E34}'..='\u{0E37}' | '\u{0E47}'..='\u{0E4E}'
+    )
 }
 
 #[cfg(test)]
@@ -94,6 +109,14 @@ mod tests {
         let safe = thai_display_safe(composed);
         assert!(!safe.contains('\u{0E33}'));
         assert!(safe.contains('\u{0E4D}') && safe.contains('\u{0E32}'));
+        assert_eq!(col_width(composed), col_width(&safe));
+    }
+
+    #[test]
+    fn sara_am_after_tone_mark_reorders_cluster() {
+        let composed = "น\u{0E49}\u{0E33}"; // น้ำ
+        let safe = thai_display_safe(composed);
+        assert_eq!(safe, "น\u{0E4D}\u{0E49}\u{0E32}");
         assert_eq!(col_width(composed), col_width(&safe));
     }
 

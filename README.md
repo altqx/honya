@@ -72,7 +72,8 @@ useful commands: `honya --version`, `honya --help`.
 
 Global keys (always available; the footer shows `?`/`:`/`q`, and `?` lists the full table):
 `?` help · `:` command palette · `Ctrl-T` theme · `l` activity log · `1`–`5`/`Tab` switch tabs ·
-`Esc` close overlay · `q` quit.
+`Esc` close overlay · `Esc`/`Backspace` dismiss notification · `q` quit.
+On the Project tab, `l` expands/focuses the tree; use backtick (`` ` ``) for the activity log there.
 
 ## Themes
 
