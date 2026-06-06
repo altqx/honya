@@ -26,35 +26,41 @@ pub fn scan_projects(root: &Path) -> Vec<Project> {
         if !dir.is_dir() {
             continue;
         }
-        if !dir.join("PROJECT.md").is_file() {
-            continue;
+        if let Some(project) = scan_one_project(&dir) {
+            projects.push(project);
         }
-
-        let id = dir
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        if id.is_empty() {
-            continue;
-        }
-
-        let volumes = scan_volumes(&dir);
-        let (created, touched) = dir_times(&dir);
-        let title = read_project_title(&dir).unwrap_or_else(|| id.clone());
-
-        projects.push(Project {
-            id,
-            dir,
-            title,
-            created,
-            touched,
-            volumes,
-            models: None,
-        });
     }
 
     projects.sort_by(|a, b| a.id.cmp(&b.id));
     projects
+}
+
+/// Build a single [`Project`] from a directory, or `None` if it is not a project
+/// (no `PROJECT.md`, or an unusable directory name). Used both by the shelf scan
+/// and by crash-recovery resume, which must reopen a project by absolute path
+/// even when it lives outside the current working root.
+pub fn scan_one_project(dir: &Path) -> Option<Project> {
+    if !dir.join("PROJECT.md").is_file() {
+        return None;
+    }
+    let id = dir.file_name().map(|n| n.to_string_lossy().into_owned())?;
+    if id.is_empty() {
+        return None;
+    }
+
+    let volumes = scan_volumes(dir);
+    let (created, touched) = dir_times(dir);
+    let title = read_project_title(dir).unwrap_or_else(|| id.clone());
+
+    Some(Project {
+        id,
+        dir: dir.to_path_buf(),
+        title,
+        created,
+        touched,
+        volumes,
+        models: None,
+    })
 }
 
 /// Discover `Vol_NN` volumes under a project directory, ascending by number.

@@ -56,6 +56,10 @@ async fn main() -> anyhow::Result<()> {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
     let mut app = App::new(EventTx(tx), cfg);
 
+    // Offer to resume a run that a crash / power loss left interrupted (raises the
+    // recovery overlay over the Shelf when a resumable checkpoint is found).
+    app.init_recovery_prompt();
+
     // Best-effort background update notification; never blocks startup.
     {
         let tx = app.tx.clone();
@@ -136,6 +140,7 @@ fn print_help() {
     println!("ENVIRONMENT:");
     println!("    HONYA_API_KEY / OPENROUTER_API_KEY   OpenRouter key (overrides saved config)");
     println!("    HONYA_NO_UPDATE_CHECK                Disable the startup update check");
+    println!("    HONYA_SESSION_FILE                   Override the crash-recovery checkpoint path");
 }
 
 /// Ensure an OpenRouter API key exists (env → persisted config); else prompt and save it.

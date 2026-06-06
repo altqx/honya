@@ -117,6 +117,11 @@ pub enum Action {
     },
     PauseRun,
     StopRun,
+    /// Resume the interrupted run recorded in the recovery checkpoint (reopen the
+    /// project and continue translating its chapter queue).
+    ResumeSession,
+    /// Forget the recovery checkpoint without resuming.
+    DiscardSession,
     DeleteGlossary {
         jp_term: String,
     },
@@ -180,12 +185,17 @@ pub struct ActiveProject {
     pub workspace: Workspace,
     pub client: Arc<dyn LlmClient>,
     pub models: ModelSet,
+    /// The active volume number — the one `workspace` resolves and that runs
+    /// translate against. Set when the project is opened (and honored on resume,
+    /// so a checkpoint's volume is respected rather than silently defaulting to
+    /// the first volume).
+    pub vol: u32,
 }
 
 impl ActiveProject {
-    /// First/active volume number (defaults to 1 if the project has none).
+    /// The active volume number.
     fn active_vol(&self) -> u32 {
-        self.project.volumes.first().map(|v| v.number).unwrap_or(1)
+        self.vol
     }
 }
 
@@ -213,6 +223,9 @@ pub struct App {
     pub log: Vec<(LogLevel, String)>,
     /// Set when a newer release is detected at startup (drives a footer hint).
     pub update_available: Option<String>,
+    /// An interrupted run found at startup, awaiting the user's resume/discard
+    /// choice in the recovery overlay (see `init_recovery_prompt`).
+    pub pending_recovery: Option<crate::workspace::session::SessionCheckpoint>,
 }
 
 impl App {
@@ -244,7 +257,72 @@ impl App {
             run_ctl: None,
             log: Vec::new(),
             update_available: None,
+            pending_recovery: None,
         }
+    }
+
+    /// Check for an interrupted run (crash / power loss / hard kill) and, if one
+    /// is resumable, raise the recovery overlay. Called once from `main` after
+    /// `App::new`; kept out of `App::new` itself so test apps never touch the real
+    /// recovery file. A stale checkpoint (project gone, or already fully done) is
+    /// cleared quietly rather than prompted.
+    pub fn init_recovery_prompt(&mut self) {
+        let Some(cp) = crate::workspace::session::load() else {
+            return;
+        };
+        if !cp.is_resumable() {
+            crate::workspace::session::clear();
+            return;
+        }
+        let (done, total) = self.recovery_progress(&cp);
+        if total > 0 && done >= total {
+            // The crash landed after the last chunk committed but before the run
+            // was marked finished — nothing left to do, so don't nag.
+            crate::workspace::session::clear();
+            return;
+        }
+        let body = recovery_body(&cp, done, total);
+        self.overlay = Overlay::confirm_with_alternate(
+            "Resume interrupted run?",
+            body,
+            "resume",
+            Action::ResumeSession,
+            'd',
+            "discard",
+            Action::DiscardSession,
+        );
+        self.pending_recovery = Some(cp);
+    }
+
+    /// Count how many of the checkpoint's chapters are already finished on disk,
+    /// using the freshly-scanned project state when it is in the current shelf
+    /// (falls back to "unknown" → 0 done when launched from another directory).
+    fn recovery_progress(
+        &self,
+        cp: &crate::workspace::session::SessionCheckpoint,
+    ) -> (usize, usize) {
+        let total = cp.chapters.len();
+        let done = self
+            .projects
+            .iter()
+            .find(|p| p.dir == cp.project_dir)
+            .and_then(|p| p.volumes.iter().find(|v| v.number == cp.vol))
+            .map(|v| {
+                cp.chapters
+                    .iter()
+                    .filter(|&&num| {
+                        v.chapters.iter().any(|ch| {
+                            ch.number == num
+                                && matches!(
+                                    ch.status,
+                                    ChapterStatus::Done | ChapterStatus::NeedsReview
+                                )
+                        })
+                    })
+                    .count()
+            })
+            .unwrap_or(0);
+        (done, total)
     }
 
     pub fn on_app_event(&mut self, ev: AppEvent) {
@@ -331,6 +409,10 @@ impl App {
             } => {
                 self.run_active = false;
                 self.run_ctl = None;
+                // The run reached its end (finished, stopped, or all-failed): the
+                // recovery checkpoint has served its purpose, so retire it.
+                crate::workspace::session::clear();
+                self.pending_recovery = None;
                 let review = if *chapters_need_review > 0 {
                     format!(" · {chapters_need_review} need review")
                 } else {
@@ -620,6 +702,15 @@ impl App {
                 }
                 None => self.toast = Some(Toast::warn("no run in progress")),
             },
+            Action::ResumeSession => {
+                self.resume_session();
+            }
+            Action::DiscardSession => {
+                crate::workspace::session::clear();
+                self.pending_recovery = None;
+                self.overlay = Overlay::None;
+                self.toast = Some(Toast::info("interrupted run discarded"));
+            }
             Action::DeleteGlossary { jp_term } => {
                 if let Some(active) = self.active.as_ref() {
                     match crate::workspace::glossary::remove(&active.workspace, &jp_term) {
@@ -684,6 +775,13 @@ impl App {
             return;
         };
         let vol = project.volumes.first().map(|v| v.number).unwrap_or(1);
+        self.activate_project(project, vol);
+    }
+
+    /// Make `project` the active project on volume `vol`: build its LLM client,
+    /// reset the per-project screens, and land on the Project tab. Returns `false`
+    /// (after toasting) when the client can't be built, so callers can bail.
+    fn activate_project(&mut self, project: Project, vol: u32) -> bool {
         let models = project
             .models
             .clone()
@@ -693,19 +791,57 @@ impl App {
             Ok(client) => client,
             Err(e) => {
                 self.toast = Some(Toast::error(format!("LLM client unavailable: {e}")));
-                return;
+                return false;
             }
         };
+        let id = project.id.clone();
         self.active = Some(ActiveProject {
             project,
             workspace,
             client,
             models,
+            vol,
         });
         self.lexicon.reset();
         self.project = ProjectScreen::new();
         self.screen = Screen::Project;
         self.toast = Some(Toast::info(format!("opened {id}")));
+        true
+    }
+
+    /// Resume the interrupted run from the recovery checkpoint: reopen its project
+    /// (by absolute path, so a different launch directory still works) and continue
+    /// translating its chapter queue. The pipeline's own chunk-level resume then
+    /// skips everything already committed to disk.
+    fn resume_session(&mut self) {
+        let Some(cp) = self.pending_recovery.take() else {
+            self.toast = Some(Toast::warn("no run to resume"));
+            return;
+        };
+        self.overlay = Overlay::None;
+        // Match strictly on the absolute project directory — never on the slug
+        // alone, or launching from elsewhere could resume into a *different*
+        // same-named project. The scan fallback covers an out-of-shelf project.
+        self.refresh_projects();
+        let project = self
+            .projects
+            .iter()
+            .find(|p| p.dir == cp.project_dir)
+            .cloned()
+            .or_else(|| crate::workspace::scan::scan_one_project(&cp.project_dir));
+        let Some(project) = project else {
+            crate::workspace::session::clear();
+            self.toast = Some(Toast::error(format!(
+                "could not reopen {} to resume",
+                cp.project_id
+            )));
+            return;
+        };
+        if !self.activate_project(project, cp.vol) {
+            return; // activate_project already toasted the reason
+        }
+        // Continue (not restart): keep committed chunks, fill the gaps.
+        self.begin_translation(cp.chapters, false);
     }
 
     fn open_chapter(&mut self, chapter: u32) {
@@ -784,14 +920,18 @@ impl App {
             self.toast = Some(Toast::warn("a run is already in progress"));
             return;
         }
-        let Some((vol, project_dir, client, models)) = self.active.as_ref().map(|active| {
-            (
-                active.active_vol(),
-                active.project.dir.clone(),
-                Arc::clone(&active.client),
-                active.models.clone(),
-            )
-        }) else {
+        let Some((vol, project_dir, project_id, project_title, client, models)) =
+            self.active.as_ref().map(|active| {
+                (
+                    active.active_vol(),
+                    active.project.dir.clone(),
+                    active.project.id.clone(),
+                    active.project.title.clone(),
+                    Arc::clone(&active.client),
+                    active.models.clone(),
+                )
+            })
+        else {
             self.toast = Some(Toast::warn("no project open"));
             return;
         };
@@ -800,7 +940,7 @@ impl App {
             return;
         }
 
-        let ws = Workspace::new(project_dir, vol);
+        let ws = Workspace::new(project_dir.clone(), vol);
         if restart {
             for chapter in &chapters {
                 if let Err(e) = crate::workspace::translation::reset_chapter(&ws, *chapter) {
@@ -811,6 +951,22 @@ impl App {
                 }
             }
             self.reset_in_memory_translation_progress(&chapters);
+        }
+
+        // Record a recovery checkpoint *before* the run starts: from here until the
+        // pipeline finishes, a crash/power-loss can be resumed on next launch.
+        let checkpoint = crate::workspace::session::SessionCheckpoint::new(
+            project_dir,
+            project_id,
+            project_title,
+            vol,
+            chapters.clone(),
+        );
+        if let Err(e) = crate::workspace::session::save(&checkpoint) {
+            self.push_log(
+                LogLevel::Warn,
+                format!("could not write recovery checkpoint: {e}"),
+            );
         }
 
         let ctl = crate::agents::pipeline::RunControl::new();
@@ -1165,6 +1321,24 @@ impl App {
             Screen::Lexicon => self.lexicon.hints(),
         }
     }
+}
+
+/// One-paragraph body for the startup recovery prompt. Flowing prose (no hard
+/// newlines) so the modal wraps it cleanly.
+fn recovery_body(
+    cp: &crate::workspace::session::SessionCheckpoint,
+    done: usize,
+    total: usize,
+) -> String {
+    let progress = if done > 0 {
+        format!("{done}/{total} chapter(s) already finished")
+    } else {
+        format!("{total} chapter(s) queued")
+    };
+    format!(
+        "honya didn't shut down cleanly during a translation run — «{}» Vol.{:02} · {progress}. Resume picks up from the last committed chunk (finished chunks are skipped, so no tokens are re-spent). Discard forgets this run; Esc keeps it for next launch.",
+        cp.project_title, cp.vol
+    )
 }
 
 fn chapter_list_preview(chapters: &[u32]) -> String {

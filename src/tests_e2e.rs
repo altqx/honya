@@ -17,6 +17,14 @@ fn fresh_app() -> App {
     App::new(EventTx(tx), AppConfig::default())
 }
 
+/// Serializes EVERY test that mutates process environment variables. `set_var` /
+/// `remove_var` rewrite the shared C `environ`, so a concurrent set from one test
+/// races a read/set from any other test regardless of the variable name (it is
+/// `unsafe` for exactly this reason). One global lock — held across each test's
+/// whole set/use/remove window — is the only sound guard. Poisoning is tolerated
+/// so one failing test doesn't cascade. Acquire this before touching env in tests.
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Render every screen at a range of terminal sizes — including pathologically small
 /// ones — and assert nothing panics (layout math, unicode width, slicing).
 #[test]
@@ -95,6 +103,7 @@ fn renders_usage_surfaces_without_panic() {
             client: Arc::new(crate::llm::mock::MockClient::default())
                 as Arc<dyn crate::llm::client::LlmClient>,
             models: ModelSet::default(),
+            vol: 1,
         });
         // Drive the Translate split meter with run + chapter sub-totals.
         app.translate
@@ -286,6 +295,7 @@ fn project_l_key_is_not_shadowed_by_activity_log() {
         client: Arc::new(crate::llm::mock::MockClient::default())
             as Arc<dyn crate::llm::client::LlmClient>,
         models: ModelSet::default(),
+        vol: 1,
     });
 
     app.on_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::empty()));
@@ -323,8 +333,11 @@ fn theme_picker_preview_commit_and_revert() {
     use crate::app::overlay::Overlay;
     use crate::model::ThemeId;
 
+    // Serialize against every other env-mutating test (shared process `environ`).
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
     // Redirect config writes to a throwaway dir so committing a theme can't
-    // clobber the real ~/.config/honya/config.json. No other test touches it.
+    // clobber the real ~/.config/honya/config.json.
     let tmp = std::env::temp_dir().join(format!("honya-test-cfg-{}", std::process::id()));
     unsafe {
         std::env::set_var("XDG_CONFIG_HOME", &tmp);
@@ -403,6 +416,312 @@ fn ctrl_t_opens_theme_picker_from_settings() {
         matches!(app.overlay, Overlay::Theme(_)),
         "Ctrl-T inside Settings opens the theme picker"
     );
+}
+
+/// A checkpoint left behind by an interrupted run raises the recovery overlay at
+/// startup, and `d` discards it (clearing the on-disk file). Drives the real key
+/// router so the modal's discard-key wiring is exercised end to end.
+#[test]
+fn recovery_prompt_appears_and_discards() {
+    use crate::workspace::session::{self, SessionCheckpoint};
+
+    let _guard = ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
+    let tmp = std::env::temp_dir().join(format!("honya_recover_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    let session_file = tmp.join("session.json");
+    unsafe {
+        std::env::set_var("HONYA_SESSION_FILE", &session_file);
+    }
+    // Fail loud rather than touch the real recovery file.
+    assert_eq!(
+        session::path(),
+        session_file,
+        "recovery path must be redirected into the throwaway dir"
+    );
+
+    // A real, resumable project on disk (PROJECT.md present).
+    let project_dir = tmp.join("re-zero");
+    crate::workspace::scaffold::create_project(&project_dir, "Re:Zero", &ModelSet::default(), 1)
+        .expect("scaffold project");
+
+    let cp = SessionCheckpoint::new(
+        project_dir.clone(),
+        "re-zero".to_string(),
+        "Re:Zero".to_string(),
+        1,
+        vec![1, 2],
+    );
+    session::save(&cp).expect("write checkpoint");
+
+    let mut app = fresh_app();
+    app.init_recovery_prompt();
+    assert!(
+        matches!(app.overlay, Overlay::Modal(_)),
+        "an interrupted run raises the recovery modal at startup"
+    );
+    assert!(
+        app.pending_recovery.is_some(),
+        "the checkpoint is held pending the user's choice"
+    );
+
+    // Discard: clears both the in-memory pending state and the on-disk file.
+    app.on_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::empty()));
+    assert!(
+        matches!(app.overlay, Overlay::None),
+        "discard closes the modal"
+    );
+    assert!(
+        app.pending_recovery.is_none(),
+        "discard drops the pending checkpoint"
+    );
+    assert!(
+        session::load().is_none(),
+        "discard removes the checkpoint file"
+    );
+
+    unsafe {
+        std::env::remove_var("HONYA_SESSION_FILE");
+    }
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// `PipelineFinished` retires the recovery checkpoint — the invariant that the
+/// file exists only while a run is genuinely in flight.
+#[test]
+fn pipeline_finished_clears_checkpoint() {
+    use crate::model::AppEvent;
+    use crate::workspace::session::{self, SessionCheckpoint};
+
+    let _guard = ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
+    let tmp = std::env::temp_dir().join(format!("honya_recover_fin_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    let session_file = tmp.join("session.json");
+    unsafe {
+        std::env::set_var("HONYA_SESSION_FILE", &session_file);
+    }
+    assert_eq!(session::path(), session_file, "recovery path redirected");
+
+    let cp = SessionCheckpoint::new(
+        tmp.join("proj"),
+        "proj".to_string(),
+        "Proj".to_string(),
+        1,
+        vec![1],
+    );
+    session::save(&cp).expect("write checkpoint");
+    assert!(session::load().is_some(), "checkpoint present before finish");
+
+    let mut app = fresh_app();
+    app.pending_recovery = Some(cp);
+    app.on_app_event(AppEvent::PipelineFinished {
+        chapters_done: 1,
+        chapters_failed: 0,
+        chapters_need_review: 0,
+    });
+
+    assert!(
+        session::load().is_none(),
+        "a finished run clears the checkpoint file"
+    );
+    assert!(
+        app.pending_recovery.is_none(),
+        "a finished run drops the in-memory pending checkpoint"
+    );
+
+    unsafe {
+        std::env::remove_var("HONYA_SESSION_FILE");
+    }
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// A checkpoint pointing at a project that no longer exists (no PROJECT.md) is
+/// stale: `init_recovery_prompt` clears it quietly instead of prompting.
+#[test]
+fn stale_checkpoint_is_cleared_without_prompting() {
+    use crate::workspace::session::{self, SessionCheckpoint};
+
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    let tmp = std::env::temp_dir().join(format!("honya_recover_stale_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    unsafe {
+        std::env::set_var("HONYA_SESSION_FILE", tmp.join("session.json"));
+    }
+
+    // Points at a directory with no PROJECT.md → not resumable.
+    let cp = SessionCheckpoint::new(
+        tmp.join("ghost"),
+        "ghost".to_string(),
+        "Ghost".to_string(),
+        1,
+        vec![1],
+    );
+    session::save(&cp).unwrap();
+
+    let mut app = fresh_app();
+    app.init_recovery_prompt();
+    assert!(
+        matches!(app.overlay, Overlay::None),
+        "a stale checkpoint must not raise the recovery prompt"
+    );
+    assert!(app.pending_recovery.is_none());
+    assert!(
+        session::load().is_none(),
+        "a stale checkpoint is cleared from disk"
+    );
+
+    unsafe {
+        std::env::remove_var("HONYA_SESSION_FILE");
+    }
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// When every queued chapter is already finished on disk (the crash landed right
+/// after the last commit), `init_recovery_prompt` clears the checkpoint instead of
+/// nagging — there is nothing left to resume.
+#[test]
+fn all_done_checkpoint_is_cleared_without_prompting() {
+    use crate::model::{Chapter, ChapterKind, ChapterStatus, Project, Volume};
+    use crate::workspace::session::{self, SessionCheckpoint};
+
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    let tmp = std::env::temp_dir().join(format!("honya_recover_done_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    unsafe {
+        std::env::set_var("HONYA_SESSION_FILE", tmp.join("session.json"));
+    }
+
+    // A real project on disk so the checkpoint is "resumable" (PROJECT.md exists).
+    let project_dir = tmp.join("novel");
+    crate::workspace::scaffold::create_project(&project_dir, "Novel", &ModelSet::default(), 1)
+        .expect("scaffold project");
+
+    let cp = SessionCheckpoint::new(
+        project_dir.clone(),
+        "novel".to_string(),
+        "Novel".to_string(),
+        1,
+        vec![1, 2],
+    );
+    session::save(&cp).unwrap();
+
+    let mut app = fresh_app();
+    // Inject the project with both queued chapters already Done so recovery_progress
+    // computes done == total (fresh_app's CWD scan won't contain this temp project).
+    let done_chapter = |n: u32| Chapter {
+        number: n,
+        title: format!("Chapter {n}"),
+        kind: ChapterKind::Prose,
+        status: ChapterStatus::Done,
+        source_segments: 1,
+        total_chunks: 1,
+        committed_chunks: 1,
+        last_run: None,
+        usage: Default::default(),
+    };
+    app.projects.push(Project {
+        id: "novel".to_string(),
+        dir: project_dir.clone(),
+        title: "Novel".to_string(),
+        created: None,
+        touched: None,
+        volumes: vec![Volume {
+            number: 1,
+            dir: project_dir.join("Vol_01"),
+            label: None,
+            chapters: vec![done_chapter(1), done_chapter(2)],
+        }],
+        models: None,
+    });
+
+    app.init_recovery_prompt();
+    assert!(
+        matches!(app.overlay, Overlay::None),
+        "an already-finished run must not raise the recovery prompt"
+    );
+    assert!(app.pending_recovery.is_none());
+    assert!(
+        session::load().is_none(),
+        "an already-finished run's checkpoint is cleared"
+    );
+
+    unsafe {
+        std::env::remove_var("HONYA_SESSION_FILE");
+    }
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// Resuming a run whose project has vanished since the checkpoint was written
+/// fails gracefully: the checkpoint is cleared and the user gets an error toast,
+/// rather than the app silently doing nothing or panicking.
+#[test]
+fn resume_with_missing_project_clears_and_reports() {
+    use crate::workspace::session::{self, SessionCheckpoint};
+
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    let tmp = std::env::temp_dir().join(format!("honya_recover_gone_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    unsafe {
+        std::env::set_var("HONYA_SESSION_FILE", tmp.join("session.json"));
+    }
+
+    // Scaffold a real project so the prompt appears, then delete it to simulate the
+    // project being removed between the crash and the resume attempt.
+    let project_dir = tmp.join("novel");
+    crate::workspace::scaffold::create_project(&project_dir, "Novel", &ModelSet::default(), 1)
+        .expect("scaffold project");
+    let cp = SessionCheckpoint::new(
+        project_dir.clone(),
+        "novel".to_string(),
+        "Novel".to_string(),
+        1,
+        vec![1],
+    );
+    session::save(&cp).unwrap();
+
+    let mut app = fresh_app();
+    app.init_recovery_prompt();
+    assert!(matches!(app.overlay, Overlay::Modal(_)), "prompt appears");
+
+    // Project disappears before the user picks "resume".
+    std::fs::remove_dir_all(&project_dir).unwrap();
+
+    app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+    assert!(
+        matches!(app.overlay, Overlay::None),
+        "the modal closes even when resume can't find the project"
+    );
+    assert!(
+        app.pending_recovery.is_none(),
+        "a failed resume drops the pending checkpoint"
+    );
+    assert!(
+        session::load().is_none(),
+        "a failed resume clears the unusable checkpoint"
+    );
+    let toast = app.toast.as_ref().expect("an error toast is shown");
+    assert!(
+        matches!(toast.level, LogLevel::Error),
+        "the failure is surfaced as an error toast"
+    );
+
+    unsafe {
+        std::env::remove_var("HONYA_SESSION_FILE");
+    }
+    let _ = std::fs::remove_dir_all(&tmp);
 }
 
 fn build_sample_epub(path: &std::path::Path) {

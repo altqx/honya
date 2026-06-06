@@ -710,6 +710,7 @@ mod tests {
             client: std::sync::Arc::new(crate::llm::mock::MockClient::default())
                 as std::sync::Arc<dyn crate::llm::client::LlmClient>,
             models: ModelSet::default(),
+            vol: 1,
         }
     }
 

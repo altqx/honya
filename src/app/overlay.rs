@@ -849,7 +849,14 @@ impl Overlay {
             Overlay::Log(_) => &[("jk", "scroll"), ("Esc/l", "close")],
             Overlay::Help(_) => &[("jk", "scroll"), ("Esc/?", "close")],
             Overlay::Modal(dlg) if dlg.alternate.is_some() => {
-                &[("y/↵", "continue"), ("r", "restart"), ("n/Esc", "cancel")]
+                // The two alternate-key modals differ by their alternate key, so
+                // pick a matching footer instead of a single hardcoded label set.
+                match dlg.alternate.as_ref().map(|alt| alt.key) {
+                    // Recovery prompt: Esc/n defers (keeps the checkpoint for next
+                    // launch) rather than discarding, so it reads as "later".
+                    Some('d') => &[("y/↵", "resume"), ("d", "discard"), ("n/Esc", "later")],
+                    _ => &[("y/↵", "continue"), ("r", "restart"), ("n/Esc", "cancel")],
+                }
             }
             Overlay::Modal(_) => &[("y", "confirm"), ("n/Esc", "cancel")],
             Overlay::None => &[],

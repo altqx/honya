@@ -9,6 +9,7 @@ pub mod data_block;
 pub mod glossary;
 pub mod scaffold;
 pub mod scan;
+pub mod session;
 pub mod style;
 pub mod translation;
 pub mod volume;
