@@ -500,7 +500,10 @@ impl Acc {
 /// the Thai is deterministically appended and the Orchestrator metadata turn
 /// runs (`ChunkOutcome::Committed`). Exhausting the attempts no longer fails the
 /// chapter: the last attempt is committed unreviewed and flagged in-file
-/// (`ChunkOutcome::NeedsReview`). A hard Translator/Reviewer error still bails.
+/// (`ChunkOutcome::NeedsReview`). A hard Translator/Reviewer error is treated the
+/// same way — retried while attempts remain, then, if a translation already
+/// exists, committed flagged `NeedsReview` rather than failing the whole chapter.
+/// Only a Translator that never produces *any* translation bails.
 async fn process_chunk(
     ctx: &PipelineCtx,
     chapter: u32,
@@ -528,6 +531,11 @@ async fn process_chunk(
 
     let max = ctx.cfg.max_attempts.max(1);
     let mut feedback: Option<String> = None;
+    // Best translation produced so far. A transient hard error from the Reviewer
+    // (or a later Translator attempt) must not throw away a translation we already
+    // have: we fall back to committing it flagged NeedsReview instead of failing
+    // the whole chapter on one chunk.
+    let mut candidate: Option<String> = None;
 
     for attempt in 1..=max {
         // ---- Translator ----
@@ -568,15 +576,46 @@ async fn process_chunk(
             {
                 Ok(o) => o,
                 Err(e) => {
+                    // A transient Translator failure shouldn't sink the chapter.
+                    // Retry while attempts remain; on the final attempt fall back
+                    // to an earlier good translation (if any) rather than failing.
                     ctx.tx.send(AppEvent::Error {
                         context: format!("translator ch{chapter} chunk{}", chunk.index),
                         msg: e.to_string(),
                     });
-                    anyhow::bail!("translator failed on chunk {}: {e}", chunk.index);
+                    if attempt < max {
+                        emit_attempt_failed_retry(
+                            ctx,
+                            chapter,
+                            chunk,
+                            attempt,
+                            max,
+                            &format!("translator error, retrying: {e}"),
+                        );
+                        continue;
+                    }
+                    match candidate {
+                        Some(thai) => {
+                            return commit_chunk_needs_review(
+                                ctx,
+                                chapter,
+                                chunk,
+                                &thai,
+                                attempt,
+                                format!("translator failed on the final attempt: {e}"),
+                            )
+                            .await;
+                        }
+                        None => anyhow::bail!(
+                            "translator failed on chunk {} with no translation to keep: {e}",
+                            chunk.index
+                        ),
+                    }
                 }
             };
 
         let thai = out.translated_text.clone();
+        candidate = Some(thai.clone());
         let tok = to_tokens(&t_usage);
         acc.fold(&t_usage);
         ctx.tx.send(AppEvent::TranslatorReturned {
@@ -629,11 +668,33 @@ async fn process_chunk(
         {
             Ok(r) => r,
             Err(e) => {
+                // The Reviewer couldn't return a verdict. Don't discard the
+                // translation we have: retry while attempts remain, otherwise
+                // commit it flagged NeedsReview instead of failing the chapter.
                 ctx.tx.send(AppEvent::Error {
                     context: format!("reviewer ch{chapter} chunk{}", chunk.index),
                     msg: e.to_string(),
                 });
-                anyhow::bail!("reviewer failed on chunk {}: {e}", chunk.index);
+                if attempt < max {
+                    emit_attempt_failed_retry(
+                        ctx,
+                        chapter,
+                        chunk,
+                        attempt,
+                        max,
+                        &format!("reviewer error, retrying: {e}"),
+                    );
+                    continue;
+                }
+                return commit_chunk_needs_review(
+                    ctx,
+                    chapter,
+                    chunk,
+                    &thai,
+                    attempt,
+                    format!("reviewer unavailable; committed without review: {e}"),
+                )
+                .await;
             }
         };
         acc.fold(&r_usage);
@@ -707,74 +768,97 @@ async fn process_chunk(
 
         // ---- Rejected ----
         if attempt < max {
-            ctx.tx.send(AppEvent::ChunkStateChanged {
-                chapter,
-                chunk: chunk.index,
-                state: ChunkState::Rejected,
-            });
-            ctx.tx.send(AppEvent::ChunkRetry {
-                chapter,
-                chunk: chunk.index,
-                attempt,
-                max,
-                feedback: fb_text.clone(),
-            });
+            emit_attempt_failed_retry(ctx, chapter, chunk, attempt, max, &fb_text);
             feedback = Some(fb_text);
         } else {
             // ---- Retries exhausted: commit the last attempt unreviewed ----
-            // Resilience: rather than fail the whole chapter on one stubborn
-            // chunk, append the last attempt's Thai with a visible
-            // `[REVIEW NEEDED]` banner so the chapter completes and a human can
-            // fix this one spot later. We deliberately SKIP the Orchestrator
-            // metadata turn so an unreviewed translation can't pollute the
-            // glossary/character roster.
             let reason = if fb_text.is_empty() {
                 "reviewer rejected after max attempts".to_string()
             } else {
                 fb_text
             };
-
-            let bytes = translation::append_chunk_needs_review(
-                &ctx.ws,
-                chapter,
-                chunk.index as u32,
-                &thai,
-                max,
-                &reason,
-            )
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!("append needs-review chunk {} failed: {e}", chunk.index)
-            })?;
-
-            ctx.tx.send(AppEvent::ChunkStateChanged {
-                chapter,
-                chunk: chunk.index,
-                state: ChunkState::NeedsReview,
-            });
-            // Count it as committed (it IS on disk) so the chapter's chunk
-            // progress reads as fully written.
-            ctx.tx.send(AppEvent::ChunkCommitted {
-                chapter,
-                chunk: chunk.index,
-                bytes_written: bytes,
-            });
-            ctx.tx.send(AppEvent::ChunkNeedsReview {
-                chapter,
-                chunk: chunk.index,
-                attempts: attempt,
-                reason,
-            });
-
-            return Ok(ChunkOutcome::NeedsReview);
+            return commit_chunk_needs_review(ctx, chapter, chunk, &thai, max, reason).await;
         }
     }
 
-    // Unreachable: the loop returns Ok on approve and on the final rejection.
+    // Unreachable: the loop returns on approve, on the final rejection, and on a
+    // terminal Translator/Reviewer error.
     anyhow::bail!(
         "chunk {} exhausted attempts without resolution",
         chunk.index
     )
+}
+
+/// Emit the per-attempt "rejected, will retry" event pair the UI renders when an
+/// attempt fails — either a reviewer rejection or a transient hard error — and at
+/// least one more attempt remains.
+fn emit_attempt_failed_retry(
+    ctx: &PipelineCtx,
+    chapter: u32,
+    chunk: &Chunk,
+    attempt: u32,
+    max: u32,
+    feedback: &str,
+) {
+    ctx.tx.send(AppEvent::ChunkStateChanged {
+        chapter,
+        chunk: chunk.index,
+        state: ChunkState::Rejected,
+    });
+    ctx.tx.send(AppEvent::ChunkRetry {
+        chapter,
+        chunk: chunk.index,
+        attempt,
+        max,
+        feedback: feedback.to_string(),
+    });
+}
+
+/// Commit a chunk's best-available translation flagged for manual review, emitting
+/// the same event sequence whether we got here by exhausting review rejections or
+/// by hitting a transient Translator/Reviewer error we couldn't recover from. The
+/// `[REVIEW NEEDED]` banner lets a human find and fix this one spot later; the
+/// Orchestrator metadata turn is deliberately SKIPPED so an unreviewed translation
+/// can't pollute the glossary/character roster.
+async fn commit_chunk_needs_review(
+    ctx: &PipelineCtx,
+    chapter: u32,
+    chunk: &Chunk,
+    thai: &str,
+    attempts: u32,
+    reason: String,
+) -> anyhow::Result<ChunkOutcome> {
+    let bytes = translation::append_chunk_needs_review(
+        &ctx.ws,
+        chapter,
+        chunk.index as u32,
+        thai,
+        attempts,
+        &reason,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("append needs-review chunk {} failed: {e}", chunk.index))?;
+
+    ctx.tx.send(AppEvent::ChunkStateChanged {
+        chapter,
+        chunk: chunk.index,
+        state: ChunkState::NeedsReview,
+    });
+    // Count it as committed (it IS on disk) so the chapter's chunk progress reads
+    // as fully written.
+    ctx.tx.send(AppEvent::ChunkCommitted {
+        chapter,
+        chunk: chunk.index,
+        bytes_written: bytes,
+    });
+    ctx.tx.send(AppEvent::ChunkNeedsReview {
+        chapter,
+        chunk: chunk.index,
+        attempts,
+        reason,
+    });
+
+    Ok(ChunkOutcome::NeedsReview)
 }
 
 fn controlled_terms_for_orchestrator(ws: &Workspace, out: &TranslatorOut) -> Vec<GlossaryTerm> {
@@ -1216,6 +1300,138 @@ mod tests {
         assert!(
             !ctx.contains("王都") && !ctx.contains("ราชธานี"),
             "absent term must NOT balloon the context:\n{ctx}"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A client whose translator always succeeds but whose reviewer always errors
+    /// (a transient hard failure), to exercise the resilience path.
+    struct ReviewerErrorClient;
+
+    #[async_trait::async_trait]
+    impl crate::llm::client::LlmClient for ReviewerErrorClient {
+        async fn chat(
+            &self,
+            req: &crate::llm::ChatRequest,
+        ) -> crate::llm::client::Result<crate::llm::ChatResponse> {
+            let schema_name = match &req.response_format {
+                Some(crate::llm::ResponseFormat::JsonSchema { json_schema }) => {
+                    Some(json_schema.name.as_str())
+                }
+                _ => None,
+            };
+            // The reviewer hard-errors every time (e.g. transport / empty choices).
+            if schema_name == Some("review_result") {
+                return Err(crate::llm::client::LlmError::EmptyChoices);
+            }
+            let content = match schema_name {
+                Some("translation_result") => serde_json::json!({
+                    "thought_process": {"scene_analysis": "(t)", "glossary_check": "(t)"},
+                    "translated_text": "ข้อความแปลภาษาไทย",
+                    "new_characters": [],
+                    "new_terms": [],
+                    "continuity_notes": []
+                })
+                .to_string(),
+                _ => "(orchestrator: no tools)".to_string(),
+            };
+            Ok(crate::llm::ChatResponse {
+                id: Some("reviewer-error-client".to_string()),
+                model: Some("honya/test".to_string()),
+                choices: vec![crate::llm::Choice {
+                    index: 0,
+                    message: crate::llm::ResponseMessage {
+                        role: Some("assistant".to_string()),
+                        content: Some(content),
+                        tool_calls: None,
+                    },
+                    finish_reason: Some("stop".to_string()),
+                }],
+                usage: Some(crate::llm::Usage {
+                    prompt_tokens: 1,
+                    completion_tokens: 1,
+                    total_tokens: 2,
+                    cost: 0.0,
+                    cost_details: None,
+                }),
+            })
+        }
+    }
+
+    /// Regression: a single-chunk chapter whose only chunk hits a transient hard
+    /// Reviewer error must NOT fail the whole chapter. The translation we already
+    /// produced is committed flagged `NeedsReview` so the chapter completes (and
+    /// the Thai is on disk) instead of showing ✗ Failed.
+    #[tokio::test]
+    async fn reviewer_hard_error_degrades_to_needs_review_not_failed() {
+        let (base, ws) = temp_ws("reviewer_err");
+        let raw = "# 第一章\n\nこれは短い章です。";
+        translation::write_raw(&ws, 1, raw).unwrap();
+        // Sanity: this raw really is a single chunk.
+        let cfg = crate::model::AppConfig::default();
+        assert_eq!(
+            chunk_chapter(raw, cfg.chunk_target_tokens, cfg.chunk_hard_cap_tokens).len(),
+            1,
+            "test fixture must produce exactly one chunk"
+        );
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = PipelineCtx {
+            client: std::sync::Arc::new(ReviewerErrorClient)
+                as std::sync::Arc<dyn crate::llm::client::LlmClient>,
+            ws: ws.clone(),
+            models: crate::model::ModelSet::default(),
+            cfg,
+            tx: crate::model::EventTx(tx),
+            ctl: RunControl::new(),
+        };
+        run_pipeline(ctx, vec![1]).await.expect("run_pipeline");
+
+        let mut saw_failed = false;
+        let mut final_state = None;
+        let mut finished = None;
+        let mut retries = 0u32;
+        while let Ok(ev) = rx.try_recv() {
+            match ev {
+                AppEvent::ChapterFailed { .. } => saw_failed = true,
+                AppEvent::ChapterStateChanged { state, .. } => final_state = Some(state),
+                AppEvent::ChunkRetry { .. } => retries += 1,
+                AppEvent::PipelineFinished {
+                    chapters_done,
+                    chapters_failed,
+                    chapters_need_review,
+                    ..
+                } => finished = Some((chapters_done, chapters_failed, chapters_need_review)),
+                _ => {}
+            }
+        }
+
+        assert!(!saw_failed, "a transient reviewer error must not fail the chapter");
+        assert_eq!(
+            final_state,
+            Some(ChapterStatus::NeedsReview),
+            "chapter should complete flagged NeedsReview"
+        );
+        assert_eq!(
+            finished,
+            Some((1, 0, 1)),
+            "1 done (completed), 0 failed, 1 needs review"
+        );
+        assert!(
+            retries >= 2,
+            "the reviewer error should be retried before degrading (got {retries})"
+        );
+
+        // The translation we produced is on disk, flagged for manual review.
+        let translated = translation::read_translated(&ws, 1).await;
+        assert!(
+            translated.contains("ข้อความแปลภาษาไทย"),
+            "the produced translation must be committed, not discarded"
+        );
+        assert!(
+            translated.contains(translation::REVIEW_NEEDED_MARKER),
+            "the committed chunk must carry the review-needed marker"
         );
 
         let _ = std::fs::remove_dir_all(&base);
