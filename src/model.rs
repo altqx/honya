@@ -411,6 +411,9 @@ pub struct VolumeData {
     /// Human proofreading notes anchored to Reader lines in translated chapters.
     #[serde(default)]
     pub annotations: Vec<ReaderAnnotation>,
+    /// User navigation bookmarks anchored to Reader lines.
+    #[serde(default)]
+    pub bookmarks: Vec<ReaderBookmark>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -431,6 +434,23 @@ pub struct ReaderAnnotation {
     pub line: u32,
     /// Human note text, e.g. "awkward phrasing" or "check honorific".
     pub note: String,
+    /// Creation timestamp for sorting/display. Optional keeps old/manual data tolerant.
+    #[serde(default)]
+    pub created_at: Option<DateTime<Utc>>,
+}
+
+/// A user navigation bookmark anchored to a Reader line in a chapter. Like
+/// [`ReaderAnnotation`] but carries no note body — just a jump target plus a short
+/// label (the bookmarked line's text) so the jump picker reads well.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReaderBookmark {
+    /// Chapter number within this volume.
+    pub chapter: u32,
+    /// 1-based line anchor within the chapter (same basis as `ReaderAnnotation.line`).
+    pub line: u32,
+    /// Short label for the picker — typically a preview of the bookmarked line.
+    #[serde(default)]
+    pub label: String,
     /// Creation timestamp for sorting/display. Optional keeps old/manual data tolerant.
     #[serde(default)]
     pub created_at: Option<DateTime<Utc>>,

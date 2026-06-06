@@ -65,6 +65,114 @@ pub fn render(md: &str, base: Color, theme: &Theme, width: usize) -> Vec<Line<'s
     out
 }
 
+/// Tint every occurrence of any string in `needles` across already-rendered
+/// `lines`, merging `over`'s set fields onto each match's existing span style.
+///
+/// Matching is ASCII-case-insensitive plain substring on the visible span text —
+/// exact for CJK/Thai (where case folding is a no-op), forgiving for Latin. Needles
+/// are tried longest-first so a longer term tints before one of its prefixes. Empty
+/// needles are skipped. The Reader uses this to highlight glossary terms and live
+/// search matches without re-parsing Markdown; matching is confined to a single span,
+/// so a term split across styling boundaries (rare) is left untinted rather than
+/// mis-sliced.
+pub fn highlight(lines: &mut [Line<'static>], needles: &[String], over: Style) {
+    let mut active: Vec<&str> = needles
+        .iter()
+        .map(String::as_str)
+        .filter(|n| !n.is_empty())
+        .collect();
+    if active.is_empty() {
+        return;
+    }
+    active.sort_by_key(|n| std::cmp::Reverse(n.len()));
+    active.dedup();
+
+    for line in lines.iter_mut() {
+        let spans = std::mem::take(&mut line.spans);
+        let mut rebuilt: Vec<Span<'static>> = Vec::with_capacity(spans.len());
+        for span in spans {
+            highlight_span(span, &active, over, &mut rebuilt);
+        }
+        line.spans = rebuilt;
+    }
+}
+
+/// Re-emit `span`, splitting out every needle match into its own span tinted with
+/// `over` merged over the span's base style. Non-matching runs keep the base style.
+fn highlight_span(span: Span<'static>, needles: &[&str], over: Style, out: &mut Vec<Span<'static>>) {
+    let base = span.style;
+    let content = span.content.into_owned();
+    if content.is_empty() {
+        out.push(Span::styled(content, base));
+        return;
+    }
+    let hit = merge_style(base, over);
+    let mut cursor = 0usize;
+    while cursor < content.len() {
+        let mut best: Option<(usize, usize)> = None;
+        for &needle in needles {
+            if let Some(rel) = ascii_ci_find(&content[cursor..], needle) {
+                let start = cursor + rel;
+                if best.is_none_or(|(bs, _)| start < bs) {
+                    best = Some((start, start + needle.len()));
+                }
+            }
+        }
+        match best {
+            Some((start, end)) => {
+                if start > cursor {
+                    out.push(Span::styled(content[cursor..start].to_string(), base));
+                }
+                out.push(Span::styled(content[start..end].to_string(), hit));
+                cursor = end;
+            }
+            None => {
+                out.push(Span::styled(content[cursor..].to_string(), base));
+                break;
+            }
+        }
+    }
+}
+
+/// Overlay the set fields of `over` (fg / bg / added modifiers) onto `base`. Avoids
+/// depending on `Style::patch`, and only the fields the Reader highlights need are
+/// merged.
+fn merge_style(base: Style, over: Style) -> Style {
+    let mut merged = base;
+    if let Some(fg) = over.fg {
+        merged = merged.fg(fg);
+    }
+    if let Some(bg) = over.bg {
+        merged = merged.bg(bg);
+    }
+    merged.add_modifier(over.add_modifier)
+}
+
+/// `true` when `needle` occurs in `hay` under ASCII-case-insensitive matching.
+/// Exposed for the Reader's global search (exact for CJK/Thai, case-forgiving for
+/// Latin); an empty needle never matches.
+pub fn contains_ci(hay: &str, needle: &str) -> bool {
+    !needle.is_empty() && ascii_ci_find(hay, needle).is_some()
+}
+
+/// Byte offset of the first ASCII-case-insensitive occurrence of `needle` in `hay`,
+/// or `None`. The returned offset always lands on a UTF-8 boundary: ASCII folding
+/// never changes byte length and bytes ≥ 0x80 must match exactly, so a match cannot
+/// begin mid-codepoint.
+fn ascii_ci_find(hay: &str, needle: &str) -> Option<usize> {
+    let h = hay.as_bytes();
+    let n = needle.as_bytes();
+    if n.is_empty() || n.len() > h.len() {
+        return None;
+    }
+    (0..=(h.len() - n.len())).find(|&i| {
+        h[i..i + n.len()]
+            .iter()
+            .zip(n)
+            .all(|(a, b)| a.eq_ignore_ascii_case(b))
+    })
+}
+
 // ============================================================================
 // termimad → ratatui conversion
 // ============================================================================
@@ -767,6 +875,52 @@ mod tests {
 
     fn first(md: &str) -> Line<'static> {
         render_one(md).into_iter().next().unwrap()
+    }
+
+    #[test]
+    fn ascii_ci_find_is_boundary_safe_and_case_insensitive() {
+        assert_eq!(ascii_ci_find("Hello World", "world"), Some(6));
+        assert_eq!(ascii_ci_find("ABC", "abc"), Some(0));
+        assert_eq!(ascii_ci_find("ไม่เจอ", "xyz"), None);
+        // A CJK needle inside a longer CJK haystack returns a byte (not char) offset
+        // that still lands on a UTF-8 boundary.
+        let off = ascii_ci_find("彼は聖剣を抜いた", "聖剣").unwrap();
+        assert!("彼は聖剣を抜いた".is_char_boundary(off));
+        assert_eq!(&"彼は聖剣を抜いた"[off..off + "聖剣".len()], "聖剣");
+    }
+
+    #[test]
+    fn highlight_tints_matches_and_preserves_other_text() {
+        let mut lines = render_one("the 聖剣 glows");
+        highlight(&mut lines, &["聖剣".to_string()], Style::default().fg(Color::Red));
+        // The visible text is unchanged — only spans were split.
+        assert_eq!(line_text(&lines[0]), "the 聖剣 glows");
+        let tinted = lines[0]
+            .spans
+            .iter()
+            .find(|s| s.content == "聖剣")
+            .expect("term split into its own span");
+        assert_eq!(tinted.style.fg, Some(Color::Red));
+        // Surrounding prose keeps the base color.
+        let plain = lines[0].spans.iter().find(|s| s.content == "the ").unwrap();
+        assert_ne!(plain.style.fg, Some(Color::Red));
+    }
+
+    #[test]
+    fn highlight_longest_needle_wins() {
+        let mut lines = render_one("聖剣騎士");
+        highlight(
+            &mut lines,
+            &["聖剣".to_string(), "聖剣騎士".to_string()],
+            Style::default().fg(Color::Green),
+        );
+        // The longer term tints as one span rather than leaving a "騎士" tail untinted.
+        let tinted = lines[0]
+            .spans
+            .iter()
+            .find(|s| s.style.fg == Some(Color::Green))
+            .expect("a tinted span");
+        assert_eq!(tinted.content, "聖剣騎士");
     }
 
     #[test]

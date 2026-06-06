@@ -244,6 +244,49 @@ fn renders_overlays_without_panic() {
         );
         let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
         term.draw(|f| app.render(f)).unwrap();
+
+        // Reader global-search input.
+        let mut app = fresh_app();
+        app.overlay = Overlay::reader_search();
+        if let Overlay::ReaderSearch(st) = &mut app.overlay {
+            st.query = "聖剣".to_string();
+        }
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| app.render(f)).unwrap();
+
+        // Reader jump/outline picker with a mix of kinds, plus an empty-match filter
+        // to exercise the windowing and "no matches" paths.
+        use crate::app::overlay::{JumpKind, JumpTarget};
+        let targets = vec![
+            JumpTarget {
+                chapter: 1,
+                line: 1,
+                label: "ch 001  第一章  [done]".to_string(),
+                kind: JumpKind::Chapter,
+            },
+            JumpTarget {
+                chapter: 1,
+                line: 12,
+                label: "    序章".to_string(),
+                kind: JumpKind::Section,
+            },
+            JumpTarget {
+                chapter: 2,
+                line: 8,
+                label: "ch 002 L8 · บรรทัดที่คั่นไว้".to_string(),
+                kind: JumpKind::Bookmark,
+            },
+        ];
+        for query in ["", "zzz-no-match"] {
+            let mut app = fresh_app();
+            app.overlay = Overlay::reader_jump("Novel · Vol.01".to_string(), targets.clone());
+            if let Overlay::ReaderJump(st) = &mut app.overlay {
+                st.query = query.to_string();
+                st.sel = 2; // a high index exercises windowing / clamping
+            }
+            let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+            term.draw(|f| app.render(f)).unwrap();
+        }
     }
 }
 

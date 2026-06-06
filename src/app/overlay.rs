@@ -362,6 +362,60 @@ pub struct ReaderNoteState {
     pub text: String,
 }
 
+/// Reader global-search input: a single text field. On commit the App hands the
+/// query to the Reader, which finds matches across both the JA and TH panes.
+#[derive(Debug, Clone)]
+pub struct ReaderSearchState {
+    pub query: String,
+}
+
+/// What a [`JumpTarget`] points at — decides its glyph in the picker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JumpKind {
+    Chapter,
+    Section,
+    Bookmark,
+}
+
+/// One destination in the Reader jump/outline picker: a chapter, a section heading
+/// within the current chapter, or a saved bookmark.
+#[derive(Debug, Clone)]
+pub struct JumpTarget {
+    pub chapter: u32,
+    /// 1-based line to scroll to within the chapter (1 = top).
+    pub line: u32,
+    /// Display label, also matched by the filter query.
+    pub label: String,
+    pub kind: JumpKind,
+}
+
+/// Reader jump/outline picker: a filterable list of chapters, the current chapter's
+/// section headings, and the volume's bookmarks. Built App-side from live state
+/// (like the QA overlay), so the placeholder constructor carries no items.
+#[derive(Debug, Clone)]
+pub struct ReaderJumpState {
+    pub title: String,
+    pub query: String,
+    pub items: Vec<JumpTarget>,
+    pub sel: usize,
+}
+
+impl ReaderJumpState {
+    /// Indices of items whose label contains the (case-insensitive) query.
+    pub fn matches(&self) -> Vec<usize> {
+        if self.query.trim().is_empty() {
+            return (0..self.items.len()).collect();
+        }
+        let q = self.query.to_lowercase();
+        self.items
+            .iter()
+            .enumerate()
+            .filter(|(_, it)| it.label.to_lowercase().contains(&q))
+            .map(|(i, _)| i)
+            .collect()
+    }
+}
+
 // ============================================================================
 // OVERLAY
 // ============================================================================
@@ -386,6 +440,10 @@ pub enum Overlay {
     Qa(QaState),
     /// Reader proofreading note editor, anchored to a translated line.
     ReaderNote(ReaderNoteState),
+    /// Reader global search across both panes (JA + TH).
+    ReaderSearch(ReaderSearchState),
+    /// Reader jump/outline picker (chapters · sections · bookmarks).
+    ReaderJump(ReaderJumpState),
 }
 
 impl Overlay {
@@ -423,6 +481,33 @@ impl Overlay {
             chapter,
             line: line.max(1),
             text: String::new(),
+        })
+    }
+
+    pub fn reader_search() -> Self {
+        Overlay::ReaderSearch(ReaderSearchState {
+            query: String::new(),
+        })
+    }
+
+    /// Jump/outline picker seeded with live targets.
+    pub fn reader_jump(title: String, items: Vec<JumpTarget>) -> Self {
+        Overlay::ReaderJump(ReaderJumpState {
+            title,
+            query: String::new(),
+            items,
+            sel: 0,
+        })
+    }
+
+    /// Placeholder jump picker for the Reader `g` key; the App swaps in the live
+    /// chapter/section/bookmark list on show, mirroring the QA placeholder pattern.
+    pub fn reader_jump_placeholder() -> Self {
+        Overlay::ReaderJump(ReaderJumpState {
+            title: String::new(),
+            query: String::new(),
+            items: Vec::new(),
+            sel: 0,
         })
     }
 
@@ -538,8 +623,10 @@ impl Overlay {
             }
             Overlay::Synopsis(st) => st.phase == SynPhase::Editing,
             Overlay::ReaderNote(_) => true,
-            Overlay::Settings(_) => true, // always editing a field
-            Overlay::Palette(_) => true,  // query field
+            Overlay::ReaderSearch(_) => true, // query field
+            Overlay::ReaderJump(_) => true,   // filter field
+            Overlay::Settings(_) => true,     // always editing a field
+            Overlay::Palette(_) => true,      // query field
             _ => false,
         }
     }
@@ -557,6 +644,8 @@ impl Overlay {
             Overlay::Synopsis(_) => self.handle_synopsis_overlay_key(key),
             Overlay::Qa(_) => self.handle_qa_key(key),
             Overlay::ReaderNote(_) => self.handle_reader_note_key(key),
+            Overlay::ReaderSearch(_) => self.handle_reader_search_key(key),
+            Overlay::ReaderJump(_) => self.handle_reader_jump_key(key),
             Overlay::Log(off) => match key.code {
                 KeyCode::Esc | KeyCode::Char('l') | KeyCode::Char('q') => Action::CloseOverlay,
                 KeyCode::Char('k') | KeyCode::Up => {
@@ -933,6 +1022,88 @@ impl Overlay {
         }
     }
 
+    fn handle_reader_search_key(&mut self, key: KeyEvent) -> Action {
+        let Overlay::ReaderSearch(st) = self else {
+            return Action::None;
+        };
+        match key.code {
+            KeyCode::Esc => Action::CloseOverlay,
+            KeyCode::Enter => {
+                if st.query.trim().is_empty() {
+                    Action::CloseOverlay
+                } else {
+                    Action::ReaderSearch {
+                        query: st.query.clone(),
+                    }
+                }
+            }
+            KeyCode::Backspace => {
+                st.query.pop();
+                Action::None
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                st.query.clear();
+                Action::None
+            }
+            KeyCode::Char(c) => {
+                st.query.push(c);
+                Action::None
+            }
+            _ => Action::None,
+        }
+    }
+
+    fn handle_reader_jump_key(&mut self, key: KeyEvent) -> Action {
+        let Overlay::ReaderJump(st) = self else {
+            return Action::None;
+        };
+        match key.code {
+            KeyCode::Esc => Action::CloseOverlay,
+            // Arrow keys move the cursor; letters type into the filter (palette-style).
+            KeyCode::Up => {
+                st.sel = st.sel.saturating_sub(1);
+                Action::None
+            }
+            KeyCode::Down => {
+                let n = st.matches().len();
+                if n > 0 {
+                    st.sel = (st.sel + 1).min(n - 1);
+                }
+                Action::None
+            }
+            KeyCode::Enter => {
+                let target = st
+                    .matches()
+                    .get(st.sel)
+                    .and_then(|&i| st.items.get(i))
+                    .map(|t| (t.chapter, t.line));
+                match target {
+                    Some((chapter, line)) => {
+                        *self = Overlay::None;
+                        Action::OpenChapterAt { chapter, line }
+                    }
+                    None => Action::CloseOverlay,
+                }
+            }
+            KeyCode::Backspace => {
+                st.query.pop();
+                st.sel = 0;
+                Action::None
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                st.query.clear();
+                st.sel = 0;
+                Action::None
+            }
+            KeyCode::Char(c) => {
+                st.query.push(c);
+                st.sel = 0;
+                Action::None
+            }
+            _ => Action::None,
+        }
+    }
+
     fn handle_synopsis_overlay_key(&mut self, key: KeyEvent) -> Action {
         let Overlay::Synopsis(st) = self else {
             return Action::None;
@@ -976,6 +1147,13 @@ impl Overlay {
             Overlay::Help(_) => &[("jk", "scroll"), ("Esc/?", "close")],
             Overlay::Qa(_) => &[("jk", "move"), ("↵", "jump to chapter"), ("Esc", "close")],
             Overlay::ReaderNote(_) => &[("type", "note"), ("↵", "save"), ("Esc", "cancel")],
+            Overlay::ReaderSearch(_) => &[("type", "query"), ("↵", "search"), ("Esc", "cancel")],
+            Overlay::ReaderJump(_) => &[
+                ("type", "filter"),
+                ("↑↓", "move"),
+                ("↵", "jump"),
+                ("Esc", "close"),
+            ],
             Overlay::Modal(dlg) if dlg.alternate.is_some() => {
                 // The two alternate-key modals differ by their alternate key, so
                 // pick a matching footer instead of a single hardcoded label set.
@@ -1013,6 +1191,8 @@ impl Overlay {
             Overlay::Synopsis(st) => self.render_synopsis(f, area, theme, st),
             Overlay::Qa(st) => self.render_qa(f, area, theme, st),
             Overlay::ReaderNote(st) => self.render_reader_note(f, area, theme, st),
+            Overlay::ReaderSearch(st) => self.render_reader_search(f, area, theme, st),
+            Overlay::ReaderJump(st) => self.render_reader_jump(f, area, theme, st),
         }
     }
 
@@ -1149,6 +1329,147 @@ impl Overlay {
         f.render_widget(
             Paragraph::new(examples).style(Style::default().bg(theme.bg_panel)),
             rows[4],
+        );
+    }
+
+    fn render_reader_search(&self, f: &mut Frame, area: Rect, theme: &Theme, st: &ReaderSearchState) {
+        let modal = centered_modal(64, 7, area);
+        f.render_widget(Clear, modal);
+        let block = self.modal_block("Search · ค้นหา (JA + TH)", theme);
+        let inner = block.inner(modal);
+        f.render_widget(block, modal);
+
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1), // label
+                Constraint::Length(3), // input box
+                Constraint::Min(0),    // hint
+            ])
+            .split(inner);
+
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                "  Find across both panes",
+                Style::default().fg(theme.ink_soft),
+            ))
+            .style(Style::default().bg(theme.bg_panel)),
+            rows[0],
+        );
+
+        let input_block = Block::default()
+            .borders(Borders::ALL)
+            .border_set(theme::hairline_set())
+            .border_style(Style::default().fg(theme.accent_soft))
+            .style(Style::default().bg(theme.bg_inset));
+        let input = if st.query.is_empty() {
+            Line::from(vec![
+                Span::styled(
+                    "聖剣 · ตัวละคร · a phrase to locate…",
+                    Style::default().fg(theme.ink_faint),
+                ),
+                Span::styled("▏", Style::default().fg(theme.stream_cursor)),
+            ])
+        } else {
+            Line::from(vec![
+                Span::styled(
+                    truncate_cols(
+                        &thai_display_safe(&st.query),
+                        rows[1].width.saturating_sub(6) as usize,
+                    ),
+                    Style::default().fg(theme.ink),
+                ),
+                Span::styled("▏", Style::default().fg(theme.stream_cursor)),
+            ])
+        };
+        f.render_widget(Paragraph::new(input).block(input_block), indent(rows[1], 2));
+
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                "  Enter searches; then  >  next  ·  <  prev  ·  Esc clears.",
+                Style::default().fg(theme.ink_faint),
+            ))
+            .style(Style::default().bg(theme.bg_panel)),
+            rows[2],
+        );
+    }
+
+    fn render_reader_jump(&self, f: &mut Frame, area: Rect, theme: &Theme, st: &ReaderJumpState) {
+        let modal = centered_modal(72, 24, area);
+        f.render_widget(Clear, modal);
+        let title = if st.title.is_empty() {
+            "Jump · ไปยัง".to_string()
+        } else {
+            format!("Jump · {}", st.title)
+        };
+        let block = self.modal_block(&title, theme);
+        let inner = block.inner(modal);
+        f.render_widget(block, modal);
+
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(2), Constraint::Min(0)])
+            .split(inner);
+
+        // Filter line.
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("  / ", Style::default().fg(theme.accent)),
+                Span::styled(thai_display_safe(&st.query), Style::default().fg(theme.ink)),
+                Span::styled("▏", Style::default().fg(theme.stream_cursor)),
+            ]))
+            .style(Style::default().bg(theme.bg_panel)),
+            rows[0],
+        );
+
+        let matches = st.matches();
+        if matches.is_empty() {
+            f.render_widget(
+                Paragraph::new(Span::styled(
+                    "   no matches",
+                    Style::default().fg(theme.ink_faint),
+                ))
+                .style(Style::default().bg(theme.bg_panel)),
+                rows[1],
+            );
+            return;
+        }
+
+        // Window the rows so the selection stays visible (theme/QA pattern).
+        let cap = (rows[1].height as usize).max(1);
+        let sel = st.sel.min(matches.len() - 1);
+        let start = if sel >= cap { sel + 1 - cap } else { 0 };
+        let end = (start + cap).min(matches.len());
+        let width = rows[1].width.saturating_sub(6) as usize;
+
+        let mut lines = Vec::with_capacity(end - start);
+        for (row, &idx) in matches.iter().enumerate().take(end).skip(start) {
+            let item = &st.items[idx];
+            let selected = row == sel;
+            let bar = if selected {
+                theme::SELECT_BAR.to_string()
+            } else {
+                " ".to_string()
+            };
+            let (glyph, glyph_color) = match item.kind {
+                JumpKind::Chapter => ("▣", theme.accent_soft),
+                JumpKind::Section => ("§", theme.ink_soft),
+                JumpKind::Bookmark => ("★", theme.status_warn),
+            };
+            let label_style = if selected {
+                Style::default().fg(theme.ink).bg(theme.accent_bg)
+            } else {
+                Style::default().fg(theme.ink_soft)
+            };
+            lines.push(Line::from(vec![
+                Span::styled(format!(" {bar} "), Style::default().fg(theme.accent)),
+                Span::styled(format!("{glyph} "), Style::default().fg(glyph_color)),
+                Span::styled(truncate_cols(&item.label, width), label_style),
+            ]));
+        }
+        f.render_widget(
+            Paragraph::new(lines).style(Style::default().bg(theme.bg_panel)),
+            rows[1],
         );
     }
 
@@ -1633,8 +1954,14 @@ impl Overlay {
                     ("jk / ↑↓", "scroll (synced)"),
                     ("[ ]", "prev · next chapter"),
                     ("z / w / o", "sync · wrap · layout"),
+                    ("/  > <", "search JA+TH · next · prev match"),
+                    ("g", "jump (chapters · sections · marks)"),
+                    ("G", "toggle glossary highlight"),
+                    ("r", "next [REVIEW NEEDED] in chapter"),
+                    ("s", "show source for this TH chunk"),
+                    ("m", "toggle bookmark at this line"),
                     ("n / N", "add note · show/hide notes"),
-                    ("y", "copy visible Thai"),
+                    ("d / y", "rerun diff · copy visible Thai"),
                     ("Q", "QA review (flagged issues)"),
                 ],
             ),

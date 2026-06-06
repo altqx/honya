@@ -18,7 +18,9 @@ fn chunk_marker(n: u32) -> String {
     format!("{CHUNK_MARKER_PREFIX}{n}{CHUNK_MARKER_SUFFIX}")
 }
 
-fn parse_chunk_marker(line: &str) -> Option<u32> {
+/// Parse a `<!-- honya:chunk N -->` line, returning its 0-based chunk index. Public
+/// so the Reader can map a TH line back to the chunk it belongs to (source align).
+pub fn parse_chunk_marker(line: &str) -> Option<u32> {
     let trimmed = line.trim();
     let n = trimmed
         .strip_prefix(CHUNK_MARKER_PREFIX)?

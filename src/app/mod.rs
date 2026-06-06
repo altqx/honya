@@ -34,7 +34,7 @@ use crate::ui::text::{thai_display_safe, truncate_cols};
 use crate::workspace::Workspace;
 
 use self::lexicon::LexiconScreen;
-use self::overlay::Overlay;
+use self::overlay::{JumpKind, JumpTarget, Overlay};
 use self::project::ProjectScreen;
 use self::reader::ReaderScreen;
 use self::shelf::ShelfScreen;
@@ -109,6 +109,21 @@ pub enum Action {
     OpenProject(String),
     OpenChapter {
         chapter: u32,
+    },
+    /// Open a chapter and scroll to a 1-based line (jump-to-section / bookmark).
+    OpenChapterAt {
+        chapter: u32,
+        line: u32,
+    },
+    /// Run a Reader global search across both panes for `query`.
+    ReaderSearch {
+        query: String,
+    },
+    /// Toggle a navigation bookmark at a Reader line (add if absent, else remove).
+    ToggleReaderBookmark {
+        chapter: u32,
+        line: u32,
+        label: String,
     },
     /// User request to translate these chapters. The App may first ask whether
     /// to resume existing chunk markers or restart from scratch.
@@ -268,6 +283,10 @@ impl App {
             shelf.select_first();
         }
         let theme = cfg.theme.build();
+        // Seed the Reader's chunk budgets from config so `s` (show source) re-derives
+        // JA chunk boundaries the same way the pipeline did.
+        let mut reader = ReaderScreen::new();
+        reader.set_chunk_cfg(cfg.chunk_target_tokens, cfg.chunk_hard_cap_tokens);
         Self {
             running: true,
             screen: Screen::Shelf,
@@ -281,7 +300,7 @@ impl App {
             shelf,
             project: ProjectScreen::new(),
             translate: TranslateScreen::new(),
-            reader: ReaderScreen::new(),
+            reader,
             lexicon: LexiconScreen::new(),
             toast: None,
             run_active: false,
@@ -962,6 +981,9 @@ impl App {
                     // QA placeholders (palette / screen `Q`) carry no data; rebuild
                     // the report from the live active project on show.
                     Overlay::Qa(_) => self.build_qa_overlay(),
+                    // Reader jump placeholders carry no targets; rebuild the
+                    // chapter/section/bookmark list from live state on show.
+                    Overlay::ReaderJump(_) => self.build_jump_overlay(),
                     other => other,
                 };
             }
@@ -973,6 +995,29 @@ impl App {
             }
             Action::OpenChapter { chapter } => {
                 self.open_chapter(chapter);
+            }
+            Action::OpenChapterAt { chapter, line } => {
+                self.open_chapter(chapter);
+                // open_chapter only navigates on success; scroll only when it landed.
+                if matches!(self.screen, Screen::Reader) && self.reader.current_chapter() == chapter
+                {
+                    self.reader.scroll_to_line(line);
+                }
+            }
+            Action::ReaderSearch { query } => {
+                let count = self.reader.run_search(&query);
+                self.toast = Some(if count == 0 {
+                    Toast::info(format!("no matches for “{}”", query.trim()))
+                } else {
+                    Toast::info(format!("{count} match(es) · > next · < prev"))
+                });
+            }
+            Action::ToggleReaderBookmark {
+                chapter,
+                line,
+                label,
+            } => {
+                self.toggle_reader_bookmark(chapter, line, label);
             }
             Action::ImportEpub {
                 epub,
@@ -1531,6 +1576,83 @@ impl App {
         }
     }
 
+    /// Toggle a navigation bookmark at a Reader line, persist it, and refresh the
+    /// Reader's badge. Mirrors `save_reader_note`'s validation/feedback shape.
+    fn toggle_reader_bookmark(&mut self, chapter: u32, line: u32, label: String) {
+        let Some(active) = self.active.as_ref() else {
+            self.toast = Some(Toast::warn("no project open"));
+            return;
+        };
+        let workspace = active.workspace.clone();
+        let line = line.max(1);
+        match crate::workspace::volume::toggle_reader_bookmark(&workspace, chapter, line, &label) {
+            Ok(added) => {
+                self.reader.reload_bookmarks(&workspace);
+                self.toast = Some(Toast::info(if added {
+                    format!("bookmarked · ch {chapter:03} L{line}")
+                } else {
+                    format!("bookmark removed · ch {chapter:03} L{line}")
+                }));
+            }
+            Err(e) => self.toast = Some(Toast::error(format!("bookmark failed: {e}"))),
+        }
+    }
+
+    /// Build the Reader jump/outline picker: every chapter in the active volume, the
+    /// current chapter's section headings nested beneath it, and the volume's
+    /// bookmarks. With no project open the picker still shows (empty) for feedback.
+    fn build_jump_overlay(&self) -> Overlay {
+        let Some(active) = self.active.as_ref() else {
+            return Overlay::reader_jump("(no project open)".to_string(), Vec::new());
+        };
+        let title = format!("{} · Vol.{:02}", active.project.title, active.vol);
+        let current = self.reader.current_chapter();
+        let mut items: Vec<JumpTarget> = Vec::new();
+
+        if let Some(volume) = active.project.volumes.iter().find(|v| v.number == active.vol) {
+            for ch in &volume.chapters {
+                items.push(JumpTarget {
+                    chapter: ch.number,
+                    line: 1,
+                    label: format!(
+                        "ch {:03}  {}  [{}]",
+                        ch.number,
+                        ch.title,
+                        status_tag(ch.status)
+                    ),
+                    kind: JumpKind::Chapter,
+                });
+                if ch.number == current {
+                    for (line, level, text) in self.reader.outline() {
+                        let indent = "  ".repeat(level.min(4).saturating_sub(1) as usize);
+                        items.push(JumpTarget {
+                            chapter: current,
+                            line,
+                            label: format!("    {indent}{text}"),
+                            kind: JumpKind::Section,
+                        });
+                    }
+                }
+            }
+        }
+
+        for b in crate::workspace::volume::reader_bookmarks(&active.workspace) {
+            let label = if b.label.trim().is_empty() {
+                format!("ch {:03} L{}", b.chapter, b.line)
+            } else {
+                format!("ch {:03} L{} · {}", b.chapter, b.line, b.label)
+            };
+            items.push(JumpTarget {
+                chapter: b.chapter,
+                line: b.line,
+                label,
+                kind: JumpKind::Bookmark,
+            });
+        }
+
+        Overlay::reader_jump(title, items)
+    }
+
     pub fn render(&mut self, f: &mut Frame) {
         let area = f.area();
         let show_toast = self.toast.is_some();
@@ -1863,6 +1985,18 @@ fn chapter_list_preview(chapters: &[u32]) -> String {
 /// The working root we scan for projects / unimported epubs. Falls back to `.`.
 fn working_root() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+}
+
+/// Compact chapter-status tag for the Reader jump picker labels.
+fn status_tag(status: ChapterStatus) -> &'static str {
+    match status {
+        ChapterStatus::Pending => "·",
+        ChapterStatus::Chunking | ChapterStatus::Translating | ChapterStatus::Reviewing => "…",
+        ChapterStatus::Appended | ChapterStatus::Done => "done",
+        ChapterStatus::NeedsReview => "review",
+        ChapterStatus::Failed => "failed",
+        ChapterStatus::Paused => "paused",
+    }
 }
 
 /// Filesystem-safe slug: ASCII lowered, punctuation runs → single `-`; non-ASCII (CJK/Thai) preserved verbatim.

@@ -4,8 +4,8 @@
 use chrono::{DateTime, Utc};
 
 use crate::model::{
-    ChapterRun, ContinuityNote, ReaderAnnotation, RunHistoryEntry, RunHistoryStatus, UsageStats,
-    VolumeData,
+    ChapterRun, ContinuityNote, ReaderAnnotation, ReaderBookmark, RunHistoryEntry,
+    RunHistoryStatus, UsageStats, VolumeData,
 };
 use crate::workspace::Workspace;
 use crate::workspace::data_block;
@@ -72,6 +72,44 @@ pub fn reader_annotations(ws: &Workspace, chapter: u32) -> Vec<ReaderAnnotation>
         .collect();
     annotations.sort_by_key(|annotation| (annotation.line, annotation.created_at));
     annotations
+}
+
+/// Toggle a navigation bookmark at `chapter`/`line`: remove an existing bookmark on
+/// that exact line, otherwise add one. Returns `true` when a bookmark was added,
+/// `false` when one was removed — the caller surfaces the right toast. The `line` is
+/// normalized to 1-based to match annotation anchoring.
+pub fn toggle_reader_bookmark(
+    ws: &Workspace,
+    chapter: u32,
+    line: u32,
+    label: &str,
+) -> std::io::Result<bool> {
+    let line = line.max(1);
+    let mut data = load(ws);
+    if let Some(pos) = data
+        .bookmarks
+        .iter()
+        .position(|b| b.chapter == chapter && b.line == line)
+    {
+        data.bookmarks.remove(pos);
+        write(ws, &data)?;
+        return Ok(false);
+    }
+    data.bookmarks.push(ReaderBookmark {
+        chapter,
+        line,
+        label: label.trim().to_string(),
+        created_at: Some(Utc::now()),
+    });
+    write(ws, &data)?;
+    Ok(true)
+}
+
+/// Return every bookmark in the volume, sorted by (chapter, line) for the picker.
+pub fn reader_bookmarks(ws: &Workspace) -> Vec<ReaderBookmark> {
+    let mut bookmarks = load(ws).bookmarks;
+    bookmarks.sort_by_key(|b| (b.chapter, b.line, b.created_at));
+    bookmarks
 }
 
 /// Add one run's usage `delta` to a chapter's cumulative lifetime total and
@@ -447,6 +485,25 @@ pub fn render_body(data: &VolumeData) -> String {
             ));
         }
     }
+    s.push('\n');
+
+    s.push_str("## ที่คั่นหน้า (Bookmarks)\n\n");
+    if data.bookmarks.is_empty() {
+        s.push_str("_ยังไม่มีที่คั่นหน้า_\n");
+    } else {
+        let mut bookmarks: Vec<&ReaderBookmark> = data.bookmarks.iter().collect();
+        bookmarks.sort_by_key(|b| (b.chapter, b.line, b.created_at));
+        s.push_str("| บท | บรรทัด | ข้อความ |\n");
+        s.push_str("|----|---------:|--------|\n");
+        for bookmark in bookmarks {
+            s.push_str(&format!(
+                "| {} | {} | {} |\n",
+                bookmark.chapter,
+                bookmark.line,
+                cell(&bookmark.label),
+            ));
+        }
+    }
 
     s
 }
@@ -545,6 +602,28 @@ mod tests {
         let body = std::fs::read_to_string(ws.volume_md()).unwrap();
         assert!(body.contains("Reader Annotations"));
         assert!(body.contains("check honorific"));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn reader_bookmarks_toggle_and_render() {
+        let (base, ws) = temp_ws("bookmarks");
+
+        // First toggle adds; the helper reports `true` (added).
+        assert!(toggle_reader_bookmark(&ws, 3, 0, "  สวัสดี  ").unwrap());
+        let bookmarks = reader_bookmarks(&ws);
+        assert_eq!(bookmarks.len(), 1);
+        assert_eq!(bookmarks[0].line, 1, "line anchors are 1-based");
+        assert_eq!(bookmarks[0].label, "สวัสดี", "label is trimmed");
+
+        let body = std::fs::read_to_string(ws.volume_md()).unwrap();
+        assert!(body.contains("Bookmarks"));
+        assert!(body.contains("สวัสดี"));
+
+        // A second toggle on the same (normalized) line removes it and reports `false`.
+        assert!(!toggle_reader_bookmark(&ws, 3, 1, "ignored").unwrap());
+        assert!(reader_bookmarks(&ws).is_empty(), "toggle removes the bookmark");
 
         let _ = std::fs::remove_dir_all(&base);
     }
