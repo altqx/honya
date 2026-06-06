@@ -178,6 +178,66 @@ fn renders_overlays_without_panic() {
             Overlay::synopsis_edit("あらすじの原文".to_string(), "เรื่องย่อภาษาไทย".to_string());
         let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
         term.draw(|f| app.render(f)).unwrap();
+
+        // QA inbox: grouped findings (review chunks, a failed chapter, continuity
+        // warning/conflict, an unanchored note) with a mid-list selection.
+        use crate::app::qa::{QaIssue, QaKind, QaReport, Severity};
+        let review = |chapter: u32, chunk: u32, detail: &str| QaIssue {
+            chapter: Some(chapter),
+            title: format!("第{chapter}章"),
+            kind: QaKind::ReviewChunk { chunk },
+            detail: detail.to_string(),
+        };
+        let report = QaReport {
+            done: 2,
+            review: 1,
+            failed: 1,
+            issues: vec![
+                review(3, 4, "meaning drift on the final sentence"),
+                review(3, 8, "honorific mismatch"),
+                QaIssue {
+                    chapter: Some(7),
+                    title: "第七章".to_string(),
+                    kind: QaKind::ChapterFailed,
+                    detail: String::new(),
+                },
+                QaIssue {
+                    chapter: Some(11),
+                    title: "第十一章".to_string(),
+                    kind: QaKind::Continuity {
+                        severity: Severity::Conflict,
+                    },
+                    detail: "name romanization differs from the glossary".to_string(),
+                },
+                QaIssue {
+                    chapter: None,
+                    title: String::new(),
+                    kind: QaKind::Continuity {
+                        severity: Severity::Warning,
+                    },
+                    detail: "timeline ambiguity".to_string(),
+                },
+            ],
+        };
+        let mut app = fresh_app();
+        app.overlay = Overlay::qa("Novel · Vol.01".to_string(), report);
+        if let Overlay::Qa(st) = &mut app.overlay {
+            st.sel = 3; // a continuity row, mid-list (exercises windowing)
+        }
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| app.render(f)).unwrap();
+
+        // QA inbox, empty (all-clear) state.
+        let mut app = fresh_app();
+        app.overlay = Overlay::qa(
+            "Novel · Vol.01".to_string(),
+            QaReport {
+                done: 4,
+                ..QaReport::default()
+            },
+        );
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| app.render(f)).unwrap();
     }
 }
 
@@ -722,6 +782,112 @@ fn resume_with_missing_project_clears_and_reports() {
         std::env::remove_var("HONYA_SESSION_FILE");
     }
     let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// The QA inbox gathers the active volume's flagged issues from disk — a
+/// review-needed chunk (with the reviewer's reason) and a failed chapter — and
+/// Enter on a finding closes the overlay and jumps to that chapter in the Reader.
+#[tokio::test]
+async fn qa_overlay_gathers_and_navigates() {
+    use crate::app::qa::{self, QaKind};
+    use crate::model::{Chapter, ChapterKind, ChapterStatus, Project, UsageStats, Volume};
+    use crate::workspace::Workspace;
+
+    let dir = std::env::temp_dir().join(format!("honya_qa_nav_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let ws = Workspace::new(dir.clone(), 1);
+
+    // Flag chunk 5 (index 4) of chapter 3 as review-needed on disk, with a reason.
+    crate::workspace::translation::append_chunk_needs_review(
+        &ws,
+        3,
+        4,
+        "คำแปลที่ยังไม่ผ่านการตรวจ",
+        3,
+        "meaning drift on the final line",
+    )
+    .await
+    .unwrap();
+
+    let chapter = |n: u32, status: ChapterStatus| Chapter {
+        number: n,
+        title: format!("第{n}章"),
+        kind: ChapterKind::Prose,
+        status,
+        source_segments: 1,
+        total_chunks: 0,
+        committed_chunks: 0,
+        last_run: None,
+        usage: UsageStats::default(),
+    };
+    let project = Project {
+        id: "novel".to_string(),
+        dir: dir.clone(),
+        title: "Novel".to_string(),
+        created: None,
+        touched: None,
+        volumes: vec![Volume {
+            number: 1,
+            dir: dir.join("Vol_01"),
+            label: None,
+            chapters: vec![
+                chapter(3, ChapterStatus::NeedsReview),
+                chapter(7, ChapterStatus::Failed),
+            ],
+        }],
+        models: None,
+    };
+    let active = ActiveProject {
+        project,
+        workspace: Workspace::new(dir.clone(), 1),
+        client: Arc::new(crate::llm::mock::MockClient::default())
+            as Arc<dyn crate::llm::client::LlmClient>,
+        models: ModelSet::default(),
+        vol: 1,
+    };
+
+    // collect() surfaces the review chunk (with reason) and the failed chapter.
+    let report = qa::collect(&active);
+    assert_eq!(report.review, 1, "one NeedsReview chapter counted");
+    assert_eq!(report.failed, 1, "one failed chapter counted");
+    let review = report
+        .issues
+        .iter()
+        .find(|i| matches!(i.kind, QaKind::ReviewChunk { chunk: 4 }))
+        .expect("review-needed chunk surfaced");
+    assert_eq!(review.chapter, Some(3));
+    assert!(
+        review.detail.contains("meaning drift"),
+        "reviewer reason surfaced: {:?}",
+        review.detail
+    );
+    assert!(
+        report
+            .issues
+            .iter()
+            .any(|i| matches!(i.kind, QaKind::ChapterFailed) && i.chapter == Some(7)),
+        "failed chapter surfaced as a finding"
+    );
+    // Sorted by chapter → the first finding belongs to chapter 3.
+    assert_eq!(report.issues.first().and_then(|i| i.chapter), Some(3));
+
+    // Enter on the first finding closes the overlay and jumps to its chapter.
+    let mut app = fresh_app();
+    app.active = Some(active);
+    app.screen = Screen::Project;
+    app.overlay = Overlay::qa("Novel · Vol.01".to_string(), report);
+    app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+    assert!(
+        matches!(app.overlay, Overlay::None),
+        "QA overlay closes on Enter"
+    );
+    assert_eq!(
+        app.screen,
+        Screen::Reader,
+        "Enter on a finding jumps to the Reader"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 fn build_sample_epub(path: &std::path::Path) {

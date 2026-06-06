@@ -15,6 +15,7 @@ use crate::theme::{self, Theme};
 use crate::workspace::Workspace;
 
 use super::Action;
+use super::overlay::Overlay;
 
 /// Layout modes for `o`.
 const MODE_SPLIT: u8 = 0;
@@ -116,6 +117,8 @@ impl ReaderScreen {
                 // keep it a no-op here so the build never depends on a clipboard dep.
                 Action::None
             }
+            // Translation QA inbox (App rebuilds the report from the live project).
+            KeyCode::Char('Q') => Action::show_overlay(Overlay::qa_placeholder()),
             _ => Action::None,
         }
     }
@@ -299,6 +302,7 @@ impl ReaderScreen {
             ("o", "layout"),
             ("w", "wrap"),
             ("y", "copy"),
+            ("Q", "QA"),
         ]
     }
 }

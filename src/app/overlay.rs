@@ -21,6 +21,7 @@ use crate::ui::layout::{centered_modal, centered_pct};
 use crate::ui::text::{thai_display_safe, truncate_cols};
 use crate::ui::widgets::render_gauge;
 
+use super::qa;
 use super::{Action, Screen, slugify};
 
 // ============================================================================
@@ -288,6 +289,10 @@ impl PaletteState {
                 action: Action::show_overlay(Overlay::Help(0)),
             },
             PaletteItem {
+                label: "QA review レビュー",
+                action: Action::show_overlay(Overlay::qa_placeholder()),
+            },
+            PaletteItem {
                 label: "Activity log",
                 action: Action::show_overlay(Overlay::Log(0)),
             },
@@ -336,6 +341,18 @@ pub struct DialogAlternate {
     pub action: Action,
 }
 
+/// Snapshot of the active volume's QA report, navigated in the QA overlay. Built
+/// once when the overlay opens (like the palette / settings snapshots).
+#[derive(Debug, Clone)]
+pub struct QaState {
+    /// Header label (`project · Vol.NN`), or a "no project" note.
+    pub title: String,
+    /// Issues + chapter-level counts, gathered at open time.
+    pub report: qa::QaReport,
+    /// Selected finding index into `report.issues`.
+    pub sel: usize,
+}
+
 // ============================================================================
 // OVERLAY
 // ============================================================================
@@ -355,6 +372,9 @@ pub enum Overlay {
     Modal(Dialog),
     /// Standalone volume-synopsis editor (re-opened from the Project screen).
     Synopsis(SynopsisState),
+    /// Translation QA inbox — per-chapter issue counts + navigable findings, opened
+    /// from the Project or Reader tab (Enter jumps to the chapter in the Reader).
+    Qa(QaState),
 }
 
 impl Overlay {
@@ -385,6 +405,26 @@ impl Overlay {
     /// Standalone synopsis editor seeded from a volume's stored raw/Thai.
     pub fn synopsis_edit(raw: String, th: String) -> Self {
         Overlay::Synopsis(SynopsisState::new(raw, th))
+    }
+
+    /// QA overlay seeded with a freshly-gathered report.
+    pub fn qa(title: String, report: qa::QaReport) -> Self {
+        Overlay::Qa(QaState {
+            title,
+            report,
+            sel: 0,
+        })
+    }
+
+    /// Placeholder QA overlay for the palette / screen `Q`; the App swaps in the
+    /// live report (gathered from the active project) on show, mirroring the
+    /// Settings/Theme placeholder pattern.
+    pub fn qa_placeholder() -> Self {
+        Overlay::Qa(QaState {
+            title: String::new(),
+            report: qa::QaReport::default(),
+            sel: 0,
+        })
     }
 
     pub fn confirm(title: impl Into<String>, body: impl Into<String>, confirm: Action) -> Self {
@@ -495,6 +535,7 @@ impl Overlay {
             Overlay::Palette(_) => self.handle_palette_key(key),
             Overlay::Modal(_) => self.handle_modal_key(key),
             Overlay::Synopsis(_) => self.handle_synopsis_overlay_key(key),
+            Overlay::Qa(_) => self.handle_qa_key(key),
             Overlay::Log(off) => match key.code {
                 KeyCode::Esc | KeyCode::Char('l') | KeyCode::Char('q') => Action::CloseOverlay,
                 KeyCode::Char('k') | KeyCode::Up => {
@@ -807,6 +848,43 @@ impl Overlay {
         }
     }
 
+    fn handle_qa_key(&mut self, key: KeyEvent) -> Action {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q') => Action::CloseOverlay,
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let Overlay::Qa(st) = self {
+                    let n = st.report.issues.len();
+                    if n > 0 {
+                        st.sel = (st.sel + 1).min(n - 1);
+                    }
+                }
+                Action::None
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let Overlay::Qa(st) = self {
+                    st.sel = st.sel.saturating_sub(1);
+                }
+                Action::None
+            }
+            KeyCode::Enter => {
+                // Resolve the selected finding's chapter, then close + jump. A note
+                // not anchored to a chapter has nothing to open, so it's a no-op.
+                let target = match self {
+                    Overlay::Qa(st) => st.report.issues.get(st.sel).and_then(|i| i.chapter),
+                    _ => None,
+                };
+                match target {
+                    Some(chapter) => {
+                        *self = Overlay::None;
+                        Action::OpenChapter { chapter }
+                    }
+                    None => Action::None,
+                }
+            }
+            _ => Action::None,
+        }
+    }
+
     fn handle_synopsis_overlay_key(&mut self, key: KeyEvent) -> Action {
         let Overlay::Synopsis(st) = self else {
             return Action::None;
@@ -848,6 +926,7 @@ impl Overlay {
             ],
             Overlay::Log(_) => &[("jk", "scroll"), ("Esc/l", "close")],
             Overlay::Help(_) => &[("jk", "scroll"), ("Esc/?", "close")],
+            Overlay::Qa(_) => &[("jk", "move"), ("↵", "open in Reader"), ("Esc", "close")],
             Overlay::Modal(dlg) if dlg.alternate.is_some() => {
                 // The two alternate-key modals differ by their alternate key, so
                 // pick a matching footer instead of a single hardcoded label set.
@@ -883,6 +962,7 @@ impl Overlay {
             Overlay::Help(off) => self.render_help(f, area, theme, *off),
             Overlay::Modal(dlg) => self.render_modal(f, area, theme, dlg),
             Overlay::Synopsis(st) => self.render_synopsis(f, area, theme, st),
+            Overlay::Qa(st) => self.render_qa(f, area, theme, st),
         }
     }
 
@@ -1394,6 +1474,7 @@ impl Overlay {
                     ("h / l", "collapse · expand / focus"),
                     ("e", "edit context (Lexicon)"),
                     ("y", "volume synopsis (translate/reroll)"),
+                    ("Q", "QA review (flagged issues)"),
                 ],
             ),
             (
@@ -1412,6 +1493,7 @@ impl Overlay {
                     ("[ ]", "prev · next chapter"),
                     ("z / w / o", "sync · wrap · layout"),
                     ("y", "copy visible Thai"),
+                    ("Q", "QA review (flagged issues)"),
                 ],
             ),
             (
@@ -1450,6 +1532,201 @@ impl Overlay {
                 .scroll((off, 0))
                 .style(Style::default().bg(theme.bg_panel)),
             inner,
+        );
+    }
+
+    /// Render the QA inbox: a chapter-level summary header over a navigable list of
+    /// findings grouped by chapter (each group headed by its issue count). The list
+    /// windows so the selected finding stays visible; one line per finding keeps the
+    /// selection index aligned with the rendered rows.
+    fn render_qa(&self, f: &mut Frame, area: Rect, theme: &Theme, st: &QaState) {
+        let modal = centered_pct(80, 80, area);
+        f.render_widget(Clear, modal);
+        let block = self.modal_block("Translation QA · レビュー", theme);
+        let inner = block.inner(modal);
+        f.render_widget(block, modal);
+
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(2), // title + summary counts
+                Constraint::Length(1), // divider
+                Constraint::Min(0),    // grouped findings
+            ])
+            .split(inner);
+
+        let report = &st.report;
+
+        // --- header: volume label + chapter-level summary counts ---
+        let title = if st.title.is_empty() {
+            "Translation QA".to_string()
+        } else {
+            st.title.clone()
+        };
+        let mut counts = vec![
+            Span::styled(
+                format!(" ✓ {} done", report.done),
+                Style::default().fg(theme.status_done),
+            ),
+            Span::styled("    ", Style::default().fg(theme.ink_faint)),
+            Span::styled(
+                format!("⚠ {} review", report.review),
+                Style::default().fg(if report.review > 0 {
+                    theme.status_warn
+                } else {
+                    theme.ink_faint
+                }),
+            ),
+            Span::styled("    ", Style::default().fg(theme.ink_faint)),
+            Span::styled(
+                format!("✗ {} failed", report.failed),
+                Style::default().fg(if report.failed > 0 {
+                    theme.status_failed
+                } else {
+                    theme.ink_faint
+                }),
+            ),
+        ];
+        if let Some(pct) = report.clean_pct() {
+            counts.push(Span::styled("     ", Style::default().fg(theme.ink_faint)));
+            counts.push(Span::styled(
+                format!("{pct}% clean"),
+                Style::default()
+                    .fg(theme.ink_soft)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+        let header = vec![
+            Line::from(Span::styled(
+                format!(
+                    " {}",
+                    truncate_cols(
+                        &thai_display_safe(&title),
+                        rows[0].width.saturating_sub(2) as usize,
+                    )
+                ),
+                Style::default()
+                    .fg(theme.ink_soft)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(counts),
+        ];
+        f.render_widget(
+            Paragraph::new(header).style(Style::default().bg(theme.bg_panel)),
+            rows[0],
+        );
+
+        // --- divider ---
+        if rows[1].width > 0 {
+            f.render_widget(
+                Paragraph::new("─".repeat(rows[1].width as usize))
+                    .style(Style::default().fg(theme.rule).bg(theme.bg_panel)),
+                rows[1],
+            );
+        }
+
+        // --- findings list ---
+        let list_area = rows[2];
+        let n = report.issues.len();
+
+        if n == 0 {
+            let (msg, color) = if report.done + report.review + report.failed == 0 {
+                (
+                    "   ยังไม่มีบทที่แปล — nothing translated yet for this volume.",
+                    theme.ink_faint,
+                )
+            } else {
+                ("   ✓ All clear — no QA issues for this volume.", theme.status_done)
+            };
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(msg, Style::default().fg(color))))
+                    .style(Style::default().bg(theme.bg_panel)),
+                list_area,
+            );
+            return;
+        }
+
+        let sel = st.sel.min(n - 1);
+        let detail_w = (list_area.width as usize).saturating_sub(14);
+
+        let mut lines: Vec<Line> = Vec::new();
+        let mut sel_line = 0usize;
+        let mut prev: Option<Option<u32>> = None;
+        for (i, issue) in report.issues.iter().enumerate() {
+            if prev != Some(issue.chapter) {
+                prev = Some(issue.chapter);
+                let count = report.count_for(issue.chapter);
+                let ch_label = match issue.chapter {
+                    Some(c) => format!(" ch {c:03}"),
+                    None => " ch —".to_string(),
+                };
+                let mut head = vec![Span::styled(
+                    ch_label,
+                    Style::default()
+                        .fg(theme.ink_soft)
+                        .add_modifier(Modifier::BOLD),
+                )];
+                if !issue.title.is_empty() {
+                    head.push(Span::styled(
+                        format!(
+                            "  {}",
+                            truncate_cols(
+                                &thai_display_safe(&issue.title),
+                                detail_w.saturating_sub(8),
+                            )
+                        ),
+                        Style::default().fg(theme.ink_faint),
+                    ));
+                }
+                head.push(Span::styled(
+                    format!("  ({count})"),
+                    Style::default().fg(theme.accent_soft),
+                ));
+                lines.push(Line::from(head));
+            }
+
+            let selected = i == sel;
+            if selected {
+                sel_line = lines.len();
+            }
+            let row_bg = if selected {
+                theme.accent_bg
+            } else {
+                theme.bg_panel
+            };
+            let (glyph, color, tag) = qa_visual(issue, theme);
+            let bar = if selected { theme::SELECT_BAR } else { ' ' };
+            let detail = if issue.detail.trim().is_empty() {
+                qa_default_detail(issue).to_string()
+            } else {
+                truncate_cols(&thai_display_safe(&issue.detail), detail_w)
+            };
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("  {bar} "),
+                    Style::default().fg(theme.accent).bg(row_bg),
+                ),
+                Span::styled(format!("{glyph} "), Style::default().fg(color).bg(row_bg)),
+                Span::styled(
+                    format!("{tag:<8} "),
+                    Style::default().fg(theme.ink_soft).bg(row_bg),
+                ),
+                Span::styled(detail, Style::default().fg(theme.ink).bg(row_bg)),
+            ]));
+        }
+
+        // Window the rows so the selected finding stays on screen.
+        let cap = (list_area.height as usize).max(1);
+        let start = if sel_line >= cap {
+            sel_line + 1 - cap
+        } else {
+            0
+        };
+        let end = (start + cap).min(lines.len());
+        let visible: Vec<Line> = lines[start..end].to_vec();
+        f.render_widget(
+            Paragraph::new(visible).style(Style::default().bg(theme.bg_panel)),
+            list_area,
         );
     }
 
@@ -1641,6 +1918,32 @@ fn render_synopsis_body(f: &mut Frame, area: Rect, theme: &Theme, st: &SynopsisS
             .style(Style::default().fg(color).bg(theme.bg_panel)),
         indent(rows[4], 2),
     );
+}
+
+/// The glyph, color, and short tag for a QA finding row.
+fn qa_visual(issue: &qa::QaIssue, theme: &Theme) -> (&'static str, ratatui::style::Color, String) {
+    use qa::{QaKind, Severity};
+    match &issue.kind {
+        QaKind::ReviewChunk { chunk } => {
+            ("⚠", theme.status_warn, format!("chunk {}", chunk + 1))
+        }
+        QaKind::ChapterFailed => ("✗", theme.status_failed, "failed".to_string()),
+        QaKind::Continuity {
+            severity: Severity::Conflict,
+        } => ("‖", theme.status_failed, "conflict".to_string()),
+        QaKind::Continuity {
+            severity: Severity::Warning,
+        } => ("‖", theme.status_warn, "warning".to_string()),
+    }
+}
+
+/// Fallback detail text when a finding carries no reviewer reason / note.
+fn qa_default_detail(issue: &qa::QaIssue) -> &'static str {
+    match issue.kind {
+        qa::QaKind::ChapterFailed => "translation failed — see activity log",
+        qa::QaKind::ReviewChunk { .. } => "committed without passing review",
+        qa::QaKind::Continuity { .. } => "continuity note",
+    }
 }
 
 /// Indent a Rect from the left/right by `pad` columns (keeps modals breathing).

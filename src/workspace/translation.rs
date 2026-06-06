@@ -50,6 +50,34 @@ pub fn review_needed_chunk_indices_in(text: &str) -> BTreeSet<u32> {
     out
 }
 
+/// For each chunk still flagged review-needed, return `(chunk_index, reason)` where
+/// `reason` is the reviewer's final objection lifted from the in-file banner (empty
+/// when the banner carries no reason line). Drives the QA panel; the chunk order is
+/// document order, matching `review_needed_chunk_indices_in`.
+pub fn review_needed_details_in(text: &str) -> Vec<(u32, String)> {
+    let mut out = Vec::new();
+    for (idx, start, end) in chunk_block_ranges(text) {
+        let block = &text[start..end];
+        if block.contains(REVIEW_NEEDED_MARKER) {
+            out.push((idx, extract_review_reason(block)));
+        }
+    }
+    out
+}
+
+/// Pull the reviewer's objection out of a review-needed banner block: the text after
+/// the `เหตุผลจากผู้ตรวจ:` blockquote line, trimmed; empty when that line is absent.
+/// Kept in lock-step with the banner `append_chunk_needs_review` writes.
+fn extract_review_reason(block: &str) -> String {
+    const KEY: &str = "เหตุผลจากผู้ตรวจ:";
+    for line in block.lines() {
+        if let Some(pos) = line.find(KEY) {
+            return line[pos + KEY.len()..].trim().to_string();
+        }
+    }
+    String::new()
+}
+
 fn chunk_block_ranges(text: &str) -> Vec<(u32, usize, usize)> {
     let mut starts = Vec::new();
     let mut offset = 0usize;
@@ -290,6 +318,15 @@ mod tests {
             review_needed_chunk_indices_in(&body),
             BTreeSet::from([8]),
             "review-needed chunk index is detectable"
+        );
+
+        // The QA panel reads each flagged chunk's index plus the reviewer's reason.
+        let details = review_needed_details_in(&body);
+        assert_eq!(details.len(), 1, "one flagged chunk: {details:?}");
+        assert_eq!(details[0].0, 8, "chunk index surfaced");
+        assert_eq!(
+            details[0].1, "meaning drift on the final sentence",
+            "reviewer reason lifted from the banner"
         );
 
         // Re-flagging the same chunk is idempotent in marker count.

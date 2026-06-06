@@ -218,6 +218,8 @@ impl ProjectScreen {
                 let data = crate::workspace::volume::load(&active.workspace);
                 Action::show_overlay(Overlay::synopsis_edit(data.synopsis_raw, data.synopsis_th))
             }
+            // Translation QA inbox (App rebuilds the report from the live project).
+            KeyCode::Char('Q') => Action::show_overlay(Overlay::qa_placeholder()),
             _ => Action::None,
         }
     }
@@ -451,6 +453,7 @@ impl ProjectScreen {
             ("h/l", "tree/focus"),
             ("e", "edit ctx"),
             ("y", "synopsis"),
+            ("Q", "QA"),
         ]
     }
 }

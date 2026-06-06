@@ -6,6 +6,7 @@
 pub mod lexicon;
 pub mod overlay;
 pub mod project;
+pub mod qa;
 pub mod reader;
 pub mod shelf;
 pub mod translate;
@@ -652,6 +653,9 @@ impl App {
                 self.overlay = match *ov {
                     Overlay::Settings(_) => Overlay::settings(&self.cfg),
                     Overlay::Theme(_) => Overlay::theme(self.cfg.theme),
+                    // QA placeholders (palette / screen `Q`) carry no data; rebuild
+                    // the report from the live active project on show.
+                    Overlay::Qa(_) => self.build_qa_overlay(),
                     other => other,
                 };
             }
@@ -1124,6 +1128,31 @@ impl App {
     fn refresh_projects(&mut self) {
         self.projects = crate::workspace::scan::scan_projects(&working_root());
         self.shelf.rescan(&working_root());
+    }
+
+    /// Gather the active volume's QA report and wrap it in the QA overlay. With no
+    /// project open (palette path) the overlay still shows, with an empty report and
+    /// a "no project" header, so the user gets feedback rather than a silent no-op.
+    fn build_qa_overlay(&self) -> Overlay {
+        match self.active.as_ref() {
+            Some(active) => {
+                let report = qa::collect(active);
+                let label = active
+                    .project
+                    .volumes
+                    .iter()
+                    .find(|v| v.number == active.vol)
+                    .and_then(|v| v.label.as_deref());
+                let title = match label {
+                    Some(label) => {
+                        format!("{} · Vol.{:02} {label}", active.project.title, active.vol)
+                    }
+                    None => format!("{} · Vol.{:02}", active.project.title, active.vol),
+                };
+                Overlay::qa(title, report)
+            }
+            None => Overlay::qa("(no project open)".to_string(), qa::QaReport::default()),
+        }
     }
 
     pub fn render(&mut self, f: &mut Frame) {
