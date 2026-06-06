@@ -179,6 +179,12 @@ fn renders_overlays_without_panic() {
         let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
         term.draw(|f| app.render(f)).unwrap();
 
+        // Reader note editor overlay.
+        let mut app = fresh_app();
+        app.overlay = Overlay::reader_note(3, 12);
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| app.render(f)).unwrap();
+
         // QA inbox: grouped findings (review chunks, a failed chapter, continuity
         // warning/conflict, an unanchored note) with a mid-list selection.
         use crate::app::qa::{QaIssue, QaKind, QaReport, Severity};
@@ -266,6 +272,82 @@ fn key_routing_without_panic() {
         term.draw(|f| app.render(f)).unwrap();
         assert!(app.running, "navigation keys must not quit the app");
     }
+}
+
+#[test]
+fn reader_note_overlay_saves_line_annotation() {
+    use crate::model::{Chapter, ChapterKind, ChapterStatus, Project, UsageStats, Volume};
+    use crate::workspace::Workspace;
+
+    let dir = std::env::temp_dir().join(format!("honya_reader_note_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let ws = Workspace::new(dir.clone(), 1);
+    crate::workspace::translation::write_raw(&ws, 1, "# 第一章\n原文一\n原文二").unwrap();
+    std::fs::create_dir_all(ws.translated(1).parent().unwrap()).unwrap();
+    std::fs::write(ws.translated(1), "แถวหนึ่ง\nแถวสอง\n").unwrap();
+
+    let chapter = Chapter {
+        number: 1,
+        title: "第一章".to_string(),
+        kind: ChapterKind::Prose,
+        status: ChapterStatus::Done,
+        source_segments: 2,
+        total_chunks: 0,
+        committed_chunks: 0,
+        last_run: None,
+        usage: UsageStats::default(),
+    };
+    let active = ActiveProject {
+        project: Project {
+            id: "novel".to_string(),
+            dir: dir.clone(),
+            title: "Novel".to_string(),
+            created: None,
+            touched: None,
+            volumes: vec![Volume {
+                number: 1,
+                dir: dir.join("Vol_01"),
+                label: None,
+                chapters: vec![chapter],
+            }],
+            models: None,
+        },
+        workspace: ws.clone(),
+        client: Arc::new(crate::llm::mock::MockClient::default())
+            as Arc<dyn crate::llm::client::LlmClient>,
+        models: ModelSet::default(),
+        vol: 1,
+    };
+
+    let mut app = fresh_app();
+    app.active = Some(active);
+    app.reader.load(&ws, 1);
+    app.screen = Screen::Reader;
+    app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::empty()));
+    app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::empty()));
+    match &app.overlay {
+        Overlay::ReaderNote(st) => {
+            assert_eq!(st.chapter, 1);
+            assert_eq!(st.line, 2);
+        }
+        other => panic!("expected ReaderNote overlay, got {other:?}"),
+    }
+
+    for ch in "awkward phrasing".chars() {
+        app.on_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::empty()));
+    }
+    app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+    assert!(matches!(app.overlay, Overlay::None));
+
+    let annotations = crate::workspace::volume::reader_annotations(&ws, 1);
+    assert_eq!(annotations.len(), 1);
+    assert_eq!(annotations[0].line, 2);
+    assert_eq!(annotations[0].note, "awkward phrasing");
+
+    let mut term = Terminal::new(TestBackend::new(90, 30)).unwrap();
+    term.draw(|f| app.render(f)).unwrap();
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

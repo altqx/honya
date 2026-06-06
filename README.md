@@ -33,7 +33,7 @@ telemetry — just a quiet workspace in your terminal.
 - **Three specialized agents** — Translator and Reviewer iterate per chunk; the Orchestrator persists new terms and characters.
 - **Continuity that holds** — per-chunk glossary/character context, protected terminology locks, and the previous chunk's tail keep voice and terms consistent across a whole volume.
 - **Cost transparency** — live token + USD meter during a run, rolled up per chapter, volume, and project.
-- **Side-by-side proofreading** — synced JA ↔ TH reader, both panes rendered from Markdown.
+- **Side-by-side proofreading** — synced JA ↔ TH reader with inline notes, both panes rendered from Markdown.
 - **12 themes** with a live-preview picker (`Ctrl-T`), from Washi 和紙 paper to Tokyo Night.
 - **Self-updating** — `honya update` swaps the binary in place after verifying its checksum.
 
@@ -117,7 +117,7 @@ On first run, honya prompts for your OpenRouter key and saves it — see [API ke
 | `1` | **書架 Shelf** | Pick a project or import a new EPUB (`i`). |
 | `2` | **棚 Project** | Volume/chapter tree with waxing-moon status (`○ ◐ ◑ ●`), context files, and a detail card with per-chapter token/cost roll-up. `t` translate chapter · `T` whole volume. |
 | `3` | **訳 Translate** | The live run: chunk gauge, three agent lines, token + USD meter, streaming Thai preview. `p` pause · `s` stop · `f` follow. |
-| `4` | **読 Reader** | Synced side-by-side JA ↔ TH proofreading, both panes rendered from Markdown. `[ ]` chapters · `z` sync · `o` layout. |
+| `4` | **読 Reader** | Synced side-by-side JA ↔ TH proofreading with inline notes. `[ ]` chapters · `z` sync · `o` layout · `n` note. |
 | `5` | **辞 Lexicon** | Browse/edit Glossary, Characters, Style. `n` new · `e` edit · `d` delete · `/` search. |
 
 In **Lexicon → Glossary**, set `Protected` to `yes` to lock a human-approved term. Protected terms are shown in GLOSSARY.md and surfaced to the Orchestrator when term discoveries are processed; automatic upserts cannot overwrite them.
@@ -230,7 +230,7 @@ your_project/
 ├── STYLE.md          # translation-memory notes / reference examples
 ├── images/           # all illustrations, relocated here on import
 └── Vol_01/
-    ├── VOLUME.md     # running recap + per-chapter summaries + usage + run history
+    ├── VOLUME.md     # running recap + chapter summaries + usage + run history + reader notes
     ├── raw/          # ch_001.md … pre-processed clean Japanese Markdown
     └── translated/   # ch_001.md … final verified Thai Markdown
 ```

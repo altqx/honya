@@ -24,8 +24,8 @@ use ratatui::widgets::Paragraph;
 
 use crate::llm::client::LlmClient;
 use crate::model::{
-    AppConfig, AppEvent, ChapterStatus, EventTx, LogLevel, ModelSet, Project, RunHistoryEntry,
-    RunHistoryStatus, ThemeId, UsageStats,
+    AppConfig, AppEvent, ChapterStatus, EventTx, LogLevel, ModelSet, Project, ReaderAnnotation,
+    RunHistoryEntry, RunHistoryStatus, ThemeId, UsageStats,
 };
 use crate::theme::Theme;
 use crate::ui::chrome::{self, StatusTally};
@@ -99,6 +99,12 @@ pub enum Action {
     SaveSynopsis {
         raw: String,
         th: String,
+    },
+    /// Persist a human Reader annotation anchored to a translated line.
+    SaveReaderNote {
+        chapter: u32,
+        line: u32,
+        note: String,
     },
     OpenProject(String),
     OpenChapter {
@@ -793,6 +799,13 @@ impl App {
             Action::SaveSynopsis { raw, th } => {
                 self.save_synopsis(raw, th);
             }
+            Action::SaveReaderNote {
+                chapter,
+                line,
+                note,
+            } => {
+                self.save_reader_note(chapter, line, note);
+            }
             Action::StartTranslation { chapters } => {
                 self.request_translation(chapters);
             }
@@ -1264,6 +1277,35 @@ impl App {
             }
         }
         self.overlay = Overlay::None;
+    }
+
+    /// Persist a Reader proofreading annotation and refresh the inline note cache.
+    fn save_reader_note(&mut self, chapter: u32, line: u32, note: String) {
+        self.overlay = Overlay::None;
+        let note = note.trim();
+        if note.is_empty() {
+            self.toast = Some(Toast::info("empty note ignored"));
+            return;
+        }
+        let Some(active) = self.active.as_ref() else {
+            self.toast = Some(Toast::warn("no project open"));
+            return;
+        };
+        let workspace = active.workspace.clone();
+        let line = line.max(1);
+        let annotation = ReaderAnnotation {
+            chapter,
+            line,
+            note: note.to_string(),
+            created_at: Some(chrono::Utc::now()),
+        };
+        match crate::workspace::volume::add_reader_annotation(&workspace, annotation) {
+            Ok(()) => {
+                self.reader.reload_annotations(&workspace);
+                self.toast = Some(Toast::info(format!("note saved · ch {chapter:03} L{line}")));
+            }
+            Err(e) => self.toast = Some(Toast::error(format!("note save failed: {e}"))),
+        }
     }
 
     fn refresh_projects(&mut self) {

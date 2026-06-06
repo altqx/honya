@@ -353,6 +353,15 @@ pub struct QaState {
     pub sel: usize,
 }
 
+/// Single-line proofreading note captured from the Reader and persisted to
+/// VOLUME.md as a line-anchored annotation.
+#[derive(Debug, Clone)]
+pub struct ReaderNoteState {
+    pub chapter: u32,
+    pub line: u32,
+    pub text: String,
+}
+
 // ============================================================================
 // OVERLAY
 // ============================================================================
@@ -375,6 +384,8 @@ pub enum Overlay {
     /// Translation QA inbox — per-chapter issue counts + navigable findings, opened
     /// from the Project or Reader tab (Enter jumps to the chapter in the Reader).
     Qa(QaState),
+    /// Reader proofreading note editor, anchored to a translated line.
+    ReaderNote(ReaderNoteState),
 }
 
 impl Overlay {
@@ -405,6 +416,14 @@ impl Overlay {
     /// Standalone synopsis editor seeded from a volume's stored raw/Thai.
     pub fn synopsis_edit(raw: String, th: String) -> Self {
         Overlay::Synopsis(SynopsisState::new(raw, th))
+    }
+
+    pub fn reader_note(chapter: u32, line: u32) -> Self {
+        Overlay::ReaderNote(ReaderNoteState {
+            chapter,
+            line: line.max(1),
+            text: String::new(),
+        })
     }
 
     /// QA overlay seeded with a freshly-gathered report.
@@ -518,6 +537,7 @@ impl Overlay {
                 st.step == 1 || (st.step == 3 && st.syn.phase == SynPhase::Editing)
             }
             Overlay::Synopsis(st) => st.phase == SynPhase::Editing,
+            Overlay::ReaderNote(_) => true,
             Overlay::Settings(_) => true, // always editing a field
             Overlay::Palette(_) => true,  // query field
             _ => false,
@@ -536,6 +556,7 @@ impl Overlay {
             Overlay::Modal(_) => self.handle_modal_key(key),
             Overlay::Synopsis(_) => self.handle_synopsis_overlay_key(key),
             Overlay::Qa(_) => self.handle_qa_key(key),
+            Overlay::ReaderNote(_) => self.handle_reader_note_key(key),
             Overlay::Log(off) => match key.code {
                 KeyCode::Esc | KeyCode::Char('l') | KeyCode::Char('q') => Action::CloseOverlay,
                 KeyCode::Char('k') | KeyCode::Up => {
@@ -885,6 +906,33 @@ impl Overlay {
         }
     }
 
+    fn handle_reader_note_key(&mut self, key: KeyEvent) -> Action {
+        let Overlay::ReaderNote(st) = self else {
+            return Action::None;
+        };
+        match key.code {
+            KeyCode::Esc => Action::CloseOverlay,
+            KeyCode::Enter => Action::SaveReaderNote {
+                chapter: st.chapter,
+                line: st.line,
+                note: st.text.clone(),
+            },
+            KeyCode::Backspace => {
+                st.text.pop();
+                Action::None
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                st.text.clear();
+                Action::None
+            }
+            KeyCode::Char(c) => {
+                st.text.push(c);
+                Action::None
+            }
+            _ => Action::None,
+        }
+    }
+
     fn handle_synopsis_overlay_key(&mut self, key: KeyEvent) -> Action {
         let Overlay::Synopsis(st) = self else {
             return Action::None;
@@ -927,6 +975,7 @@ impl Overlay {
             Overlay::Log(_) => &[("jk", "scroll"), ("Esc/l", "close")],
             Overlay::Help(_) => &[("jk", "scroll"), ("Esc/?", "close")],
             Overlay::Qa(_) => &[("jk", "move"), ("↵", "jump to chapter"), ("Esc", "close")],
+            Overlay::ReaderNote(_) => &[("type", "note"), ("↵", "save"), ("Esc", "cancel")],
             Overlay::Modal(dlg) if dlg.alternate.is_some() => {
                 // The two alternate-key modals differ by their alternate key, so
                 // pick a matching footer instead of a single hardcoded label set.
@@ -963,6 +1012,7 @@ impl Overlay {
             Overlay::Modal(dlg) => self.render_modal(f, area, theme, dlg),
             Overlay::Synopsis(st) => self.render_synopsis(f, area, theme, st),
             Overlay::Qa(st) => self.render_qa(f, area, theme, st),
+            Overlay::ReaderNote(st) => self.render_reader_note(f, area, theme, st),
         }
     }
 
@@ -1009,6 +1059,97 @@ impl Overlay {
         let inner = block.inner(modal);
         f.render_widget(block, modal);
         render_synopsis_body(f, inner, theme, st);
+    }
+
+    fn render_reader_note(&self, f: &mut Frame, area: Rect, theme: &Theme, st: &ReaderNoteState) {
+        let modal = centered_modal(72, 14, area);
+        f.render_widget(Clear, modal);
+        let block = self.modal_block("Reader note · proofreading", theme);
+        let inner = block.inner(modal);
+        f.render_widget(block, modal);
+
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1), // anchor
+                Constraint::Length(1), // label
+                Constraint::Length(3), // input box
+                Constraint::Length(1), // examples label
+                Constraint::Min(0),    // examples
+            ])
+            .split(inner);
+
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("  Anchor  ", Style::default().fg(theme.ink_faint)),
+                Span::styled(
+                    format!("ch {:03} · translated line {}", st.chapter, st.line),
+                    Style::default().fg(theme.accent_soft),
+                ),
+            ]))
+            .style(Style::default().bg(theme.bg_panel)),
+            rows[0],
+        );
+
+        f.render_widget(
+            Paragraph::new(Span::styled("  Note", Style::default().fg(theme.ink_soft)))
+                .style(Style::default().bg(theme.bg_panel)),
+            rows[1],
+        );
+
+        let input_block = Block::default()
+            .borders(Borders::ALL)
+            .border_set(theme::hairline_set())
+            .border_style(Style::default().fg(theme.accent_soft))
+            .style(Style::default().bg(theme.bg_inset));
+        let input = if st.text.is_empty() {
+            Line::from(vec![
+                Span::styled(
+                    "awkward phrasing / check honorific / rename skill term / review tone",
+                    Style::default().fg(theme.ink_faint),
+                ),
+                Span::styled("▏", Style::default().fg(theme.stream_cursor)),
+            ])
+        } else {
+            Line::from(vec![
+                Span::styled(
+                    truncate_cols(
+                        &thai_display_safe(&st.text),
+                        rows[2].width.saturating_sub(6) as usize,
+                    ),
+                    Style::default().fg(theme.ink),
+                ),
+                Span::styled("▏", Style::default().fg(theme.stream_cursor)),
+            ])
+        };
+        f.render_widget(Paragraph::new(input).block(input_block), indent(rows[2], 2));
+
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                "  Examples",
+                Style::default().fg(theme.ink_faint),
+            ))
+            .style(Style::default().bg(theme.bg_panel)),
+            rows[3],
+        );
+        let examples = vec![
+            Line::from(Span::styled(
+                "  • awkward phrasing      • check honorific",
+                Style::default().fg(theme.ink_soft),
+            )),
+            Line::from(Span::styled(
+                "  • rename skill term     • review tone",
+                Style::default().fg(theme.ink_soft),
+            )),
+            Line::from(Span::styled(
+                "  Enter saves inline; Esc cancels.",
+                Style::default().fg(theme.ink_faint),
+            )),
+        ];
+        f.render_widget(
+            Paragraph::new(examples).style(Style::default().bg(theme.bg_panel)),
+            rows[4],
+        );
     }
 
     fn render_import_pick(&self, f: &mut Frame, area: Rect, theme: &Theme, st: &ImportState) {
@@ -1492,7 +1633,7 @@ impl Overlay {
                     ("jk / ↑↓", "scroll (synced)"),
                     ("[ ]", "prev · next chapter"),
                     ("z / w / o", "sync · wrap · layout"),
-                    ("y", "copy visible Thai"),
+                    ("n / N", "add note · show/hide notes"),
                     ("Q", "QA review (flagged issues)"),
                 ],
             ),

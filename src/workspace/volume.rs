@@ -6,8 +6,8 @@ use chrono::{DateTime, Utc};
 use crate::model::{
     ContinuityNote, ReaderAnnotation, RunHistoryEntry, RunHistoryStatus, UsageStats, VolumeData,
 };
-use crate::workspace::data_block;
 use crate::workspace::Workspace;
+use crate::workspace::data_block;
 
 /// Load the volume metadata (defaults when VOLUME.md is absent/empty).
 pub fn load(ws: &Workspace) -> VolumeData {
@@ -317,7 +317,8 @@ pub fn render_body(data: &VolumeData) -> String {
         s.push_str("_ยังไม่มีโน้ตพิสูจน์อักษร_\n");
     } else {
         let mut annotations: Vec<&ReaderAnnotation> = data.annotations.iter().collect();
-        annotations.sort_by_key(|annotation| (annotation.chapter, annotation.line, annotation.created_at));
+        annotations
+            .sort_by_key(|annotation| (annotation.chapter, annotation.line, annotation.created_at));
         s.push_str("| บท | บรรทัด | เวลา | บันทึก |\n");
         s.push_str("|----|---------:|------|--------|\n");
         for annotation in annotations {
@@ -390,7 +391,7 @@ fn chapters_cell(chapters: &[u32]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{TokenUsage, UsageStats};
+    use crate::model::{ReaderAnnotation, TokenUsage, UsageStats};
 
     fn temp_ws(tag: &str) -> (std::path::PathBuf, Workspace) {
         let base = std::env::temp_dir().join(format!("honya_volume_{tag}_{}", std::process::id()));
@@ -398,6 +399,42 @@ mod tests {
         let ws = Workspace::new(base.clone(), 1);
         std::fs::create_dir_all(&ws.vol_dir).unwrap();
         (base, ws)
+    }
+
+    #[test]
+    fn reader_annotations_round_trip_and_render() {
+        let (base, ws) = temp_ws("annotations");
+        add_reader_annotation(
+            &ws,
+            ReaderAnnotation {
+                chapter: 2,
+                line: 0,
+                note: "  check honorific  ".to_string(),
+                created_at: Some(Utc::now()),
+            },
+        )
+        .unwrap();
+        add_reader_annotation(
+            &ws,
+            ReaderAnnotation {
+                chapter: 2,
+                line: 8,
+                note: "".to_string(),
+                created_at: Some(Utc::now()),
+            },
+        )
+        .unwrap();
+
+        let annotations = reader_annotations(&ws, 2);
+        assert_eq!(annotations.len(), 1, "empty notes are ignored");
+        assert_eq!(annotations[0].line, 1, "line anchors are 1-based");
+        assert_eq!(annotations[0].note, "check honorific");
+
+        let body = std::fs::read_to_string(ws.volume_md()).unwrap();
+        assert!(body.contains("Reader Annotations"));
+        assert!(body.contains("check honorific"));
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

@@ -126,8 +126,12 @@ impl ReaderScreen {
                 Action::None
             }
             KeyCode::Char('n') => {
-                let line = self.current_annotation_line();
-                Action::show_overlay(Overlay::reader_note(self.chapter, line))
+                if self.chapter == 0 {
+                    Action::None
+                } else {
+                    let line = self.current_annotation_line();
+                    Action::show_overlay(Overlay::reader_note(self.chapter, line))
+                }
             }
             KeyCode::Char('N') => {
                 self.show_annotations = !self.show_annotations;
@@ -364,6 +368,64 @@ impl ReaderScreen {
             ("Q", "QA"),
         ]
     }
+}
+
+fn annotate_markdown(content: &str, annotations: &[ReaderAnnotation]) -> String {
+    let mut by_line: std::collections::BTreeMap<u32, Vec<&ReaderAnnotation>> =
+        std::collections::BTreeMap::new();
+    for annotation in annotations {
+        by_line
+            .entry(annotation.line.max(1))
+            .or_default()
+            .push(annotation);
+    }
+
+    let mut out = String::new();
+    let mut line_no = 1u32;
+    for line in content.lines() {
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(line);
+        push_annotations_for_line(&mut out, line_no, &mut by_line);
+        line_no = line_no.saturating_add(1);
+    }
+
+    if content.is_empty() {
+        push_annotations_for_line(&mut out, 1, &mut by_line);
+    }
+
+    // Notes anchored past EOF (for example after a hand edit shrank the file) stay
+    // visible at the tail with their original line number.
+    for (line, notes) in by_line {
+        for note in notes {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(&format!("> 📝 L{line}: {}", inline_note_text(&note.note)));
+        }
+    }
+
+    out
+}
+
+fn push_annotations_for_line(
+    out: &mut String,
+    line: u32,
+    by_line: &mut std::collections::BTreeMap<u32, Vec<&ReaderAnnotation>>,
+) {
+    let Some(notes) = by_line.remove(&line) else {
+        return;
+    };
+    for note in notes {
+        out.push('\n');
+        out.push_str("> 📝 ");
+        out.push_str(&inline_note_text(&note.note));
+    }
+}
+
+fn inline_note_text(note: &str) -> String {
+    note.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 impl Default for ReaderScreen {
