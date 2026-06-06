@@ -182,57 +182,21 @@ impl OpenRouterClient {
 
         let mut bytes = resp.bytes_stream();
         let mut line_buf: Vec<u8> = Vec::new();
-        let mut content = String::new();
-        let mut usage: Option<Usage> = None;
-        let mut id: Option<String> = None;
-        let mut model: Option<String> = None;
-        let mut role: Option<String> = None;
-        let mut finish_reason: Option<String> = None;
+        let mut stream_resp = StreamResponse::default();
 
         while let Some(chunk) = bytes.next().await {
             line_buf.extend_from_slice(&chunk?);
             while let Some(pos) = line_buf.iter().position(|b| *b == b'\n') {
                 let line: Vec<u8> = line_buf.drain(..=pos).collect();
-                handle_sse_line(
-                    &line,
-                    on_delta,
-                    &mut content,
-                    &mut usage,
-                    &mut id,
-                    &mut model,
-                    &mut role,
-                    &mut finish_reason,
-                )?;
+                handle_sse_line(&line, on_delta, &mut stream_resp)?;
             }
         }
 
         if !line_buf.is_empty() {
-            handle_sse_line(
-                &line_buf,
-                on_delta,
-                &mut content,
-                &mut usage,
-                &mut id,
-                &mut model,
-                &mut role,
-                &mut finish_reason,
-            )?;
+            handle_sse_line(&line_buf, on_delta, &mut stream_resp)?;
         }
 
-        Ok(ChatResponse {
-            id,
-            model,
-            choices: vec![Choice {
-                index: 0,
-                message: ResponseMessage {
-                    role,
-                    content: Some(content),
-                    tool_calls: None,
-                },
-                finish_reason,
-            }],
-            usage,
-        })
+        Ok(stream_resp.into_response())
     }
 
     fn request_builder(&self, req: &ChatRequest) -> reqwest::RequestBuilder {
@@ -318,15 +282,39 @@ struct StreamError {
     message: String,
 }
 
+#[derive(Debug, Default)]
+struct StreamResponse {
+    content: String,
+    usage: Option<Usage>,
+    id: Option<String>,
+    model: Option<String>,
+    role: Option<String>,
+    finish_reason: Option<String>,
+}
+
+impl StreamResponse {
+    fn into_response(self) -> ChatResponse {
+        ChatResponse {
+            id: self.id,
+            model: self.model,
+            choices: vec![Choice {
+                index: 0,
+                message: ResponseMessage {
+                    role: self.role,
+                    content: Some(self.content),
+                    tool_calls: None,
+                },
+                finish_reason: self.finish_reason,
+            }],
+            usage: self.usage,
+        }
+    }
+}
+
 fn handle_sse_line(
     line: &[u8],
     on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
-    content: &mut String,
-    usage: &mut Option<Usage>,
-    id: &mut Option<String>,
-    model: &mut Option<String>,
-    role: &mut Option<String>,
-    finish_reason: &mut Option<String>,
+    stream_resp: &mut StreamResponse,
 ) -> Result<()> {
     let line = String::from_utf8_lossy(line);
     let line = line.trim_end_matches(['\r', '\n']);
@@ -353,19 +341,19 @@ fn handle_sse_line(
     }
 
     if chunk.id.is_some() {
-        *id = chunk.id;
+        stream_resp.id = chunk.id;
     }
     if chunk.model.is_some() {
-        *model = chunk.model;
+        stream_resp.model = chunk.model;
     }
     if chunk.usage.is_some() {
-        *usage = chunk.usage;
+        stream_resp.usage = chunk.usage;
     }
 
     for choice in chunk.choices {
         let _ = choice.index;
         if let Some(next_role) = choice.delta.role {
-            *role = Some(next_role);
+            stream_resp.role = Some(next_role);
         }
         if let Some(next_finish_reason) = choice.finish_reason {
             if next_finish_reason == "error" {
@@ -374,12 +362,12 @@ fn handle_sse_line(
                     message: "stream ended with finish_reason=error".to_string(),
                 });
             }
-            *finish_reason = Some(next_finish_reason);
+            stream_resp.finish_reason = Some(next_finish_reason);
         }
         if let Some(delta) = choice.delta.content
             && !delta.is_empty()
         {
-            content.push_str(&delta);
+            stream_resp.content.push_str(&delta);
             on_delta(&delta);
         }
     }
@@ -404,41 +392,26 @@ mod tests {
     fn sse_line_appends_content_and_final_usage() {
         let mut seen = String::new();
         let mut on_delta = |delta: &str| seen.push_str(delta);
-        let mut content = String::new();
-        let mut usage = None;
-        let mut id = None;
-        let mut model = None;
-        let mut role = None;
-        let mut finish_reason = None;
+        let mut stream_resp = StreamResponse::default();
 
         handle_sse_line(
             br#"data: {"id":"cmpl_1","model":"test/model","choices":[{"index":0,"delta":{"role":"assistant","content":"abc"},"finish_reason":null}],"usage":null}"#,
             &mut on_delta,
-            &mut content,
-            &mut usage,
-            &mut id,
-            &mut model,
-            &mut role,
-            &mut finish_reason,
+            &mut stream_resp,
         )
         .unwrap();
         handle_sse_line(
             br#"data: {"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3,"cost":0.004}}"#,
             &mut on_delta,
-            &mut content,
-            &mut usage,
-            &mut id,
-            &mut model,
-            &mut role,
-            &mut finish_reason,
+            &mut stream_resp,
         )
         .unwrap();
 
         assert_eq!(seen, "abc");
-        assert_eq!(content, "abc");
-        assert_eq!(id.as_deref(), Some("cmpl_1"));
-        assert_eq!(model.as_deref(), Some("test/model"));
-        assert_eq!(role.as_deref(), Some("assistant"));
-        assert_eq!(usage.expect("final usage").total_tokens, 3);
+        assert_eq!(stream_resp.content, "abc");
+        assert_eq!(stream_resp.id.as_deref(), Some("cmpl_1"));
+        assert_eq!(stream_resp.model.as_deref(), Some("test/model"));
+        assert_eq!(stream_resp.role.as_deref(), Some("assistant"));
+        assert_eq!(stream_resp.usage.expect("final usage").total_tokens, 3);
     }
 }
