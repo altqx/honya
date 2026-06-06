@@ -770,6 +770,69 @@ fn onboarding_shows_welcome_on_first_run_only() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
+/// remove_project_dir deletes a real project directory but refuses anything that is
+/// not a honya project (no PROJECT.md), guarding the recursive delete.
+#[test]
+fn remove_project_dir_guards_non_projects() {
+    let base = std::env::temp_dir().join(format!("honya-rmguard-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+
+    // A directory without PROJECT.md must be refused and left intact.
+    let bystander = base.join("not-a-project");
+    std::fs::create_dir_all(&bystander).unwrap();
+    assert!(crate::app::remove_project_dir(&bystander).is_err());
+    assert!(bystander.exists(), "non-project directory is not deleted");
+
+    // A real project directory (has PROJECT.md) is removed wholesale.
+    let proj = base.join("re-zero");
+    std::fs::create_dir_all(proj.join("Vol_01/translated")).unwrap();
+    std::fs::write(proj.join("PROJECT.md"), "# Re:Zero\n").unwrap();
+    assert!(crate::app::remove_project_dir(&proj).is_ok());
+    assert!(!proj.exists(), "project directory is deleted");
+
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// Pressing `d` on the shelf then confirming actually deletes the project directory
+/// from disk and closes the overlay (the action used to be a no-op stub).
+#[test]
+fn shelf_delete_confirm_removes_project() {
+    let base = std::env::temp_dir().join(format!("honya-delflow-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let dir = base.join("re-zero");
+    std::fs::create_dir_all(dir.join("Vol_01/translated")).unwrap();
+    std::fs::write(dir.join("PROJECT.md"), "# Re:Zero\n").unwrap();
+
+    let mut app = fresh_app();
+    app.screen = Screen::Shelf;
+    app.projects = vec![crate::model::Project {
+        id: "re-zero".into(),
+        dir: dir.clone(),
+        title: "Re:Zero".into(),
+        created: None,
+        touched: None,
+        volumes: vec![],
+        models: None,
+    }];
+    app.shelf.select_first();
+
+    // `d` raises a confirm modal whose confirm action is the real delete.
+    app.on_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::empty()));
+    assert!(
+        matches!(app.overlay, Overlay::Modal(_)),
+        "delete asks for confirmation first"
+    );
+    // `y` confirms → the directory is gone and the overlay closes.
+    app.on_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::empty()));
+    assert!(!dir.exists(), "confirming delete removes the project directory");
+    assert!(
+        matches!(app.overlay, Overlay::None),
+        "overlay closes after delete"
+    );
+
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 /// Ctrl-T must open the theme picker even while the Settings overlay is focused
 /// (the panel advertises it, and an open overlay otherwise swallows the global).
 #[test]

@@ -107,6 +107,11 @@ pub enum Action {
         note: String,
     },
     OpenProject(String),
+    /// Permanently delete a project directory (raw + translations + metadata) from
+    /// disk. Confirmed via a modal first; refuses if a run is in progress.
+    DeleteProject {
+        id: String,
+    },
     OpenChapter {
         chapter: u32,
     },
@@ -1011,6 +1016,9 @@ impl App {
             Action::OpenProject(id) => {
                 self.open_project(id);
             }
+            Action::DeleteProject { id } => {
+                self.delete_project(id);
+            }
             Action::OpenChapter { chapter } => {
                 self.open_chapter(chapter);
             }
@@ -1165,6 +1173,42 @@ impl App {
         };
         let vol = project.volumes.first().map(|v| v.number).unwrap_or(1);
         self.activate_project(project, vol);
+    }
+
+    /// Permanently delete a project directory from disk (the only way to remove it
+    /// from the shelf, which is a live scan of the working root — there is no
+    /// separate list to drop it from). Guarded: refuses during an active run, and
+    /// `remove_project_dir` refuses any directory that is not actually a project.
+    fn delete_project(&mut self, id: String) {
+        if self.run_active {
+            self.toast = Some(Toast::warn("can't delete a project while a run is in progress"));
+            return;
+        }
+        // The id comes from the rendered shelf (`self.projects`), so find it there;
+        // a stale entry just fails the disk guard below rather than deleting wrongly.
+        let Some(project) = self.projects.iter().find(|p| p.id == id).cloned() else {
+            self.toast = Some(Toast::error(format!("project {id} not found")));
+            return;
+        };
+        match remove_project_dir(&project.dir) {
+            Ok(()) => {
+                // Close it if it was the open project, so we don't keep a dangling
+                // workspace pointed at a now-deleted directory.
+                if self.active.as_ref().is_some_and(|a| a.project.id == id) {
+                    self.active = None;
+                    self.screen = Screen::Shelf;
+                }
+                let root = working_root();
+                self.refresh_projects();
+                self.shelf.rescan(&root);
+                self.shelf.select_first();
+                self.push_log(LogLevel::Info, format!("deleted project {id}"));
+                self.toast = Some(Toast::info(format!("deleted {}", project.title)));
+            }
+            Err(e) => {
+                self.toast = Some(Toast::error(format!("delete failed: {e}")));
+            }
+        }
     }
 
     /// Make `project` the active project on volume `vol`: build its LLM client (if a
@@ -2138,6 +2182,19 @@ fn chapter_list_preview(chapters: &[u32]) -> String {
 /// The working root we scan for projects / unimported epubs. Falls back to `.`.
 fn working_root() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+}
+
+/// Recursively delete a project directory, refusing anything that is not actually a
+/// honya project (must contain `PROJECT.md`). This guard keeps a stale/mis-set path
+/// from turning a delete into an arbitrary `rm -rf`.
+pub(crate) fn remove_project_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    if !dir.join("PROJECT.md").is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "not a honya project directory",
+        ));
+    }
+    std::fs::remove_dir_all(dir)
 }
 
 /// Compact chapter-status tag for the Reader jump picker labels.

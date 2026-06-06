@@ -98,8 +98,11 @@ impl ShelfScreen {
                 if let Some(p) = projects.get(sel) {
                     Action::show_overlay(Overlay::confirm(
                         "Delete project?",
-                        format!("This removes {} from the shelf list only.", p.title),
-                        Action::None,
+                        format!(
+                            "Permanently delete “{}” and ALL its files (raw, translations, glossary, characters)? This cannot be undone.",
+                            p.title
+                        ),
+                        Action::DeleteProject { id: p.id.clone() },
                     ))
                 } else {
                     Action::None
