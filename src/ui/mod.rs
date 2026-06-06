@@ -2,6 +2,7 @@
 //! compose these; nothing here owns app state.
 
 pub mod chrome;
+pub mod diff;
 pub mod layout;
 pub mod markdown;
 pub mod text;

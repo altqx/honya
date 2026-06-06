@@ -4,10 +4,11 @@
 use chrono::{DateTime, Utc};
 
 use crate::model::{
-    ContinuityNote, ReaderAnnotation, RunHistoryEntry, RunHistoryStatus, UsageStats, VolumeData,
+    ChapterRun, ContinuityNote, ReaderAnnotation, RunHistoryEntry, RunHistoryStatus, UsageStats,
+    VolumeData,
 };
-use crate::workspace::data_block;
 use crate::workspace::Workspace;
+use crate::workspace::data_block;
 
 /// Load the volume metadata (defaults when VOLUME.md is absent/empty).
 pub fn load(ws: &Workspace) -> VolumeData {
@@ -178,6 +179,117 @@ fn trim_run_history(history: &mut Vec<RunHistoryEntry>) {
         let overflow = history.len() - MAX_RUN_HISTORY;
         history.drain(0..overflow);
     }
+}
+
+/// Per-chapter run records (for rerun comparison) retained per chapter. Older
+/// versions' archived Thai is deleted when trimmed.
+const MAX_RUNS_PER_CHAPTER: usize = 5;
+
+/// Append a finished chapter's per-run record (cost / QA / glossary deltas) and
+/// persist. Trims to the most recent [`MAX_RUNS_PER_CHAPTER`] per chapter, deleting
+/// the archived Thai of any run that falls off the back.
+pub fn record_chapter_run(ws: &Workspace, run: ChapterRun) -> std::io::Result<()> {
+    let mut data = load(ws);
+    data.chapter_runs.push(run);
+    trim_chapter_runs(ws, &mut data);
+    write(ws, &data)
+}
+
+/// This chapter's run records, oldest → newest. The newest record without an
+/// `archived` path is the live version; the newest record *with* one points at the
+/// most recently displaced version, which the Reader diffs against.
+pub fn chapter_runs(ws: &Workspace, chapter: u32) -> Vec<ChapterRun> {
+    let mut runs: Vec<ChapterRun> = load(ws)
+        .chapter_runs
+        .into_iter()
+        .filter(|r| r.chapter == chapter)
+        .collect();
+    runs.sort_by_key(|r| r.finished_at);
+    runs
+}
+
+/// Best-effort facts about the version being archived, used to synthesize a run
+/// record for a translation that predates per-run recording.
+pub struct PriorVersion {
+    pub finished_at: DateTime<Utc>,
+    pub review_needed: u32,
+    pub failed: bool,
+    pub total_chunks: u32,
+    pub committed_chunks: u32,
+}
+
+/// Mark that `rel_path` (relative to the volume dir) now holds the archived Thai of
+/// a chapter's current, about-to-be-overwritten version. Attaches the path to that
+/// version's existing run record; if none exists (a translation made before this
+/// feature), synthesizes a `"(prior)"` record so the text diff still works (its
+/// per-run cost shows as n/a). Call this right before `reset_chapter`.
+pub fn archive_prev_version(
+    ws: &Workspace,
+    chapter: u32,
+    rel_path: &str,
+    prior: PriorVersion,
+) -> std::io::Result<()> {
+    let mut data = load(ws);
+    let latest = data
+        .chapter_runs
+        .iter_mut()
+        .filter(|r| r.chapter == chapter && r.archived.is_none())
+        .max_by_key(|r| r.finished_at);
+    match latest {
+        Some(run) => run.archived = Some(rel_path.to_string()),
+        None => data.chapter_runs.push(ChapterRun {
+            chapter,
+            run_id: "(prior)".to_string(),
+            finished_at: prior.finished_at,
+            usage: UsageStats::default(),
+            usage_unknown: true,
+            review_needed: prior.review_needed,
+            failed: prior.failed,
+            total_chunks: prior.total_chunks,
+            committed_chunks: prior.committed_chunks,
+            glossary_added: Vec::new(),
+            glossary_changed: Vec::new(),
+            archived: Some(rel_path.to_string()),
+        }),
+    }
+    trim_chapter_runs(ws, &mut data);
+    write(ws, &data)
+}
+
+/// Keep only the newest [`MAX_RUNS_PER_CHAPTER`] records per chapter, deleting the
+/// archived Thai files of the runs that fall off so `reruns/` cannot grow without
+/// bound.
+fn trim_chapter_runs(ws: &Workspace, data: &mut VolumeData) {
+    let mut per_chapter: std::collections::BTreeMap<u32, Vec<usize>> =
+        std::collections::BTreeMap::new();
+    for (i, r) in data.chapter_runs.iter().enumerate() {
+        per_chapter.entry(r.chapter).or_default().push(i);
+    }
+    let mut remove: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    for idxs in per_chapter.values() {
+        if idxs.len() > MAX_RUNS_PER_CHAPTER {
+            let mut by_age = idxs.clone();
+            by_age.sort_by_key(|&i| data.chapter_runs[i].finished_at);
+            for &i in by_age.iter().take(idxs.len() - MAX_RUNS_PER_CHAPTER) {
+                remove.insert(i);
+            }
+        }
+    }
+    if remove.is_empty() {
+        return;
+    }
+    for &i in &remove {
+        if let Some(rel) = &data.chapter_runs[i].archived {
+            let _ = std::fs::remove_file(ws.vol_rel(rel));
+        }
+    }
+    let kept: Vec<ChapterRun> = std::mem::take(&mut data.chapter_runs)
+        .into_iter()
+        .enumerate()
+        .filter(|(i, _)| !remove.contains(i))
+        .map(|(_, r)| r)
+        .collect();
+    data.chapter_runs = kept;
 }
 
 /// Render the human-readable Markdown body for VOLUME.md.
@@ -489,6 +601,105 @@ mod tests {
         record_run_discarded(&ws, "run-test").unwrap();
         let data = load(&ws);
         assert_eq!(data.run_history[0].status, RunHistoryStatus::Discarded);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    fn chapter_run(chapter: u32, id: &str, secs: i64, cost: f64) -> ChapterRun {
+        ChapterRun {
+            chapter,
+            run_id: id.to_string(),
+            finished_at: DateTime::<Utc>::from_timestamp(secs, 0).unwrap(),
+            usage: UsageStats {
+                cost_usd: cost,
+                ..Default::default()
+            },
+            usage_unknown: false,
+            review_needed: 0,
+            failed: false,
+            total_chunks: 3,
+            committed_chunks: 3,
+            glossary_added: Vec::new(),
+            glossary_changed: Vec::new(),
+            archived: None,
+        }
+    }
+
+    #[test]
+    fn chapter_runs_filter_sort_and_trim_deletes_archives() {
+        let (base, ws) = temp_ws("chapter_runs");
+        // Six runs for ch 3 (cap is 5) plus one unrelated ch 4 run.
+        for i in 0..6 {
+            let mut run = chapter_run(3, &format!("r{i}"), 1_000 + i, 0.01 * (i as f64 + 1.0));
+            // Give the two oldest an archived file on disk to prove trim removes them.
+            if i < 2 {
+                let rel = format!("reruns/ch_003/r{i}.md");
+                let abs = ws.vol_rel(&rel);
+                std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+                std::fs::write(&abs, "old").unwrap();
+                run.archived = Some(rel);
+            }
+            record_chapter_run(&ws, run).unwrap();
+        }
+        record_chapter_run(&ws, chapter_run(4, "other", 2_000, 0.5)).unwrap();
+
+        let runs = chapter_runs(&ws, 3);
+        assert_eq!(runs.len(), 5, "trimmed to MAX_RUNS_PER_CHAPTER");
+        // Newest-by-finished_at retained, oldest dropped → r1..=r5 survive (r0 gone).
+        assert_eq!(runs.first().unwrap().run_id, "r1");
+        assert_eq!(runs.last().unwrap().run_id, "r5");
+        // The dropped oldest run's archive file was deleted; the surviving one stays.
+        assert!(!ws.vol_rel("reruns/ch_003/r0.md").exists());
+        assert!(ws.vol_rel("reruns/ch_003/r1.md").exists());
+        // Other chapters are untouched.
+        assert_eq!(chapter_runs(&ws, 4).len(), 1);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn archive_prev_attaches_to_latest_then_synthesizes() {
+        let (base, ws) = temp_ws("archive_prev");
+        // A real recorded run exists → archiving attaches the path to it.
+        record_chapter_run(&ws, chapter_run(1, "real", 10, 0.04)).unwrap();
+        archive_prev_version(
+            &ws,
+            1,
+            "reruns/ch_001/real.md",
+            PriorVersion {
+                finished_at: DateTime::<Utc>::from_timestamp(10, 0).unwrap(),
+                review_needed: 0,
+                failed: false,
+                total_chunks: 3,
+                committed_chunks: 3,
+            },
+        )
+        .unwrap();
+        let runs = chapter_runs(&ws, 1);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].archived.as_deref(), Some("reruns/ch_001/real.md"));
+        assert!(!runs[0].usage_unknown);
+
+        // A chapter with no recorded run (pre-feature) → a "(prior)" stub is made.
+        archive_prev_version(
+            &ws,
+            2,
+            "reruns/ch_002/prior.md",
+            PriorVersion {
+                finished_at: DateTime::<Utc>::from_timestamp(5, 0).unwrap(),
+                review_needed: 2,
+                failed: false,
+                total_chunks: 4,
+                committed_chunks: 4,
+            },
+        )
+        .unwrap();
+        let runs = chapter_runs(&ws, 2);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].run_id, "(prior)");
+        assert!(runs[0].usage_unknown);
+        assert_eq!(runs[0].review_needed, 2);
+        assert_eq!(runs[0].archived.as_deref(), Some("reruns/ch_002/prior.md"));
 
         let _ = std::fs::remove_dir_all(&base);
     }

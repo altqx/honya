@@ -72,6 +72,19 @@ impl Workspace {
             .join("translated")
             .join(format!("ch_{:03}.md", ch))
     }
+
+    /// `<vol_dir>/reruns/ch_{ch:03}` — archived prior translations of a chapter,
+    /// kept for rerun comparison. A sibling of `raw/`/`translated/`, so it is never
+    /// mistaken for a chapter source by `scan` (which globs only `raw/`).
+    pub fn reruns_dir(&self, ch: u32) -> PathBuf {
+        self.vol_dir.join("reruns").join(format!("ch_{:03}", ch))
+    }
+
+    /// Resolve a volume-relative path (e.g. a `ChapterRun.archived` value) to an
+    /// absolute path under this volume.
+    pub fn vol_rel(&self, rel: &str) -> PathBuf {
+        self.vol_dir.join(rel)
+    }
 }
 
 /// Slugify into a filesystem-safe ascii slug (lowercased, non-`[a-z0-9]` → `-`,

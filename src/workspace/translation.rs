@@ -65,6 +65,33 @@ pub fn review_needed_details_in(text: &str) -> Vec<(u32, String)> {
     out
 }
 
+/// Strip the machine-only markers (`<!-- honya:chunk N -->` and the review-needed
+/// marker) from a translated chapter, leaving just the readable prose. Used by the
+/// Reader diff view so a rerun comparison shows text changes, not marker churn. The
+/// visible `[REVIEW NEEDED]` banner is deliberately kept — its appearing/vanishing
+/// across runs is meaningful diff signal. Collapses the blank-line runs the dropped
+/// markers leave behind so the two sides line up.
+pub fn prose_only(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut blank_run = 0u32;
+    for line in text.lines() {
+        if parse_chunk_marker(line).is_some() || line.trim() == REVIEW_NEEDED_MARKER {
+            continue;
+        }
+        if line.trim().is_empty() {
+            blank_run += 1;
+            if blank_run > 1 {
+                continue; // collapse 2+ blank lines into one
+            }
+        } else {
+            blank_run = 0;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.trim_matches('\n').to_string()
+}
+
 /// Pull the reviewer's objection out of a review-needed banner block: the text after
 /// the `เหตุผลจากผู้ตรวจ:` blockquote line, trimmed; empty when that line is absent.
 /// Kept in lock-step with the banner `append_chunk_needs_review` writes.

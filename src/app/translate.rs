@@ -4,15 +4,15 @@
 //! (role badge, spinner on the active one) + a token/retry meter. Bottom panel: the
 //! streaming Thai preview side-by-side with the JA source and an indigo caret.
 
+use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
-use ratatui::Frame;
 
 use crate::model::{AgentRole, AppEvent, ReviewVerdict, UsageStats};
-use crate::theme::{self, agent_badge, spinner_frame, Theme};
+use crate::theme::{self, Theme, agent_badge, spinner_frame};
 use crate::ui::text::truncate_cols;
 use crate::ui::widgets::render_line_gauge;
 

@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 
-use crate::agents::audit::audit_translation_with_context;
+use crate::agents::audit::audit_translation_with_terms;
 use crate::agents::chunk::{Chunk, chunk_chapter};
 use crate::agents::continuity;
 use crate::agents::prompts::{ORCHESTRATOR_SYSTEM, build_orchestrator_metadata_msg};
@@ -354,8 +354,20 @@ const MAX_GLOSSARY_IN_CTX: usize = 80;
 const MAX_CHARACTERS_IN_CTX: usize = 40;
 const MAX_PROTECTED_TERMS_FOR_ORCH: usize = 40;
 
+fn glossary_terms_for_chunk(ws: &Workspace, chunk_text: &str, max: usize) -> Vec<GlossaryTerm> {
+    let mut terms = glossary::load(ws);
+    // Keep only terms the chunk actually uses, so the injected glossary tracks
+    // the chunk rather than the whole, ever-growing volume.
+    terms.retain(|t| {
+        let jp = t.jp_term.trim();
+        !jp.is_empty() && chunk_text.contains(jp)
+    });
+    terms.truncate(max);
+    terms
+}
+
 /// Assemble the reference context bundled into every Translator/Reviewer call:
-/// the locked glossary, the character roster (pronouns/register), and the
+/// the scoped terminology policies, the character roster (pronouns/register), and the
 /// PROJECT/STYLE prose — each in its own clearly-delimited section. Re-read per
 /// chunk so mid-chapter glossary/character additions take effect immediately.
 fn build_reference_ctx(ws: &Workspace, chunk_text: &str) -> String {
@@ -380,17 +392,10 @@ fn build_reference_ctx(ws: &Workspace, chunk_text: &str) -> String {
     }
 
     let mut s = String::new();
-    let mut terms = glossary::load(ws);
-    // Keep only terms the chunk actually uses, so the injected glossary tracks
-    // the chunk rather than the whole, ever-growing volume.
-    terms.retain(|t| {
-        let jp = t.jp_term.trim();
-        !jp.is_empty() && chunk_text.contains(jp)
-    });
-    terms.truncate(MAX_GLOSSARY_IN_CTX);
+    let terms = glossary_terms_for_chunk(ws, chunk_text, MAX_GLOSSARY_IN_CTX);
     section(
         &mut s,
-        "<<GLOSSARY: คำศัพท์ที่ล็อกไว้ ต้องใช้ให้ตรง>>",
+        "<<GLOSSARY: นโยบายคำศัพท์ (hard lock / preferred / forbidden / context)>>",
         &glossary::render_context_blurb(&terms),
         "<<END_GLOSSARY>>",
     );
@@ -593,7 +598,9 @@ async fn process_chunk(
         });
 
         // ---- Deterministic audit + Reviewer ----
-        let audit_findings = audit_translation_with_context(&chunk.text, &thai, &prev_thai);
+        let audit_terms = glossary_terms_for_chunk(&ctx.ws, &chunk.text, MAX_GLOSSARY_IN_CTX);
+        let audit_findings =
+            audit_translation_with_terms(&chunk.text, &thai, &prev_thai, &audit_terms);
         ctx.tx.send(AppEvent::ChunkStateChanged {
             chapter,
             chunk: chunk.index,
@@ -770,25 +777,25 @@ async fn process_chunk(
     )
 }
 
-fn protected_terms_for_orchestrator(ws: &Workspace, out: &TranslatorOut) -> Vec<GlossaryTerm> {
+fn controlled_terms_for_orchestrator(ws: &Workspace, out: &TranslatorOut) -> Vec<GlossaryTerm> {
     if out.new_terms.is_empty() {
         return Vec::new();
     }
 
     let mut terms: Vec<GlossaryTerm> = glossary::load(ws)
         .into_iter()
-        .filter(glossary::is_protected)
+        .filter(glossary::blocks_automatic_update)
         .collect();
 
-    // Prioritize locks that resemble this chunk's reported discoveries, then
-    // include a bounded fallback list so the Orchestrator can still reason about
-    // nearby terminology without ballooning the prompt.
-    terms.sort_by_key(|t| !protected_term_matches_discovery(t, out));
+    // Prioritize controlled terms that resemble this chunk's reported discoveries,
+    // then include a bounded fallback list so the Orchestrator can still reason
+    // about nearby terminology without ballooning the prompt.
+    terms.sort_by_key(|t| !controlled_term_matches_discovery(t, out));
     terms.truncate(MAX_PROTECTED_TERMS_FOR_ORCH);
     terms
 }
 
-fn protected_term_matches_discovery(term: &GlossaryTerm, out: &TranslatorOut) -> bool {
+fn controlled_term_matches_discovery(term: &GlossaryTerm, out: &TranslatorOut) -> bool {
     let jp = term.jp_term.trim();
     let th = term.thai_term.trim();
     out.new_terms.iter().any(|new| {
@@ -809,8 +816,8 @@ async fn run_orchestrator_metadata_turn(
     chapter: u32,
     out: &TranslatorOut,
 ) -> anyhow::Result<(Usage, usize)> {
-    let protected_terms = protected_terms_for_orchestrator(&ctx.ws, out);
-    let user = build_orchestrator_metadata_msg(chapter, out, &protected_terms);
+    let controlled_terms = controlled_terms_for_orchestrator(&ctx.ws, out);
+    let user = build_orchestrator_metadata_msg(chapter, out, &controlled_terms);
 
     let tools: Vec<Tool> = serde_json::from_value(orchestrator_tools())
         .map_err(|e| anyhow::anyhow!("failed to build orchestrator tools: {e}"))?;
@@ -859,6 +866,9 @@ mod tests {
             romaji: None,
             category: None,
             gloss: None,
+            policy: None,
+            forbidden_thai: Vec::new(),
+            context_rule: None,
             protected: None,
             do_not_translate: None,
             first_seen_chapter: None,

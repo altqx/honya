@@ -5,6 +5,9 @@
 use once_cell::sync::Lazy;
 use regex::Regex;
 
+use crate::model::{GlossaryTerm, TermPolicy};
+use crate::workspace::glossary;
+
 static HTML_TAG: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"</?[A-Za-z][A-Za-z0-9:-]*(?:\s+[^<>\n]{0,160})?>")
         .expect("html-tag regex is valid")
@@ -18,12 +21,13 @@ static TRANSLATION_LABEL: Lazy<Regex> = Lazy::new(|| {
         .expect("translation-label regex is valid")
 });
 
-/// Return concise, actionable findings. An empty list means the deterministic
-/// gate did not find a mechanical problem.
-pub fn audit_translation_with_context(
+/// Return concise, actionable findings with deterministic terminology checks for
+/// scoped glossary terms that appear in this source chunk.
+pub fn audit_translation_with_terms(
     source_jp: &str,
     thai: &str,
     prev_thai: &[String],
+    terms: &[GlossaryTerm],
 ) -> Vec<String> {
     let source = source_jp.trim();
     let translated = thai.trim();
@@ -125,7 +129,55 @@ pub fn audit_translation_with_context(
         );
     }
 
+    audit_terminology(&mut findings, source, translated, terms);
+
     findings
+}
+
+fn audit_terminology(
+    findings: &mut Vec<String>,
+    source: &str,
+    translated: &str,
+    terms: &[GlossaryTerm],
+) {
+    for term in terms {
+        let jp = term.jp_term.trim();
+        if jp.is_empty() || !source.contains(jp) {
+            continue;
+        }
+
+        match glossary::effective_policy(term) {
+            TermPolicy::HardLocked => {
+                let expected = expected_hard_locked_rendering(term);
+                if !expected.is_empty() && !translated.contains(expected) {
+                    findings.push(format!(
+                        "hard-locked glossary term `{jp}` must use exact rendering `{expected}` in translated_text"
+                    ));
+                }
+            }
+            TermPolicy::Forbidden => {}
+            TermPolicy::Preferred | TermPolicy::ContextDependent => {}
+        }
+
+        for forbidden in glossary::forbidden_renderings(term) {
+            if !forbidden.is_empty() && translated.contains(&forbidden) {
+                findings.push(format!(
+                    "forbidden glossary rendering `{forbidden}` was used for `{jp}`; choose an allowed/contextual rendering instead"
+                ));
+            }
+        }
+    }
+}
+
+fn expected_hard_locked_rendering(term: &GlossaryTerm) -> &str {
+    let thai = term.thai_term.trim();
+    if !thai.is_empty() {
+        thai
+    } else if matches!(term.do_not_translate, Some(true)) {
+        term.jp_term.trim()
+    } else {
+        ""
+    }
 }
 
 fn copied_continuity(prev_thai: &[String], translated: &str) -> bool {
@@ -191,6 +243,27 @@ fn japanese_char_count(text: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::{GlossaryTerm, TermPolicy};
+
+    fn term(jp: &str, thai: &str, policy: TermPolicy) -> GlossaryTerm {
+        GlossaryTerm {
+            jp_term: jp.to_string(),
+            thai_term: thai.to_string(),
+            romaji: None,
+            category: None,
+            gloss: None,
+            policy: Some(policy),
+            forbidden_thai: Vec::new(),
+            context_rule: None,
+            protected: matches!(
+                policy,
+                TermPolicy::HardLocked | TermPolicy::Forbidden | TermPolicy::ContextDependent
+            )
+            .then_some(true),
+            do_not_translate: None,
+            first_seen_chapter: None,
+        }
+    }
 
     #[test]
     fn audit_accepts_clean_thai_markdown() {
@@ -199,7 +272,7 @@ mod tests {
         let thai = "เธอหัวเราะ\n\n---\n\n![ภาพประกอบ](../images/a.webp)\n\n**แสงแรงกล้า**สาดเข้ามา";
 
         assert_eq!(
-            audit_translation_with_context(source, thai, &[]),
+            audit_translation_with_terms(source, thai, &[], &[]),
             Vec::<String>::new()
         );
     }
@@ -209,7 +282,7 @@ mod tests {
         let source = "一文目。\n\n---\n\n![ภาพประกอบ](../images/a.webp)\n\n**二文目。**";
         let thai = "<div>一文目。</div>\n\n**二文目。** &nbsp;";
 
-        let findings = audit_translation_with_context(source, thai, &[]);
+        let findings = audit_translation_with_terms(source, thai, &[], &[]);
         assert!(findings.iter().any(|f| f.contains("HTML tag")));
         assert!(findings.iter().any(|f| f.contains("&nbsp;")));
         assert!(findings.iter().any(|f| f.contains("scene divider")));
@@ -223,15 +296,28 @@ mod tests {
         let prev = vec!["เธอกำมือแน่นพลางฝืนยิ้มทั้งที่เสียงยังสั่นอยู่เล็กน้อย".to_string()];
         let thai = "เธอกำมือแน่นพลางฝืนยิ้มทั้งที่เสียงยังสั่นอยู่เล็กน้อย\n\nเธอหันกลับไป";
 
-        let findings = audit_translation_with_context(source, thai, &prev);
+        let findings = audit_translation_with_terms(source, thai, &prev, &[]);
 
         assert!(findings.iter().any(|f| f.contains("continuity context")));
     }
 
     #[test]
     fn audit_flags_translation_label() {
-        let findings = audit_translation_with_context("彼女は笑った。", "คำแปล: เธอหัวเราะ", &[]);
+        let findings = audit_translation_with_terms("彼女は笑った。", "คำแปล: เธอหัวเราะ", &[], &[]);
 
         assert!(findings.iter().any(|f| f.contains("translation labels")));
+    }
+
+    #[test]
+    fn audit_enforces_hard_locked_and_forbidden_terms() {
+        let mut forbidden = term("黒炎", "ไฟดำ", TermPolicy::Forbidden);
+        forbidden.forbidden_thai.push("เปลวไฟทมิฬ".to_string());
+        let terms = vec![term("聖剣", "ดาบศักดิ์สิทธิ์", TermPolicy::HardLocked), forbidden];
+
+        let findings =
+            audit_translation_with_terms("聖剣が黒炎を切った。", "ดาบเทพตัดเปลวไฟทมิฬ", &[], &terms);
+
+        assert!(findings.iter().any(|f| f.contains("hard-locked")));
+        assert!(findings.iter().any(|f| f.contains("forbidden glossary")));
     }
 }

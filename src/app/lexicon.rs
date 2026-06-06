@@ -9,7 +9,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::model::{Character, GlossaryTerm};
+use crate::model::{Character, GlossaryTerm, TermPolicy};
 use crate::theme::{self, Theme};
 use crate::ui::text::{pad_to_cols, thai_display_safe, truncate_cols};
 use crate::workspace::Workspace;
@@ -41,19 +41,25 @@ impl EditForm {
             romaji: None,
             category: None,
             gloss: None,
+            policy: Some(TermPolicy::Preferred),
+            forbidden_thai: Vec::new(),
+            context_rule: None,
             protected: None,
             do_not_translate: None,
             first_seen_chapter: None,
         });
+        let policy = policy_field(crate::workspace::glossary::effective_policy(&g));
         Self {
             kind: SUB_GLOSSARY,
             fields: vec![
                 ("JP term", g.jp_term),
                 ("Thai term", g.thai_term),
                 ("Category", g.category.unwrap_or_default()),
-                ("Gloss", g.gloss.unwrap_or_default()),
+                ("Policy", policy),
                 ("Do not trans", bool_field(g.do_not_translate)),
-                ("Protected", bool_field(g.protected)),
+                ("Forbidden", g.forbidden_thai.join(", ")),
+                ("Context rule", g.context_rule.unwrap_or_default()),
+                ("Gloss", g.gloss.unwrap_or_default()),
             ],
             field: 0,
             is_new: seed.is_none(),
@@ -103,13 +109,21 @@ impl EditForm {
 
     fn to_glossary(&self) -> GlossaryTerm {
         let get = |i: usize| self.fields.get(i).map(|f| f.1.clone()).unwrap_or_default();
+        let policy = parse_policy(&get(3)).unwrap_or(TermPolicy::Preferred);
         GlossaryTerm {
             jp_term: get(0),
             thai_term: get(1),
             romaji: None,
             category: opt(get(2)),
-            gloss: opt(get(3)),
-            protected: bool_opt(get(5)),
+            gloss: opt(get(7)),
+            policy: Some(policy),
+            forbidden_thai: split_list(&get(5)),
+            context_rule: opt(get(6)),
+            protected: matches!(
+                policy,
+                TermPolicy::HardLocked | TermPolicy::Forbidden | TermPolicy::ContextDependent
+            )
+            .then_some(true),
             do_not_translate: bool_opt(get(4)),
             first_seen_chapter: None,
         }
@@ -179,6 +193,16 @@ impl LexiconScreen {
                     t.jp_term.to_lowercase().contains(&q)
                         || t.thai_term.to_lowercase().contains(&q)
                         || t.category
+                            .as_deref()
+                            .unwrap_or("")
+                            .to_lowercase()
+                            .contains(&q)
+                        || policy_field(crate::workspace::glossary::effective_policy(t))
+                            .contains(&q)
+                        || t.forbidden_thai
+                            .iter()
+                            .any(|v| v.to_lowercase().contains(&q))
+                        || t.context_rule
                             .as_deref()
                             .unwrap_or("")
                             .to_lowercase()
@@ -519,18 +543,18 @@ impl LexiconScreen {
         // Header row.
         let head = Line::from(Span::styled(
             format!(
-                "   {} {} {} {} {}  Gloss",
+                "   {} {} {} {} {}  Notes",
                 pad_to_cols("JP term", 12),
                 pad_to_cols("Thai term", 16),
                 pad_to_cols("Cat", 8),
-                "Lock",
+                pad_to_cols("Policy", 10),
                 "DNT"
             ),
             Style::default().fg(theme.ink_faint),
         ));
 
         let mut items = vec![ListItem::new(head)];
-        let gloss_w = area.width.saturating_sub(55).max(8) as usize;
+        let gloss_w = area.width.saturating_sub(63).max(8) as usize;
         for (i, t) in terms.iter().enumerate() {
             let selected = i == sel;
             let bar = if selected { theme::SELECT_BAR } else { ' ' };
@@ -539,11 +563,7 @@ impl LexiconScreen {
             } else {
                 theme.bg_panel
             };
-            let lock = if t.protected.unwrap_or(false) {
-                "✓"
-            } else {
-                "·"
-            };
+            let policy = policy_short(crate::workspace::glossary::effective_policy(t));
             let dnt = if t.do_not_translate.unwrap_or(false) {
                 "✓"
             } else {
@@ -566,18 +586,16 @@ impl LexiconScreen {
                     Style::default().fg(theme.ink_soft).bg(bg),
                 ),
                 Span::styled(
-                    format!(" {lock}    "),
+                    pad_to_cols(policy, 10),
                     Style::default().fg(theme.ink_faint).bg(bg),
                 ),
+                Span::styled(" ", Style::default().bg(bg)),
                 Span::styled(
                     format!(" {dnt}   "),
                     Style::default().fg(theme.ink_faint).bg(bg),
                 ),
                 Span::styled(
-                    truncate_cols(
-                        &thai_display_safe(t.gloss.as_deref().unwrap_or("")),
-                        gloss_w,
-                    ),
+                    truncate_cols(&thai_display_safe(&term_note(t)), gloss_w),
                     Style::default().fg(theme.ink_soft).bg(bg),
                 ),
             ])));
@@ -796,6 +814,60 @@ fn bool_opt(s: String) -> Option<bool> {
         }
         _ => None,
     }
+}
+
+fn policy_field(policy: TermPolicy) -> String {
+    match policy {
+        TermPolicy::HardLocked => "hard_locked".to_string(),
+        TermPolicy::Preferred => "preferred".to_string(),
+        TermPolicy::Forbidden => "forbidden".to_string(),
+        TermPolicy::ContextDependent => "context_dependent".to_string(),
+    }
+}
+
+fn parse_policy(s: &str) -> Option<TermPolicy> {
+    match s.trim().to_lowercase().replace('-', "_").as_str() {
+        "hard_locked" | "hard" | "lock" | "locked" | "protected" => Some(TermPolicy::HardLocked),
+        "preferred" | "prefer" | "default" | "soft" => Some(TermPolicy::Preferred),
+        "forbidden" | "forbid" | "ban" | "banned" => Some(TermPolicy::Forbidden),
+        "context_dependent" | "context" | "conditional" | "depends" => {
+            Some(TermPolicy::ContextDependent)
+        }
+        "" => None,
+        _ => None,
+    }
+}
+
+fn policy_short(policy: TermPolicy) -> &'static str {
+    match policy {
+        TermPolicy::HardLocked => "lock",
+        TermPolicy::Preferred => "prefer",
+        TermPolicy::Forbidden => "forbid",
+        TermPolicy::ContextDependent => "context",
+    }
+}
+
+fn term_note(t: &GlossaryTerm) -> String {
+    let mut parts = Vec::new();
+    if let Some(rule) = t.context_rule.as_deref().filter(|v| !v.trim().is_empty()) {
+        parts.push(format!("ctx: {}", rule.trim()));
+    }
+    let forbidden = crate::workspace::glossary::forbidden_renderings(t);
+    if !forbidden.is_empty() {
+        parts.push(format!("avoid: {}", forbidden.join(", ")));
+    }
+    if let Some(gloss) = t.gloss.as_deref().filter(|v| !v.trim().is_empty()) {
+        parts.push(gloss.trim().to_string());
+    }
+    parts.join(" · ")
+}
+
+fn split_list(s: &str) -> Vec<String> {
+    s.split([',', ';', '\n'])
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 /// A stable id derived from a JP name (mirrors the workspace's slugify-jp rule:

@@ -24,8 +24,8 @@ use ratatui::widgets::Paragraph;
 
 use crate::llm::client::LlmClient;
 use crate::model::{
-    AppConfig, AppEvent, ChapterStatus, EventTx, LogLevel, ModelSet, Project, ReaderAnnotation,
-    RunHistoryEntry, RunHistoryStatus, ThemeId, UsageStats,
+    AppConfig, AppEvent, ChapterRun, ChapterStatus, EventTx, LogLevel, ModelSet, Project,
+    ReaderAnnotation, RunHistoryEntry, RunHistoryStatus, ThemeId, UsageStats,
 };
 use crate::theme::Theme;
 use crate::ui::chrome::{self, StatusTally};
@@ -237,6 +237,26 @@ pub struct App {
     /// Checkpoint for the currently running pipeline. Kept in memory so the final
     /// `PipelineFinished` event can close the matching VOLUME.md run-history row.
     pub active_run: Option<crate::workspace::session::SessionCheckpoint>,
+    /// The per-chapter run record being assembled across this run's events (cost is
+    /// folded in from `ChapterUsage`, QA/glossary deltas computed at the terminal
+    /// state). Recorded to VOLUME.md so reruns can be compared. One at a time:
+    /// chapters run sequentially.
+    pending_chapter_run: Option<PendingChapterRun>,
+}
+
+/// Accumulates one chapter's run facts between `ChapterStarted` and its terminal
+/// state event, so the finished record can be written in one place.
+struct PendingChapterRun {
+    chapter: u32,
+    run_id: String,
+    /// Glossary jp_term → Thai snapshot taken at the chapter's start, diffed at the
+    /// end to report what this run added / changed.
+    glossary_before: HashMap<String, String>,
+    /// This run's spend on the chapter, folded in from `ChapterUsage`.
+    usage: UsageStats,
+    /// Whether any usage was seen — image-only / instant-fail chapters get none and
+    /// are not worth a comparison record.
+    has_usage: bool,
 }
 
 impl App {
@@ -270,6 +290,7 @@ impl App {
             update_available: None,
             pending_recovery: None,
             active_run: None,
+            pending_chapter_run: None,
         }
     }
 
@@ -338,6 +359,7 @@ impl App {
             AppEvent::ChapterStarted { chapter } => {
                 self.set_chapter_status(*chapter, ChapterStatus::Translating);
                 self.run_active = true;
+                self.begin_pending_chapter_run(*chapter);
                 if let Some(title) = self.chapter_title(*chapter) {
                     self.translate.set_chapter_title(title);
                 }
@@ -347,6 +369,12 @@ impl App {
             }
             AppEvent::ChapterStateChanged { chapter, state } => {
                 self.set_chapter_status(*chapter, *state);
+                if matches!(
+                    state,
+                    ChapterStatus::Done | ChapterStatus::NeedsReview | ChapterStatus::Failed
+                ) {
+                    self.finalize_pending_chapter_run(*chapter, *state);
+                }
             }
             AppEvent::ChapterChunked {
                 chapter,
@@ -386,6 +414,12 @@ impl App {
             }
             AppEvent::ChapterUsage { chapter, delta } => {
                 self.add_chapter_usage(*chapter, delta);
+                if let Some(p) = self.pending_chapter_run.as_mut()
+                    && p.chapter == *chapter
+                {
+                    p.usage.add(delta);
+                    p.has_usage = true;
+                }
             }
             AppEvent::ChapterFailed { chapter, reason } => {
                 self.set_chapter_status(*chapter, ChapterStatus::Failed);
@@ -416,6 +450,9 @@ impl App {
             } => {
                 self.run_active = false;
                 self.run_ctl = None;
+                // A chapter interrupted by Stop never reaches a terminal state event,
+                // so drop any half-built record rather than mis-recording it.
+                self.pending_chapter_run = None;
                 self.finish_active_run_history(
                     *chapters_done,
                     *chapters_failed,
@@ -532,6 +569,159 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Start assembling a per-chapter run record (snapshot the glossary so we can
+    /// report what this run adds / changes). Called on `ChapterStarted`.
+    fn begin_pending_chapter_run(&mut self, chapter: u32) {
+        let (ws, run_id) = match self.active.as_ref() {
+            Some(a) => (
+                a.workspace.clone(),
+                self.active_run
+                    .as_ref()
+                    .map(|c| c.run_id.clone())
+                    .unwrap_or_default(),
+            ),
+            None => return,
+        };
+        let glossary_before = glossary_map(&ws);
+        self.pending_chapter_run = Some(PendingChapterRun {
+            chapter,
+            run_id,
+            glossary_before,
+            usage: UsageStats::default(),
+            has_usage: false,
+        });
+    }
+
+    /// Finish and persist the per-chapter run record once the chapter reaches a
+    /// terminal state, capturing the cost (folded earlier), the glossary delta vs
+    /// the start-of-run snapshot, and the QA outcome (review-needed chunks / fail).
+    fn finalize_pending_chapter_run(&mut self, chapter: u32, state: ChapterStatus) {
+        let Some(pending) = self.pending_chapter_run.take() else {
+            return;
+        };
+        // Only the chapter we were tracking, and only if it actually spent tokens
+        // (image-only / instant-fail chapters have nothing worth comparing).
+        if pending.chapter != chapter || !pending.has_usage {
+            return;
+        }
+        let Some(active) = self.active.as_ref() else {
+            return;
+        };
+        let ws = active.workspace.clone();
+        let total_chunks = self.find_chapter(chapter).map(|c| c.total_chunks);
+
+        let after = glossary_map(&ws);
+        let (glossary_added, glossary_changed) = glossary_delta(&pending.glossary_before, &after);
+
+        let translated = std::fs::read_to_string(ws.translated(chapter)).unwrap_or_default();
+        let review_needed =
+            crate::workspace::translation::review_needed_chunk_indices_in(&translated).len() as u32;
+        let committed_chunks =
+            crate::workspace::translation::committed_chunk_indices_in(&translated).len() as u32;
+
+        let run = ChapterRun {
+            chapter,
+            run_id: if pending.run_id.trim().is_empty() {
+                "(run)".to_string()
+            } else {
+                pending.run_id
+            },
+            finished_at: chrono::Utc::now(),
+            usage: pending.usage,
+            usage_unknown: false,
+            review_needed,
+            failed: matches!(state, ChapterStatus::Failed),
+            total_chunks: total_chunks.unwrap_or(committed_chunks),
+            committed_chunks,
+            glossary_added,
+            glossary_changed,
+            archived: None,
+        };
+        if let Err(e) = crate::workspace::volume::record_chapter_run(&ws, run) {
+            self.push_log(
+                LogLevel::Warn,
+                format!("could not record chapter run for ch {chapter}: {e}"),
+            );
+        }
+    }
+
+    /// Archive a chapter's current translation before a restart deletes it, so the
+    /// upcoming rerun can be diffed against it. Attaches the archive to that
+    /// version's run record (or synthesizes a `"(prior)"` one for a pre-feature
+    /// translation). Best-effort: failures only warn.
+    fn archive_for_rerun(&mut self, ws: &Workspace, chapter: u32) {
+        let path = ws.translated(chapter);
+        let content = match std::fs::read_to_string(&path) {
+            Ok(c) if !c.trim().is_empty() => c,
+            _ => return, // nothing translated yet → nothing to archive
+        };
+        let dir = ws.reruns_dir(chapter);
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            self.push_log(
+                LogLevel::Warn,
+                format!("could not create rerun archive dir for ch {chapter}: {e}"),
+            );
+            return;
+        }
+        let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string();
+        let fname = format!("{stamp}.md");
+        if let Err(e) = std::fs::write(dir.join(&fname), &content) {
+            self.push_log(
+                LogLevel::Warn,
+                format!("could not archive prior translation for ch {chapter}: {e}"),
+            );
+            return;
+        }
+        let rel = format!("reruns/ch_{chapter:03}/{fname}");
+
+        let review_needed =
+            crate::workspace::translation::review_needed_chunk_indices_in(&content).len() as u32;
+        let committed_chunks =
+            crate::workspace::translation::committed_chunk_indices_in(&content).len() as u32;
+        let total_chunks = self
+            .find_chapter(chapter)
+            .map(|c| c.total_chunks)
+            .filter(|t| *t > 0)
+            .unwrap_or(committed_chunks);
+        let failed = matches!(
+            self.find_chapter(chapter).map(|c| c.status),
+            Some(ChapterStatus::Failed)
+        );
+        let finished_at = std::fs::metadata(&path)
+            .and_then(|m| m.modified())
+            .map(chrono::DateTime::<chrono::Utc>::from)
+            .unwrap_or_else(|_| chrono::Utc::now());
+
+        if let Err(e) = crate::workspace::volume::archive_prev_version(
+            ws,
+            chapter,
+            &rel,
+            crate::workspace::volume::PriorVersion {
+                finished_at,
+                review_needed,
+                failed,
+                total_chunks,
+                committed_chunks,
+            },
+        ) {
+            self.push_log(
+                LogLevel::Warn,
+                format!("could not record rerun archive for ch {chapter}: {e}"),
+            );
+        }
+    }
+
+    /// The in-memory chapter record (across the active project's volumes).
+    fn find_chapter(&self, chapter: u32) -> Option<&crate::model::Chapter> {
+        self.active
+            .as_ref()?
+            .project
+            .volumes
+            .iter()
+            .flat_map(|v| v.chapters.iter())
+            .find(|c| c.number == chapter)
     }
 
     /// Fold a finished chapter's run usage into its in-memory lifetime total,
@@ -1083,6 +1273,9 @@ impl App {
         let ws = Workspace::new(project_dir.clone(), vol);
         if restart {
             for chapter in &chapters {
+                // Snapshot the existing translation for rerun comparison before the
+                // restart deletes it.
+                self.archive_for_rerun(&ws, *chapter);
                 if let Err(e) = crate::workspace::translation::reset_chapter(&ws, *chapter) {
                     self.toast = Some(Toast::error(format!(
                         "restart failed for ch {chapter}: {e}"
@@ -1613,6 +1806,38 @@ fn run_history_status(
     } else {
         RunHistoryStatus::Completed
     }
+}
+
+/// Load the glossary as a `jp_term → Thai` map (keys trimmed), for diffing what a
+/// run added / changed.
+fn glossary_map(ws: &Workspace) -> HashMap<String, String> {
+    crate::workspace::glossary::load(ws)
+        .into_iter()
+        .map(|t| (t.jp_term.trim().to_string(), t.thai_term))
+        .collect()
+}
+
+/// Diff two glossary snapshots by jp_term: `(added, changed)` jp_terms (sorted,
+/// capped). "Added" = a term absent before; "changed" = a term whose Thai differs.
+fn glossary_delta(
+    before: &HashMap<String, String>,
+    after: &HashMap<String, String>,
+) -> (Vec<String>, Vec<String>) {
+    const CAP: usize = 100;
+    let mut added = Vec::new();
+    let mut changed = Vec::new();
+    for (jp, thai) in after {
+        match before.get(jp) {
+            None => added.push(jp.clone()),
+            Some(prev) if prev != thai => changed.push(jp.clone()),
+            _ => {}
+        }
+    }
+    added.sort();
+    changed.sort();
+    added.truncate(CAP);
+    changed.truncate(CAP);
+    (added, changed)
 }
 
 fn chapter_list_preview(chapters: &[u32]) -> String {

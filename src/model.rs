@@ -269,6 +269,14 @@ pub struct NewTerm {
     pub thai_term: String,
     pub category: String,
     pub gloss: String,
+    #[serde(default)]
+    pub policy: Option<TermPolicy>,
+    #[serde(default)]
+    pub forbidden_thai: Vec<String>,
+    #[serde(default)]
+    pub context_rule: Option<String>,
+    #[serde(default)]
+    pub do_not_translate: Option<bool>,
 }
 
 /// Reviewer strict-schema output ("review_result") — matches the product spec exactly:
@@ -326,6 +334,20 @@ pub struct Relationship {
     pub relation: String,
 }
 
+/// How a glossary entry should constrain terminology in translation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TermPolicy {
+    /// Use the saved rendering exactly whenever the source term appears.
+    HardLocked,
+    /// Use the saved rendering by default, but allow natural context-sensitive variation.
+    Preferred,
+    /// The saved/forbidden renderings must not appear for this source term.
+    Forbidden,
+    /// The rendering depends on context; `context_rule` explains when/how to choose.
+    ContextDependent,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GlossaryTerm {
     pub jp_term: String,
@@ -336,8 +358,18 @@ pub struct GlossaryTerm {
     pub category: Option<String>,
     #[serde(default)]
     pub gloss: Option<String>,
-    /// Human-confirmed terminology lock: automatic Orchestrator upserts must not
-    /// rewrite the canonical rendering or flags for this term.
+    /// New terminology-control model. When absent, legacy `protected=true` maps
+    /// to [`TermPolicy::HardLocked`]; otherwise the entry is treated as preferred.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<TermPolicy>,
+    /// Thai renderings that must not be used for this Japanese term.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub forbidden_thai: Vec<String>,
+    /// Context rule for [`TermPolicy::ContextDependent`] entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_rule: Option<String>,
+    /// Back-compat / manual protection flag: automatic Orchestrator upserts must
+    /// not rewrite controlled human-confirmed terms.
     #[serde(default, alias = "locked")]
     pub protected: Option<bool>,
     #[serde(default)]
@@ -370,6 +402,10 @@ pub struct VolumeData {
     /// of only an ephemeral TUI log.
     #[serde(default)]
     pub run_history: Vec<RunHistoryEntry>,
+    /// Per-chapter run outcomes retained for rerun comparison (cost / QA / glossary
+    /// deltas + archived Thai). Trimmed to the most recent few runs per chapter.
+    #[serde(default)]
+    pub chapter_runs: Vec<ChapterRun>,
     #[serde(default)]
     pub notes: Vec<ContinuityNote>,
     /// Human proofreading notes anchored to Reader lines in translated chapters.
@@ -560,6 +596,49 @@ impl RunHistoryEntry {
             honya_version,
         }
     }
+}
+
+/// One chapter's outcome from a single translation run, retained per-chapter in
+/// VOLUME.md so reruns can be compared (cost / QA / glossary deltas, plus a path
+/// to the archived Thai this run produced once a later rerun displaces it). Unlike
+/// `chapter_usage` (which is the *cumulative* lifetime total), `usage` here is the
+/// spend of this one run — exactly the "cost difference" a rerun comparison needs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChapterRun {
+    pub chapter: u32,
+    /// Run id shared with the recovery checkpoint / run-history row. The sentinel
+    /// `"(prior)"` marks a version translated before this feature existed, whose
+    /// per-run cost was never recorded (`usage_unknown`).
+    pub run_id: String,
+    pub finished_at: DateTime<Utc>,
+    /// This run's spend on this chapter (per-run delta, NOT the lifetime total).
+    #[serde(default)]
+    pub usage: UsageStats,
+    /// True when `usage` was never captured (a pre-feature version) — display n/a
+    /// rather than a misleading `$0.0000`.
+    #[serde(default)]
+    pub usage_unknown: bool,
+    /// QA signal: chunks left flagged review-needed after this run (0 = clean).
+    #[serde(default)]
+    pub review_needed: u32,
+    /// QA signal: the chapter ended `Failed`.
+    #[serde(default)]
+    pub failed: bool,
+    #[serde(default)]
+    pub total_chunks: u32,
+    #[serde(default)]
+    pub committed_chunks: u32,
+    /// jp_terms inserted into the glossary during this run.
+    #[serde(default)]
+    pub glossary_added: Vec<String>,
+    /// jp_terms whose Thai rendering changed during this run.
+    #[serde(default)]
+    pub glossary_changed: Vec<String>,
+    /// Path (relative to the volume dir, e.g. `reruns/ch_003/<run>.md`) to the Thai
+    /// this run produced, archived when a later rerun displaced it. `None` while
+    /// this run is still the live version in `translated/`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived: Option<String>,
 }
 
 /// The background -> UI channel payload, sent over `tokio::sync::mpsc`. Raw crossterm

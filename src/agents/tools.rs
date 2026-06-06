@@ -13,7 +13,8 @@ use serde_json::json;
 
 use crate::llm::tool_loop::ToolExecutor;
 use crate::model::{
-    AppEvent, Character, ContinuityNote, EventTx, GlossaryTerm, Relationship, ToolResult,
+    AppEvent, Character, ContinuityNote, EventTx, GlossaryTerm, Relationship, TermPolicy,
+    ToolResult,
 };
 use crate::workspace::{Workspace, characters, glossary, translation, volume};
 
@@ -59,7 +60,7 @@ pub fn orchestrator_tools() -> serde_json::Value {
             "type": "function",
             "function": {
                 "name": "upsert_glossary_term",
-                "description": "Create or update a glossary term in GLOSSARY.md (skills, places, organizations, items, titles, concepts, sound effects). Existing protected terms are terminology locks and will not be overwritten by automatic Orchestrator updates.",
+                "description": "Create or update a glossary term in GLOSSARY.md (skills, places, organizations, items, titles, concepts, sound effects). Existing controlled/protected terms (hard_locked, forbidden, context_dependent, or protected=true) will not be overwritten by automatic Orchestrator updates.",
                 "parameters": {
                     "type": "object",
                     "additionalProperties": false,
@@ -70,7 +71,10 @@ pub fn orchestrator_tools() -> serde_json::Value {
                         "romaji": {"type": "string"},
                         "category": {"type": "string", "enum": ["skill", "place", "org", "item", "title", "concept", "sfx", "other"]},
                         "gloss": {"type": "string", "description": "Short clarifying note about meaning or usage."},
-                        "protected": {"type": "boolean", "description": "True only for a human-confirmed terminology lock; protected existing terms cannot be automatically overwritten."},
+                        "policy": {"type": "string", "enum": ["hard_locked", "preferred", "forbidden", "context_dependent"], "description": "Terminology policy. Use preferred for normal discoveries; hard_locked/forbidden/context_dependent are human controls and block automatic overwrites."},
+                        "forbidden_thai": {"type": "array", "items": {"type": "string"}, "description": "Thai renderings that must not be used for this Japanese term."},
+                        "context_rule": {"type": "string", "description": "Rule for context_dependent terms (when to use each rendering)."},
+                        "protected": {"type": "boolean", "description": "Back-compat human protection flag; protected existing terms cannot be automatically overwritten."},
                         "do_not_translate": {"type": "boolean", "description": "True to keep the term verbatim / romanized."},
                         "first_seen_chapter": {"type": "integer"}
                     }
@@ -133,7 +137,7 @@ pub fn orchestrator_tools() -> serde_json::Value {
             "type": "function",
             "function": {
                 "name": "get_glossary",
-                "description": "Read glossary terms from GLOSSARY.md, optionally filtered by query/category/protected_only, to check existing locked terminology before inventing new terms.",
+                "description": "Read glossary terms from GLOSSARY.md, optionally filtered by query/category/policy/protected_only, to check existing terminology controls before inventing new terms.",
                 "parameters": {
                     "type": "object",
                     "additionalProperties": false,
@@ -141,7 +145,8 @@ pub fn orchestrator_tools() -> serde_json::Value {
                     "properties": {
                         "query": {"type": "string"},
                         "category": {"type": "string", "enum": ["skill", "place", "org", "item", "title", "concept", "sfx", "other"]},
-                        "protected_only": {"type": "boolean", "description": "True to return only protected terminology locks."},
+                        "policy": {"type": "string", "enum": ["hard_locked", "preferred", "forbidden", "context_dependent"]},
+                        "protected_only": {"type": "boolean", "description": "True to return only terms that block automatic overwrite (hard locked, forbidden, context dependent, or protected)."},
                         "limit": {"type": "integer"}
                     }
                 }
@@ -201,6 +206,12 @@ struct UpsertGlossaryArgs {
     #[serde(default)]
     gloss: Option<String>,
     #[serde(default)]
+    policy: Option<TermPolicy>,
+    #[serde(default)]
+    forbidden_thai: Vec<String>,
+    #[serde(default)]
+    context_rule: Option<String>,
+    #[serde(default)]
     protected: Option<bool>,
     #[serde(default)]
     do_not_translate: Option<bool>,
@@ -240,6 +251,8 @@ struct GetGlossaryArgs {
     query: Option<String>,
     #[serde(default)]
     category: Option<String>,
+    #[serde(default)]
+    policy: Option<TermPolicy>,
     #[serde(default)]
     protected_only: Option<bool>,
     #[serde(default)]
@@ -337,6 +350,9 @@ pub async fn dispatch_tool(
                 romaji: a.romaji,
                 category: a.category,
                 gloss: a.gloss,
+                policy: a.policy,
+                forbidden_thai: a.forbidden_thai,
+                context_rule: a.context_rule,
                 protected: a.protected,
                 do_not_translate: a.do_not_translate,
                 first_seen_chapter: a.first_seen_chapter.or(Some(chapter)),
@@ -356,9 +372,11 @@ pub async fn dispatch_tool(
                     ToolResult::ok(format!("Upserted term {} → {}", a.jp_term, a.thai_term))
                 }
                 Ok(glossary::GlossaryUpsertOutcome::Protected { existing, conflict }) => {
+                    let policy = glossary::effective_policy(&existing);
                     let summary = format!(
-                        "protected term {} kept as {}",
-                        existing.jp_term, existing.thai_term
+                        "controlled term {} kept by {} policy",
+                        existing.jp_term,
+                        glossary::policy_label(policy)
                     );
                     tx.send(AppEvent::ToolInvoked {
                         chapter,
@@ -368,17 +386,20 @@ pub async fn dispatch_tool(
                     ToolResult::data(
                         if conflict {
                             format!(
-                                "Term {} is protected; kept locked Thai '{}'. Do not overwrite it; flag a term conflict if this chunk needs a different rendering.",
-                                existing.jp_term, existing.thai_term
+                                "Term {} is controlled by '{}' policy; no automatic update was applied. Flag a term conflict if this chunk needs a different rendering.",
+                                existing.jp_term,
+                                glossary::policy_label(policy)
                             )
                         } else {
                             format!(
-                                "Term {} is protected; no automatic update was applied.",
-                                existing.jp_term
+                                "Term {} is controlled by '{}' policy; no automatic update was applied.",
+                                existing.jp_term,
+                                glossary::policy_label(policy)
                             )
                         },
                         json!({
                             "protected": true,
+                            "policy": policy,
                             "conflict": conflict,
                             "existing": existing,
                         }),
@@ -485,6 +506,7 @@ pub async fn dispatch_tool(
                 ws,
                 a.query.as_deref(),
                 a.category.as_deref(),
+                a.policy,
                 protected_only,
                 limit,
             );
@@ -585,6 +607,15 @@ mod tests {
             romaji: None,
             category: Some("item".to_string()),
             gloss: None,
+            policy: protected.map(|is_protected| {
+                if is_protected {
+                    TermPolicy::HardLocked
+                } else {
+                    TermPolicy::Preferred
+                }
+            }),
+            forbidden_thai: Vec::new(),
+            context_rule: None,
             protected,
             do_not_translate: Some(false),
             first_seen_chapter: Some(1),
@@ -610,7 +641,7 @@ mod tests {
             result.ok,
             "protected skip should be a recoverable tool result"
         );
-        assert!(result.message.contains("protected"));
+        assert!(result.message.contains("controlled"));
         assert_eq!(
             result
                 .data
@@ -625,13 +656,14 @@ mod tests {
         assert_eq!(saved.thai_term, "ดาบศักดิ์สิทธิ์");
         assert_eq!(saved.do_not_translate, Some(false));
         assert_eq!(saved.protected, Some(true));
+        assert_eq!(glossary::effective_policy(saved), TermPolicy::HardLocked);
 
         let mut saw_protected_log = false;
         let mut saw_upsert_event = false;
         while let Ok(ev) = rx.try_recv() {
             match ev {
                 AppEvent::ToolInvoked { summary, .. } => {
-                    saw_protected_log |= summary.contains("protected term");
+                    saw_protected_log |= summary.contains("controlled term");
                 }
                 AppEvent::GlossaryUpserted { .. } => saw_upsert_event = true,
                 _ => {}
@@ -640,7 +672,7 @@ mod tests {
         assert!(saw_protected_log);
         assert!(
             !saw_upsert_event,
-            "blocked protected terms must not emit upsert UI events"
+            "blocked controlled terms must not emit upsert UI events"
         );
 
         let _ = std::fs::remove_dir_all(&base);
