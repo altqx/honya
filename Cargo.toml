@@ -53,8 +53,3 @@ chrono = { version = "0.4.45", features = [
   "clock",
   "serde",
 ] } # timestamps in PROJECT.md/run logs
-
-# Verified: entire superset resolves with `cargo generate-lockfile` (382 crates) and the
-# TUI/EPUB/cleanse/LLM probes all `cargo build` clean on rustc 1.95.0 edition 2024.
-# Exactly ONE crossterm (0.29.0) and ONE zip (8.6.0) in the lockfile.
-# quick-xml is intentionally OMITTED: roxmltree covers all XML, JSON-in-comment blocks cover metadata.
