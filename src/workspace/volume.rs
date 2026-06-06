@@ -1,9 +1,11 @@
 //! Read/update VOLUME.md. The data block is the full `VolumeData` JSON; the
 //! Markdown body above it is re-rendered from that payload on every write.
 
-use crate::model::{ContinuityNote, UsageStats, VolumeData};
-use crate::workspace::Workspace;
+use chrono::{DateTime, Utc};
+
+use crate::model::{ContinuityNote, RunHistoryEntry, RunHistoryStatus, UsageStats, VolumeData};
 use crate::workspace::data_block;
+use crate::workspace::Workspace;
 
 /// Load the volume metadata (defaults when VOLUME.md is absent/empty).
 pub fn load(ws: &Workspace) -> VolumeData {
@@ -50,6 +52,101 @@ pub fn add_chapter_usage(ws: &Workspace, chapter: u32, delta: &UsageStats) -> st
         .or_default()
         .add(delta);
     write(ws, &data)
+}
+
+/// Keep at most this many durable run rows. The newest rows are retained; older
+/// entries are already reflected in the cumulative chapter usage totals.
+const MAX_RUN_HISTORY: usize = 100;
+
+/// Upsert a `running` history row when a translation run starts (or resumes from
+/// an older checkpoint whose row is missing). The row shares its id with the
+/// crash-recovery checkpoint.
+pub fn record_run_started(ws: &Workspace, run: RunHistoryEntry) -> std::io::Result<()> {
+    let mut data = load(ws);
+    if let Some(existing) = data.run_history.iter_mut().find(|r| r.id == run.id) {
+        existing.status = RunHistoryStatus::Running;
+        existing.finished_at = None;
+        existing.chapters = run.chapters;
+        if existing.honya_version.trim().is_empty() {
+            existing.honya_version = run.honya_version;
+        }
+    } else {
+        data.run_history.push(run);
+    }
+    trim_run_history(&mut data.run_history);
+    write(ws, &data)
+}
+
+/// Terminal summary used to close out a durable run-history row.
+pub struct RunHistoryFinish {
+    pub status: RunHistoryStatus,
+    pub finished_at: DateTime<Utc>,
+    /// Chapter queue for fallback rows (for example a crash between checkpoint
+    /// write and run-history start write).
+    pub chapters: Vec<u32>,
+    pub chapters_done: u32,
+    pub chapters_failed: u32,
+    pub chapters_need_review: u32,
+    pub usage: UsageStats,
+}
+
+/// Finalize a run-history row when the pipeline reports its terminal summary.
+pub fn record_run_finished(
+    ws: &Workspace,
+    run_id: &str,
+    finish: RunHistoryFinish,
+) -> std::io::Result<()> {
+    let mut data = load(ws);
+    if let Some(existing) = data.run_history.iter_mut().find(|r| r.id == run_id) {
+        existing.finished_at = Some(finish.finished_at);
+        existing.status = finish.status;
+        if existing.chapters.is_empty() && !finish.chapters.is_empty() {
+            existing.chapters = finish.chapters;
+        }
+        existing.chapters_done = finish.chapters_done;
+        existing.chapters_failed = finish.chapters_failed;
+        existing.chapters_need_review = finish.chapters_need_review;
+        // Recovery cleanup may not know the final run total; do not erase a
+        // nonzero value if a future progress writer already populated it.
+        if !finish.usage.is_zero() || existing.usage.is_zero() {
+            existing.usage = finish.usage;
+        }
+    } else {
+        data.run_history.push(RunHistoryEntry {
+            id: run_id.to_string(),
+            started_at: finish.finished_at,
+            finished_at: Some(finish.finished_at),
+            status: finish.status,
+            chapters: finish.chapters,
+            chapters_done: finish.chapters_done,
+            chapters_failed: finish.chapters_failed,
+            chapters_need_review: finish.chapters_need_review,
+            usage: finish.usage,
+            honya_version: crate::update::current_version().to_string(),
+        });
+    }
+    trim_run_history(&mut data.run_history);
+    write(ws, &data)
+}
+
+/// Mark an interrupted run as intentionally abandoned when the user chooses
+/// "discard" in the recovery prompt.
+pub fn record_run_discarded(ws: &Workspace, run_id: &str) -> std::io::Result<()> {
+    let mut data = load(ws);
+    if let Some(existing) = data.run_history.iter_mut().find(|r| r.id == run_id) {
+        existing.finished_at = Some(Utc::now());
+        existing.status = RunHistoryStatus::Discarded;
+        write(ws, &data)
+    } else {
+        Ok(())
+    }
+}
+
+fn trim_run_history(history: &mut Vec<RunHistoryEntry>) {
+    if history.len() > MAX_RUN_HISTORY {
+        let overflow = history.len() - MAX_RUN_HISTORY;
+        history.drain(0..overflow);
+    }
 }
 
 /// Render the human-readable Markdown body for VOLUME.md.
@@ -131,6 +228,36 @@ pub fn render_body(data: &VolumeData) -> String {
     }
     s.push('\n');
 
+    s.push_str("## ประวัติรัน (Run History)\n\n");
+    if data.run_history.is_empty() {
+        s.push_str("_ยังไม่มีประวัติรัน_\n");
+    } else {
+        s.push_str("| เริ่ม | จบ | สถานะ | บท | ผลลัพธ์ | usage |\n");
+        s.push_str("|------|----|--------|----|---------|-------|\n");
+        for run in data.run_history.iter().rev().take(20) {
+            s.push_str(&format!(
+                "| {} | {} | {} | {} | {} | {} |\n",
+                cell(&short_time(run.started_at)),
+                cell(
+                    &run.finished_at
+                        .map(short_time)
+                        .unwrap_or_else(|| "—".to_string())
+                ),
+                cell(run_status_label(run.status)),
+                cell(&chapters_cell(&run.chapters)),
+                cell(&format!(
+                    "{} done · {} failed · {} review",
+                    run.chapters_done, run.chapters_failed, run.chapters_need_review
+                )),
+                cell(&format!(
+                    "{} tok · {} tools · ${:.4}",
+                    run.usage.tokens.total, run.usage.tool_calls, run.usage.cost_usd
+                )),
+            ));
+        }
+    }
+    s.push('\n');
+
     s.push_str("## บันทึกความต่อเนื่อง (Continuity Notes)\n\n");
     if data.notes.is_empty() {
         s.push_str("_ไม่มีประเด็นความต่อเนื่อง_\n");
@@ -167,4 +294,110 @@ fn cell(s: &str) -> String {
         return "—".to_string();
     }
     trimmed.replace('|', "\\|").replace('\n', " ")
+}
+
+fn short_time(t: DateTime<Utc>) -> String {
+    t.format("%Y-%m-%d %H:%M").to_string()
+}
+
+fn run_status_label(status: RunHistoryStatus) -> &'static str {
+    match status {
+        RunHistoryStatus::Running => "running",
+        RunHistoryStatus::Completed => "completed",
+        RunHistoryStatus::NeedsReview => "needs review",
+        RunHistoryStatus::Partial => "partial",
+        RunHistoryStatus::Failed => "failed",
+        RunHistoryStatus::Stopped => "stopped",
+        RunHistoryStatus::Discarded => "discarded",
+    }
+}
+
+fn chapters_cell(chapters: &[u32]) -> String {
+    if chapters.is_empty() {
+        return "—".to_string();
+    }
+    if chapters.len() <= 6 {
+        return chapters
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+    }
+    let head = chapters
+        .iter()
+        .take(5)
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{head}, … (+{})", chapters.len() - 5)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{TokenUsage, UsageStats};
+
+    fn temp_ws(tag: &str) -> (std::path::PathBuf, Workspace) {
+        let base = std::env::temp_dir().join(format!("honya_volume_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let ws = Workspace::new(base.clone(), 1);
+        std::fs::create_dir_all(&ws.vol_dir).unwrap();
+        (base, ws)
+    }
+
+    #[test]
+    fn run_history_start_finish_and_discard_round_trip() {
+        let (base, ws) = temp_ws("history");
+        let started_at = Utc::now();
+        let run = RunHistoryEntry::started(
+            "run-test".to_string(),
+            started_at,
+            vec![1, 2, 5],
+            "0.test".to_string(),
+        );
+
+        record_run_started(&ws, run).unwrap();
+        let data = load(&ws);
+        assert_eq!(data.run_history.len(), 1);
+        assert_eq!(data.run_history[0].status, RunHistoryStatus::Running);
+        assert!(render_body(&data).contains("Run History"));
+
+        let usage = UsageStats {
+            tokens: TokenUsage {
+                prompt: 10,
+                completion: 20,
+                total: 30,
+            },
+            cost_usd: 0.0123,
+            tool_calls: 2,
+        };
+        record_run_finished(
+            &ws,
+            "run-test",
+            RunHistoryFinish {
+                status: RunHistoryStatus::NeedsReview,
+                finished_at: Utc::now(),
+                chapters: vec![1, 2, 5],
+                chapters_done: 2,
+                chapters_failed: 1,
+                chapters_need_review: 1,
+                usage,
+            },
+        )
+        .unwrap();
+        let data = load(&ws);
+        let row = &data.run_history[0];
+        assert_eq!(row.status, RunHistoryStatus::NeedsReview);
+        assert_eq!(row.chapters_done, 2);
+        assert_eq!(row.chapters_failed, 1);
+        assert_eq!(row.chapters_need_review, 1);
+        assert_eq!(row.usage.tokens.total, 30);
+        assert!(row.finished_at.is_some());
+
+        record_run_discarded(&ws, "run-test").unwrap();
+        let data = load(&ws);
+        assert_eq!(data.run_history[0].status, RunHistoryStatus::Discarded);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }

@@ -140,7 +140,9 @@ fn print_help() {
     println!("ENVIRONMENT:");
     println!("    HONYA_API_KEY / OPENROUTER_API_KEY   OpenRouter key (overrides saved config)");
     println!("    HONYA_NO_UPDATE_CHECK                Disable the startup update check");
-    println!("    HONYA_SESSION_FILE                   Override the crash-recovery checkpoint path");
+    println!(
+        "    HONYA_SESSION_FILE                   Override the crash-recovery checkpoint path"
+    );
 }
 
 /// Ensure an OpenRouter API key exists (env → persisted config); else prompt and save it.

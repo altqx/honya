@@ -208,6 +208,14 @@ plus the upstream provider charge) and shows them live in the **Translate** mete
 per chapter and rolls them up to the volume and the whole project. Costs are cumulative "lifetime
 spend" — re-translating a chapter adds to its running total rather than resetting it.
 
+### Resume & run history
+
+When a run starts, honya writes a recovery checkpoint before spending tokens and appends a matching
+run-history row to `VOLUME.md`. If the app is killed or power is lost, the next launch offers to
+resume the same chapter queue and skips clean chunk markers already committed to `translated/`.
+Finishing, stopping, failing, or discarding an interrupted run closes out the durable history row with
+counts, review-needed flags, token/tool usage, and USD cost.
+
 ## Project layout
 
 A project directory mirrors the spec exactly:
@@ -220,7 +228,7 @@ your_project/
 ├── STYLE.md          # translation-memory notes / reference examples
 ├── images/           # all illustrations, relocated here on import
 └── Vol_01/
-    ├── VOLUME.md     # running recap + per-chapter summaries + usage roll-up
+    ├── VOLUME.md     # running recap + per-chapter summaries + usage + run history
     ├── raw/          # ch_001.md … pre-processed clean Japanese Markdown
     └── translated/   # ch_001.md … final verified Thai Markdown
 ```

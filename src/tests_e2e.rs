@@ -584,6 +584,8 @@ fn pipeline_finished_clears_checkpoint() {
         chapters_done: 1,
         chapters_failed: 0,
         chapters_need_review: 0,
+        stopped: false,
+        run: Default::default(),
     });
 
     assert!(
@@ -649,7 +651,10 @@ fn stale_checkpoint_is_cleared_without_prompting() {
 /// nagging — there is nothing left to resume.
 #[test]
 fn all_done_checkpoint_is_cleared_without_prompting() {
-    use crate::model::{Chapter, ChapterKind, ChapterStatus, Project, Volume};
+    use crate::model::{
+        Chapter, ChapterKind, ChapterStatus, Project, RunHistoryEntry, RunHistoryStatus, Volume,
+    };
+    use crate::workspace::Workspace;
     use crate::workspace::session::{self, SessionCheckpoint};
 
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -674,6 +679,17 @@ fn all_done_checkpoint_is_cleared_without_prompting() {
         vec![1, 2],
     );
     session::save(&cp).unwrap();
+    let ws = Workspace::new(project_dir.clone(), 1);
+    crate::workspace::volume::record_run_started(
+        &ws,
+        RunHistoryEntry::started(
+            cp.run_id.clone(),
+            cp.started_at,
+            cp.chapters.clone(),
+            cp.honya_version.clone(),
+        ),
+    )
+    .unwrap();
 
     let mut app = fresh_app();
     // Inject the project with both queued chapters already Done so recovery_progress
@@ -713,6 +729,12 @@ fn all_done_checkpoint_is_cleared_without_prompting() {
     assert!(
         session::load().is_none(),
         "an already-finished run's checkpoint is cleared"
+    );
+    let history = crate::workspace::volume::load(&ws).run_history;
+    assert_eq!(
+        history[0].status,
+        RunHistoryStatus::Completed,
+        "an already-finished recovery closes the run-history row"
     );
 
     unsafe {

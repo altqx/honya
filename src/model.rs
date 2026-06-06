@@ -361,6 +361,11 @@ pub struct VolumeData {
     /// total is the sum of these; the project total is the sum across volumes.
     #[serde(default)]
     pub chapter_usage: BTreeMap<String, UsageStats>,
+    /// Append-only-ish audit trail of translation runs for this volume. Updated at
+    /// run start/finish so crash recovery can leave a durable breadcrumb instead
+    /// of only an ephemeral TUI log.
+    #[serde(default)]
+    pub run_history: Vec<RunHistoryEntry>,
     #[serde(default)]
     pub notes: Vec<ContinuityNote>,
 }
@@ -461,6 +466,79 @@ impl UsageStats {
         self.tokens.total = self.tokens.total.saturating_add(o.tokens.total);
         self.cost_usd += o.cost_usd;
         self.tool_calls = self.tool_calls.saturating_add(o.tool_calls);
+    }
+}
+
+/// Durable lifecycle state for one translation run in a volume's run history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RunHistoryStatus {
+    /// Run has been started and a recovery checkpoint should also exist.
+    #[default]
+    Running,
+    /// Every queued chapter finished cleanly.
+    Completed,
+    /// All queued chapters finished, but at least one chunk was committed with a
+    /// visible review-needed marker.
+    NeedsReview,
+    /// The run completed some work but one or more chapters failed.
+    Partial,
+    /// No queued chapter completed successfully.
+    Failed,
+    /// The user stopped the run cooperatively from the Translate screen.
+    Stopped,
+    /// The user discarded an interrupted checkpoint instead of resuming it.
+    Discarded,
+}
+
+/// One persisted run-history row in `VOLUME.md`'s data block. This is not used as
+/// the resume substrate (translated chunk markers are); it is the human/audit
+/// trail that explains what happened across crashes, stops, retries, and reruns.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunHistoryEntry {
+    /// Stable id shared with the crash-recovery checkpoint.
+    pub id: String,
+    pub started_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub status: RunHistoryStatus,
+    /// Chapter queue requested for this run, in order.
+    #[serde(default)]
+    pub chapters: Vec<u32>,
+    #[serde(default)]
+    pub chapters_done: u32,
+    #[serde(default)]
+    pub chapters_failed: u32,
+    #[serde(default)]
+    pub chapters_need_review: u32,
+    /// Whole-run usage/cost total emitted by the pipeline at finish.
+    #[serde(default)]
+    pub usage: UsageStats,
+    /// honya version that created the run entry.
+    #[serde(default)]
+    pub honya_version: String,
+}
+
+impl RunHistoryEntry {
+    pub fn started(
+        id: String,
+        started_at: DateTime<Utc>,
+        chapters: Vec<u32>,
+        honya_version: String,
+    ) -> Self {
+        Self {
+            id,
+            started_at,
+            finished_at: None,
+            status: RunHistoryStatus::Running,
+            chapters,
+            chapters_done: 0,
+            chapters_failed: 0,
+            chapters_need_review: 0,
+            usage: UsageStats::default(),
+            honya_version,
+        }
     }
 }
 
@@ -603,6 +681,10 @@ pub enum AppEvent {
         chapters_failed: u32,
         /// Of the `chapters_done`, how many completed with ≥1 chunk needing review.
         chapters_need_review: u32,
+        /// True when the run ended because the user requested Stop.
+        stopped: bool,
+        /// Whole-run usage/cost total, used to finalize the durable run history.
+        run: UsageStats,
     },
     Error {
         context: String,

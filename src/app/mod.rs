@@ -24,7 +24,8 @@ use ratatui::widgets::Paragraph;
 
 use crate::llm::client::LlmClient;
 use crate::model::{
-    AppConfig, AppEvent, ChapterStatus, EventTx, LogLevel, ModelSet, Project, ThemeId, UsageStats,
+    AppConfig, AppEvent, ChapterStatus, EventTx, LogLevel, ModelSet, Project, RunHistoryEntry,
+    RunHistoryStatus, ThemeId, UsageStats,
 };
 use crate::theme::Theme;
 use crate::ui::chrome::{self, StatusTally};
@@ -227,6 +228,9 @@ pub struct App {
     /// An interrupted run found at startup, awaiting the user's resume/discard
     /// choice in the recovery overlay (see `init_recovery_prompt`).
     pub pending_recovery: Option<crate::workspace::session::SessionCheckpoint>,
+    /// Checkpoint for the currently running pipeline. Kept in memory so the final
+    /// `PipelineFinished` event can close the matching VOLUME.md run-history row.
+    pub active_run: Option<crate::workspace::session::SessionCheckpoint>,
 }
 
 impl App {
@@ -259,6 +263,7 @@ impl App {
             log: Vec::new(),
             update_available: None,
             pending_recovery: None,
+            active_run: None,
         }
     }
 
@@ -268,9 +273,10 @@ impl App {
     /// recovery file. A stale checkpoint (project gone, or already fully done) is
     /// cleared quietly rather than prompted.
     pub fn init_recovery_prompt(&mut self) {
-        let Some(cp) = crate::workspace::session::load() else {
+        let Some(mut cp) = crate::workspace::session::load() else {
             return;
         };
+        cp.ensure_run_id();
         if !cp.is_resumable() {
             crate::workspace::session::clear();
             return;
@@ -278,7 +284,9 @@ impl App {
         let (done, total) = self.recovery_progress(&cp);
         if total > 0 && done >= total {
             // The crash landed after the last chunk committed but before the run
-            // was marked finished — nothing left to do, so don't nag.
+            // was marked finished — nothing left to do, so don't nag. Close the
+            // run-history row too so it never remains stuck at "running".
+            self.finish_recovered_all_done(&cp, done as u32);
             crate::workspace::session::clear();
             return;
         }
@@ -296,8 +304,8 @@ impl App {
     }
 
     /// Count how many of the checkpoint's chapters are already finished on disk,
-    /// using the freshly-scanned project state when it is in the current shelf
-    /// (falls back to "unknown" → 0 done when launched from another directory).
+    /// using the freshly-scanned project state when it is in the current shelf and
+    /// falling back to scanning the checkpoint's absolute project path.
     fn recovery_progress(
         &self,
         cp: &crate::workspace::session::SessionCheckpoint,
@@ -307,20 +315,10 @@ impl App {
             .projects
             .iter()
             .find(|p| p.dir == cp.project_dir)
-            .and_then(|p| p.volumes.iter().find(|v| v.number == cp.vol))
-            .map(|v| {
-                cp.chapters
-                    .iter()
-                    .filter(|&&num| {
-                        v.chapters.iter().any(|ch| {
-                            ch.number == num
-                                && matches!(
-                                    ch.status,
-                                    ChapterStatus::Done | ChapterStatus::NeedsReview
-                                )
-                        })
-                    })
-                    .count()
+            .map(|p| done_recovery_chapters(p, cp))
+            .or_else(|| {
+                crate::workspace::scan::scan_one_project(&cp.project_dir)
+                    .map(|p| done_recovery_chapters(&p, cp))
             })
             .unwrap_or(0);
         (done, total)
@@ -407,9 +405,18 @@ impl App {
                 chapters_done,
                 chapters_failed,
                 chapters_need_review,
+                stopped,
+                run,
             } => {
                 self.run_active = false;
                 self.run_ctl = None;
+                self.finish_active_run_history(
+                    *chapters_done,
+                    *chapters_failed,
+                    *chapters_need_review,
+                    *stopped,
+                    *run,
+                );
                 // The run reached its end (finished, stopped, or all-failed): the
                 // recovery checkpoint has served its purpose, so retire it.
                 crate::workspace::session::clear();
@@ -419,13 +426,14 @@ impl App {
                 } else {
                     String::new()
                 };
+                let stopped_note = if *stopped { " · stopped" } else { "" };
                 self.toast = Some(Toast::info(format!(
-                    "run finished · {chapters_done} done · {chapters_failed} failed{review}"
+                    "run finished · {chapters_done} done · {chapters_failed} failed{review}{stopped_note}"
                 )));
                 self.push_log(
                     LogLevel::Info,
                     format!(
-                        "pipeline finished: {chapters_done} done, {chapters_failed} failed, {chapters_need_review} need review"
+                        "pipeline finished: {chapters_done} done, {chapters_failed} failed, {chapters_need_review} need review{stopped_note}"
                     ),
                 );
             }
@@ -532,6 +540,108 @@ impl App {
                     }
                 }
             }
+        }
+    }
+
+    fn finish_recovered_all_done(
+        &mut self,
+        cp: &crate::workspace::session::SessionCheckpoint,
+        chapters_done: u32,
+    ) {
+        if cp.run_id.trim().is_empty() {
+            return;
+        }
+        let chapters_need_review = self.recovery_need_review(cp) as u32;
+        let status = if chapters_need_review > 0 {
+            RunHistoryStatus::NeedsReview
+        } else {
+            RunHistoryStatus::Completed
+        };
+        let ws = Workspace::new(cp.project_dir.clone(), cp.vol);
+        if let Err(e) = crate::workspace::volume::record_run_finished(
+            &ws,
+            &cp.run_id,
+            crate::workspace::volume::RunHistoryFinish {
+                status,
+                finished_at: chrono::Utc::now(),
+                chapters: cp.chapters.clone(),
+                chapters_done,
+                chapters_failed: 0,
+                chapters_need_review,
+                usage: UsageStats::default(),
+            },
+        ) {
+            self.push_log(
+                LogLevel::Warn,
+                format!(
+                    "could not close recovered run history for {}: {e}",
+                    cp.project_id
+                ),
+            );
+        }
+    }
+
+    fn recovery_need_review(&self, cp: &crate::workspace::session::SessionCheckpoint) -> usize {
+        self.projects
+            .iter()
+            .find(|p| p.dir == cp.project_dir)
+            .map(|p| need_review_recovery_chapters(p, cp))
+            .or_else(|| {
+                crate::workspace::scan::scan_one_project(&cp.project_dir)
+                    .map(|p| need_review_recovery_chapters(&p, cp))
+            })
+            .unwrap_or(0)
+    }
+
+    fn finish_active_run_history(
+        &mut self,
+        chapters_done: u32,
+        chapters_failed: u32,
+        chapters_need_review: u32,
+        stopped: bool,
+        run: UsageStats,
+    ) {
+        let Some(mut cp) = self.active_run.take() else {
+            return;
+        };
+        cp.ensure_run_id();
+        let status = run_history_status(
+            chapters_done,
+            chapters_failed,
+            chapters_need_review,
+            stopped,
+        );
+        let ws = Workspace::new(cp.project_dir.clone(), cp.vol);
+        if let Err(e) = crate::workspace::volume::record_run_finished(
+            &ws,
+            &cp.run_id,
+            crate::workspace::volume::RunHistoryFinish {
+                status,
+                finished_at: chrono::Utc::now(),
+                chapters: cp.chapters.clone(),
+                chapters_done,
+                chapters_failed,
+                chapters_need_review,
+                usage: run,
+            },
+        ) {
+            self.push_log(
+                LogLevel::Warn,
+                format!("could not persist run history for {}: {e}", cp.project_id),
+            );
+        }
+    }
+
+    fn mark_recovery_discarded(&mut self, cp: &crate::workspace::session::SessionCheckpoint) {
+        if cp.run_id.trim().is_empty() {
+            return;
+        }
+        let ws = Workspace::new(cp.project_dir.clone(), cp.vol);
+        if let Err(e) = crate::workspace::volume::record_run_discarded(&ws, &cp.run_id) {
+            self.push_log(
+                LogLevel::Warn,
+                format!("could not mark run {} discarded: {e}", cp.run_id),
+            );
         }
     }
 
@@ -710,8 +820,10 @@ impl App {
                 self.resume_session();
             }
             Action::DiscardSession => {
+                if let Some(cp) = self.pending_recovery.take() {
+                    self.mark_recovery_discarded(&cp);
+                }
                 crate::workspace::session::clear();
-                self.pending_recovery = None;
                 self.overlay = Overlay::None;
                 self.toast = Some(Toast::info("interrupted run discarded"));
             }
@@ -818,10 +930,11 @@ impl App {
     /// translating its chapter queue. The pipeline's own chunk-level resume then
     /// skips everything already committed to disk.
     fn resume_session(&mut self) {
-        let Some(cp) = self.pending_recovery.take() else {
+        let Some(mut cp) = self.pending_recovery.take() else {
             self.toast = Some(Toast::warn("no run to resume"));
             return;
         };
+        cp.ensure_run_id();
         self.overlay = Overlay::None;
         // Match strictly on the absolute project directory — never on the slug
         // alone, or launching from elsewhere could resume into a *different*
@@ -844,8 +957,9 @@ impl App {
         if !self.activate_project(project, cp.vol) {
             return; // activate_project already toasted the reason
         }
-        // Continue (not restart): keep committed chunks, fill the gaps.
-        self.begin_translation(cp.chapters, false);
+        // Continue (not restart): keep committed chunks, fill the gaps, and keep
+        // writing to the same durable run-history row.
+        self.begin_translation_with_checkpoint(cp.chapters.clone(), false, Some(cp));
     }
 
     fn open_chapter(&mut self, chapter: u32) {
@@ -920,6 +1034,15 @@ impl App {
     }
 
     fn begin_translation(&mut self, chapters: Vec<u32>, restart: bool) {
+        self.begin_translation_with_checkpoint(chapters, restart, None);
+    }
+
+    fn begin_translation_with_checkpoint(
+        &mut self,
+        chapters: Vec<u32>,
+        restart: bool,
+        checkpoint: Option<crate::workspace::session::SessionCheckpoint>,
+    ) {
         if self.run_active {
             self.toast = Some(Toast::warn("a run is already in progress"));
             return;
@@ -959,18 +1082,35 @@ impl App {
 
         // Record a recovery checkpoint *before* the run starts: from here until the
         // pipeline finishes, a crash/power-loss can be resumed on next launch.
-        let checkpoint = crate::workspace::session::SessionCheckpoint::new(
-            project_dir,
-            project_id,
-            project_title,
-            vol,
-            chapters.clone(),
-        );
+        let mut checkpoint = checkpoint.unwrap_or_else(|| {
+            crate::workspace::session::SessionCheckpoint::new(
+                project_dir.clone(),
+                project_id,
+                project_title,
+                vol,
+                chapters.clone(),
+            )
+        });
+        checkpoint.ensure_run_id();
         if let Err(e) = crate::workspace::session::save(&checkpoint) {
             self.push_log(
                 LogLevel::Warn,
                 format!("could not write recovery checkpoint: {e}"),
             );
+        }
+        let history_version = if checkpoint.honya_version.trim().is_empty() {
+            crate::update::current_version().to_string()
+        } else {
+            checkpoint.honya_version.clone()
+        };
+        let history = RunHistoryEntry::started(
+            checkpoint.run_id.clone(),
+            checkpoint.started_at,
+            checkpoint.chapters.clone(),
+            history_version,
+        );
+        if let Err(e) = crate::workspace::volume::record_run_started(&ws, history) {
+            self.push_log(LogLevel::Warn, format!("could not write run history: {e}"));
         }
 
         let ctl = crate::agents::pipeline::RunControl::new();
@@ -983,7 +1123,8 @@ impl App {
             ctl: ctl.clone(),
         };
         self.run_ctl = Some(ctl);
-        let chapters_for_task = chapters.clone();
+        self.active_run = Some(checkpoint.clone());
+        let chapters_for_task = checkpoint.chapters.clone();
         let tx = self.tx.clone();
         tokio::spawn(async move {
             if let Err(e) = crate::agents::run_pipeline(ctx, chapters_for_task).await {
@@ -1352,6 +1493,49 @@ impl App {
     }
 }
 
+fn done_recovery_chapters(
+    project: &Project,
+    cp: &crate::workspace::session::SessionCheckpoint,
+) -> usize {
+    project
+        .volumes
+        .iter()
+        .find(|v| v.number == cp.vol)
+        .map(|v| {
+            cp.chapters
+                .iter()
+                .filter(|&&num| {
+                    v.chapters.iter().any(|ch| {
+                        ch.number == num
+                            && matches!(ch.status, ChapterStatus::Done | ChapterStatus::NeedsReview)
+                    })
+                })
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+fn need_review_recovery_chapters(
+    project: &Project,
+    cp: &crate::workspace::session::SessionCheckpoint,
+) -> usize {
+    project
+        .volumes
+        .iter()
+        .find(|v| v.number == cp.vol)
+        .map(|v| {
+            cp.chapters
+                .iter()
+                .filter(|&&num| {
+                    v.chapters.iter().any(|ch| {
+                        ch.number == num && matches!(ch.status, ChapterStatus::NeedsReview)
+                    })
+                })
+                .count()
+        })
+        .unwrap_or(0)
+}
+
 /// One-paragraph body for the startup recovery prompt. Flowing prose (no hard
 /// newlines) so the modal wraps it cleanly.
 fn recovery_body(
@@ -1368,6 +1552,25 @@ fn recovery_body(
         "honya didn't shut down cleanly during a translation run — «{}» Vol.{:02} · {progress}. Resume picks up from the last committed chunk (finished chunks are skipped, so no tokens are re-spent). Discard forgets this run; Esc keeps it for next launch.",
         cp.project_title, cp.vol
     )
+}
+
+fn run_history_status(
+    chapters_done: u32,
+    chapters_failed: u32,
+    chapters_need_review: u32,
+    stopped: bool,
+) -> RunHistoryStatus {
+    if stopped {
+        RunHistoryStatus::Stopped
+    } else if chapters_failed > 0 && chapters_done == 0 {
+        RunHistoryStatus::Failed
+    } else if chapters_failed > 0 {
+        RunHistoryStatus::Partial
+    } else if chapters_need_review > 0 {
+        RunHistoryStatus::NeedsReview
+    } else {
+        RunHistoryStatus::Completed
+    }
 }
 
 fn chapter_list_preview(chapters: &[u32]) -> String {

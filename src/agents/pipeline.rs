@@ -115,10 +115,12 @@ pub async fn run_pipeline(ctx: PipelineCtx, chapters: Vec<u32>) -> anyhow::Resul
     let mut done = 0u32;
     let mut failed = 0u32;
     let mut need_review = 0u32;
+    let mut stopped = false;
     let mut acc = Acc::default();
 
     for chapter in chapters {
         if ctx.ctl.is_stopped() {
+            stopped = true;
             ctx.tx.send(AppEvent::Log {
                 level: LogLevel::Warn,
                 msg: "run stopped before chapter".to_string(),
@@ -174,6 +176,7 @@ pub async fn run_pipeline(ctx: PipelineCtx, chapters: Vec<u32>) -> anyhow::Resul
                 });
             }
             Ok(Outcome::Stopped) => {
+                stopped = true;
                 ctx.tx.send(AppEvent::Log {
                     level: LogLevel::Warn,
                     msg: format!("run stopped during chapter {chapter}"),
@@ -203,6 +206,8 @@ pub async fn run_pipeline(ctx: PipelineCtx, chapters: Vec<u32>) -> anyhow::Resul
         chapters_done: done,
         chapters_failed: failed,
         chapters_need_review: need_review,
+        stopped,
+        run: acc.run,
     });
     Ok(())
 }

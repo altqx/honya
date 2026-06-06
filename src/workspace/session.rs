@@ -40,6 +40,10 @@ pub struct SessionCheckpoint {
     pub chapters: Vec<u32>,
     /// When the run started (informational / display).
     pub started_at: DateTime<Utc>,
+    /// Stable run-history id shared with `VOLUME.md`. Default keeps older
+    /// checkpoints loadable; resume will synthesize one if absent.
+    #[serde(default)]
+    pub run_id: String,
     /// honya version that wrote the checkpoint (forward-compat / debugging).
     pub honya_version: String,
 }
@@ -54,6 +58,7 @@ impl SessionCheckpoint {
         vol: u32,
         chapters: Vec<u32>,
     ) -> Self {
+        let started_at = Utc::now();
         Self {
             version: SCHEMA_VERSION,
             project_dir,
@@ -61,7 +66,8 @@ impl SessionCheckpoint {
             project_title,
             vol,
             chapters,
-            started_at: Utc::now(),
+            started_at,
+            run_id: make_run_id(started_at),
             honya_version: crate::update::current_version().to_string(),
         }
     }
@@ -72,6 +78,24 @@ impl SessionCheckpoint {
     pub fn is_resumable(&self) -> bool {
         !self.chapters.is_empty() && self.project_dir.join("PROJECT.md").is_file()
     }
+
+    /// Fill in a run id for checkpoints written by older compatible versions.
+    pub fn ensure_run_id(&mut self) {
+        if self.run_id.trim().is_empty() {
+            self.run_id = make_run_id(self.started_at);
+        }
+    }
+}
+
+/// Deterministic, filesystem-safe id for a run started at `started_at`. The
+/// process id suffix avoids collisions when multiple honya instances start in
+/// the same millisecond (even though only one run is allowed per app instance).
+pub fn make_run_id(started_at: DateTime<Utc>) -> String {
+    format!(
+        "run-{}-{}",
+        started_at.format("%Y%m%dT%H%M%S%.3fZ"),
+        std::process::id()
+    )
 }
 
 /// Path to the recovery checkpoint. Honors `HONYA_SESSION_FILE` (an absolute path
