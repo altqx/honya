@@ -100,8 +100,8 @@ fn renders_usage_surfaces_without_panic() {
         app.active = Some(ActiveProject {
             project: project.clone(),
             workspace: Workspace::new(dir.clone(), 1),
-            client: Arc::new(crate::llm::mock::MockClient::default())
-                as Arc<dyn crate::llm::client::LlmClient>,
+            client: Some(Arc::new(crate::llm::mock::MockClient::default())
+                as Arc<dyn crate::llm::client::LlmClient>),
             models: ModelSet::default(),
             vol: 1,
         });
@@ -130,6 +130,20 @@ fn renders_overlays_without_panic() {
         for ov in [Overlay::Help(0), Overlay::Log(0)] {
             let mut app = fresh_app();
             app.overlay = ov;
+            let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+            term.draw(|f| app.render(f)).unwrap();
+        }
+        // Welcome overlay (both key/sample status combinations) and Settings with the
+        // API-key field focused.
+        for (key, sample) in [(false, false), (true, true)] {
+            let mut app = fresh_app();
+            app.overlay = Overlay::welcome(key, sample);
+            let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+            term.draw(|f| app.render(f)).unwrap();
+        }
+        {
+            let mut app = fresh_app();
+            app.overlay = Overlay::settings_with_field(&app.cfg.clone(), 4);
             let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
             term.draw(|f| app.render(f)).unwrap();
         }
@@ -356,8 +370,8 @@ fn reader_note_overlay_saves_line_annotation() {
             models: None,
         },
         workspace: ws.clone(),
-        client: Arc::new(crate::llm::mock::MockClient::default())
-            as Arc<dyn crate::llm::client::LlmClient>,
+        client: Some(Arc::new(crate::llm::mock::MockClient::default())
+            as Arc<dyn crate::llm::client::LlmClient>),
         models: ModelSet::default(),
         vol: 1,
     };
@@ -477,8 +491,8 @@ fn project_l_key_is_not_shadowed_by_activity_log() {
     app.active = Some(ActiveProject {
         project,
         workspace: Workspace::new(dir, 1),
-        client: Arc::new(crate::llm::mock::MockClient::default())
-            as Arc<dyn crate::llm::client::LlmClient>,
+        client: Some(Arc::new(crate::llm::mock::MockClient::default())
+            as Arc<dyn crate::llm::client::LlmClient>),
         models: ModelSet::default(),
         vol: 1,
     });
@@ -587,6 +601,175 @@ fn theme_picker_preview_commit_and_revert() {
     }
 }
 
+/// Each Welcome menu row maps to its expected Action, and the menu wraps + Esc
+/// dismisses (which the App turns into persisting onboarding completion).
+#[test]
+fn welcome_menu_returns_expected_actions() {
+    use crate::app::Action;
+
+    let down = KeyEvent::new(KeyCode::Down, KeyModifiers::empty());
+    let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::empty());
+    let mk = || Overlay::welcome(false, false);
+
+    // Row 0 → create the sample project.
+    assert!(matches!(mk().handle_key(enter), Action::CreateSample));
+
+    // Row 1 → open import.
+    let mut ov = mk();
+    ov.handle_key(down);
+    assert!(matches!(ov.handle_key(enter), Action::OpenImport));
+
+    // Row 2 → open Settings (focused on the key field).
+    let mut ov = mk();
+    ov.handle_key(down);
+    ov.handle_key(down);
+    assert!(
+        matches!(ov.handle_key(enter), Action::ShowOverlay(b) if matches!(*b, Overlay::Settings(_)))
+    );
+
+    // Row 3 → dismiss.
+    let mut ov = mk();
+    for _ in 0..3 {
+        ov.handle_key(down);
+    }
+    assert!(matches!(ov.handle_key(enter), Action::DismissWelcome));
+
+    // Up from row 0 wraps to the last row (dismiss).
+    let mut ov = mk();
+    ov.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::empty()));
+    assert!(matches!(ov.handle_key(enter), Action::DismissWelcome));
+
+    // Esc dismisses outright.
+    assert!(matches!(
+        mk().handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty())),
+        Action::DismissWelcome
+    ));
+}
+
+/// The API-key field in Settings is editable and surfaces the typed key on save;
+/// under an env override it is read-only and save leaves the config key untouched.
+#[test]
+fn settings_api_key_field_edits_and_respects_env_override() {
+    use crate::app::Action;
+    use crate::app::overlay::SettingsState;
+
+    let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::empty());
+
+    // Editable case: type into the key field (index 4), Enter → SaveSettings{api_key}.
+    let mut ov = Overlay::Settings(SettingsState {
+        base_url: "https://x".into(),
+        orchestrator: "o".into(),
+        translator: "t".into(),
+        reviewer: "r".into(),
+        api_key: String::new(),
+        api_key_env: false,
+        field: 4,
+    });
+    for c in "sk-or-1".chars() {
+        ov.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::empty()));
+    }
+    match ov.handle_key(enter) {
+        Action::SaveSettings { api_key, .. } => assert_eq!(api_key.as_deref(), Some("sk-or-1")),
+        other => panic!("expected SaveSettings, got {other:?}"),
+    }
+
+    // Env-override case: typing is ignored and save passes api_key: None.
+    let mut ov = Overlay::Settings(SettingsState {
+        base_url: "u".into(),
+        orchestrator: "o".into(),
+        translator: "t".into(),
+        reviewer: "r".into(),
+        api_key: "saved".into(),
+        api_key_env: true,
+        field: 4,
+    });
+    ov.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::empty()));
+    ov.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::empty()));
+    match &ov {
+        Overlay::Settings(st) => assert_eq!(st.api_key, "saved", "env key field is read-only"),
+        _ => panic!("settings overlay"),
+    }
+    match ov.handle_key(enter) {
+        Action::SaveSettings { api_key, .. } => {
+            assert!(api_key.is_none(), "env override → config key left untouched")
+        }
+        other => panic!("expected SaveSettings, got {other:?}"),
+    }
+}
+
+/// First-run onboarding: the Welcome overlay opens once on an empty, never-onboarded
+/// shelf and is suppressed for already-onboarded users, users with projects, and
+/// whenever another overlay (e.g. crash recovery) already has priority.
+#[test]
+fn onboarding_shows_welcome_on_first_run_only() {
+    // Redirect config writes (mark_onboarded persists) and serialize env access.
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let tmp = std::env::temp_dir().join(format!("honya-onboard-cfg-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    unsafe {
+        std::env::set_var("XDG_CONFIG_HOME", &tmp);
+    }
+    assert!(crate::config::config_dir().starts_with(&tmp));
+
+    let dummy_project = || crate::model::Project {
+        id: "x".into(),
+        dir: PathBuf::from("/tmp/honya-x"),
+        title: "X".into(),
+        created: None,
+        touched: None,
+        volumes: vec![],
+        models: None,
+    };
+
+    // Fresh + empty + not onboarded → Welcome opens and the flag is persisted.
+    let mut app = fresh_app();
+    app.projects.clear();
+    app.cfg.onboarded = false;
+    app.overlay = Overlay::None;
+    app.init_onboarding();
+    assert!(
+        matches!(app.overlay, Overlay::Welcome(_)),
+        "first run shows Welcome"
+    );
+    assert!(app.cfg.onboarded, "shown once → marked onboarded");
+
+    // Already onboarded → nothing opens.
+    let mut app = fresh_app();
+    app.projects.clear();
+    app.cfg.onboarded = true;
+    app.overlay = Overlay::None;
+    app.init_onboarding();
+    assert!(matches!(app.overlay, Overlay::None), "onboarded → no Welcome");
+
+    // Returning user (has projects) without the flag → quietly marked, no Welcome.
+    let mut app = fresh_app();
+    app.cfg.onboarded = false;
+    app.overlay = Overlay::None;
+    app.projects = vec![dummy_project()];
+    app.init_onboarding();
+    assert!(
+        matches!(app.overlay, Overlay::None),
+        "existing projects suppress Welcome"
+    );
+    assert!(app.cfg.onboarded, "returning user marked onboarded");
+
+    // Another overlay already up (recovery prompt) keeps priority.
+    let mut app = fresh_app();
+    app.projects.clear();
+    app.cfg.onboarded = false;
+    app.overlay = Overlay::Help(0);
+    app.init_onboarding();
+    assert!(
+        matches!(app.overlay, Overlay::Help(_)),
+        "a pending overlay wins over Welcome"
+    );
+
+    unsafe {
+        std::env::remove_var("XDG_CONFIG_HOME");
+    }
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
 /// Ctrl-T must open the theme picker even while the Settings overlay is focused
 /// (the panel advertises it, and an open overlay otherwise swallows the global).
 #[test]
@@ -594,7 +777,7 @@ fn ctrl_t_opens_theme_picker_from_settings() {
     use crate::app::overlay::Overlay;
 
     let mut app = fresh_app();
-    app.overlay = Overlay::settings(&app.cfg.clone());
+    app.overlay = Overlay::settings_with_field(&app.cfg.clone(), 0);
     assert!(matches!(app.overlay, Overlay::Settings(_)));
     app.on_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
     assert!(
@@ -986,8 +1169,8 @@ async fn qa_overlay_gathers_and_navigates() {
     let active = ActiveProject {
         project,
         workspace: Workspace::new(dir.clone(), 1),
-        client: Arc::new(crate::llm::mock::MockClient::default())
-            as Arc<dyn crate::llm::client::LlmClient>,
+        client: Some(Arc::new(crate::llm::mock::MockClient::default())
+            as Arc<dyn crate::llm::client::LlmClient>),
         models: ModelSet::default(),
         vol: 1,
     };
@@ -1092,8 +1275,8 @@ fn qa_collect_continuity_and_key_edges() {
             models: None,
         },
         workspace: Workspace::new(dir.clone(), 1),
-        client: Arc::new(crate::llm::mock::MockClient::default())
-            as Arc<dyn crate::llm::client::LlmClient>,
+        client: Some(Arc::new(crate::llm::mock::MockClient::default())
+            as Arc<dyn crate::llm::client::LlmClient>),
         models: ModelSet::default(),
         vol: 1,
     };

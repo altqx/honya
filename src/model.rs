@@ -213,6 +213,10 @@ pub struct AppConfig {
     /// Active color theme (serde default keeps pre-theme configs loading).
     #[serde(default)]
     pub theme: ThemeId,
+    /// True once the user has been through (or dismissed) first-run onboarding.
+    /// Drives whether the in-app Welcome overlay auto-opens at launch.
+    #[serde(default)]
+    pub onboarded: bool,
 }
 
 impl Default for AppConfig {
@@ -228,6 +232,7 @@ impl Default for AppConfig {
             title: Some("honya".into()),
             api_key: None,
             theme: ThemeId::default(),
+            onboarded: false,
         }
     }
 }

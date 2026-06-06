@@ -712,8 +712,8 @@ mod tests {
                 models: None,
             },
             workspace: Workspace::new(dir, 1),
-            client: std::sync::Arc::new(crate::llm::mock::MockClient::default())
-                as std::sync::Arc<dyn crate::llm::client::LlmClient>,
+            client: Some(std::sync::Arc::new(crate::llm::mock::MockClient::default())
+                as std::sync::Arc<dyn crate::llm::client::LlmClient>),
             models: ModelSet::default(),
             vol: 1,
         }

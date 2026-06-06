@@ -56,6 +56,19 @@ pub fn save(cfg: &AppConfig) -> std::io::Result<()> {
 /// OPENROUTER_API_KEY); otherwise the key persisted in the config is used.
 /// Empty/whitespace values are treated as absent.
 pub fn resolve_api_key(cfg: &AppConfig) -> Option<String> {
+    api_key_from_env().or_else(|| {
+        cfg.api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string)
+    })
+}
+
+/// The API key supplied via the environment (HONYA_API_KEY, then
+/// OPENROUTER_API_KEY), if any. When this is set it overrides the saved config
+/// key, so the in-app Settings editor surfaces it as read-only.
+pub fn api_key_from_env() -> Option<String> {
     for var in ["HONYA_API_KEY", "OPENROUTER_API_KEY"] {
         if let Ok(v) = std::env::var(var) {
             let v = v.trim();
@@ -64,9 +77,5 @@ pub fn resolve_api_key(cfg: &AppConfig) -> Option<String> {
             }
         }
     }
-    cfg.api_key
-        .as_deref()
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-        .map(str::to_string)
+    None
 }

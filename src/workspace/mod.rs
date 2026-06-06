@@ -7,6 +7,7 @@ use std::path::PathBuf;
 pub mod characters;
 pub mod data_block;
 pub mod glossary;
+pub mod sample;
 pub mod scaffold;
 pub mod scan;
 pub mod session;

@@ -185,27 +185,37 @@ impl ImportState {
     }
 }
 
-/// Settings: editable model ids + base URL + an api-key-present indicator.
+/// Number of focusable Settings fields (base URL, 3 models, API key).
+const SETTINGS_FIELDS: u8 = 5;
+/// Index of the API-key field within Settings.
+const SETTINGS_KEY_FIELD: u8 = 4;
+
+/// Settings: editable base URL + model ids + an editable, masked API key.
 #[derive(Debug, Clone)]
 pub struct SettingsState {
     pub base_url: String,
     pub orchestrator: String,
     pub translator: String,
     pub reviewer: String,
-    pub api_key_present: bool,
-    /// Which field is focused (0..=3).
+    /// The config-stored API key, editable here (masked on screen). Empty = none.
+    pub api_key: String,
+    /// True when an env var (HONYA_API_KEY / OPENROUTER_API_KEY) supplies the key;
+    /// it overrides config, so the field is shown read-only.
+    pub api_key_env: bool,
+    /// Which field is focused (0..=4).
     pub field: u8,
 }
 
 impl SettingsState {
-    fn from_cfg(cfg: &AppConfig) -> Self {
+    fn from_cfg_focus(cfg: &AppConfig, field: u8) -> Self {
         Self {
             base_url: cfg.base_url.clone(),
             orchestrator: cfg.models.orchestrator.clone(),
             translator: cfg.models.translator.clone(),
             reviewer: cfg.models.reviewer.clone(),
-            api_key_present: crate::config::resolve_api_key(cfg).is_some(),
-            field: 0,
+            api_key: cfg.api_key.clone().unwrap_or_default(),
+            api_key_env: crate::config::api_key_from_env().is_some(),
+            field: field.min(SETTINGS_FIELDS - 1),
         }
     }
 
@@ -214,7 +224,8 @@ impl SettingsState {
             0 => &mut self.base_url,
             1 => &mut self.orchestrator,
             2 => &mut self.translator,
-            _ => &mut self.reviewer,
+            3 => &mut self.reviewer,
+            _ => &mut self.api_key,
         }
     }
 }
@@ -256,6 +267,10 @@ pub struct PaletteItem {
 impl PaletteState {
     fn new() -> Self {
         let items = vec![
+            PaletteItem {
+                label: "Getting started 入門",
+                action: Action::show_overlay(Overlay::welcome_placeholder()),
+            },
             PaletteItem {
                 label: "Go: Shelf 書架",
                 action: Action::Goto(Screen::Shelf),
@@ -416,6 +431,22 @@ impl ReaderJumpState {
     }
 }
 
+/// First-run welcome / getting-started overlay: a short explainer of the five-screen
+/// workflow plus an action menu. Built App-side with live key/sample status so the
+/// menu labels read correctly.
+#[derive(Debug, Clone)]
+pub struct WelcomeState {
+    /// Selected menu row (0..WELCOME_ITEMS).
+    pub sel: usize,
+    /// Whether an API key is already configured (env or saved).
+    pub api_key_present: bool,
+    /// Whether the bundled sample project already exists on disk.
+    pub sample_exists: bool,
+}
+
+/// Number of selectable rows in the Welcome action menu.
+const WELCOME_ITEMS: usize = 4;
+
 // ============================================================================
 // OVERLAY
 // ============================================================================
@@ -423,6 +454,8 @@ impl ReaderJumpState {
 #[derive(Debug, Clone)]
 pub enum Overlay {
     None,
+    /// First-run getting-started overlay (sample / import / key / dismiss).
+    Welcome(WelcomeState),
     Import(ImportState),
     Settings(SettingsState),
     /// Live-preview color theme picker.
@@ -453,8 +486,25 @@ impl Overlay {
         Overlay::Import(ImportState::new(epubs))
     }
 
-    pub fn settings(cfg: &AppConfig) -> Self {
-        Overlay::Settings(SettingsState::from_cfg(cfg))
+    /// Welcome overlay seeded with live key / sample status.
+    pub fn welcome(api_key_present: bool, sample_exists: bool) -> Self {
+        Overlay::Welcome(WelcomeState {
+            sel: 0,
+            api_key_present,
+            sample_exists,
+        })
+    }
+
+    /// Placeholder for the palette (no live status handle); the App swaps in the
+    /// real key/sample status on show, mirroring the Settings/QA placeholder pattern.
+    fn welcome_placeholder() -> Self {
+        Overlay::welcome(false, false)
+    }
+
+    /// Settings built from live config with a specific field pre-focused (0 = top;
+    /// the Welcome overlay's "Set API key" shortcut focuses the key field).
+    pub fn settings_with_field(cfg: &AppConfig, field: u8) -> Self {
+        Overlay::Settings(SettingsState::from_cfg_focus(cfg, field))
     }
 
     pub fn theme(current: ThemeId) -> Self {
@@ -563,17 +613,23 @@ impl Overlay {
         })
     }
 
-    /// A settings overlay built from defaults — used by the palette which has no
-    /// `&AppConfig` handle; the App swaps in the real config field values on show.
-    fn settings_placeholder() -> Self {
+    /// A settings overlay placeholder — used by callers without an `&AppConfig`
+    /// handle (palette, Welcome); the App swaps in the real config field values on
+    /// show, preserving the requested focused `field`.
+    fn settings_at(field: u8) -> Self {
         Overlay::Settings(SettingsState {
             base_url: String::new(),
             orchestrator: String::new(),
             translator: String::new(),
             reviewer: String::new(),
-            api_key_present: false,
-            field: 0,
+            api_key: String::new(),
+            api_key_env: false,
+            field: field.min(SETTINGS_FIELDS - 1),
         })
+    }
+
+    fn settings_placeholder() -> Self {
+        Overlay::settings_at(0)
     }
 
     // ---- import progress passthrough (called from App::on_app_event) ------
@@ -636,6 +692,7 @@ impl Overlay {
     pub fn handle_key(&mut self, key: KeyEvent) -> Action {
         match self {
             Overlay::None => Action::None,
+            Overlay::Welcome(_) => self.handle_welcome_key(key),
             Overlay::Import(_) => self.handle_import_key(key),
             Overlay::Settings(_) => self.handle_settings_key(key),
             Overlay::Theme(_) => self.handle_theme_key(key),
@@ -670,6 +727,32 @@ impl Overlay {
                 }
                 _ => Action::None,
             },
+        }
+    }
+
+    fn handle_welcome_key(&mut self, key: KeyEvent) -> Action {
+        let Overlay::Welcome(st) = self else {
+            return Action::None;
+        };
+        match key.code {
+            // Esc / q dismiss and mark onboarding complete (App persists the flag).
+            KeyCode::Esc | KeyCode::Char('q') => Action::DismissWelcome,
+            KeyCode::Up | KeyCode::Char('k') => {
+                st.sel = (st.sel + WELCOME_ITEMS - 1) % WELCOME_ITEMS;
+                Action::None
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                st.sel = (st.sel + 1) % WELCOME_ITEMS;
+                Action::None
+            }
+            KeyCode::Enter => match st.sel {
+                0 => Action::CreateSample,
+                1 => Action::OpenImport,
+                // Jump straight to the API-key field in Settings.
+                2 => Action::show_overlay(Overlay::settings_at(SETTINGS_KEY_FIELD)),
+                _ => Action::DismissWelcome,
+            },
+            _ => Action::None,
         }
     }
 
@@ -836,20 +919,28 @@ impl Overlay {
                 orchestrator: st.orchestrator.clone(),
                 translator: st.translator.clone(),
                 reviewer: st.reviewer.clone(),
+                // An env-supplied key wins over config, so don't let an edit here
+                // clobber the saved key in that case (None = leave config as-is).
+                api_key: if st.api_key_env {
+                    None
+                } else {
+                    Some(st.api_key.clone())
+                },
             },
             KeyCode::Tab | KeyCode::Down => {
-                st.field = (st.field + 1) % 4;
+                st.field = (st.field + 1) % SETTINGS_FIELDS;
                 Action::None
             }
             KeyCode::Up | KeyCode::BackTab => {
-                st.field = (st.field + 3) % 4;
+                st.field = (st.field + SETTINGS_FIELDS - 1) % SETTINGS_FIELDS;
                 Action::None
             }
-            KeyCode::Backspace => {
+            // The API-key field is read-only while an env var supplies the key.
+            KeyCode::Backspace if !(st.field == SETTINGS_KEY_FIELD && st.api_key_env) => {
                 st.field_mut().pop();
                 Action::None
             }
-            KeyCode::Char(c) => {
+            KeyCode::Char(c) if !(st.field == SETTINGS_KEY_FIELD && st.api_key_env) => {
                 st.field_mut().push(c);
                 Action::None
             }
@@ -1127,6 +1218,7 @@ impl Overlay {
 
     pub fn hints(&self) -> &'static [(&'static str, &'static str)] {
         match self {
+            Overlay::Welcome(_) => &[("↑↓", "move"), ("↵", "select"), ("Esc", "skip")],
             Overlay::Import(st) => match st.step {
                 0 => &[("↑↓", "pick"), ("↵", "next"), ("Esc", "cancel")],
                 1 => &[("type", "name"), ("↵/Tab", "next"), ("Esc", "back")],
@@ -1181,6 +1273,7 @@ impl Overlay {
     ) {
         match self {
             Overlay::None => {}
+            Overlay::Welcome(st) => self.render_welcome(f, area, theme, st),
             Overlay::Import(st) => self.render_import(f, area, theme, st),
             Overlay::Settings(st) => self.render_settings(f, area, theme, cfg, st),
             Overlay::Theme(st) => self.render_theme(f, area, theme, st),
@@ -1208,6 +1301,95 @@ impl Overlay {
                     .add_modifier(Modifier::BOLD),
             ))
             .style(Style::default().bg(theme.bg_panel))
+    }
+
+    fn render_welcome(&self, f: &mut Frame, area: Rect, theme: &Theme, st: &WelcomeState) {
+        let modal = centered_modal(76, 24, area);
+        f.render_widget(Clear, modal);
+        let block = self.modal_block("ようこそ · Welcome to honya 本屋", theme);
+        let inner = block.inner(modal);
+        f.render_widget(block, modal);
+
+        let dim = Style::default().fg(theme.ink_faint);
+        let soft = Style::default().fg(theme.ink_soft);
+        let accent = Style::default().fg(theme.accent);
+
+        let mut lines: Vec<Line> = vec![
+            Line::raw(""),
+            Line::from(Span::styled(
+                "  AI-assisted Japanese → Thai light-novel translation.",
+                soft,
+            )),
+            Line::raw(""),
+            Line::from(Span::styled("  The five screens (1–5 / Tab):", dim)),
+        ];
+        let screens = [
+            ("1", "書架 Shelf", "import EPUBs · pick a project"),
+            ("2", "棚 Project", "chapters · queue · run translation"),
+            ("3", "訳 Translate", "watch the live 3-agent pipeline"),
+            ("4", "読 Reader", "read JA ↔ TH side by side"),
+            ("5", "辞 Lexicon", "glossary · characters · style"),
+        ];
+        for (num, name, desc) in screens {
+            lines.push(Line::from(vec![
+                Span::styled(format!("   {num} "), accent),
+                Span::styled(format!("{name:<14}"), Style::default().fg(theme.ink)),
+                Span::styled(desc, soft),
+            ]));
+        }
+        lines.push(Line::raw(""));
+
+        // Action menu rows (selection index aligns with handle_welcome_key).
+        let sample_label = if st.sample_exists {
+            "Open the sample project".to_string()
+        } else {
+            "Create a sample project".to_string()
+        };
+        let key_status = if st.api_key_present {
+            ("✓ key configured", theme.status_done)
+        } else {
+            ("needed to translate", theme.status_warn)
+        };
+        let items: [(String, Vec<Span>); WELCOME_ITEMS] = [
+            (
+                sample_label,
+                vec![Span::styled(" — explore offline, no API key needed", dim)],
+            ),
+            ("Import an EPUB".to_string(), vec![]),
+            (
+                "Set OpenRouter API key".to_string(),
+                vec![
+                    Span::styled("  ", dim),
+                    Span::styled(key_status.0, Style::default().fg(key_status.1)),
+                ],
+            ),
+            ("Skip — I'll explore on my own".to_string(), vec![]),
+        ];
+        for (i, (label, suffix)) in items.into_iter().enumerate() {
+            let selected = i == st.sel;
+            let bar = if selected { theme::SELECT_BAR } else { ' ' };
+            let label_style = if selected {
+                Style::default()
+                    .fg(theme.ink)
+                    .bg(theme.accent_bg)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.ink)
+            };
+            let mut spans = vec![
+                Span::styled(format!("  {bar} "), accent),
+                Span::styled(label, label_style),
+            ];
+            spans.extend(suffix);
+            lines.push(Line::from(spans));
+        }
+
+        f.render_widget(
+            Paragraph::new(lines)
+                .wrap(Wrap { trim: false })
+                .style(Style::default().bg(theme.bg_panel)),
+            inner,
+        );
     }
 
     fn render_import(&self, f: &mut Frame, area: Rect, theme: &Theme, st: &ImportState) {
@@ -1655,11 +1837,32 @@ impl Overlay {
         cfg: &AppConfig,
         st: &SettingsState,
     ) {
-        let modal = centered_modal(72, 16, area);
+        let modal = centered_modal(72, 18, area);
         f.render_widget(Clear, modal);
         let block = self.modal_block("Settings", theme);
         let inner = block.inner(modal);
         f.render_widget(block, modal);
+
+        let val_w = area.width.saturating_sub(26) as usize;
+        // One editable text row: marker · label · value · cursor.
+        let field_line = |label: &str, value: String, focused: bool| -> Line<'static> {
+            let marker = if focused { theme::SELECT_BAR } else { ' ' };
+            let value_style = if focused {
+                Style::default().fg(theme.ink).bg(theme.accent_bg)
+            } else {
+                Style::default().fg(theme.ink_soft)
+            };
+            Line::from(vec![
+                Span::styled(format!(" {marker} "), Style::default().fg(theme.accent)),
+                Span::styled(format!("{label:<20}"), Style::default().fg(theme.ink_faint)),
+                Span::styled(truncate_cols(&value, val_w), value_style),
+                if focused {
+                    Span::styled("▏", Style::default().fg(theme.stream_cursor))
+                } else {
+                    Span::raw("")
+                },
+            ])
+        };
 
         let fields = [
             ("Base URL", st.base_url.as_str(), 0u8),
@@ -1669,43 +1872,31 @@ impl Overlay {
         ];
         let mut lines = vec![Line::raw("")];
         for (label, value, idx) in fields {
-            let focused = st.field == idx;
-            let marker = if focused { theme::SELECT_BAR } else { ' ' };
-            let value_style = if focused {
-                Style::default().fg(theme.ink).bg(theme.accent_bg)
-            } else {
-                Style::default().fg(theme.ink_soft)
-            };
-            lines.push(Line::from(vec![
-                Span::styled(format!(" {marker} "), Style::default().fg(theme.accent)),
-                Span::styled(format!("{label:<20}"), Style::default().fg(theme.ink_faint)),
-                Span::styled(
-                    truncate_cols(value, area.width.saturating_sub(26) as usize),
-                    value_style,
-                ),
-                if focused {
-                    Span::styled("▏", Style::default().fg(theme.stream_cursor))
-                } else {
-                    Span::raw("")
-                },
-            ]));
+            lines.push(field_line(label, value.to_string(), st.field == idx));
         }
-        lines.push(Line::raw(""));
-        let key_state = if st.api_key_present {
-            Span::styled("● present", Style::default().fg(theme.status_done))
+
+        // API key: masked, editable — unless the environment supplies it.
+        let focused_key = st.field == SETTINGS_KEY_FIELD;
+        if st.api_key_env {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!(" {} ", if focused_key { theme::SELECT_BAR } else { ' ' }),
+                    Style::default().fg(theme.accent),
+                ),
+                Span::styled("API key             ", Style::default().fg(theme.ink_faint)),
+                Span::styled("● via environment", Style::default().fg(theme.status_done)),
+                Span::styled(" (read-only)", Style::default().fg(theme.ink_faint)),
+            ]));
         } else {
-            Span::styled(
-                "○ missing — set HONYA_API_KEY",
-                Style::default().fg(theme.status_warn),
-            )
-        };
-        lines.push(Line::from(vec![
-            Span::styled(
-                "   API key             ",
-                Style::default().fg(theme.ink_faint),
-            ),
-            key_state,
-        ]));
+            let shown = if st.api_key.trim().is_empty() {
+                "— not set —".to_string()
+            } else {
+                mask_secret(&st.api_key)
+            };
+            lines.push(field_line("API key", shown, focused_key));
+        }
+
+        lines.push(Line::raw(""));
         lines.push(Line::from(vec![
             Span::styled(
                 "   Theme               ",
@@ -1715,8 +1906,13 @@ impl Overlay {
             Span::styled("   Ctrl-T to change", Style::default().fg(theme.ink_faint)),
         ]));
         lines.push(Line::raw(""));
+        let footer = if st.api_key_env {
+            "   Key from HONYA_API_KEY / OPENROUTER_API_KEY · ↵ save · Esc close"
+        } else {
+            "   Paste an OpenRouter key (sk-or-…); saved to config.json · ↵ save"
+        };
         lines.push(Line::from(Span::styled(
-            "   Set HONYA_API_KEY or OPENROUTER_API_KEY in your environment.",
+            footer,
             Style::default().fg(theme.ink_faint),
         )));
         f.render_widget(
@@ -1911,7 +2107,7 @@ impl Overlay {
                 &[
                     ("1–5 / Tab", "switch primary tab"),
                     ("?", "toggle this help"),
-                    (": / Ctrl-P", "command palette"),
+                    (": / Ctrl-P", "command palette (→ Getting started)"),
                     ("Ctrl-T", "theme picker"),
                     ("` / l", "activity log (Project keeps l)"),
                     ("Esc / Backspace", "close overlay / dismiss toast"),
@@ -2432,6 +2628,19 @@ fn indent(area: Rect, pad: u16) -> Rect {
         width: area.width.saturating_sub(pad * 2),
         height: area.height,
     }
+}
+
+/// Mask a secret for display: a run of bullets with the last 4 characters revealed
+/// (e.g. `sk-or-v1-…1a2b` → `••••••••1a2b`), so the user can confirm which key is
+/// saved without exposing it. Short keys are fully bulleted.
+fn mask_secret(s: &str) -> String {
+    let chars: Vec<char> = s.trim().chars().collect();
+    if chars.len() <= 4 {
+        return "•".repeat(chars.len());
+    }
+    let tail: String = chars[chars.len() - 4..].iter().collect();
+    let dots = chars.len().saturating_sub(4).min(12);
+    format!("{}{}", "•".repeat(dots), tail)
 }
 
 /// Turn an epub file stem into a readable default title: `_`/`-` → spaces,

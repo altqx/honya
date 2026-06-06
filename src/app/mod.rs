@@ -156,7 +156,16 @@ pub enum Action {
         orchestrator: String,
         translator: String,
         reviewer: String,
+        /// New config API key: `Some("")` clears it, `Some(k)` sets it, `None`
+        /// leaves it untouched (the env var supplies the key, so config is moot).
+        api_key: Option<String>,
     },
+    /// Create the bundled sample project (if absent) and open it.
+    CreateSample,
+    /// Open the EPUB import wizard from the Welcome overlay (App supplies the list).
+    OpenImport,
+    /// Dismiss the Welcome overlay and persist that onboarding is complete.
+    DismissWelcome,
     /// Live-preview a theme without persisting (theme picker navigation).
     PreviewTheme(ThemeId),
     /// Commit a theme: apply, persist to config, close the picker.
@@ -206,7 +215,10 @@ impl Toast {
 pub struct ActiveProject {
     pub project: Project,
     pub workspace: Workspace,
-    pub client: Arc<dyn LlmClient>,
+    /// The LLM client, built lazily: `None` when no API key is configured yet, so a
+    /// project can still be opened and browsed offline (Reader / Lexicon). Built /
+    /// cached on demand by `App::ensure_active_client` when a run needs it.
+    pub client: Option<Arc<dyn LlmClient>>,
     pub models: ModelSet,
     /// The active volume number — the one `workspace` resolves and that runs
     /// translate against. Set when the project is opened (and honored on resume,
@@ -976,7 +988,13 @@ impl App {
             Action::ShowOverlay(ov) => {
                 // Palette placeholders carry no config; rebuild from live config.
                 self.overlay = match *ov {
-                    Overlay::Settings(_) => Overlay::settings(&self.cfg),
+                    // Welcome placeholders carry no status; rebuild from live state.
+                    Overlay::Welcome(_) => {
+                        let key = crate::config::resolve_api_key(&self.cfg).is_some();
+                        let sample = crate::workspace::sample::sample_exists(&working_root());
+                        Overlay::welcome(key, sample)
+                    }
+                    Overlay::Settings(ph) => Overlay::settings_with_field(&self.cfg, ph.field),
                     Overlay::Theme(_) => Overlay::theme(self.cfg.theme),
                     // QA placeholders (palette / screen `Q`) carry no data; rebuild
                     // the report from the live active project on show.
@@ -1098,15 +1116,22 @@ impl App {
                 orchestrator,
                 translator,
                 reviewer,
+                api_key,
             } => {
-                self.cfg.base_url = base_url;
-                self.cfg.models.orchestrator = orchestrator;
-                self.cfg.models.translator = translator;
-                self.cfg.models.reviewer = reviewer;
-                match crate::config::save(&self.cfg) {
-                    Ok(()) => self.toast = Some(Toast::info("settings saved")),
-                    Err(e) => self.toast = Some(Toast::error(format!("save failed: {e}"))),
-                }
+                self.save_settings(base_url, orchestrator, translator, reviewer, api_key);
+            }
+            Action::CreateSample => {
+                self.create_sample_project();
+            }
+            Action::OpenImport => {
+                let epubs = crate::workspace::scan::find_unimported_epubs(&working_root())
+                    .into_iter()
+                    .map(|(p, _)| p)
+                    .collect();
+                self.overlay = Overlay::import(epubs);
+            }
+            Action::DismissWelcome => {
+                self.mark_onboarded();
                 self.overlay = Overlay::None;
             }
             Action::PreviewTheme(id) => {
@@ -1142,22 +1167,21 @@ impl App {
         self.activate_project(project, vol);
     }
 
-    /// Make `project` the active project on volume `vol`: build its LLM client,
-    /// reset the per-project screens, and land on the Project tab. Returns `false`
-    /// (after toasting) when the client can't be built, so callers can bail.
+    /// Make `project` the active project on volume `vol`: build its LLM client (if a
+    /// key is configured), reset the per-project screens, and land on the Project
+    /// tab. Always succeeds — a missing key only disables translation, not browsing,
+    /// so the client is left `None` and built lazily once a key is set. Returns
+    /// `true` for callers that branch on activation.
     fn activate_project(&mut self, project: Project, vol: u32) -> bool {
         let models = project
             .models
             .clone()
             .unwrap_or_else(|| self.cfg.models.clone());
         let workspace = Workspace::new(project.dir.clone(), vol);
-        let client = match crate::build_client(&self.cfg) {
-            Ok(client) => client,
-            Err(e) => {
-                self.toast = Some(Toast::error(format!("LLM client unavailable: {e}")));
-                return false;
-            }
-        };
+        let client = crate::build_client(&self.cfg).ok();
+        // Distinguish "no key configured" (the expected offline case) from a client
+        // that failed to build despite a key — only the former drives the hint toast.
+        let no_key = crate::config::resolve_api_key(&self.cfg).is_none();
         let id = project.id.clone();
         self.active = Some(ActiveProject {
             project,
@@ -1169,8 +1193,23 @@ impl App {
         self.lexicon.reset();
         self.project = ProjectScreen::new();
         self.screen = Screen::Project;
-        self.toast = Some(Toast::info(format!("opened {id}")));
+        self.toast = Some(if no_key {
+            Toast::info(format!("opened {id} · add an API key in Settings to translate"))
+        } else {
+            Toast::info(format!("opened {id}"))
+        });
         true
+    }
+
+    /// Resolve the active project's LLM client, building and caching it from config
+    /// if it was opened without a key (the user may have since added one in
+    /// Settings). `None` means no key is configured anywhere.
+    fn ensure_active_client(&mut self) -> Option<Arc<dyn LlmClient>> {
+        let active = self.active.as_mut()?;
+        if active.client.is_none() {
+            active.client = crate::build_client(&self.cfg).ok();
+        }
+        active.client.clone()
     }
 
     /// Resume the interrupted run from the recovery checkpoint: reopen its project
@@ -1295,14 +1334,13 @@ impl App {
             self.toast = Some(Toast::warn("a run is already in progress"));
             return;
         }
-        let Some((vol, project_dir, project_id, project_title, client, models)) =
+        let Some((vol, project_dir, project_id, project_title, models)) =
             self.active.as_ref().map(|active| {
                 (
                     active.active_vol(),
                     active.project.dir.clone(),
                     active.project.id.clone(),
                     active.project.title.clone(),
-                    Arc::clone(&active.client),
                     active.models.clone(),
                 )
             })
@@ -1314,6 +1352,20 @@ impl App {
             self.toast = Some(Toast::warn("nothing selected"));
             return;
         }
+        let Some(client) = self.ensure_active_client() else {
+            // None means either no key (the common case) or a key that failed to
+            // build a client — surface the real error in the latter case rather than
+            // misleadingly telling the user to add a key they already have.
+            self.toast = Some(if crate::config::resolve_api_key(&self.cfg).is_none() {
+                Toast::warn("no API key — open Settings ( : → Settings ) to add one")
+            } else {
+                match crate::build_client(&self.cfg) {
+                    Err(e) => Toast::error(format!("LLM client unavailable: {e}")),
+                    Ok(_) => Toast::warn("could not start translation"),
+                }
+            });
+            return;
+        };
 
         let ws = Workspace::new(project_dir.clone(), vol);
         if restart {
@@ -1477,10 +1529,17 @@ impl App {
     /// active project's client when one is open, else builds from config (the
     /// import wizard runs from the Shelf with no project open yet).
     fn translate_synopsis(&mut self, raw: String, attempt: u32) {
-        let (client, model) = match self.active.as_ref() {
-            Some(a) => (Arc::clone(&a.client), a.models.translator.clone()),
+        // Prefer the active project's translator model; fall back to config (the
+        // import wizard runs from the Shelf with no project open yet).
+        let model = self
+            .active
+            .as_ref()
+            .map(|a| a.models.translator.clone())
+            .unwrap_or_else(|| self.cfg.models.translator.clone());
+        let client = match self.ensure_active_client() {
+            Some(c) => c,
             None => match crate::build_client(&self.cfg) {
-                Ok(c) => (c, self.cfg.models.translator.clone()),
+                Ok(c) => c,
                 Err(e) => {
                     // No client → report failure so the editor leaves Translating.
                     self.tx
@@ -1504,6 +1563,100 @@ impl App {
                 Err(e) => tx.send(AppEvent::SynopsisFailed { msg: e.to_string() }),
             }
         });
+    }
+
+    /// Persist edited Settings (base URL, model ids, and the config API key) and
+    /// close. `api_key` is `None` when the environment supplies the key (config is
+    /// left untouched), `Some("")` clears the saved key, `Some(k)` sets it. After a
+    /// key change, the active project's client is rebuilt so translation works at
+    /// once (or stops, if the key was cleared).
+    fn save_settings(
+        &mut self,
+        base_url: String,
+        orchestrator: String,
+        translator: String,
+        reviewer: String,
+        api_key: Option<String>,
+    ) {
+        self.cfg.base_url = base_url;
+        self.cfg.models.orchestrator = orchestrator;
+        self.cfg.models.translator = translator;
+        self.cfg.models.reviewer = reviewer;
+        let key_changed = if let Some(k) = api_key {
+            let k = k.trim();
+            let next = (!k.is_empty()).then(|| k.to_string());
+            let changed = next != self.cfg.api_key;
+            self.cfg.api_key = next;
+            changed
+        } else {
+            false
+        };
+        // Rebuild the active client so a newly-added/changed/cleared key takes hold
+        // without reopening the project.
+        if key_changed && let Some(active) = self.active.as_mut() {
+            active.client = crate::build_client(&self.cfg).ok();
+        }
+        match crate::config::save(&self.cfg) {
+            Ok(()) => self.toast = Some(Toast::info("settings saved")),
+            Err(e) => self.toast = Some(Toast::error(format!("save failed: {e}"))),
+        }
+        self.overlay = Overlay::None;
+    }
+
+    /// Create the bundled sample project (if absent) and open it — the offline,
+    /// no-key path for learning the five-screen workflow. Marks onboarding complete.
+    fn create_sample_project(&mut self) {
+        match crate::workspace::sample::create_sample_project(&working_root(), &self.cfg.models) {
+            Ok(id) => {
+                self.mark_onboarded();
+                self.refresh_projects();
+                self.shelf.rescan(&working_root());
+                self.push_log(LogLevel::Info, format!("created sample project {id}"));
+                // Close the Welcome overlay first: `open_project` lands on the Project
+                // screen, but it does not clear overlays, so without this the modal
+                // would stay rendered over (and keep swallowing input for) the project
+                // the user just opened.
+                self.overlay = Overlay::None;
+                self.open_project(id);
+            }
+            Err(e) => {
+                self.toast = Some(Toast::error(format!("could not create sample: {e}")));
+            }
+        }
+    }
+
+    /// Record that the user has completed (or dismissed) onboarding and persist it,
+    /// so the Welcome overlay does not auto-open on subsequent launches.
+    fn mark_onboarded(&mut self) {
+        if !self.cfg.onboarded {
+            self.cfg.onboarded = true;
+            let _ = crate::config::save(&self.cfg);
+        }
+    }
+
+    /// On first launch (no projects yet and not previously onboarded), raise the
+    /// in-app Welcome overlay. Called from `main` after `init_recovery_prompt`, so a
+    /// pending crash-recovery prompt keeps priority. Existing users (who already
+    /// have projects) are quietly marked onboarded and never see it.
+    pub fn init_onboarding(&mut self) {
+        if self.cfg.onboarded {
+            return;
+        }
+        if !self.projects.is_empty() {
+            // A returning user from before this flag existed — don't nag them.
+            self.mark_onboarded();
+            return;
+        }
+        // Recovery prompt (or any overlay already up) wins this launch.
+        if !matches!(self.overlay, Overlay::None) {
+            return;
+        }
+        let key_present = crate::config::resolve_api_key(&self.cfg).is_some();
+        let sample_exists = crate::workspace::sample::sample_exists(&working_root());
+        // Shown once automatically; mark it so we don't nag on every launch. It stays
+        // reachable from the palette / Help for anyone who wants it again.
+        self.mark_onboarded();
+        self.overlay = Overlay::welcome(key_present, sample_exists);
     }
 
     /// Persist the active volume's synopsis (from the standalone editor) and close.
