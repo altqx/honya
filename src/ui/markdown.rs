@@ -139,11 +139,7 @@ fn push_table_row(
     out.push(Line::from(spans));
 }
 
-fn push_table_rule(
-    rule: &termimad::FmtTableRule,
-    theme: &Theme,
-    out: &mut Vec<Line<'static>>,
-) {
+fn push_table_rule(rule: &termimad::FmtTableRule, theme: &Theme, out: &mut Vec<Line<'static>>) {
     let (left, join, right) = match rule.position {
         RelativePosition::Top => ('┌', '┬', '┐'),
         RelativePosition::Bottom => ('└', '┴', '┘'),
@@ -158,10 +154,7 @@ fn push_table_rule(
         s.extend(std::iter::repeat_n('─', width.max(1)));
     }
     s.push(right);
-    out.push(Line::from(Span::styled(
-        s,
-        Style::default().fg(theme.rule),
-    )));
+    out.push(Line::from(Span::styled(s, Style::default().fg(theme.rule))));
 }
 
 fn append_composite_inline(
@@ -200,10 +193,9 @@ fn prefix_spans(kind: CompositeKind, theme: &Theme) -> Vec<Span<'static>> {
             format!("{} • ", " ".repeat(depth as usize)),
             Style::default().fg(theme.accent),
         )],
-        CompositeKind::ListItemFollowUp(depth) => vec![Span::raw(format!(
-            "{}  ",
-            " ".repeat(depth as usize)
-        ))],
+        CompositeKind::ListItemFollowUp(depth) => {
+            vec![Span::raw(format!("{}  ", " ".repeat(depth as usize)))]
+        }
         _ => Vec::new(),
     }
 }
