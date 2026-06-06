@@ -12,7 +12,7 @@ unicode-segmentation = "1"                                                 # gra
 
 # --- async runtime + HTTP ---
 tokio       = { version = "1.52", features = ["full"] }                    # rt-multi-thread, macros, time, fs, sync, io-util
-reqwest     = { version = "0.13", default-features = false, features = ["json", "rustls", "http2"] }  # NOTE: feature is "rustls", NOT "rustls-tls"
+reqwest     = { version = "0.13", default-features = false, features = ["json", "rustls", "http2", "stream"] }  # NOTE: feature is "rustls", NOT "rustls-tls"
 futures     = "0.3"                                                        # FutureExt::fuse, StreamExt::next for select!
 async-trait = "0.1"                                                        # dyn-compatible async LlmClient / ToolExecutor traits
 

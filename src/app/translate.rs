@@ -43,6 +43,7 @@ pub struct TranslateScreen {
     chunk: (usize, usize),
     /// Accumulated Thai preview text.
     preview: String,
+    pending_preview_separator: bool,
     /// Whole-run cumulative usage (tokens / cost / tool calls), from `UsageUpdate`.
     run: UsageStats,
     /// Current chapter's running usage sub-total, from `UsageUpdate`.
@@ -65,6 +66,7 @@ impl TranslateScreen {
             chapter_title: String::new(),
             chunk: (0, 0),
             preview: String::new(),
+            pending_preview_separator: false,
             run: UsageStats::default(),
             chapter: UsageStats::default(),
             retries: 0,
@@ -93,6 +95,7 @@ impl TranslateScreen {
                 self.phase = RunPhase::Running;
                 self.current_chapter = Some(*chapter);
                 self.preview.clear();
+                self.pending_preview_separator = false;
                 self.scroll = 0;
                 self.chunk = (0, 0);
                 self.agent_lines = [
@@ -124,6 +127,8 @@ impl TranslateScreen {
             AppEvent::TranslatorRequested { chunk, attempt, .. } => {
                 self.active_agent = 1;
                 self.agent_lines[1] = format!("requesting chunk {} (attempt {attempt})", chunk + 1);
+                self.pending_preview_separator =
+                    !self.preview.is_empty() && !self.preview.ends_with('\n');
             }
             AppEvent::TranslatorReturned {
                 thai_preview,
@@ -137,9 +142,12 @@ impl TranslateScreen {
                     // `thai_preview` now carries the chunk's full multi-line Thai.
                     // Separate successive chunks with a blank line so the preview
                     // reads as flowing prose instead of one run-on paragraph.
-                    if !self.preview.is_empty() && !self.preview.ends_with('\n') {
+                    if self.pending_preview_separator
+                        || (!self.preview.is_empty() && !self.preview.ends_with('\n'))
+                    {
                         self.preview.push_str("\n\n");
                     }
+                    self.pending_preview_separator = false;
                     self.append_preview(thai_preview);
                 }
                 // The authoritative running total arrives via UsageUpdate (emitted
@@ -204,6 +212,7 @@ impl TranslateScreen {
                     AgentRole::Reviewer => self.active_agent = 2,
                 }
                 if matches!(role, AgentRole::Translator) {
+                    self.consume_pending_preview_separator();
                     self.append_preview(delta);
                 }
             }
@@ -257,6 +266,15 @@ impl TranslateScreen {
         if self.follow {
             // Keep the view pinned to the tail when following.
             self.scroll = u16::MAX;
+        }
+    }
+
+    fn consume_pending_preview_separator(&mut self) {
+        if self.pending_preview_separator {
+            if !self.preview.is_empty() && !self.preview.ends_with('\n') {
+                self.preview.push_str("\n\n");
+            }
+            self.pending_preview_separator = false;
         }
     }
 

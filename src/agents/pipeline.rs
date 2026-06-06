@@ -20,14 +20,14 @@ use crate::agents::continuity;
 use crate::agents::prompts::{ORCHESTRATOR_SYSTEM, build_orchestrator_metadata_msg};
 use crate::agents::reviewer::review_chunk;
 use crate::agents::tools::{WorkspaceTools, orchestrator_tools};
-use crate::agents::translator::translate_chunk;
+use crate::agents::translator::translate_chunk_streaming;
 use crate::cleanse;
 use crate::llm::client::LlmClient;
 use crate::llm::tool_loop::run_tool_loop;
 use crate::llm::{ChatRequest, Message, Tool, Usage};
 use crate::model::{
-    AppConfig, AppEvent, ChapterStatus, ChunkState, EventTx, LogLevel, ModelSet, ReviewVerdict,
-    ReviewerOut, TokenUsage, TranslatorOut, UsageStats,
+    AgentRole, AppConfig, AppEvent, ChapterStatus, ChunkState, EventTx, LogLevel, ModelSet,
+    ReviewVerdict, ReviewerOut, TokenUsage, TranslatorOut, UsageStats,
 };
 use crate::workspace::{Workspace, characters, data_block, glossary, translation, volume};
 
@@ -535,25 +535,35 @@ async fn process_chunk(
             attempt,
         });
 
-        let (out, t_usage): (TranslatorOut, Usage) = match translate_chunk(
-            ctx.client.as_ref(),
-            &ctx.models.translator,
-            &reference_ctx,
-            &prev_thai,
-            &chunk.text,
-            feedback.as_deref(),
-        )
-        .await
-        {
-            Ok(o) => o,
-            Err(e) => {
-                ctx.tx.send(AppEvent::Error {
-                    context: format!("translator ch{chapter} chunk{}", chunk.index),
-                    msg: e.to_string(),
-                });
-                anyhow::bail!("translator failed on chunk {}: {e}", chunk.index);
-            }
-        };
+        let tx = ctx.tx.clone();
+        let (out, t_usage, streamed_preview): (TranslatorOut, Usage, bool) =
+            match translate_chunk_streaming(
+                ctx.client.as_ref(),
+                &ctx.models.translator,
+                &reference_ctx,
+                &prev_thai,
+                &chunk.text,
+                feedback.as_deref(),
+                move |delta| {
+                    tx.send(AppEvent::StreamDelta {
+                        chapter,
+                        chunk: chunk.index,
+                        role: AgentRole::Translator,
+                        delta: delta.to_string(),
+                    });
+                },
+            )
+            .await
+            {
+                Ok(o) => o,
+                Err(e) => {
+                    ctx.tx.send(AppEvent::Error {
+                        context: format!("translator ch{chapter} chunk{}", chunk.index),
+                        msg: e.to_string(),
+                    });
+                    anyhow::bail!("translator failed on chunk {}: {e}", chunk.index);
+                }
+            };
 
         let thai = out.translated_text.clone();
         let tok = to_tokens(&t_usage);
@@ -562,10 +572,13 @@ async fn process_chunk(
             chapter,
             chunk: chunk.index,
             attempt,
-            // Send the chunk's full Thai so the live preview shows the whole
-            // translation, not just a clipped first line. The screen bounds the
-            // accumulated text so a long run can't grow it without limit.
-            thai_preview: thai.clone(),
+            // If the streaming path emitted translated_text deltas, avoid
+            // appending the same chunk again when the final schema lands.
+            thai_preview: if streamed_preview {
+                String::new()
+            } else {
+                thai.clone()
+            },
             tokens: tok,
         });
         ctx.tx.send(AppEvent::UsageUpdate {
