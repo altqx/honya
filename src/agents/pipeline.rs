@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 
-use crate::agents::audit::audit_translation;
+use crate::agents::audit::audit_translation_with_context;
 use crate::agents::chunk::{Chunk, chunk_chapter};
 use crate::agents::continuity;
 use crate::agents::prompts::{ORCHESTRATOR_SYSTEM, build_orchestrator_metadata_msg};
@@ -574,7 +574,7 @@ async fn process_chunk(
         });
 
         // ---- Deterministic audit + Reviewer ----
-        let audit_findings = audit_translation(&chunk.text, &thai);
+        let audit_findings = audit_translation_with_context(&chunk.text, &thai, &prev_thai);
         ctx.tx.send(AppEvent::ChunkStateChanged {
             chapter,
             chunk: chunk.index,
@@ -597,6 +597,7 @@ async fn process_chunk(
             &thai,
             &reference_ctx,
             &audit_findings,
+            &prev_thai,
         )
         .await
         {

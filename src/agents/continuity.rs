@@ -95,7 +95,8 @@ fn push_trimmed(current: &mut String, out: &mut Vec<String>) {
     current.clear();
 }
 
-/// Assemble the Translator user message: optional continuity block then the source delimited by `<<SOURCE_JP>> … <<END_SOURCE_JP>>`.
+/// Assemble the Translator user message: optional continuity block, a scoped
+/// task reminder, then the source delimited by `<<SOURCE_JP>> … <<END_SOURCE_JP>>`.
 pub fn build_translator_user_msg(prev_thai: &[String], raw_chunk: &str) -> String {
     let mut s = String::new();
 
@@ -110,6 +111,14 @@ pub fn build_translator_user_msg(prev_thai: &[String], raw_chunk: &str) -> Strin
         }
         s.push_str("<<END_CONTINUITY>>\n\n");
     }
+
+    s.push_str(
+        "<<TASK: แปลเฉพาะข้อความใน SOURCE_JP เป็นภาษาไทยเท่านั้น>>\n\
+         - ใช้ CONTINUITY/REFERENCE/REVIEWER_FEEDBACK เป็นบริบท ห้ามคัดลอกลง translated_text\n\
+         - translated_text ต้องเป็น Markdown ภาษาไทยฉบับสุดท้าย ไม่มีหัวข้อ \"คำแปล:\" ไม่มีคำเกริ่น และไม่มีคำอธิบายงาน\n\
+         - รักษาย่อหน้าและจังหวะของต้นฉบับเท่าที่ทำได้ โดยเรียบเรียงให้เป็นภาษาไทยธรรมชาติ\n\
+         <<END_TASK>>\n\n",
+    );
 
     s.push_str("<<SOURCE_JP>>\n");
     s.push_str(raw_chunk);

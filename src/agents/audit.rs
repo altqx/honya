@@ -13,9 +13,18 @@ static HTML_TAG: Lazy<Regex> = Lazy::new(|| {
 static MARKDOWN_IMAGE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"!\[[^\]\n]*\]\([^\)\n]+\)").expect("image regex is valid"));
 
+static TRANSLATION_LABEL: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)^\s*(?:translation|translated text|thai translation|คำแปล|คำแปลภาษาไทย|แปลไทย)\s*[:：\-]")
+        .expect("translation-label regex is valid")
+});
+
 /// Return concise, actionable findings. An empty list means the deterministic
 /// gate did not find a mechanical problem.
-pub fn audit_translation(source_jp: &str, thai: &str) -> Vec<String> {
+pub fn audit_translation_with_context(
+    source_jp: &str,
+    thai: &str,
+    prev_thai: &[String],
+) -> Vec<String> {
     let source = source_jp.trim();
     let translated = thai.trim();
     let mut findings = Vec::new();
@@ -43,8 +52,27 @@ pub fn audit_translation(source_jp: &str, thai: &str) -> Vec<String> {
         || translated.contains("<<END_SOURCE_JP>>")
         || translated.contains("<<TRANSLATION_TH>>")
         || translated.contains("<<REFERENCE")
+        || translated.contains("<<CONTINUITY")
+        || translated.contains("<<REVIEWER_FEEDBACK")
     {
         findings.push("remove prompt delimiter text from translated_text".to_string());
+    }
+
+    if TRANSLATION_LABEL.is_match(translated)
+        || translated.starts_with("ต่อไปนี้คือคำแปล")
+        || translated.starts_with("นี่คือคำแปล")
+    {
+        findings.push(
+            "remove translation labels or assistant prefaces; translated_text must contain only the final Thai Markdown"
+                .to_string(),
+        );
+    }
+
+    if copied_continuity(prev_thai, translated) {
+        findings.push(
+            "translated_text appears to copy prior continuity context; remove already-translated Thai and translate only the current SOURCE_JP chunk"
+                .to_string(),
+        );
     }
 
     compare_count(
@@ -100,6 +128,27 @@ pub fn audit_translation(source_jp: &str, thai: &str) -> Vec<String> {
     findings
 }
 
+fn copied_continuity(prev_thai: &[String], translated: &str) -> bool {
+    let translated_norm = normalize_for_duplicate_check(translated);
+    if translated_norm.is_empty() {
+        return false;
+    }
+
+    prev_thai.iter().any(|line| {
+        let line_norm = normalize_for_duplicate_check(line);
+        let thai_chars = thai_char_count(line);
+        // Short dialogue beats repeat naturally, so only flag substantial exact
+        // copies of the injected continuity tail.
+        thai_chars >= 24 && line_norm.chars().count() >= 32 && translated_norm.contains(&line_norm)
+    })
+}
+
+fn normalize_for_duplicate_check(text: &str) -> String {
+    text.chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect::<String>()
+}
+
 fn compare_count(
     findings: &mut Vec<String>,
     label: &str,
@@ -149,7 +198,10 @@ mod tests {
             "彼女は笑った。\n\n---\n\n![ภาพประกอบ](../images/a.webp)\n\n**強い光**が差した。";
         let thai = "เธอหัวเราะ\n\n---\n\n![ภาพประกอบ](../images/a.webp)\n\n**แสงแรงกล้า**สาดเข้ามา";
 
-        assert_eq!(audit_translation(source, thai), Vec::<String>::new());
+        assert_eq!(
+            audit_translation_with_context(source, thai, &[]),
+            Vec::<String>::new()
+        );
     }
 
     #[test]
@@ -157,11 +209,29 @@ mod tests {
         let source = "一文目。\n\n---\n\n![ภาพประกอบ](../images/a.webp)\n\n**二文目。**";
         let thai = "<div>一文目。</div>\n\n**二文目。** &nbsp;";
 
-        let findings = audit_translation(source, thai);
+        let findings = audit_translation_with_context(source, thai, &[]);
         assert!(findings.iter().any(|f| f.contains("HTML tag")));
         assert!(findings.iter().any(|f| f.contains("&nbsp;")));
         assert!(findings.iter().any(|f| f.contains("scene divider")));
         assert!(findings.iter().any(|f| f.contains("Markdown image")));
         assert!(findings.iter().any(|f| f.contains("no Thai characters")));
+    }
+
+    #[test]
+    fn audit_flags_copied_continuity() {
+        let source = "彼女は振り返った。";
+        let prev = vec!["เธอกำมือแน่นพลางฝืนยิ้มทั้งที่เสียงยังสั่นอยู่เล็กน้อย".to_string()];
+        let thai = "เธอกำมือแน่นพลางฝืนยิ้มทั้งที่เสียงยังสั่นอยู่เล็กน้อย\n\nเธอหันกลับไป";
+
+        let findings = audit_translation_with_context(source, thai, &prev);
+
+        assert!(findings.iter().any(|f| f.contains("continuity context")));
+    }
+
+    #[test]
+    fn audit_flags_translation_label() {
+        let findings = audit_translation_with_context("彼女は笑った。", "คำแปล: เธอหัวเราะ", &[]);
+
+        assert!(findings.iter().any(|f| f.contains("translation labels")));
     }
 }
