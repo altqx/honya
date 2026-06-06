@@ -4,16 +4,17 @@
 //! Flow per chapter (verbatim from the pipeline design):
 //!   * ImageOnly chapter → `write_image_only`, skip the agents, `ChapterCompleted`.
 //!   * Otherwise: chunk the raw markdown (`ChapterChunked`), then for each chunk
-//!     translate → review up to `cfg.max_attempts`. On approve we DETERMINISTICALLY
+//!     translate → audit → review up to `cfg.max_attempts`. On approve we DETERMINISTICALLY
 //!     append the Thai (`workspace::translation::append_chunk`, NOT via an LLM
 //!     tool), emit `ChunkCommitted`, then run the Orchestrator metadata turn so
 //!     discoveries land in CHARACTERS.md / GLOSSARY.md / VOLUME.md. On exhausting
-//!     retries the chunk and chapter fail.
+//!     retries the chunk is committed with a review-needed marker.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 
+use crate::agents::audit::audit_translation;
 use crate::agents::chunk::{Chunk, chunk_chapter};
 use crate::agents::continuity;
 use crate::agents::prompts::{ORCHESTRATOR_SYSTEM, build_orchestrator_metadata_msg};
@@ -26,7 +27,7 @@ use crate::llm::tool_loop::run_tool_loop;
 use crate::llm::{ChatRequest, Message, Tool, Usage};
 use crate::model::{
     AppConfig, AppEvent, ChapterStatus, ChunkState, EventTx, LogLevel, ModelSet, ReviewVerdict,
-    TokenUsage, TranslatorOut, UsageStats,
+    ReviewerOut, TokenUsage, TranslatorOut, UsageStats,
 };
 use crate::workspace::{Workspace, characters, data_block, glossary, translation, volume};
 
@@ -436,6 +437,21 @@ fn to_tokens(u: &Usage) -> TokenUsage {
     }
 }
 
+fn effective_feedback_text(audit_findings: &[String], review: &ReviewerOut) -> String {
+    let mut feedback = Vec::new();
+    feedback.extend(
+        audit_findings
+            .iter()
+            .map(|f| format!("Local audit: {}", f.trim()))
+            .filter(|f| !f.trim().is_empty()),
+    );
+    let reviewer_feedback = review.feedback_text();
+    if !reviewer_feedback.trim().is_empty() {
+        feedback.push(reviewer_feedback);
+    }
+    feedback.join("; ")
+}
+
 /// Build a `UsageStats` from one API call's token + BYOK-aware cost usage.
 fn stats_from_usage(u: &Usage) -> UsageStats {
     UsageStats {
@@ -557,7 +573,8 @@ async fn process_chunk(
             chapter: acc.chapter,
         });
 
-        // ---- Reviewer ----
+        // ---- Deterministic audit + Reviewer ----
+        let audit_findings = audit_translation(&chunk.text, &thai);
         ctx.tx.send(AppEvent::ChunkStateChanged {
             chapter,
             chunk: chunk.index,
@@ -579,6 +596,7 @@ async fn process_chunk(
             &chunk.text,
             &thai,
             &reference_ctx,
+            &audit_findings,
         )
         .await
         {
@@ -597,8 +615,8 @@ async fn process_chunk(
             chapter: acc.chapter,
         });
 
-        let approved = review.approved();
-        let fb_text = review.feedback_text();
+        let approved = review.approved() && audit_findings.is_empty();
+        let fb_text = effective_feedback_text(&audit_findings, &review);
         ctx.tx.send(AppEvent::ReviewerReturned {
             chapter,
             chunk: chunk.index,
@@ -810,6 +828,91 @@ mod tests {
         }
     }
 
+    struct AuditRetryClient {
+        schemas: std::sync::Mutex<Vec<Option<String>>>,
+        translations: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl AuditRetryClient {
+        fn new(translations: Vec<&str>) -> Self {
+            Self {
+                schemas: std::sync::Mutex::new(Vec::new()),
+                translations: std::sync::Mutex::new(
+                    translations.into_iter().map(str::to_string).collect(),
+                ),
+            }
+        }
+
+        fn schema_calls(&self, name: &str) -> usize {
+            self.schemas
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|schema| schema.as_deref() == Some(name))
+                .count()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::llm::client::LlmClient for AuditRetryClient {
+        async fn chat(
+            &self,
+            req: &crate::llm::ChatRequest,
+        ) -> crate::llm::client::Result<crate::llm::ChatResponse> {
+            let schema_name = match &req.response_format {
+                Some(crate::llm::ResponseFormat::JsonSchema { json_schema }) => {
+                    Some(json_schema.name.clone())
+                }
+                _ => None,
+            };
+            self.schemas.lock().unwrap().push(schema_name.clone());
+
+            let content = match schema_name.as_deref() {
+                Some("translation_result") => {
+                    let next = self.translations.lock().unwrap().remove(0);
+                    serde_json::json!({
+                        "thought_process": {
+                            "scene_analysis": "(test)",
+                            "glossary_check": "(test)"
+                        },
+                        "translated_text": next,
+                        "new_characters": [],
+                        "new_terms": [],
+                        "continuity_notes": []
+                    })
+                    .to_string()
+                }
+                Some("review_result") => serde_json::json!({
+                    "status": "approve",
+                    "feedback": []
+                })
+                .to_string(),
+                _ => "(test orchestrator: no tools)".to_string(),
+            };
+
+            Ok(crate::llm::ChatResponse {
+                id: Some("audit-retry-client".to_string()),
+                model: Some("honya/test".to_string()),
+                choices: vec![crate::llm::Choice {
+                    index: 0,
+                    message: crate::llm::ResponseMessage {
+                        role: Some("assistant".to_string()),
+                        content: Some(content),
+                        tool_calls: None,
+                    },
+                    finish_reason: Some("stop".to_string()),
+                }],
+                usage: Some(crate::llm::Usage {
+                    prompt_tokens: 1,
+                    completion_tokens: 1,
+                    total_tokens: 2,
+                    cost: 0.0,
+                    cost_details: None,
+                }),
+            })
+        }
+    }
+
     #[async_trait::async_trait]
     impl crate::llm::client::LlmClient for CountingClient {
         async fn chat(
@@ -865,6 +968,74 @@ mod tests {
                 }),
             })
         }
+    }
+
+    #[tokio::test]
+    async fn local_audit_forces_retry_even_if_reviewer_approves() {
+        let (base, ws) = temp_ws("audit_retry");
+        let raw = "一文目。\n\n---\n\n二文目。";
+        translation::write_raw(&ws, 1, raw).unwrap();
+
+        let client = std::sync::Arc::new(AuditRetryClient::new(vec![
+            "<div>一文目。</div>\n\n二文目。",
+            "ประโยคแรก\n\n---\n\nประโยคที่สอง",
+        ]));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = PipelineCtx {
+            client: client.clone() as std::sync::Arc<dyn crate::llm::client::LlmClient>,
+            ws: ws.clone(),
+            models: crate::model::ModelSet::default(),
+            cfg: crate::model::AppConfig {
+                max_attempts: 2,
+                ..crate::model::AppConfig::default()
+            },
+            tx: crate::model::EventTx(tx),
+            ctl: RunControl::new(),
+        };
+        let mut acc = Acc::default();
+        let chunk = Chunk {
+            index: 0,
+            text: raw.to_string(),
+            est_tokens: 1,
+        };
+
+        match process_chunk(&ctx, 1, &chunk, &mut acc)
+            .await
+            .expect("process_chunk")
+        {
+            ChunkOutcome::Committed => {}
+            ChunkOutcome::NeedsReview => panic!("clean retry should be approved"),
+        }
+
+        assert_eq!(
+            client.schema_calls("translation_result"),
+            2,
+            "audit findings should route back to the Translator"
+        );
+        assert_eq!(
+            client.schema_calls("review_result"),
+            2,
+            "both attempts still pass through the Reviewer"
+        );
+
+        let translated = translation::read_translated(&ws, 1).await;
+        assert!(translated.contains("ประโยคแรก"));
+        assert!(!translated.contains("<div>"));
+
+        let mut saw_audit_feedback = false;
+        while let Ok(ev) = rx.try_recv() {
+            if let AppEvent::ChunkRetry { feedback, .. } = ev
+                && feedback.contains("Local audit")
+            {
+                saw_audit_feedback = true;
+            }
+        }
+        assert!(
+            saw_audit_feedback,
+            "retry feedback should include local audit findings"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[tokio::test]

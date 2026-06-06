@@ -4,6 +4,7 @@
 //! and the idempotent append to `translated/`. The Orchestrator LLM runs once
 //! per committed chunk as a metadata turn that persists discoveries via tools.
 
+pub mod audit;
 pub mod chunk;
 pub mod continuity;
 pub mod pipeline;

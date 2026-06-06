@@ -15,8 +15,9 @@ pub async fn review_chunk(
     source_jp: &str,
     thai: &str,
     reference_ctx: &str,
+    audit_findings: &[String],
 ) -> Result<(ReviewerOut, Usage)> {
-    let user = build_reviewer_user(source_jp, thai, reference_ctx);
+    let user = build_reviewer_user(source_jp, thai, reference_ctx, audit_findings);
 
     let req = ChatRequest {
         model: model.to_string(),
