@@ -826,6 +826,9 @@ pub enum AppEvent {
     },
     ImportFinished {
         project_id: String,
+        /// The volume that was just imported, so the UI can land on it (a fresh
+        /// import is Vol.01; an "add volume" lands on the new volume).
+        vol: u32,
     },
 
     /// A volume-synopsis translation finished — folded into the open synopsis

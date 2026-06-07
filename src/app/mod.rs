@@ -107,6 +107,14 @@ pub enum Action {
         note: String,
     },
     OpenProject(String),
+    /// Switch the open project's active volume (the one Reader / Translate / synopsis
+    /// / QA resolve against). Emitted by the Project tree as the cursor moves between
+    /// volumes ("auto-follow the cursor").
+    SetActiveVolume {
+        vol: u32,
+    },
+    /// Open the import wizard pre-targeted at the open project to add the next volume.
+    AddVolume,
     /// Permanently delete a project directory (raw + translations + metadata) from
     /// disk. Confirmed via a modal first; refuses if a run is in progress.
     DeleteProject {
@@ -527,13 +535,17 @@ impl App {
                 self.overlay.set_import_progress(*done, *total, label);
                 self.toast = Some(Toast::info(format!("importing · {label}")));
             }
-            AppEvent::ImportFinished { project_id } => {
+            AppEvent::ImportFinished { project_id, vol } => {
                 self.run_active = false;
                 self.overlay = Overlay::None;
                 self.refresh_projects();
-                self.toast = Some(Toast::info(format!("imported {project_id}")));
-                self.push_log(LogLevel::Info, format!("imported {project_id}"));
+                self.toast = Some(Toast::info(format!("imported {project_id} · Vol.{vol:02}")));
+                self.push_log(LogLevel::Info, format!("imported {project_id} Vol.{vol:02}"));
                 self.open_project(project_id.clone());
+                // Land on the imported volume (Vol.01 for a fresh import, the new
+                // volume for an add-volume), keeping the cursor and active volume in
+                // sync so auto-follow doesn't flip it on the next keystroke.
+                self.focus_active_volume(*vol);
             }
             AppEvent::SynopsisTranslated { text } => {
                 self.overlay.set_synopsis_result(Ok(text.clone()));
@@ -1016,6 +1028,12 @@ impl App {
             Action::OpenProject(id) => {
                 self.open_project(id);
             }
+            Action::SetActiveVolume { vol } => {
+                self.set_active_volume(vol);
+            }
+            Action::AddVolume => {
+                self.open_add_volume();
+            }
             Action::DeleteProject { id } => {
                 self.delete_project(id);
             }
@@ -1173,6 +1191,58 @@ impl App {
         };
         let vol = project.volumes.first().map(|v| v.number).unwrap_or(1);
         self.activate_project(project, vol);
+    }
+
+    /// Switch the active volume in place (no screen reset): re-point the workspace at
+    /// `vol` so Reader / Translate / synopsis / QA resolve against it. No-op if `vol`
+    /// is already active or absent. Lightweight — called as the Project tree cursor
+    /// crosses volume boundaries, so it must stay cheap and side-effect-free.
+    fn set_active_volume(&mut self, vol: u32) {
+        if let Some(active) = self.active.as_mut()
+            && active.vol != vol
+            && active.project.volumes.iter().any(|v| v.number == vol)
+        {
+            active.vol = vol;
+            active.workspace = Workspace::new(active.project.dir.clone(), vol);
+        }
+    }
+
+    /// Move the Project tree cursor onto `vol` and make it the active volume, so the
+    /// user lands on a freshly-imported volume (cursor and active volume stay in
+    /// sync). No-op if no project is open or `vol` is absent.
+    fn focus_active_volume(&mut self, vol: u32) {
+        if let Some(active) = self.active.as_ref() {
+            self.project.focus_volume(active, vol);
+        }
+        self.set_active_volume(vol);
+    }
+
+    /// Open the import wizard pre-targeted at the open project to add its next
+    /// volume: the name is locked to the project's and the volume defaults to one
+    /// past its highest. The import merges in because the slug collides.
+    fn open_add_volume(&mut self) {
+        if self.run_active {
+            self.toast = Some(Toast::warn("a run is already in progress"));
+            return;
+        }
+        let Some(active) = self.active.as_ref() else {
+            self.toast = Some(Toast::warn("no project open"));
+            return;
+        };
+        let title = active.project.title.clone();
+        let next = active
+            .project
+            .volumes
+            .iter()
+            .map(|v| v.number)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let epubs: Vec<PathBuf> = crate::workspace::scan::find_unimported_epubs(&working_root())
+            .into_iter()
+            .map(|(p, _)| p)
+            .collect();
+        self.overlay = Overlay::import_into(epubs, title, next);
     }
 
     /// Permanently delete a project directory from disk (the only way to remove it
@@ -1560,7 +1630,7 @@ impl App {
             )
             .await
             {
-                Ok(project_id) => tx.send(AppEvent::ImportFinished { project_id }),
+                Ok(project_id) => tx.send(AppEvent::ImportFinished { project_id, vol }),
                 Err(e) => tx.send(AppEvent::Error {
                     context: "import".to_string(),
                     msg: e.to_string(),
@@ -1980,7 +2050,8 @@ impl App {
                 if let Some(label) = active
                     .project
                     .volumes
-                    .first()
+                    .iter()
+                    .find(|v| v.number == vol)
                     .and_then(|v| v.label.as_deref())
                 {
                     format!("honya 本屋   {} · Vol.{vol} {label}", active.project.title)

@@ -145,7 +145,9 @@ fn handle_synopsis_keys(st: &mut SynopsisState, key: KeyEvent) -> SynKey {
     }
 }
 
-/// The import wizard: pick epub → name → volume → synopsis → importing.
+/// The import wizard: pick epub → name → volume → synopsis → importing. When
+/// `lock_name` is set (the "add volume to this project" flow), the name step is
+/// skipped and the title is fixed to the open project's.
 #[derive(Debug, Clone)]
 pub struct ImportState {
     /// 0 = pick, 1 = name, 2 = volume, 3 = synopsis, 4 = importing (gauge).
@@ -154,6 +156,9 @@ pub struct ImportState {
     pub sel: usize,
     pub name: String,
     pub vol: u32,
+    /// True for the "add volume" flow: the name is the open project's and locked,
+    /// so the wizard skips the name step (pick → volume → synopsis).
+    pub lock_name: bool,
     /// Synopsis input + translate/reroll loop (wizard step 3).
     pub syn: SynopsisState,
     /// Live preprocessing progress (done, total, label) once the import starts.
@@ -175,8 +180,41 @@ impl ImportState {
             sel: 0,
             name,
             vol: 1,
+            lock_name: false,
             syn: SynopsisState::new(String::new(), String::new()),
             progress: None,
+        }
+    }
+
+    /// "Add volume" wizard: name fixed to `title`, volume pre-set to `vol`, and the
+    /// name step skipped. The import merges into the existing project because its
+    /// slug collides with the open project's.
+    fn new_into(epubs: Vec<PathBuf>, title: String, vol: u32) -> Self {
+        Self {
+            step: 0,
+            epubs,
+            sel: 0,
+            name: title,
+            vol: vol.max(1),
+            lock_name: true,
+            syn: SynopsisState::new(String::new(), String::new()),
+            progress: None,
+        }
+    }
+
+    /// Total wizard steps before importing: 3 when the name is locked (pick ·
+    /// volume · synopsis), else 4 (pick · name · volume · synopsis).
+    fn step_count(&self) -> u8 {
+        if self.lock_name { 3 } else { 4 }
+    }
+
+    /// 1-based step number for the header, accounting for the skipped name step
+    /// when the name is locked (steps 0, 2, 3 read as 1, 2, 3).
+    fn step_display(&self) -> u8 {
+        if self.lock_name {
+            if self.step == 0 { 1 } else { self.step }
+        } else {
+            self.step + 1
         }
     }
 
@@ -486,6 +524,12 @@ impl Overlay {
         Overlay::Import(ImportState::new(epubs))
     }
 
+    /// "Add volume" wizard, pre-targeted at an open project: the name is locked to
+    /// `title` and the volume defaults to `vol` (the project's next number).
+    pub fn import_into(epubs: Vec<PathBuf>, title: String, vol: u32) -> Self {
+        Overlay::Import(ImportState::new_into(epubs, title, vol))
+    }
+
     /// Welcome overlay seeded with live key / sample status.
     pub fn welcome(api_key_present: bool, sample_exists: bool) -> Self {
         Overlay::Welcome(WelcomeState {
@@ -780,8 +824,10 @@ impl Overlay {
                     if st.epubs.is_empty() {
                         Action::CloseOverlay
                     } else {
-                        // Refresh the name default from the chosen file.
-                        if st.name.trim().is_empty()
+                        // Refresh the name default from the chosen file (fresh import
+                        // only — the add-volume flow keeps the locked project name).
+                        if !st.lock_name
+                            && st.name.trim().is_empty()
                             && let Some(stem) = st
                                 .selected_epub()
                                 .and_then(|p| p.file_stem())
@@ -789,7 +835,8 @@ impl Overlay {
                         {
                             st.name = prettify_stem(stem);
                         }
-                        st.step = 1;
+                        // Skip the name step when the project name is locked.
+                        st.step = if st.lock_name { 2 } else { 1 };
                         Action::None
                     }
                 }
@@ -822,7 +869,8 @@ impl Overlay {
             // ---- step 2: volume ----
             2 => match key.code {
                 KeyCode::Esc => {
-                    st.step = 1;
+                    // Back to the name step, or to the picker when the name is locked.
+                    st.step = if st.lock_name { 0 } else { 1 };
                     Action::None
                 }
                 KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('+') | KeyCode::Right => {
@@ -1396,9 +1444,15 @@ impl Overlay {
         let height = if st.step == 3 { 24 } else { 18 };
         let modal = centered_modal(76, height, area);
         f.render_widget(Clear, modal);
+        // The add-volume flow reads as "Add volume" and counts its 3 visible steps.
+        let verb = if st.lock_name {
+            "Add volume"
+        } else {
+            "Import EPUB"
+        };
         let title = match st.step {
-            4 => "Import EPUB — importing".to_string(),
-            s => format!("Import EPUB — step {} / 4", s.min(3) + 1),
+            4 => format!("{verb} — importing"),
+            _ => format!("{verb} — step {} / {}", st.step_display(), st.step_count()),
         };
         let block = self.modal_block(&title, theme);
         let inner = block.inner(modal);
@@ -1673,13 +1727,30 @@ impl Overlay {
             f.render_widget(p, area);
             return;
         }
-        let mut lines = vec![
-            Line::from(Span::styled(
-                "  Choose a source EPUB:",
-                Style::default().fg(theme.ink_soft),
-            )),
-            Line::raw(""),
-        ];
+        let mut lines = Vec::new();
+        if st.lock_name {
+            // Add-volume flow: name the target project so the picker reads in context.
+            lines.push(Line::from(vec![
+                Span::styled("  Add ", Style::default().fg(theme.ink_soft)),
+                Span::styled(
+                    format!("Vol.{:02}", st.vol),
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("  to  ", Style::default().fg(theme.ink_soft)),
+                Span::styled(
+                    thai_display_safe(st.name.trim()),
+                    Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
+                ),
+            ]));
+            lines.push(Line::raw(""));
+        }
+        lines.push(Line::from(Span::styled(
+            "  Choose a source EPUB:",
+            Style::default().fg(theme.ink_soft),
+        )));
+        lines.push(Line::raw(""));
         for (i, p) in st.epubs.iter().enumerate() {
             let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("?");
             let selected = i == st.sel;
@@ -1773,6 +1844,12 @@ impl Overlay {
     }
 
     fn render_import_volume(&self, f: &mut Frame, area: Rect, theme: &Theme, st: &ImportState) {
+        // In the add-volume flow the pre-filled number is the project's next volume.
+        let vol_note = if st.lock_name {
+            Span::styled("  (next)", Style::default().fg(theme.ink_faint))
+        } else {
+            Span::raw("")
+        };
         let lines = vec![
             Line::raw(""),
             Line::from(Span::styled(
@@ -1788,10 +1865,11 @@ impl Overlay {
                         .fg(theme.accent)
                         .add_modifier(Modifier::BOLD),
                 ),
+                vol_note,
             ]),
             Line::raw(""),
             Line::from(Span::styled(
-                "  ↑↓ adjust · type a number · Enter to import",
+                "  ↑↓ adjust · type a number · Enter to continue",
                 Style::default().fg(theme.ink_faint),
             )),
         ];

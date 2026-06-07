@@ -9,10 +9,10 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 
-use crate::model::{Chapter, ChapterKind, ChapterStatus, UsageStats, Volume};
+use crate::model::{Chapter, ChapterKind, ChapterStatus, Project, UsageStats, Volume};
 use crate::theme::{self, Theme, status_glyph};
 use crate::ui::text::{col_width, pad_to_cols, thai_display_safe, truncate_cols};
-use crate::ui::widgets::status_cell;
+use crate::ui::widgets::{render_line_gauge, status_cell};
 
 use super::Screen;
 use super::overlay::Overlay;
@@ -113,7 +113,7 @@ impl ProjectScreen {
         let n = rows.len();
         let sel = self.tree.selected().unwrap_or(0).min(n.saturating_sub(1));
 
-        match key.code {
+        let action = match key.code {
             KeyCode::Up | KeyCode::Char('k') => {
                 let next = if sel == 0 {
                     n.saturating_sub(1)
@@ -220,9 +220,37 @@ impl ProjectScreen {
                 let data = crate::workspace::volume::load(&active.workspace);
                 Action::show_overlay(Overlay::synopsis_edit(data.synopsis_raw, data.synopsis_th))
             }
+            // Add a volume to this project (import wizard pre-targeted at it).
+            KeyCode::Char('V') => Action::AddVolume,
             // Translation QA inbox (App rebuilds the report from the live project).
             KeyCode::Char('Q') => Action::show_overlay(Overlay::qa_placeholder()),
             _ => Action::None,
+        };
+
+        // Auto-follow the cursor: when navigation lands in a different volume and no
+        // concrete action fired, switch the active volume to match — so Reader /
+        // Translate / synopsis / QA all operate on the volume under the cursor.
+        // Marks key off per-volume chapter numbers, so leaving a volume clears them.
+        if matches!(action, Action::None)
+            && let Some(v) = self.selected_volume(active)
+            && v != active.vol
+        {
+            self.selected.clear();
+            return Action::SetActiveVolume { vol: v };
+        }
+        action
+    }
+
+    /// Move the tree cursor onto a volume's header (expanding it), so the App can
+    /// land the user on a freshly-added volume after import.
+    pub fn focus_volume(&mut self, active: &ActiveProject, vol: u32) {
+        self.collapsed.remove(&vol);
+        if let Some(idx) = self
+            .rows(active)
+            .iter()
+            .position(|r| matches!(r, Row::Volume(v) if v.number == vol))
+        {
+            self.tree.select(Some(idx));
         }
     }
 
@@ -238,13 +266,95 @@ impl ProjectScreen {
             return;
         };
 
+        // Project dashboard band on top (title · active volume · overall progress),
+        // then the chapter tree + context/detail panels below it.
+        let panes = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(2), Constraint::Min(0)])
+            .split(area);
+        self.render_dashboard(f, panes[0], active, theme);
+
         let cols = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Min(40), Constraint::Length(34)])
-            .split(area);
+            .split(panes[1]);
 
         self.render_tree(f, cols[0], active, theme);
         self.render_side(f, cols[1], active, theme);
+    }
+
+    /// The dashboard band: `棚 title` with the active volume + volume count on the
+    /// right, and a project-wide chapter-completion gauge below.
+    fn render_dashboard(&self, f: &mut Frame, area: Rect, active: &ActiveProject, theme: &Theme) {
+        if area.height < 2 {
+            return;
+        }
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Length(1)])
+            .split(area);
+
+        // Title line: 棚 + project title (left), active volume + count (right).
+        let prefix = " 棚  ";
+        let title = truncate_cols(
+            &thai_display_safe(&active.project.title),
+            (area.width as usize).saturating_sub(34).max(10),
+        );
+        let nvols = active.project.volumes.len();
+        let vol_label = active
+            .project
+            .volumes
+            .iter()
+            .find(|v| v.number == active.vol)
+            .and_then(|v| v.label.as_deref());
+        let right = match vol_label {
+            Some(l) => format!(
+                "Vol.{:02} {} · {} vol{}",
+                active.vol,
+                thai_display_safe(l),
+                nvols,
+                if nvols == 1 { "" } else { "s" }
+            ),
+            None => format!(
+                "Vol.{:02} · {} vol{}",
+                active.vol,
+                nvols,
+                if nvols == 1 { "" } else { "s" }
+            ),
+        };
+        let mut spans = vec![
+            Span::styled(prefix, Style::default().fg(theme.accent)),
+            Span::styled(
+                title.clone(),
+                Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
+            ),
+        ];
+        let used = col_width(prefix) + col_width(&title);
+        let rw = col_width(&right);
+        if (area.width as usize) > used + rw + 2 {
+            let gap = area.width as usize - used - rw - 1;
+            spans.push(Span::raw(" ".repeat(gap)));
+            spans.push(Span::styled(right, Style::default().fg(theme.accent_soft)));
+        }
+        f.render_widget(
+            Paragraph::new(Line::from(spans)).style(Style::default().bg(theme.bg)),
+            rows[0],
+        );
+
+        // Progress line: overall chapter completion across every volume.
+        let (done, total) = project_progress(&active.project);
+        let pct = if total == 0 {
+            0
+        } else {
+            ((done as f64 / total as f64) * 100.0).round() as u16
+        };
+        let ratio = if total == 0 {
+            0.0
+        } else {
+            done as f64 / total as f64
+        };
+        let label = format!(" {done}/{total} chapters · {pct}%");
+        render_line_gauge(f, rows[1], ratio, &label, theme);
     }
 
     fn render_tree(&mut self, f: &mut Frame, area: Rect, active: &ActiveProject, theme: &Theme) {
@@ -451,6 +561,7 @@ impl ProjectScreen {
             ("↵", "read"),
             ("t", "marked/current"),
             ("T", "whole vol"),
+            ("V", "add vol"),
             ("Space", "mark"),
             ("h/l", "tree/focus"),
             ("e", "edit ctx"),
@@ -637,6 +748,25 @@ fn translatable(ch: &Chapter) -> bool {
         && (!ch.status.is_terminal() || ch.status == ChapterStatus::Failed)
 }
 
+/// (done, total) chapter counts across every volume, for the dashboard gauge.
+/// NeedsReview counts as done (content exists); Appended too.
+fn project_progress(p: &Project) -> (usize, usize) {
+    let mut done = 0;
+    let mut total = 0;
+    for v in &p.volumes {
+        for c in &v.chapters {
+            total += 1;
+            if matches!(
+                c.status,
+                ChapterStatus::Done | ChapterStatus::Appended | ChapterStatus::NeedsReview
+            ) {
+                done += 1;
+            }
+        }
+    }
+    (done, total)
+}
+
 fn vol_tally(v: &Volume) -> (u32, u32, u32, u32) {
     let mut done = 0;
     let mut working = 0;
@@ -719,6 +849,20 @@ mod tests {
         }
     }
 
+    /// Two-volume project (each volume has chapters 1 & 2), active on Vol.01 —
+    /// the fixture for the auto-follow-the-cursor volume-switching tests.
+    fn two_vol_project() -> ActiveProject {
+        let mut active = active_project();
+        let dir = active.project.dir.clone();
+        active.project.volumes.push(Volume {
+            number: 2,
+            dir: dir.join("Vol_02"),
+            label: None,
+            chapters: vec![chapter(1), chapter(2)],
+        });
+        active
+    }
+
     #[test]
     fn t_prefers_marked_chapters_and_clears_marks() {
         let active = active_project();
@@ -755,5 +899,66 @@ mod tests {
             Action::StartTranslation { chapters } => assert_eq!(chapters, vec![2]),
             other => panic!("expected StartTranslation, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn cursor_into_next_volume_switches_active_volume() {
+        let active = two_vol_project(); // active.vol == 1, cursor on Vol.01 header
+        let mut screen = ProjectScreen::new();
+
+        // Down over Vol.01's two chapters stays in volume 1 (no switch).
+        assert!(matches!(
+            screen.handle_key(key(KeyCode::Down), Some(&active)),
+            Action::None
+        ));
+        assert!(matches!(
+            screen.handle_key(key(KeyCode::Down), Some(&active)),
+            Action::None
+        ));
+        // The next Down lands on the Vol.02 header → auto-switch the active volume.
+        match screen.handle_key(key(KeyCode::Down), Some(&active)) {
+            Action::SetActiveVolume { vol } => assert_eq!(vol, 2),
+            other => panic!("expected SetActiveVolume, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn switching_volume_clears_marks() {
+        let active = two_vol_project();
+        let mut screen = ProjectScreen::new();
+
+        // Mark chapter 1 in Vol.01.
+        screen.handle_key(key(KeyCode::Down), Some(&active));
+        screen.handle_key(key(KeyCode::Char(' ')), Some(&active));
+        assert!(screen.selected.contains(&1));
+
+        // Crossing into Vol.02 clears the marks (they key off per-volume numbers).
+        screen.handle_key(key(KeyCode::Down), Some(&active));
+        let action = screen.handle_key(key(KeyCode::Down), Some(&active));
+        assert!(matches!(action, Action::SetActiveVolume { vol: 2 }));
+        assert!(screen.selected.is_empty(), "marks clear when leaving a volume");
+    }
+
+    #[test]
+    fn v_key_requests_add_volume() {
+        let active = active_project();
+        let mut screen = ProjectScreen::new();
+        assert!(matches!(
+            screen.handle_key(key(KeyCode::Char('V')), Some(&active)),
+            Action::AddVolume
+        ));
+    }
+
+    #[test]
+    fn focus_volume_moves_cursor_to_the_volume_header() {
+        let active = two_vol_project();
+        let mut screen = ProjectScreen::new();
+        screen.focus_volume(&active, 2);
+        // The selected row must now be the Vol.02 header.
+        assert_eq!(screen.selected_volume(&active), Some(2));
+        assert!(
+            screen.selected_chapter(&active).is_none(),
+            "cursor sits on the header, not a chapter"
+        );
     }
 }

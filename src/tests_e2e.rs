@@ -163,6 +163,7 @@ fn renders_overlays_without_panic() {
             sel: 0,
             name: "Test Novel".to_string(),
             vol: 1,
+            lock_name: false,
             syn: SynopsisState::new(String::new(), String::new()),
             progress: Some((7, 22, "cleansing ch 7/22".to_string())),
         });
@@ -177,6 +178,7 @@ fn renders_overlays_without_panic() {
             sel: 0,
             name: "Test Novel".to_string(),
             vol: 1,
+            lock_name: false,
             syn: SynopsisState::new(
                 "主人公は故郷に帰る。".to_string(),
                 "พระเอกกลับบ้านเกิด".to_string(),
