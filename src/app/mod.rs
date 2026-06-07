@@ -569,33 +569,45 @@ impl App {
         }
     }
 
+    /// The volume a pipeline event belongs to: the *running* volume during a run
+    /// (recorded in the checkpoint), else the active volume. Chapter numbers are
+    /// per-volume, so locating a chapter by number alone is ambiguous in a
+    /// multi-volume project — every event-driven mutator scopes through here so a
+    /// run on Vol.02 never touches Vol.01's same-numbered chapter.
+    fn event_vol(&self) -> Option<u32> {
+        self.active_run
+            .as_ref()
+            .map(|cp| cp.vol)
+            .or_else(|| self.active.as_ref().map(|a| a.vol))
+    }
+
+    /// Mutable handle to `chapter` within the event's volume (see [`Self::event_vol`]).
+    fn chapter_in_event_vol_mut(&mut self, chapter: u32) -> Option<&mut crate::model::Chapter> {
+        let vol = self.event_vol()?;
+        self.active
+            .as_mut()?
+            .project
+            .volumes
+            .iter_mut()
+            .find(|v| v.number == vol)?
+            .chapters
+            .iter_mut()
+            .find(|c| c.number == chapter)
+    }
+
     fn set_chapter_status(&mut self, chapter: u32, status: ChapterStatus) {
-        if let Some(active) = self.active.as_mut() {
-            for vol in active.project.volumes.iter_mut() {
-                for ch in vol.chapters.iter_mut() {
-                    if ch.number == chapter {
-                        ch.status = status;
-                        return;
-                    }
-                }
-            }
+        if let Some(ch) = self.chapter_in_event_vol_mut(chapter) {
+            ch.status = status;
         }
     }
 
     fn set_chapter_chunks(&mut self, chapter: u32, total: u32, committed: Option<u32>) {
-        if let Some(active) = self.active.as_mut() {
-            for vol in active.project.volumes.iter_mut() {
-                for ch in vol.chapters.iter_mut() {
-                    if ch.number == chapter {
-                        ch.total_chunks = total;
-                        if let Some(c) = committed {
-                            ch.committed_chunks = c;
-                        } else if total > 0 {
-                            ch.committed_chunks = ch.committed_chunks.min(total);
-                        }
-                        return;
-                    }
-                }
+        if let Some(ch) = self.chapter_in_event_vol_mut(chapter) {
+            ch.total_chunks = total;
+            if let Some(c) = committed {
+                ch.committed_chunks = c;
+            } else if total > 0 {
+                ch.committed_chunks = ch.committed_chunks.min(total);
             }
         }
     }
@@ -604,17 +616,10 @@ impl App {
         if bytes_written == 0 {
             return;
         }
-        if let Some(active) = self.active.as_mut() {
-            for vol in active.project.volumes.iter_mut() {
-                for ch in vol.chapters.iter_mut() {
-                    if ch.number == chapter {
-                        ch.committed_chunks = ch.committed_chunks.saturating_add(1);
-                        if ch.total_chunks > 0 {
-                            ch.committed_chunks = ch.committed_chunks.min(ch.total_chunks);
-                        }
-                        return;
-                    }
-                }
+        if let Some(ch) = self.chapter_in_event_vol_mut(chapter) {
+            ch.committed_chunks = ch.committed_chunks.saturating_add(1);
+            if ch.total_chunks > 0 {
+                ch.committed_chunks = ch.committed_chunks.min(ch.total_chunks);
             }
         }
     }
@@ -622,16 +627,20 @@ impl App {
     /// Start assembling a per-chapter run record (snapshot the glossary so we can
     /// report what this run adds / changes). Called on `ChapterStarted`.
     fn begin_pending_chapter_run(&mut self, chapter: u32) {
-        let (ws, run_id) = match self.active.as_ref() {
-            Some(a) => (
-                a.workspace.clone(),
-                self.active_run
-                    .as_ref()
-                    .map(|c| c.run_id.clone())
-                    .unwrap_or_default(),
-            ),
-            None => return,
+        // Bind the workspace to the running volume, not `active.workspace`, which can
+        // drift if the user navigates to another volume mid-run (auto-follow).
+        let Some(vol) = self.event_vol() else {
+            return;
         };
+        let Some(active) = self.active.as_ref() else {
+            return;
+        };
+        let ws = Workspace::new(active.project.dir.clone(), vol);
+        let run_id = self
+            .active_run
+            .as_ref()
+            .map(|c| c.run_id.clone())
+            .unwrap_or_default();
         let glossary_before = glossary_map(&ws);
         self.pending_chapter_run = Some(PendingChapterRun {
             chapter,
@@ -654,10 +663,15 @@ impl App {
         if pending.chapter != chapter || !pending.has_usage {
             return;
         }
+        // Bind to the running volume (see begin_pending_chapter_run) so the translated
+        // file and VOLUME.md run record resolve to the volume actually translated.
+        let Some(vol) = self.event_vol() else {
+            return;
+        };
         let Some(active) = self.active.as_ref() else {
             return;
         };
-        let ws = active.workspace.clone();
+        let ws = Workspace::new(active.project.dir.clone(), vol);
         let total_chunks = self.find_chapter(chapter).map(|c| c.total_chunks);
 
         let after = glossary_map(&ws);
@@ -763,27 +777,23 @@ impl App {
 
     /// The in-memory chapter record (across the active project's volumes).
     fn find_chapter(&self, chapter: u32) -> Option<&crate::model::Chapter> {
+        let vol = self.event_vol()?;
         self.active
             .as_ref()?
             .project
             .volumes
             .iter()
-            .flat_map(|v| v.chapters.iter())
+            .find(|v| v.number == vol)?
+            .chapters
+            .iter()
             .find(|c| c.number == chapter)
     }
 
     /// Fold a finished chapter's run usage into its in-memory lifetime total,
     /// mirroring the VOLUME.md persistence so the Project screen stays live.
     fn add_chapter_usage(&mut self, chapter: u32, delta: &UsageStats) {
-        if let Some(active) = self.active.as_mut() {
-            for vol in active.project.volumes.iter_mut() {
-                for ch in vol.chapters.iter_mut() {
-                    if ch.number == chapter {
-                        ch.usage.add(delta);
-                        return;
-                    }
-                }
-            }
+        if let Some(ch) = self.chapter_in_event_vol_mut(chapter) {
+            ch.usage.add(delta);
         }
     }
 
@@ -1384,16 +1394,9 @@ impl App {
         }
     }
 
-    /// A chapter's display title from the active project (for the live Translate header).
+    /// A chapter's display title from the running/active volume (live Translate header).
     fn chapter_title(&self, chapter: u32) -> Option<String> {
-        let active = self.active.as_ref()?;
-        active
-            .project
-            .volumes
-            .iter()
-            .flat_map(|v| v.chapters.iter())
-            .find(|c| c.number == chapter)
-            .map(|c| c.title.clone())
+        self.find_chapter(chapter).map(|c| c.title.clone())
     }
 
     fn request_translation(&mut self, chapters: Vec<u32>) {
@@ -1561,17 +1564,23 @@ impl App {
     }
 
     fn chapters_with_translation_progress(&self, chapters: &[u32]) -> Vec<u32> {
-        let Some(active) = self.active.as_ref() else {
+        // Scope to the target volume: at request time there's no run yet, so this
+        // resolves to the active (cursor-followed) volume, which is where the marked
+        // chapters live. Without scoping, a same-numbered chapter in another volume
+        // would mis-trigger the continue/restart prompt.
+        let Some(vol) = self.event_vol() else {
+            return Vec::new();
+        };
+        let Some(volume) = self
+            .active
+            .as_ref()
+            .and_then(|a| a.project.volumes.iter().find(|v| v.number == vol))
+        else {
             return Vec::new();
         };
         let mut out = Vec::new();
         for chapter in chapters {
-            if let Some(ch) = active
-                .project
-                .volumes
-                .iter()
-                .flat_map(|v| v.chapters.iter())
-                .find(|ch| ch.number == *chapter)
+            if let Some(ch) = volume.chapters.iter().find(|ch| ch.number == *chapter)
                 && (ch.committed_chunks > 0
                     || matches!(ch.status, ChapterStatus::Failed | ChapterStatus::Paused))
             {

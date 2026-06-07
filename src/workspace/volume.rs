@@ -571,6 +571,28 @@ mod tests {
     }
 
     #[test]
+    fn synopsis_is_scoped_per_volume() {
+        // Two volumes under one project root must keep independent synopses, so the
+        // add-volume flow's per-volume synopsis never bleeds into another volume.
+        let root = std::env::temp_dir().join(format!("honya_vol_syn_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let v1 = Workspace::new(root.clone(), 1);
+        let v2 = Workspace::new(root.clone(), 2);
+        std::fs::create_dir_all(&v1.vol_dir).unwrap();
+        std::fs::create_dir_all(&v2.vol_dir).unwrap();
+
+        set_synopsis(&v1, "一巻の原文", "เล่มหนึ่ง").unwrap();
+        set_synopsis(&v2, "二巻の原文", "เล่มสอง").unwrap();
+
+        assert_eq!(load(&v1).synopsis_raw, "一巻の原文");
+        assert_eq!(load(&v1).synopsis_th, "เล่มหนึ่ง");
+        assert_eq!(load(&v2).synopsis_raw, "二巻の原文");
+        assert_eq!(load(&v2).synopsis_th, "เล่มสอง");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn reader_annotations_round_trip_and_render() {
         let (base, ws) = temp_ws("annotations");
         add_reader_annotation(

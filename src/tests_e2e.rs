@@ -1634,3 +1634,96 @@ async fn end_to_end_import_and_mock_translate() {
 
     let _ = std::fs::remove_dir_all(&base);
 }
+
+/// In a multi-volume project, chapter numbers collide across volumes (each `Vol_NN`
+/// has its own `ch_001`). A pipeline event must update the *running* volume's
+/// chapter (recorded in the checkpoint), never another volume's same-numbered one —
+/// even when the cursor (active volume) has moved elsewhere mid-run.
+#[test]
+fn pipeline_events_route_to_the_running_volume() {
+    use crate::app::ActiveProject;
+    use crate::model::{
+        AppEvent, Chapter, ChapterKind, ChapterStatus, ModelSet, Project, UsageStats, Volume,
+    };
+    use crate::workspace::Workspace;
+    use crate::workspace::session::SessionCheckpoint;
+
+    let dir = std::env::temp_dir().join(format!("honya_route_vol_{}", std::process::id()));
+    let mk_ch = |n: u32| Chapter {
+        number: n,
+        title: format!("ch{n}"),
+        kind: ChapterKind::Prose,
+        status: ChapterStatus::Pending,
+        source_segments: 1,
+        total_chunks: 0,
+        committed_chunks: 0,
+        last_run: None,
+        usage: UsageStats::default(),
+    };
+    let project = Project {
+        id: "novel".to_string(),
+        dir: dir.clone(),
+        title: "Novel".to_string(),
+        created: None,
+        touched: None,
+        volumes: vec![
+            Volume {
+                number: 1,
+                dir: dir.join("Vol_01"),
+                label: None,
+                chapters: vec![mk_ch(1), mk_ch(2)],
+            },
+            Volume {
+                number: 2,
+                dir: dir.join("Vol_02"),
+                label: None,
+                chapters: vec![mk_ch(1), mk_ch(2)],
+            },
+        ],
+        models: None,
+    };
+    let mut app = fresh_app();
+    app.active = Some(ActiveProject {
+        project,
+        workspace: Workspace::new(dir.clone(), 1),
+        client: None,
+        models: ModelSet::default(),
+        vol: 1, // cursor/active volume is Vol.01 ...
+    });
+    // ... but the in-flight run targets Vol.02.
+    app.active_run = Some(SessionCheckpoint::new(
+        dir.clone(),
+        "novel".to_string(),
+        "Novel".to_string(),
+        2,
+        vec![1],
+    ));
+
+    app.on_app_event(AppEvent::ChapterCompleted { chapter: 1 });
+
+    let status = |app: &App, vol: u32, ch: u32| {
+        app.active
+            .as_ref()
+            .unwrap()
+            .project
+            .volumes
+            .iter()
+            .find(|v| v.number == vol)
+            .unwrap()
+            .chapters
+            .iter()
+            .find(|c| c.number == ch)
+            .unwrap()
+            .status
+    };
+    assert_eq!(
+        status(&app, 2, 1),
+        ChapterStatus::Done,
+        "the running volume's chapter is updated"
+    );
+    assert_eq!(
+        status(&app, 1, 1),
+        ChapterStatus::Pending,
+        "the other volume's same-numbered chapter is untouched"
+    );
+}
