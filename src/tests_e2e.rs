@@ -1697,7 +1697,6 @@ async fn end_to_end_import_and_mock_translate() {
     ));
     assert!(approx(project.usage_total().cost_usd, ch1.cost_usd));
 
-    // ---- Export the finished volume to all three deliverable formats ----
     {
         use crate::export::{ExportFormat, export_volume, gather};
         let ws = Workspace::new(project_root.clone(), 1);
@@ -1735,7 +1734,6 @@ async fn end_to_end_import_and_mock_translate() {
                 p.display()
             );
         }
-        // The exported EPUB must re-import cleanly through the production importer.
         let epub = paths
             .iter()
             .find(|p| p.extension().and_then(|e| e.to_str()) == Some("epub"))

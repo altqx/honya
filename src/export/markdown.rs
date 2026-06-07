@@ -1,7 +1,5 @@
-//! Merged-Markdown export: one `.md` file for the whole volume — a metadata front
-//! page, then every chapter under a `## ` heading, separated by `---`. Images are
-//! copied into a sibling `images/` directory and links rewritten to `images/FILE`,
-//! so the `.md` + `images/` pair is self-contained and portable.
+//! Merged-Markdown export: one `.md` with a metadata front page and all chapters.
+//! Images are copied to sibling `images/` and links are rewritten there.
 
 use std::io;
 use std::path::Path;
@@ -16,7 +14,6 @@ pub fn write(book: &ExportBook, out_path: &Path) -> io::Result<()> {
 
     let mut doc = String::new();
 
-    // ---- metadata front page ----
     doc.push_str(&format!("# {}\n\n", book.display_title()));
     if let Some(label) = book.volume_label.as_ref().filter(|l| !l.trim().is_empty()) {
         doc.push_str(&format!("**{}**\n\n", label.trim()));
@@ -28,7 +25,6 @@ pub fn write(book: &ExportBook, out_path: &Path) -> io::Result<()> {
         doc.push_str("\n\n");
     }
 
-    // ---- chapters ----
     for ch in &book.chapters {
         doc.push_str("---\n\n");
         doc.push_str(&format!("## {}\n\n", ch.title.trim()));
@@ -38,14 +34,13 @@ pub fn write(book: &ExportBook, out_path: &Path) -> io::Result<()> {
 
     std::fs::write(out_path, doc.trim_start().as_bytes())?;
 
-    // ---- copy images ----
     if !book.images.is_empty() {
         let img_out = dir.join("images");
         std::fs::create_dir_all(&img_out)?;
         for file in &book.images {
             let src = book.images_dir.join(file);
             let dst = img_out.join(file);
-            // Best-effort: a missing/locked image must not abort the export.
+            // Missing or locked images should not abort the export.
             let _ = std::fs::copy(&src, &dst);
         }
     }
@@ -96,8 +91,8 @@ mod tests {
         assert!(doc.contains("## เรื่องย่อ"));
         assert!(doc.contains("## บทที่ ๑"));
         assert!(doc.contains("## บทที่ ๒"));
-        assert!(doc.matches("---").count() >= 2); // a separator before each chapter
-        assert!(doc.contains("![ภาพ](images/a.png)")); // rewritten
+        assert!(doc.matches("---").count() >= 2);
+        assert!(doc.contains("![ภาพ](images/a.png)"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -1,8 +1,6 @@
-//! DOCX export for editors/proofreaders: a minimal but valid OpenXML word document
-//! (a zip of XML parts) built by hand — no new dependencies. Headings render as
-//! larger bold runs (so no `styles.xml` is needed), `**`/`*` map to `<w:b/>`/`<w:i/>`,
-//! `---` becomes a centered `* * *`, and images embed as inline `<w:drawing>` sized
-//! in EMUs from a small PNG/JPEG/GIF dimension parser.
+//! DOCX export for editors/proofreaders. Builds minimal OpenXML by hand:
+//! headings are bold runs, `**` / `*` become `<w:b/>` / `<w:i/>`, `---` becomes
+//! centered `* * *`, and PNG/JPEG/GIF dimensions size inline drawings.
 
 use std::collections::HashMap;
 use std::io::{self, Write};
@@ -22,9 +20,7 @@ const MAX_WIDTH_EMU: u64 = 5_486_400;
 /// Fallback box when an image's dimensions can't be parsed (~4×3 in).
 const FALLBACK_EMU: (u64, u64) = (3_657_600, 2_743_200);
 
-/// An embedded image: its relationship id, media part name, and display size. The
-/// content type is declared once via `[Content_Types].xml` Default extensions, so it
-/// isn't tracked per image here.
+/// Embedded image metadata for the DOCX package.
 struct Embedded {
     rid: String,
     media: String,
@@ -38,7 +34,7 @@ pub fn write(book: &ExportBook, out_path: &Path) -> io::Result<()> {
         std::fs::create_dir_all(parent)?;
     }
 
-    // Resolve embedded images: read bytes, parse dimensions, assign ids.
+    // Read bytes, dimensions, and relationship ids for embedded images.
     let mut embedded: HashMap<String, Embedded> = HashMap::new();
     let mut media: Vec<(String, Vec<u8>)> = Vec::new();
     for (i, file) in book.images.iter().enumerate() {
@@ -131,7 +127,6 @@ fn document_xml(book: &ExportBook, embedded: &HashMap<String, Embedded>) -> Stri
     let mut body = String::new();
     let mut drawing_id = 1u32;
 
-    // ---- front matter ----
     body.push_str(&heading_p(&book.display_title(), 36));
     if let Some(label) = book.volume_label.as_ref().filter(|l| !l.trim().is_empty()) {
         body.push_str(&para_runs(&[run(label.trim(), true, false)]));
@@ -147,7 +142,6 @@ fn document_xml(book: &ExportBook, embedded: &HashMap<String, Embedded>) -> Stri
         }
     }
 
-    // ---- chapters ----
     for ch in &book.chapters {
         body.push_str(&heading_p(&ch.title, 32));
         for block in parse_blocks(&ch.markdown) {
@@ -174,7 +168,6 @@ fn block_xml(block: &Block, embedded: &HashMap<String, Embedded>, did: &mut u32)
                 2 => 28,
                 _ => 26,
             };
-            // Render heading text bold at the given size.
             let text = inline_plain(spans);
             heading_p(&text, sz)
         }
@@ -319,7 +312,6 @@ fn scaled_extent(dims: Option<(u32, u32)>) -> (u64, u64) {
     if cx <= MAX_WIDTH_EMU {
         (cx, cy)
     } else {
-        // Preserve aspect ratio while clamping to the content width.
         let cy = cy * MAX_WIDTH_EMU / cx;
         (MAX_WIDTH_EMU, cy)
     }
@@ -397,7 +389,7 @@ mod tests {
 
     #[test]
     fn jpeg_dims_from_sof0() {
-        // SOI, then a SOF0 segment: FF C0, len=0011, prec=8, height=00C8, width=012C.
+        // Minimal SOF0 JPEG header.
         let b = vec![
             0xFF, 0xD8, // SOI
             0xFF, 0xC0, 0x00, 0x11, 0x08, 0x00, 0xC8, 0x01, 0x2C, 0x03, 0x01, 0x22, 0x00, 0x02,
@@ -469,25 +461,22 @@ mod tests {
             .unwrap()
             .read_to_string(&mut doc)
             .unwrap();
-        assert!(doc.contains("เนื้อหา")); // body text
-        assert!(doc.contains("<w:b/>")); // bold run
-        assert!(doc.contains("r:embed=")); // inline image drawing
+        assert!(doc.contains("เนื้อหา"));
+        assert!(doc.contains("<w:b/>"));
+        assert!(doc.contains("r:embed="));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn extent_caps_width() {
-        // 1000px wide far exceeds 6in; width clamps and height scales down.
         let (cx, cy) = scaled_extent(Some((1000, 500)));
         assert_eq!(cx, MAX_WIDTH_EMU);
         assert_eq!(cy, MAX_WIDTH_EMU / 2);
-        // Small image keeps native EMU size.
         assert_eq!(
             scaled_extent(Some((100, 100))),
             (100 * EMU_PER_PX, 100 * EMU_PER_PX)
         );
-        // Unknown dims → fallback box.
         assert_eq!(scaled_extent(None), FALLBACK_EMU);
     }
 }

@@ -1,8 +1,6 @@
-//! Gather one volume's translated chapters + metadata into an in-memory book the
-//! format renderers consume. Reads `translated/ch_NNN.md`, strips the chunk markers
-//! and the `[REVIEW NEEDED]` banner (`translation::export_prose`), pulls the Thai
-//! chapter title out of a leading heading when present, and records warnings for
-//! chapters that are missing a translation or still flagged for review.
+//! Gather one volume's translated chapters and metadata for export renderers.
+//! `translation::export_prose` strips chunk markers/review banners; leading Thai
+//! headings become chapter titles, and non-fatal gaps become warnings.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -71,8 +69,7 @@ pub async fn gather(
         let label = format!("ch_{:03} “{}”", ch.number, ch.title);
 
         if cleaned.trim().is_empty() {
-            // Empty/front-matter chapters are intentionally blank; only warn when a
-            // prose/illustration chapter is missing the text we'd expect.
+            // Empty/front-matter chapters are allowed to stay blank.
             if ch.kind != ChapterKind::Empty {
                 warnings.push(format!("{label} — no translation (skipped)"));
             }
@@ -91,7 +88,7 @@ pub async fn gather(
             .filter(|t| !t.trim().is_empty())
             .unwrap_or_else(|| ch.title.clone());
 
-        // Embed only images that exist on disk; warn on dangling references.
+        // Only embed files that still exist on disk.
         for file in blocks::referenced_images(&body) {
             if images_dir.join(&file).is_file() {
                 all_images.insert(file);
@@ -147,7 +144,6 @@ mod tests {
         let ws = Workspace::new(root.clone(), 1);
         std::fs::create_dir_all(ws.vol_dir.join("translated")).unwrap();
 
-        // ch1: NeedsReview — chunk markers + the [REVIEW NEEDED] banner, then prose.
         std::fs::write(
             ws.translated(1),
             "<!-- honya:chunk 0 -->\n\
@@ -158,9 +154,7 @@ mod tests {
              เนื้อหาไทยที่ดี\n",
         )
         .unwrap();
-        // ch3: clean Done.
         std::fs::write(ws.translated(3), "<!-- honya:chunk 0 -->\nบทที่สาม\n").unwrap();
-        // ch2: no translated file (Pending).
 
         let chapters = vec![
             chapter(1, "หนึ่ง", ChapterKind::Prose, ChapterStatus::NeedsReview),
@@ -169,14 +163,12 @@ mod tests {
         ];
         let book = gather(&ws, "โปรเจกต์", "proj", 1, None, &chapters).await;
 
-        // ch2 (no translation) is skipped; ch1 + ch3 are included.
         assert_eq!(book.chapters.len(), 2);
         let ch1 = &book.chapters[0];
         assert_eq!(ch1.number, 1);
         assert!(!ch1.markdown.contains("REVIEW NEEDED"));
         assert!(!ch1.markdown.contains("honya:chunk"));
         assert!(ch1.markdown.contains("เนื้อหาไทยที่ดี"));
-        // Warnings surface both the NeedsReview chapter and the missing translation.
         assert!(book.warnings.iter().any(|w| w.contains("NeedsReview")));
         assert!(book.warnings.iter().any(|w| w.contains("no translation")));
 

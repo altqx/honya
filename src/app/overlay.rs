@@ -1,10 +1,7 @@
-//! src/app/overlay.rs — transient overlays drawn LAST over a `Clear`:
-//! the import wizard, settings, the activity log, the help key-table, the command
-//! palette, and a generic confirm modal.
+//! Transient overlays drawn last over a `Clear`: import, settings, logs, help,
+//! palette, confirm dialogs, and editors.
 //!
-//! `is_input_capturing()` is the load-bearing rule: when a text field is focused
-//! the single-letter global keys (`q`, `l`, `?`, …) are suppressed so the user can
-//! type freely. The App router consults this before falling through to globals.
+//! `is_input_capturing()` suppresses single-letter globals while text input has focus.
 
 use std::path::PathBuf;
 
@@ -24,10 +21,6 @@ use crate::ui::widgets::render_gauge;
 
 use super::qa;
 use super::{Action, Screen, slugify};
-
-// ============================================================================
-// STATE STRUCTS
-// ============================================================================
 
 /// Where a synopsis editor sits in its lifecycle.
 #[derive(Debug, Clone, PartialEq)]
@@ -90,9 +83,7 @@ enum SynKey {
 /// Fold one keypress into a [`SynopsisState`], returning the embedder's next move.
 fn handle_synopsis_keys(st: &mut SynopsisState, key: KeyEvent) -> SynKey {
     match st.phase {
-        // Mid-translation keys are ignored (the result arrives via set_synopsis_result),
-        // except Esc, which bails back to editing — a late result is then dropped by the
-        // phase guard in set_synopsis_result.
+        // Late results are ignored by set_synopsis_result once phase changes.
         SynPhase::Translating => match key.code {
             KeyCode::Esc => {
                 st.phase = SynPhase::Editing;
@@ -104,7 +95,6 @@ fn handle_synopsis_keys(st: &mut SynopsisState, key: KeyEvent) -> SynKey {
             KeyCode::Esc => SynKey::Back,
             KeyCode::Tab => {
                 if st.raw.trim().is_empty() {
-                    // Nothing to translate → proceed without a synopsis.
                     SynKey::Skip
                 } else {
                     st.phase = SynPhase::Translating;
@@ -526,10 +516,6 @@ impl ExportState {
     }
 }
 
-// ============================================================================
-// OVERLAY
-// ============================================================================
-
 #[derive(Debug, Clone)]
 pub enum Overlay {
     None,
@@ -561,8 +547,6 @@ pub enum Overlay {
 }
 
 impl Overlay {
-    // ---- constructors -----------------------------------------------------
-
     pub fn import(epubs: Vec<PathBuf>) -> Self {
         Overlay::Import(ImportState::new(epubs))
     }
@@ -725,16 +709,12 @@ impl Overlay {
         Overlay::Export(ExportState::new(vol))
     }
 
-    // ---- import progress passthrough (called from App::on_app_event) ------
-
     pub fn set_import_progress(&mut self, done: usize, total: usize, label: &str) {
         if let Overlay::Import(st) = self {
             st.step = 4;
             st.progress = Some((done, total, label.to_string()));
         }
     }
-
-    // ---- export passthrough (called from App::on_app_event) ----------------
 
     pub fn set_export_progress(&mut self, done: usize, total: usize, label: &str) {
         if let Overlay::Export(st) = self {
@@ -748,11 +728,8 @@ impl Overlay {
         }
     }
 
-    // ---- synopsis result passthrough (called from App::on_app_event) -------
-
     /// Fold a finished translation (or its error) into whichever synopsis editor
-    /// is open. Ignored unless that editor is still awaiting (so a stale result
-    /// after the user edited or moved on is dropped).
+    /// is still awaiting it.
     pub fn set_synopsis_result(&mut self, result: std::result::Result<String, String>) {
         let st = match self {
             Overlay::Import(s) if s.step == 3 => &mut s.syn,
@@ -775,8 +752,6 @@ impl Overlay {
         }
     }
 
-    // ---- input capture rule -----------------------------------------------
-
     /// True when a text field is focused → suppress single-letter globals.
     #[allow(dead_code)]
     pub fn is_input_capturing(&self) -> bool {
@@ -793,8 +768,6 @@ impl Overlay {
             _ => false,
         }
     }
-
-    // ---- key handling ------------------------------------------------------
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Action {
         match self {
@@ -856,7 +829,6 @@ impl Overlay {
             KeyCode::Enter => match st.sel {
                 0 => Action::CreateSample,
                 1 => Action::OpenImport,
-                // Jump straight to the API-key field in Settings.
                 2 => Action::show_overlay(Overlay::settings_at(SETTINGS_KEY_FIELD)),
                 _ => Action::DismissWelcome,
             },
@@ -868,21 +840,20 @@ impl Overlay {
         let Overlay::Export(st) = self else {
             return Action::None;
         };
-        // Results view: any acknowledge key closes.
+        // Done: any acknowledge key closes.
         if st.done.is_some() {
             return match key.code {
                 KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q') => Action::CloseOverlay,
                 _ => Action::None,
             };
         }
-        // Running: Esc/q dismiss the overlay (the export finishes in the background).
+        // Running: export continues in the background.
         if st.progress.is_some() {
             return match key.code {
                 KeyCode::Esc | KeyCode::Char('q') => Action::CloseOverlay,
                 _ => Action::None,
             };
         }
-        // Format checklist.
         let n = st.formats.len();
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => Action::CloseOverlay,
@@ -918,7 +889,7 @@ impl Overlay {
             return Action::None;
         };
         match st.step {
-            // ---- step 0: pick epub ----
+            // Step 0: pick EPUB.
             0 => match key.code {
                 KeyCode::Esc => Action::CloseOverlay,
                 KeyCode::Up | KeyCode::Char('k') => {
@@ -937,8 +908,7 @@ impl Overlay {
                     if st.epubs.is_empty() {
                         Action::CloseOverlay
                     } else {
-                        // Refresh the name default from the chosen file (fresh import
-                        // only — the add-volume flow keeps the locked project name).
+                        // Fresh imports can use the selected file stem as a default.
                         if !st.lock_name
                             && st.name.trim().is_empty()
                             && let Some(stem) = st
@@ -948,14 +918,13 @@ impl Overlay {
                         {
                             st.name = prettify_stem(stem);
                         }
-                        // Skip the name step when the project name is locked.
                         st.step = if st.lock_name { 2 } else { 1 };
                         Action::None
                     }
                 }
                 _ => Action::None,
             },
-            // ---- step 1: name (text field) ----
+            // Step 1: name.
             1 => match key.code {
                 KeyCode::Esc => {
                     st.step = 0;
@@ -979,10 +948,9 @@ impl Overlay {
                 }
                 _ => Action::None,
             },
-            // ---- step 2: volume ----
+            // Step 2: volume.
             2 => match key.code {
                 KeyCode::Esc => {
-                    // Back to the name step, or to the picker when the name is locked.
                     st.step = if st.lock_name { 0 } else { 1 };
                     Action::None
                 }
@@ -995,7 +963,6 @@ impl Overlay {
                     Action::None
                 }
                 KeyCode::Char(d @ '0'..='9') => {
-                    // Type a number directly.
                     let digit = d as u32 - '0' as u32;
                     st.vol = (st.vol.saturating_mul(10).saturating_add(digit)).clamp(1, 999);
                     Action::None
@@ -1005,13 +972,12 @@ impl Overlay {
                     Action::None
                 }
                 KeyCode::Enter => {
-                    // Advance to the synopsis step rather than importing immediately.
                     st.step = 3;
                     Action::None
                 }
                 _ => Action::None,
             },
-            // ---- step 3: volume synopsis (raw → translate → reroll/accept) ----
+            // Step 3: synopsis.
             3 => {
                 let intent = handle_synopsis_keys(&mut st.syn, key);
                 match intent {
@@ -1056,7 +1022,7 @@ impl Overlay {
                     }
                 }
             }
-            // ---- step 4: importing (gauge) — Esc cancels by closing ----
+            // Step 4: importing.
             _ => match key.code {
                 KeyCode::Esc => Action::CloseOverlay,
                 _ => Action::None,
@@ -1070,13 +1036,11 @@ impl Overlay {
         };
         match key.code {
             KeyCode::Esc => Action::CloseOverlay,
-            // Honor the advertised "Ctrl-T to change" here, since an open overlay
-            // swallows keys before the global Ctrl-T router is reached.
+            // Overlay captures keys before the global Ctrl-T router.
             KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 Action::show_overlay(Overlay::theme_placeholder())
             }
-            // Ctrl-U toggles the startup update behavior in place (persisted on save),
-            // mirroring how Ctrl-T reaches the theme picker from an open overlay.
+            // Ctrl-U mirrors Ctrl-T inside Settings.
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 st.update_mode = st.update_mode.toggled();
                 Action::None
@@ -1086,8 +1050,7 @@ impl Overlay {
                 orchestrator: st.orchestrator.clone(),
                 translator: st.translator.clone(),
                 reviewer: st.reviewer.clone(),
-                // An env-supplied key wins over config, so don't let an edit here
-                // clobber the saved key in that case (None = leave config as-is).
+                // Env keys must not overwrite saved config.
                 api_key: if st.api_key_env {
                     None
                 } else {
@@ -1103,7 +1066,7 @@ impl Overlay {
                 st.field = (st.field + SETTINGS_FIELDS - 1) % SETTINGS_FIELDS;
                 Action::None
             }
-            // The API-key field is read-only while an env var supplies the key.
+            // Env-supplied API key is read-only.
             KeyCode::Backspace if !(st.field == SETTINGS_KEY_FIELD && st.api_key_env) => {
                 st.field_mut().pop();
                 Action::None
@@ -1121,7 +1084,6 @@ impl Overlay {
             return Action::None;
         };
         match key.code {
-            // Move + live-preview (App applies PreviewTheme to `app.theme`).
             KeyCode::Up | KeyCode::Char('k') => {
                 st.sel = st.sel.saturating_sub(1);
                 Action::PreviewTheme(st.current())
@@ -1132,9 +1094,7 @@ impl Overlay {
                 }
                 Action::PreviewTheme(st.current())
             }
-            // Commit: persist + close.
             KeyCode::Enter => Action::SaveTheme(st.current()),
-            // Abandon: restore the previously-saved theme + close.
             KeyCode::Esc | KeyCode::Char('q') => Action::CancelTheme,
             _ => Action::None,
         }
@@ -1188,8 +1148,7 @@ impl Overlay {
                     Overlay::Modal(dlg) => dlg.confirm.clone(),
                     _ => return Action::None,
                 };
-                // Always dismiss on confirm; the wrapped action then runs (some
-                // actions — StopRun, the shelf placeholders — don't self-close).
+                // Confirm always dismisses before running wrapped actions.
                 *self = Overlay::None;
                 action
             }
@@ -1236,8 +1195,7 @@ impl Overlay {
                 Action::None
             }
             KeyCode::Enter => {
-                // Resolve the selected finding's chapter, then close + jump. A note
-                // not anchored to a chapter has nothing to open, so it's a no-op.
+                // Unanchored notes have no chapter target.
                 let target = match self {
                     Overlay::Qa(st) => st.report.issues.get(st.sel).and_then(|i| i.chapter),
                     _ => None,
@@ -1318,7 +1276,6 @@ impl Overlay {
         };
         match key.code {
             KeyCode::Esc => Action::CloseOverlay,
-            // Arrow keys move the cursor; letters type into the filter (palette-style).
             KeyCode::Up => {
                 st.sel = st.sel.saturating_sub(1);
                 Action::None
@@ -1382,8 +1339,6 @@ impl Overlay {
         }
     }
 
-    // ---- hints -------------------------------------------------------------
-
     pub fn hints(&self) -> &'static [(&'static str, &'static str)] {
         match self {
             Overlay::Welcome(_) => &[("↑↓", "move"), ("↵", "select"), ("Esc", "skip")],
@@ -1429,11 +1384,9 @@ impl Overlay {
                 }
             }
             Overlay::Modal(dlg) if dlg.alternate.is_some() => {
-                // The two alternate-key modals differ by their alternate key, so
-                // pick a matching footer instead of a single hardcoded label set.
+                // Alternate-key modals need distinct footer labels.
                 match dlg.alternate.as_ref().map(|alt| alt.key) {
-                    // Recovery prompt: Esc/n defers (keeps the checkpoint for next
-                    // launch) rather than discarding, so it reads as "later".
+                    // Recovery Esc/n defers; it does not discard the checkpoint.
                     Some('d') => &[("y/↵", "resume"), ("d", "discard"), ("n/Esc", "later")],
                     _ => &[("y/↵", "continue"), ("r", "restart"), ("n/Esc", "cancel")],
                 }
@@ -1442,8 +1395,6 @@ impl Overlay {
             Overlay::None => &[],
         }
     }
-
-    // ---- render ------------------------------------------------------------
 
     pub fn render(
         &self,
@@ -1522,7 +1473,6 @@ impl Overlay {
         }
         lines.push(Line::raw(""));
 
-        // Action menu rows (selection index aligns with handle_welcome_key).
         let sample_label = if st.sample_exists {
             "Open the sample project".to_string()
         } else {
@@ -1579,7 +1529,7 @@ impl Overlay {
         let height = if st.step == 3 { 24 } else { 18 };
         let modal = centered_modal(76, height, area);
         f.render_widget(Clear, modal);
-        // The add-volume flow reads as "Add volume" and counts its 3 visible steps.
+        // Add-volume skips the project-name step.
         let verb = if st.lock_name {
             "Add volume"
         } else {
@@ -1788,7 +1738,6 @@ impl Overlay {
             .constraints([Constraint::Length(2), Constraint::Min(0)])
             .split(inner);
 
-        // Filter line.
         f.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled("  / ", Style::default().fg(theme.accent)),
@@ -2202,7 +2151,6 @@ impl Overlay {
         f.render_widget(block, modal);
 
         let val_w = area.width.saturating_sub(26) as usize;
-        // One editable text row: marker · label · value · cursor.
         let field_line = |label: &str, value: String, focused: bool| -> Line<'static> {
             let marker = if focused { theme::SELECT_BAR } else { ' ' };
             let value_style = if focused {
@@ -2233,7 +2181,6 @@ impl Overlay {
             lines.push(field_line(label, value.to_string(), st.field == idx));
         }
 
-        // API key: masked, editable — unless the environment supplies it.
         let focused_key = st.field == SETTINGS_KEY_FIELD;
         if st.api_key_env {
             lines.push(Line::from(vec![
@@ -2332,7 +2279,6 @@ impl Overlay {
             rows[0],
         );
 
-        // Swatch row: ● accent ◐ working ● done ✗ failed ‖ warn ▣ image.
         let swatch = |glyph: &str, color, label: &str| -> Vec<Span<'static>> {
             vec![
                 Span::styled(format!(" {glyph} "), Style::default().fg(color)),
@@ -2365,7 +2311,6 @@ impl Overlay {
             .constraints([Constraint::Length(2), Constraint::Min(0)])
             .split(inner);
 
-        // Query line.
         f.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled("  : ", Style::default().fg(theme.accent)),
@@ -2588,7 +2533,6 @@ impl Overlay {
 
         let report = &st.report;
 
-        // --- header: volume label + chapter-level summary counts ---
         let title = if st.title.is_empty() {
             "Translation QA".to_string()
         } else {
@@ -2647,7 +2591,6 @@ impl Overlay {
             rows[0],
         );
 
-        // --- divider ---
         if rows[1].width > 0 {
             f.render_widget(
                 Paragraph::new("─".repeat(rows[1].width as usize))
@@ -2656,7 +2599,6 @@ impl Overlay {
             );
         }
 
-        // --- findings list ---
         let list_area = rows[2];
         let n = report.issues.len();
 
@@ -2681,10 +2623,7 @@ impl Overlay {
         }
 
         let sel = st.sel.min(n - 1);
-        // Each finding row's fixed prefix is "  {bar} " (4) + "{glyph} " (2) +
-        // pad_to_cols(tag, TAG_W)+space (TAG_W+1) columns; the rest is the detail.
-        // TAG_W = 9 fits the widest real tag ("chunk 999", "conflict") without
-        // clipping a chunk number — only the unreachable ≥1000-chunk case clips.
+        // Fixed prefix is 7+TAG_W cols; TAG_W fits "chunk 999" and "conflict".
         const TAG_W: usize = 9;
         let detail_w = (list_area.width as usize).saturating_sub(7 + TAG_W);
 
@@ -2706,9 +2645,7 @@ impl Overlay {
                         .add_modifier(Modifier::BOLD),
                 )];
                 if !issue.title.is_empty() {
-                    // The header's own fixed parts (" ch NNN", the "  " title lead,
-                    // and "  (count)") are ~14 cols; `detail_w` (= width − 15) is a
-                    // safe budget that leaves the count badge visible.
+                    // Leave room for the count badge after title truncation.
                     head.push(Span::styled(
                         format!(
                             "  {}",
@@ -2748,7 +2685,7 @@ impl Overlay {
                 ),
                 Span::styled(format!("{glyph} "), Style::default().fg(color).bg(row_bg)),
                 Span::styled(
-                    // Column-pad (and clip) so a long tag can't shove the detail over.
+                    // Keep long tags from shifting detail.
                     format!("{} ", pad_to_cols(&tag, TAG_W)),
                     Style::default().fg(theme.ink_soft).bg(row_bg),
                 ),
@@ -2756,7 +2693,6 @@ impl Overlay {
             ]));
         }
 
-        // Window the rows so the selected finding stays on screen.
         let cap = (list_area.height as usize).max(1);
         let start = if sel_line >= cap {
             sel_line + 1 - cap
@@ -2814,10 +2750,6 @@ impl Overlay {
     }
 }
 
-// ============================================================================
-// HELPERS
-// ============================================================================
-
 /// Phase-dependent footer hints for the synopsis editor (shared by the wizard
 /// step and the standalone overlay).
 fn synopsis_hints(st: &SynopsisState) -> &'static [(&'static str, &'static str)] {
@@ -2863,7 +2795,6 @@ fn render_synopsis_body(f: &mut Frame, area: Rect, theme: &Theme, st: &SynopsisS
         rows[0],
     );
 
-    // --- raw input box (multi-line, wraps; caret only while editing) ---
     let editing = st.phase == SynPhase::Editing;
     let border_color = if editing {
         theme.accent_soft
@@ -2909,7 +2840,6 @@ fn render_synopsis_body(f: &mut Frame, area: Rect, theme: &Theme, st: &SynopsisS
         indent(rows[1], 2),
     );
 
-    // --- status line ---
     let status = match st.phase {
         SynPhase::Editing => Span::styled(
             if st.raw.trim().is_empty() {
@@ -2945,7 +2875,6 @@ fn render_synopsis_body(f: &mut Frame, area: Rect, theme: &Theme, st: &SynopsisS
         rows[3],
     );
 
-    // --- translation / error / placeholder ---
     let (body, color) = match st.phase {
         SynPhase::Failed => (st.error.clone(), theme.status_failed),
         _ if st.th.trim().is_empty() => {

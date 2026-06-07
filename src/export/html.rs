@@ -1,8 +1,5 @@
-//! Render the parsed block IR to XHTML for the EPUB export. The output is the inner
-//! `<body>` markup; `epub.rs` wraps it in the XHTML document shell. Image `src`s are
-//! prefixed with `img_prefix` (e.g. `images/`) and only emitted for files in the
-//! `embedded` set — a referenced-but-missing image degrades to its alt caption so the
-//! EPUB stays valid (every `<img>` resolves to a manifested file).
+//! Render block IR to EPUB XHTML body fragments. Missing images degrade to alt text
+//! so every `<img>` references a manifested file.
 
 use std::collections::HashSet;
 
@@ -122,6 +119,6 @@ mod tests {
         assert!(yes.contains("<img src=\"images/p.png\" alt=\"cap\"/>"));
         let no = blocks_to_xhtml(&blocks, "images/", &embedded(&[]));
         assert!(!no.contains("<img"));
-        assert!(no.contains("cap")); // degrades to caption
+        assert!(no.contains("cap"));
     }
 }

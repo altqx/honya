@@ -1,8 +1,5 @@
-//! EPUB3 export: rebuild a valid `.epub` from the volume's translated chapters —
-//! the inverse of `src/epub` import, so the result round-trips through `import_epub`.
-//! Structure: `mimetype` (stored, first) · `META-INF/container.xml` · `OEBPS/`
-//! (content.opf · nav.xhtml · front.xhtml · chap_NNN.xhtml · images/). Pure string
-//! XML + the vendored `zip` writer — no new dependencies.
+//! EPUB3 export for translated volumes. Writes the required OCF/OPF/nav parts plus
+//! one XHTML file per chapter, using hand-built XML and the vendored zip writer.
 
 use std::collections::HashSet;
 use std::io::{self, Write};
@@ -15,8 +12,7 @@ use super::blocks::parse_blocks;
 use super::book::ExportBook;
 use super::html::{blocks_to_xhtml, esc, esc_attr};
 
-/// A deterministic, fixed modification timestamp — `Date::now` is unavailable in
-/// this environment and EPUB3 only requires the field to be present and well-formed.
+/// Deterministic EPUB metadata timestamp.
 const MODIFIED: &str = "2024-01-01T00:00:00Z";
 
 /// Write the EPUB to `out_path`.
@@ -43,7 +39,6 @@ pub fn write(book: &ExportBook, out_path: &Path) -> io::Result<()> {
 
     let embedded: HashSet<String> = book.images.iter().cloned().collect();
 
-    // Front matter + one document per chapter.
     add(&mut zip, "OEBPS/front.xhtml", front_xhtml(book).as_bytes())?;
     for ch in &book.chapters {
         let body = blocks_to_xhtml(&parse_blocks(&ch.markdown), "images/", &embedded);
@@ -55,7 +50,6 @@ pub fn write(book: &ExportBook, out_path: &Path) -> io::Result<()> {
         )?;
     }
 
-    // Images.
     for file in &book.images {
         let bytes = std::fs::read(book.images_dir.join(file))?;
         add(&mut zip, &format!("OEBPS/images/{file}"), &bytes)?;

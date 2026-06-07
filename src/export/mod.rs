@@ -1,11 +1,6 @@
-//! Export a finished volume to shareable deliverables — merged Markdown, EPUB3, and
-//! DOCX — so work that ends as Thai Markdown under `translated/` becomes something a
-//! user can hand to an editor, sideload onto an e-reader, or open in Word.
-//!
-//! Flow: [`book::gather`] reads the volume off disk into an [`ExportBook`], then
-//! [`export_volume`] renders each requested [`ExportFormat`] into `<root>/exports/`,
-//! emitting [`AppEvent::ExportProgress`] per step. Everything is pure Rust over the
-//! vendored `zip` writer and hand-built XML — no new dependencies (see CLAUDE.md).
+//! Export a volume as merged Markdown, EPUB3, and/or DOCX.
+//! `book::gather` reads translated chapters; `export_volume` renders requested
+//! formats under `<root>/exports/` and emits progress events.
 
 pub mod blocks;
 pub mod book;
@@ -137,9 +132,7 @@ mod tests {
         png
     }
 
-    /// Export an EPUB, then re-import it with the production importer: the round trip
-    /// proves the generated package is structurally valid (container → OPF → spine →
-    /// manifest), reusing `epub::import` as an oracle.
+    /// Round-trip an exported EPUB through the production importer.
     #[tokio::test]
     async fn epub_export_round_trips_through_importer() {
         let root = std::env::temp_dir().join(format!("honya_epub_rt_{}", std::process::id()));
@@ -184,7 +177,6 @@ mod tests {
 
         let work = root.join("reimport");
         let imported = crate::epub::import::import_epub(epub, &work).unwrap();
-        // front matter + 2 chapters = 3 spine documents.
         assert_eq!(imported.spine.len(), 3);
         assert!(
             imported
@@ -195,7 +187,6 @@ mod tests {
                 .contains("Test Novel")
         );
         assert_eq!(imported.metadata.language.as_deref(), Some("th"));
-        // The image survived into the manifest.
         assert!(imported.manifest.iter().any(|m| m.href.contains("p.png")));
 
         let _ = std::fs::remove_dir_all(&root);

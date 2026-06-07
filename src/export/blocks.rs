@@ -1,13 +1,7 @@
-//! A tiny block/inline parser for the *known* honya Markdown subset — exactly what
-//! `cleanse` and the translator emit: ATX headings (`# `), blank-line-separated
-//! paragraphs, thematic breaks (`---`), image links (`![alt](url)`), and `**bold**`
-//! / `*italic*` emphasis. This is deliberately NOT a general CommonMark parser: the
-//! producer and consumer are both in-tree, so the grammar is small and closed.
+//! Parser for the closed honya Markdown subset: ATX headings, blank-line
+//! paragraphs, `---`, image links, and `**` / `*` emphasis.
 //!
-//! Image URLs are reduced to their basename (the file under `images/`), since every
-//! deliverable format re-homes images under its own directory. `referenced_images`
-//! harvests those basenames; `rewrite_image_links` rewrites the raw Markdown's image
-//! URLs to a new prefix for the merged-Markdown export (which never parses blocks).
+//! Image URLs collapse to basenames because each renderer re-homes images.
 
 use std::sync::OnceLock;
 
@@ -78,7 +72,6 @@ pub fn rewrite_image_links(md: &str, prefix: &str) -> String {
 /// chapter title and avoid rendering it twice.
 pub fn split_leading_title(md: &str) -> (Option<String>, String) {
     let mut lines = md.lines();
-    // Skip leading blank lines to find the first content line.
     let mut prefix_blanks = 0usize;
     let first = loop {
         match lines.next() {
@@ -103,7 +96,7 @@ pub fn split_leading_title(md: &str) -> (Option<String>, String) {
 /// Parse the known Markdown subset into block elements.
 pub fn parse_blocks(md: &str) -> Vec<Block> {
     let mut blocks = Vec::new();
-    // Split on blank-line boundaries (cleanse guarantees `\n\n` between blocks).
+    // cleanse emits blank-line boundaries between blocks.
     for raw in md.split("\n\n") {
         let chunk = raw.trim_matches('\n');
         let trimmed = chunk.trim();
@@ -122,12 +115,10 @@ pub fn parse_blocks(md: &str) -> Vec<Block> {
             });
             continue;
         }
-        // A block that is exactly one image link → standalone illustration.
         if let Some(img) = sole_image(trimmed) {
             blocks.push(img);
             continue;
         }
-        // Otherwise a paragraph: soft-wrap newlines collapse to spaces.
         let joined = chunk.lines().map(str::trim).collect::<Vec<_>>().join(" ");
         blocks.push(Block::Para(parse_inline(&joined)));
     }
@@ -177,7 +168,6 @@ pub fn parse_inline(s: &str) -> Vec<Inline> {
     };
     while i < chars.len() {
         let c = chars[i];
-        // image: ![alt](url)
         if c == '!'
             && chars.get(i + 1) == Some(&'[')
             && let Some((alt, url, end)) = scan_image(&chars, i)
@@ -190,7 +180,6 @@ pub fn parse_inline(s: &str) -> Vec<Inline> {
             i = end;
             continue;
         }
-        // bold: **...**
         if c == '*'
             && chars.get(i + 1) == Some(&'*')
             && let Some((inner, end)) = scan_delim(&chars, i, "**")
@@ -200,7 +189,6 @@ pub fn parse_inline(s: &str) -> Vec<Inline> {
             i = end;
             continue;
         }
-        // italic: *...*
         if c == '*'
             && let Some((inner, end)) = scan_delim(&chars, i, "*")
         {
@@ -218,7 +206,6 @@ pub fn parse_inline(s: &str) -> Vec<Inline> {
 
 /// Scan `![alt](url)` starting at `start` (`!`). Returns (alt, url, index-after).
 fn scan_image(chars: &[char], start: usize) -> Option<(String, String, usize)> {
-    // alt: from start+2 up to ']'
     let mut i = start + 2;
     let alt_start = i;
     while i < chars.len() && chars[i] != ']' {
