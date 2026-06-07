@@ -17,15 +17,16 @@ Running the app (not the tests) requires an OpenRouter API key, resolved in orde
 
 Version is the single source of truth in `Cargo.toml`; CI auto-tags on version change, so a release is cut by bumping `version` there.
 
-## Changelog — keep it current (mandatory)
+## Changelog — only on an explicit version bump
 
-**Every** new feature, bug fix, or otherwise user-noticeable change MUST be recorded in the web changelog at `web/public/changelog.html` as part of the same change — it is not optional and not a follow-up. The changelog page is the user-facing history shown at `https://honya.altqx.com/changelog`.
+**Do not** touch the web changelog (`web/public/changelog.html`) for ordinary feature/fix work. Update it **only** when I explicitly tell you to bump the version — never edit a version block that has already been released. The changelog page is the user-facing history shown at `https://honya.altqx.com/changelog`.
 
-How to add an entry:
-- Find (or add) the `<article class="release">` block for the **current `Cargo.toml` version** (entries are newest-first; the topmost release is the latest). When bumping `version` for a release, add a new `<article>` at the top of the timeline and move its `rel-badge` "ล่าสุด" marker there (drop it from the previous latest).
-- Add one `<li class="change">` per change, using the right tag: `add` (เพิ่ม) for features, `chg` (ปรับปรุง) for changes/improvements, `fix` (แก้ไข) for bug fixes.
+When I ask you to bump the version:
+- Bump `version` in `Cargo.toml` (the single source of truth; CI auto-tags on the change).
+- Add a **new** `<article class="release">` at the top of the timeline for the new version (entries are newest-first), and move the `rel-badge` "ล่าสุด" marker there (drop it from the previous latest). Never add entries to the already-released topmost block — the new work goes in the new version.
+- Add one `<li class="change">` per user-noticeable change, using the right tag: `add` (เพิ่ม) for features, `chg` (ปรับปรุง) for changes/improvements, `fix` (แก้ไข) for bug fixes.
 - Write entries in **Thai** to match the Thai-localized site, but keep code identifiers, key names, file formats, agent names, and commands as-is in `<code>` (same translate-vs-keep rules as the rest of `web/public/`). Keep them concise and user-facing — describe the behavior, not the implementation.
-- Also update the "เวอร์ชันล่าสุด" pill near the top of the page when the latest version changes.
+- Also update the "เวอร์ชันล่าสุด" pill near the top of the page to the new version.
 
 ## Architecture
 

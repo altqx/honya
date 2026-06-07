@@ -2842,24 +2842,25 @@ fn render_synopsis_body(f: &mut Frame, area: Rect, theme: &Theme, st: &SynopsisS
 
     let status = match st.phase {
         SynPhase::Editing => Span::styled(
-            if st.raw.trim().is_empty() {
+            thai_display_safe(if st.raw.trim().is_empty() {
                 "  Tab ข้าม (ไม่ใส่เรื่องย่อ) · Esc กลับ"
             } else {
                 "  Tab แปล · Enter ขึ้นบรรทัด · Esc กลับ"
-            },
+            }),
             Style::default().fg(theme.ink_faint),
         ),
         SynPhase::Translating => Span::styled(
-            "  ◐ กำลังแปลด้วย Translator agent …",
+            thai_display_safe("  ◐ กำลังแปลด้วย Translator agent …"),
             Style::default().fg(theme.status_working),
         ),
         SynPhase::Done => Span::styled(
-            format!("  ✓ แปลแล้ว (roll {})", st.attempt + 1),
+            thai_display_safe(&format!("  ✓ แปลแล้ว (roll {})", st.attempt + 1)),
             Style::default().fg(theme.status_done),
         ),
-        SynPhase::Failed => {
-            Span::styled("  ✗ แปลไม่สำเร็จ", Style::default().fg(theme.status_failed))
-        }
+        SynPhase::Failed => Span::styled(
+            thai_display_safe("  ✗ แปลไม่สำเร็จ"),
+            Style::default().fg(theme.status_failed),
+        ),
     };
     f.render_widget(
         Paragraph::new(status).style(Style::default().bg(theme.bg_panel)),
@@ -2868,7 +2869,7 @@ fn render_synopsis_body(f: &mut Frame, area: Rect, theme: &Theme, st: &SynopsisS
 
     f.render_widget(
         Paragraph::new(Span::styled(
-            "  ── คำแปลภาษาไทย / Thai ──",
+            thai_display_safe("  ── คำแปลภาษาไทย / Thai ──"),
             Style::default().fg(theme.ink_faint),
         ))
         .style(Style::default().bg(theme.bg_panel)),
@@ -2967,4 +2968,50 @@ fn prettify_stem(stem: &str) -> String {
         .collect();
     let base = if trimmed.is_empty() { words } else { trimmed };
     base.join(" ").trim().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    /// Every glyph the terminal would draw for the synopsis editor, concatenated.
+    fn rendered_glyphs(st: &SynopsisState) -> String {
+        let theme = Theme::washi();
+        let mut term = Terminal::new(TestBackend::new(80, 16)).unwrap();
+        term.draw(|f| render_synopsis_body(f, f.area(), &theme, st))
+            .unwrap();
+        term.backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    /// SARA AM (`ำ`, U+0E33) must never reach the terminal: every Thai label is
+    /// decomposed to NIKHAHIT + SARA AA first, otherwise it smears across cells
+    /// on the next redraw. The status labels here were a missed render site.
+    #[test]
+    fn synopsis_labels_never_emit_raw_sara_am() {
+        for phase in [
+            SynPhase::Editing,
+            SynPhase::Translating,
+            SynPhase::Done,
+            SynPhase::Failed,
+        ] {
+            let mut st = SynopsisState::new(
+                "源のあらすじ".to_string(),
+                "เรื่องย่อภาษาไทย".to_string(),
+            );
+            st.phase = phase.clone();
+            st.error = "แปลไม่สำเร็จ".to_string();
+            let glyphs = rendered_glyphs(&st);
+            assert!(
+                !glyphs.contains('\u{0E33}'),
+                "raw SARA AM leaked into the {phase:?} synopsis render"
+            );
+        }
+    }
 }
