@@ -61,12 +61,32 @@ async fn main() -> anyhow::Result<()> {
     // defers to a pending recovery prompt and is skipped for returning users.
     app.init_onboarding();
 
-    // Best-effort background update notification; never blocks startup.
+    // Best-effort background update handling; never blocks startup. Auto mode
+    // (the default) downloads + installs the latest release in place and flags a
+    // restart; Notify mode only surfaces the "honya update" hint. Both honor
+    // HONYA_NO_UPDATE_CHECK (it makes the check a no-op).
     {
         let tx = app.tx.clone();
+        let mode = app.cfg.update_mode;
         tokio::spawn(async move {
-            if let Some(version) = update::check_for_update().await {
-                tx.send(AppEvent::UpdateAvailable { version });
+            use crate::model::UpdateMode;
+            match mode {
+                UpdateMode::Auto => match update::auto_update().await {
+                    update::AutoUpdate::Installed(version) => {
+                        tx.send(AppEvent::UpdateInstalled { version });
+                    }
+                    // Found but couldn't install (e.g. read-only install dir);
+                    // fall back to notifying so `honya update` is still offered.
+                    update::AutoUpdate::Available(version) => {
+                        tx.send(AppEvent::UpdateAvailable { version });
+                    }
+                    update::AutoUpdate::UpToDate => {}
+                },
+                UpdateMode::Notify => {
+                    if let Some(version) = update::check_for_update().await {
+                        tx.send(AppEvent::UpdateAvailable { version });
+                    }
+                }
             }
         });
     }
@@ -143,7 +163,9 @@ fn print_help() {
     println!("    or try the bundled sample project to explore offline.\n");
     println!("ENVIRONMENT:");
     println!("    HONYA_API_KEY / OPENROUTER_API_KEY   OpenRouter key (overrides saved config)");
-    println!("    HONYA_NO_UPDATE_CHECK                Disable the startup update check");
+    println!(
+        "    HONYA_NO_UPDATE_CHECK                Disable the startup update check / auto-update"
+    );
     println!(
         "    HONYA_SESSION_FILE                   Override the crash-recovery checkpoint path"
     );

@@ -157,6 +157,7 @@ pub fn render_footer(
     area: Rect,
     hints: &[(&str, &str)],
     update: Option<&str>,
+    installed: Option<&str>,
     theme: &Theme,
 ) {
     if area.width == 0 {
@@ -175,8 +176,18 @@ pub fn render_footer(
     let lbl_style = Style::default().fg(theme.ink_faint);
 
     let mut global: Vec<Span> = Vec::new();
-    // A pending self-update shows as a persistent amber badge before the cluster.
-    if let Some(version) = update {
+    // An auto-installed update shows a green "restart to apply" badge; otherwise a
+    // pending update shows an amber "honya update" badge. Both sit before the cluster.
+    if let Some(version) = installed {
+        let done = Style::default()
+            .fg(theme.status_done)
+            .add_modifier(Modifier::BOLD);
+        global.push(Span::styled("✓ ", done));
+        global.push(Span::styled(
+            format!("{version} · restart to apply  "),
+            Style::default().fg(theme.status_done),
+        ));
+    } else if let Some(version) = update {
         let warn = Style::default()
             .fg(theme.status_warn)
             .add_modifier(Modifier::BOLD);

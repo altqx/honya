@@ -172,6 +172,8 @@ pub enum Action {
         /// New config API key: `Some("")` clears it, `Some(k)` sets it, `None`
         /// leaves it untouched (the env var supplies the key, so config is moot).
         api_key: Option<String>,
+        /// Startup update behavior (auto-install vs. notify only).
+        update_mode: crate::model::UpdateMode,
     },
     /// Create the bundled sample project (if absent) and open it.
     CreateSample,
@@ -271,6 +273,9 @@ pub struct App {
     pub log: Vec<(LogLevel, String)>,
     /// Set when a newer release is detected at startup (drives a footer hint).
     pub update_available: Option<String>,
+    /// Set when an auto-update installed a new release this session (drives a
+    /// "restart to apply" footer badge; the running process is still the old one).
+    pub update_installed: Option<String>,
     /// An interrupted run found at startup, awaiting the user's resume/discard
     /// choice in the recovery overlay (see `init_recovery_prompt`).
     pub pending_recovery: Option<crate::workspace::session::SessionCheckpoint>,
@@ -332,6 +337,7 @@ impl App {
             run_ctl: None,
             log: Vec::new(),
             update_available: None,
+            update_installed: None,
             pending_recovery: None,
             active_run: None,
             pending_chapter_run: None,
@@ -476,6 +482,19 @@ impl App {
                     "honya {version} available — run `honya update`"
                 )));
                 self.push_log(LogLevel::Info, format!("update available: honya {version}"));
+            }
+            AppEvent::UpdateInstalled { version } => {
+                // The new binary is on disk; the running process is still the old
+                // one, so the change applies on next launch.
+                self.update_installed = Some(version.clone());
+                self.update_available = None;
+                self.toast = Some(Toast::info(format!(
+                    "updated to honya {version} — restart to apply"
+                )));
+                self.push_log(
+                    LogLevel::Info,
+                    format!("auto-updated to honya {version}; restart to apply"),
+                );
             }
             AppEvent::PipelinePaused => {
                 // Stay run_active (held, not finished) so a second run can't start while paused.
@@ -1153,8 +1172,16 @@ impl App {
                 translator,
                 reviewer,
                 api_key,
+                update_mode,
             } => {
-                self.save_settings(base_url, orchestrator, translator, reviewer, api_key);
+                self.save_settings(
+                    base_url,
+                    orchestrator,
+                    translator,
+                    reviewer,
+                    api_key,
+                    update_mode,
+                );
             }
             Action::CreateSample => {
                 self.create_sample_project();
@@ -1700,11 +1727,13 @@ impl App {
         translator: String,
         reviewer: String,
         api_key: Option<String>,
+        update_mode: crate::model::UpdateMode,
     ) {
         self.cfg.base_url = base_url;
         self.cfg.models.orchestrator = orchestrator;
         self.cfg.models.translator = translator;
         self.cfg.models.reviewer = reviewer;
+        self.cfg.update_mode = update_mode;
         let key_changed = if let Some(k) = api_key {
             let k = k.trim();
             let next = (!k.is_empty()).then(|| k.to_string());
@@ -1966,6 +1995,7 @@ impl App {
             sk.footer,
             hints,
             self.update_available.as_deref(),
+            self.update_installed.as_deref(),
             &self.theme,
         );
 

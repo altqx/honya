@@ -95,6 +95,44 @@ pub async fn check_for_update() -> Option<String> {
     }
 }
 
+/// Outcome of a background auto-update attempt (see [`auto_update`]).
+pub enum AutoUpdate {
+    /// The latest release was downloaded, verified, and installed in place; the
+    /// new binary is live on the next launch. Carries the version (no `v`).
+    Installed(String),
+    /// A newer release exists but it could not be installed automatically (e.g.
+    /// no write permission for the install dir). Fall back to notifying the user
+    /// so a manual `honya update` still works. Carries the version (no `v`).
+    Available(String),
+    /// Nothing to do: already current, an unknown platform, a blocked/failed
+    /// network, or `HONYA_NO_UPDATE_CHECK`.
+    UpToDate,
+}
+
+/// Best-effort startup auto-update for `UpdateMode::Auto`: check for a newer
+/// release and, when one exists, install it in the background. Never panics and
+/// never writes to stdout (safe to call from inside the TUI). On any install
+/// failure it degrades to [`AutoUpdate::Available`] rather than erroring out.
+pub async fn auto_update() -> AutoUpdate {
+    if std::env::var_os("HONYA_NO_UPDATE_CHECK").is_some() {
+        return AutoUpdate::UpToDate;
+    }
+    let Some(target) = target_triple() else {
+        return AutoUpdate::UpToDate; // no prebuilt binary for this platform
+    };
+    let Some(tag) = latest_release_tag().await.ok().flatten() else {
+        return AutoUpdate::UpToDate; // unreachable / no published release
+    };
+    if !is_newer(&tag, current_version()) {
+        return AutoUpdate::UpToDate;
+    }
+    let version = tag.trim_start_matches('v').to_string();
+    match install_release(&tag, target).await {
+        Ok(()) => AutoUpdate::Installed(version),
+        Err(_) => AutoUpdate::Available(version),
+    }
+}
+
 /// `honya update`: download the latest release for this platform, verify its
 /// checksum, and replace the running executable in place. Prints progress to
 /// stdout; returns an error with actionable guidance on failure.
@@ -122,11 +160,22 @@ pub async fn run_self_update() -> Result<()> {
     }
     println!("Updating honya {current} → {tag} …");
 
+    install_release(&tag, target).await?;
+
+    println!("✓ honya is now {tag}. Restart it to use the new version.");
+    Ok(())
+}
+
+/// Download the release for `target` at `tag`, verify its checksum, and replace
+/// the running executable in place. The quiet core shared by the `honya update`
+/// subcommand and the background [`auto_update`] — it writes nothing to stdout,
+/// so it is safe to call from inside the TUI.
+async fn install_release(tag: &str, target: &str) -> Result<()> {
     let base = format!("https://github.com/{REPO}/releases/download/{tag}");
     let archive = format!("honya-{target}.tar.gz");
 
     // Private, unpredictable temp dir (0700, exclusive) so a local user can't swap files mid-update.
-    let tmp = private_staging_dir(&tag)?;
+    let tmp = private_staging_dir(tag)?;
     let guard = TempDir(tmp.clone());
 
     let tar_path = tmp.join(&archive);
@@ -158,8 +207,6 @@ pub async fn run_self_update() -> Result<()> {
     let current_exe = std::env::current_exe().context("resolving the current executable path")?;
     replace_executable(&new_bin, &current_exe)?;
     drop(guard);
-
-    println!("✓ honya is now {tag}. Restart it to use the new version.");
     Ok(())
 }
 
@@ -209,7 +256,6 @@ fn verify_sha256(file: &Path, sumfile: &str) -> Result<()> {
     if actual != expected {
         bail!("checksum mismatch — refusing to install (expected {expected}, got {actual})");
     }
-    println!("✓ checksum verified");
     Ok(())
 }
 

@@ -15,7 +15,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
-use crate::model::{AppConfig, LogLevel, ThemeId};
+use crate::model::{AppConfig, LogLevel, ThemeId, UpdateMode};
 use crate::theme::{self, ALL_THEMES, Theme};
 use crate::ui::layout::{centered_modal, centered_pct};
 use crate::ui::text::{pad_to_cols, thai_display_safe, truncate_cols};
@@ -240,6 +240,8 @@ pub struct SettingsState {
     /// True when an env var (HONYA_API_KEY / OPENROUTER_API_KEY) supplies the key;
     /// it overrides config, so the field is shown read-only.
     pub api_key_env: bool,
+    /// Startup update behavior; toggled with Ctrl-U (not a text field).
+    pub update_mode: UpdateMode,
     /// Which field is focused (0..=4).
     pub field: u8,
 }
@@ -253,6 +255,7 @@ impl SettingsState {
             reviewer: cfg.models.reviewer.clone(),
             api_key: cfg.api_key.clone().unwrap_or_default(),
             api_key_env: crate::config::api_key_from_env().is_some(),
+            update_mode: cfg.update_mode,
             field: field.min(SETTINGS_FIELDS - 1),
         }
     }
@@ -668,6 +671,7 @@ impl Overlay {
             reviewer: String::new(),
             api_key: String::new(),
             api_key_env: false,
+            update_mode: UpdateMode::default(),
             field: field.min(SETTINGS_FIELDS - 1),
         })
     }
@@ -962,6 +966,12 @@ impl Overlay {
             KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 Action::show_overlay(Overlay::theme_placeholder())
             }
+            // Ctrl-U toggles the startup update behavior in place (persisted on save),
+            // mirroring how Ctrl-T reaches the theme picker from an open overlay.
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                st.update_mode = st.update_mode.toggled();
+                Action::None
+            }
             KeyCode::Enter => Action::SaveSettings {
                 base_url: st.base_url.clone(),
                 orchestrator: st.orchestrator.clone(),
@@ -974,6 +984,7 @@ impl Overlay {
                 } else {
                     Some(st.api_key.clone())
                 },
+                update_mode: st.update_mode,
             },
             KeyCode::Tab | KeyCode::Down => {
                 st.field = (st.field + 1) % SETTINGS_FIELDS;
@@ -1982,6 +1993,14 @@ impl Overlay {
             ),
             Span::styled(cfg.theme.label(), Style::default().fg(theme.accent)),
             Span::styled("   Ctrl-T to change", Style::default().fg(theme.ink_faint)),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled(
+                "   Auto-update         ",
+                Style::default().fg(theme.ink_faint),
+            ),
+            Span::styled(st.update_mode.label(), Style::default().fg(theme.accent)),
+            Span::styled("   Ctrl-U to toggle", Style::default().fg(theme.ink_faint)),
         ]));
         lines.push(Line::raw(""));
         let footer = if st.api_key_env {

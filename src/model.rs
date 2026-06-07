@@ -188,6 +188,37 @@ pub enum ThemeId {
     RosePine,
 }
 
+/// How honya handles a newer release found at startup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdateMode {
+    /// Download, verify, and install the update in the background at launch; the
+    /// new binary goes live on the next start. This is the default.
+    #[default]
+    Auto,
+    /// Leave the install to the user — only surface a "honya update" hint when a
+    /// newer release exists (the pre-0.1.12 behavior).
+    Notify,
+}
+
+impl UpdateMode {
+    /// Short label for the Settings line.
+    pub fn label(self) -> &'static str {
+        match self {
+            UpdateMode::Auto => "On startup",
+            UpdateMode::Notify => "Notify only",
+        }
+    }
+
+    /// The other mode (for the Settings toggle).
+    pub fn toggled(self) -> Self {
+        match self {
+            UpdateMode::Auto => UpdateMode::Notify,
+            UpdateMode::Notify => UpdateMode::Auto,
+        }
+    }
+}
+
 /// Global, persisted app configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -217,6 +248,10 @@ pub struct AppConfig {
     /// Drives whether the in-app Welcome overlay auto-opens at launch.
     #[serde(default)]
     pub onboarded: bool,
+    /// What to do when a newer release is found at startup (serde default keeps
+    /// pre-update-mode configs loading, and defaults them to auto-install).
+    #[serde(default)]
+    pub update_mode: UpdateMode,
 }
 
 impl Default for AppConfig {
@@ -233,6 +268,7 @@ impl Default for AppConfig {
             api_key: None,
             theme: ThemeId::default(),
             onboarded: false,
+            update_mode: UpdateMode::default(),
         }
     }
 }
@@ -820,6 +856,11 @@ pub enum AppEvent {
     },
 
     UpdateAvailable {
+        version: String,
+    },
+    /// Auto-update finished: the new binary is installed and goes live on the
+    /// next launch. Carries the version just installed.
+    UpdateInstalled {
         version: String,
     },
 

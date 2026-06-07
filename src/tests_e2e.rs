@@ -665,6 +665,7 @@ fn settings_api_key_field_edits_and_respects_env_override() {
         reviewer: "r".into(),
         api_key: String::new(),
         api_key_env: false,
+        update_mode: crate::model::UpdateMode::Auto,
         field: 4,
     });
     for c in "sk-or-1".chars() {
@@ -683,6 +684,7 @@ fn settings_api_key_field_edits_and_respects_env_override() {
         reviewer: "r".into(),
         api_key: "saved".into(),
         api_key_env: true,
+        update_mode: crate::model::UpdateMode::Auto,
         field: 4,
     });
     ov.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::empty()));
@@ -695,6 +697,42 @@ fn settings_api_key_field_edits_and_respects_env_override() {
         Action::SaveSettings { api_key, .. } => {
             assert!(api_key.is_none(), "env override → config key left untouched")
         }
+        other => panic!("expected SaveSettings, got {other:?}"),
+    }
+}
+
+/// Ctrl-U in Settings toggles the startup update mode in place, and Enter saves the
+/// toggled value through `SaveSettings` (it is not a focusable text field).
+#[test]
+fn settings_ctrl_u_toggles_update_mode_and_saves_it() {
+    use crate::app::Action;
+    use crate::app::overlay::SettingsState;
+    use crate::model::UpdateMode;
+
+    let mut ov = Overlay::Settings(SettingsState {
+        base_url: "u".into(),
+        orchestrator: "o".into(),
+        translator: "t".into(),
+        reviewer: "r".into(),
+        api_key: String::new(),
+        api_key_env: false,
+        update_mode: UpdateMode::Auto,
+        field: 0,
+    });
+
+    // Ctrl-U flips Auto → Notify without typing into the focused field.
+    ov.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+    match &ov {
+        Overlay::Settings(st) => {
+            assert_eq!(st.update_mode, UpdateMode::Notify);
+            assert_eq!(st.base_url, "u", "Ctrl-U must not type into the field");
+        }
+        _ => panic!("settings overlay"),
+    }
+
+    // Enter carries the toggled mode out for persistence.
+    match ov.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty())) {
+        Action::SaveSettings { update_mode, .. } => assert_eq!(update_mode, UpdateMode::Notify),
         other => panic!("expected SaveSettings, got {other:?}"),
     }
 }
