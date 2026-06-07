@@ -17,6 +17,16 @@ Running the app (not the tests) requires an OpenRouter API key, resolved in orde
 
 Version is the single source of truth in `Cargo.toml`; CI auto-tags on version change, so a release is cut by bumping `version` there.
 
+## Changelog — keep it current (mandatory)
+
+**Every** new feature, bug fix, or otherwise user-noticeable change MUST be recorded in the web changelog at `web/public/changelog.html` as part of the same change — it is not optional and not a follow-up. The changelog page is the user-facing history shown at `https://honya.altqx.com/changelog`.
+
+How to add an entry:
+- Find (or add) the `<article class="release">` block for the **current `Cargo.toml` version** (entries are newest-first; the topmost release is the latest). When bumping `version` for a release, add a new `<article>` at the top of the timeline and move its `rel-badge` "ล่าสุด" marker there (drop it from the previous latest).
+- Add one `<li class="change">` per change, using the right tag: `add` (เพิ่ม) for features, `chg` (ปรับปรุง) for changes/improvements, `fix` (แก้ไข) for bug fixes.
+- Write entries in **Thai** to match the Thai-localized site, but keep code identifiers, key names, file formats, agent names, and commands as-is in `<code>` (same translate-vs-keep rules as the rest of `web/public/`). Keep them concise and user-facing — describe the behavior, not the implementation.
+- Also update the "เวอร์ชันล่าสุด" pill near the top of the page when the latest version changes.
+
 ## Architecture
 
 ### Event loop & concurrency contract (the most important thing to understand)

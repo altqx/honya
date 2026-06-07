@@ -14,6 +14,8 @@ web/
 └── public/                <- DEPLOY ROOT (everything here is published)
     ├── index.html         the homepage (htmx shell: hero + animated terminal,
     │                       five-screen tab switcher, install CTA, footer)
+    ├── changelog.html     the changelog page (served at /changelog) — per-version
+    │                       history; update it on every feature/fix (see CLAUDE.md)
     ├── partials/          htmx fragments loaded into the five-screen panel:
     │   ├── screen-shelf.html
     │   ├── screen-project.html
