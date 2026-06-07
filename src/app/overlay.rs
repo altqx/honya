@@ -214,10 +214,12 @@ impl ImportState {
     }
 }
 
-/// Number of focusable Settings fields (base URL, 3 models, API key).
-const SETTINGS_FIELDS: u8 = 5;
+/// Number of focusable Settings fields (base URL, 3 models, API key, retries).
+const SETTINGS_FIELDS: u8 = 6;
 /// Index of the API-key field within Settings.
 const SETTINGS_KEY_FIELD: u8 = 4;
+/// Index of the retry-attempts field within Settings (digits only).
+const SETTINGS_RETRIES_FIELD: u8 = 5;
 
 /// Settings: editable base URL + model ids + an editable, masked API key.
 #[derive(Debug, Clone)]
@@ -233,7 +235,10 @@ pub struct SettingsState {
     pub api_key_env: bool,
     /// Startup update behavior; toggled with Ctrl-U (not a text field).
     pub update_mode: UpdateMode,
-    /// Which field is focused (0..=4).
+    /// Max Translator↔Reviewer retry attempts per chunk, as typed (digits only).
+    /// Parsed and clamped to 1..=20 on save via [`SettingsState::max_attempts_value`].
+    pub max_attempts: String,
+    /// Which field is focused (0..=5).
     pub field: u8,
 }
 
@@ -247,6 +252,7 @@ impl SettingsState {
             api_key: cfg.api_key.clone().unwrap_or_default(),
             api_key_env: crate::config::api_key_from_env().is_some(),
             update_mode: cfg.update_mode,
+            max_attempts: cfg.max_attempts.to_string(),
             field: field.min(SETTINGS_FIELDS - 1),
         }
     }
@@ -257,8 +263,19 @@ impl SettingsState {
             1 => &mut self.orchestrator,
             2 => &mut self.translator,
             3 => &mut self.reviewer,
-            _ => &mut self.api_key,
+            4 => &mut self.api_key,
+            _ => &mut self.max_attempts,
         }
+    }
+
+    /// The retries field parsed into a usable attempt count. Empty, non-numeric,
+    /// or 0 falls back to 1; values are capped at 20 to keep the loop bounded.
+    fn max_attempts_value(&self) -> u32 {
+        self.max_attempts
+            .trim()
+            .parse::<u32>()
+            .unwrap_or(0)
+            .clamp(1, 20)
     }
 }
 
@@ -696,6 +713,7 @@ impl Overlay {
             api_key: String::new(),
             api_key_env: false,
             update_mode: UpdateMode::default(),
+            max_attempts: String::new(),
             field: field.min(SETTINGS_FIELDS - 1),
         })
     }
@@ -1057,6 +1075,7 @@ impl Overlay {
                     Some(st.api_key.clone())
                 },
                 update_mode: st.update_mode,
+                max_attempts: st.max_attempts_value(),
             },
             KeyCode::Tab | KeyCode::Down => {
                 st.field = (st.field + 1) % SETTINGS_FIELDS;
@@ -1069,6 +1088,13 @@ impl Overlay {
             // Env-supplied API key is read-only.
             KeyCode::Backspace if !(st.field == SETTINGS_KEY_FIELD && st.api_key_env) => {
                 st.field_mut().pop();
+                Action::None
+            }
+            // The retries field is numeric: accept digits only, drop everything else.
+            KeyCode::Char(c) if st.field == SETTINGS_RETRIES_FIELD => {
+                if c.is_ascii_digit() {
+                    st.field_mut().push(c);
+                }
                 Action::None
             }
             KeyCode::Char(c) if !(st.field == SETTINGS_KEY_FIELD && st.api_key_env) => {
@@ -2144,7 +2170,7 @@ impl Overlay {
         cfg: &AppConfig,
         st: &SettingsState,
     ) {
-        let modal = centered_modal(72, 18, area);
+        let modal = centered_modal(72, 20, area);
         f.render_widget(Clear, modal);
         let block = self.modal_block("Settings", theme);
         let inner = block.inner(modal);
@@ -2200,6 +2226,16 @@ impl Overlay {
             };
             lines.push(field_line("API key", shown, focused_key));
         }
+
+        lines.push(field_line(
+            "Retry attempts",
+            st.max_attempts.clone(),
+            st.field == SETTINGS_RETRIES_FIELD,
+        ));
+        lines.push(Line::from(Span::styled(
+            "      ↳ Translator↔Reviewer loop per chunk (1–20)",
+            Style::default().fg(theme.ink_faint),
+        )));
 
         lines.push(Line::raw(""));
         lines.push(Line::from(vec![

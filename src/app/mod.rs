@@ -180,6 +180,8 @@ pub enum Action {
         api_key: Option<String>,
         /// Startup update behavior (auto-install vs. notify only).
         update_mode: crate::model::UpdateMode,
+        /// Max Translator↔Reviewer retry attempts per chunk (already clamped 1..=20).
+        max_attempts: u32,
     },
     /// Create the bundled sample project (if absent) and open it.
     CreateSample,
@@ -1221,6 +1223,7 @@ impl App {
                 reviewer,
                 api_key,
                 update_mode,
+                max_attempts,
             } => {
                 self.save_settings(
                     base_url,
@@ -1229,6 +1232,7 @@ impl App {
                     reviewer,
                     api_key,
                     update_mode,
+                    max_attempts,
                 );
             }
             Action::CreateSample => {
@@ -1827,6 +1831,9 @@ impl App {
     /// left untouched), `Some("")` clears the saved key, `Some(k)` sets it. After a
     /// key change, the active project's client is rebuilt so translation works at
     /// once (or stops, if the key was cleared).
+    // Args mirror the `Action::SaveSettings` payload one-to-one (config fields the
+    // Settings overlay edits); bundling them into a struct would only add ceremony.
+    #[allow(clippy::too_many_arguments)]
     fn save_settings(
         &mut self,
         base_url: String,
@@ -1835,12 +1842,14 @@ impl App {
         reviewer: String,
         api_key: Option<String>,
         update_mode: crate::model::UpdateMode,
+        max_attempts: u32,
     ) {
         self.cfg.base_url = base_url;
         self.cfg.models.orchestrator = orchestrator;
         self.cfg.models.translator = translator;
         self.cfg.models.reviewer = reviewer;
         self.cfg.update_mode = update_mode;
+        self.cfg.max_attempts = max_attempts;
         let key_changed = if let Some(k) = api_key {
             let k = k.trim();
             let next = (!k.is_empty()).then(|| k.to_string());

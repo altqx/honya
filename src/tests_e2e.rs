@@ -684,6 +684,7 @@ fn settings_api_key_field_edits_and_respects_env_override() {
         api_key: String::new(),
         api_key_env: false,
         update_mode: crate::model::UpdateMode::Auto,
+        max_attempts: "3".into(),
         field: 4,
     });
     for c in "sk-or-1".chars() {
@@ -703,6 +704,7 @@ fn settings_api_key_field_edits_and_respects_env_override() {
         api_key: "saved".into(),
         api_key_env: true,
         update_mode: crate::model::UpdateMode::Auto,
+        max_attempts: "3".into(),
         field: 4,
     });
     ov.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::empty()));
@@ -738,6 +740,7 @@ fn settings_ctrl_u_toggles_update_mode_and_saves_it() {
         api_key: String::new(),
         api_key_env: false,
         update_mode: UpdateMode::Auto,
+        max_attempts: "3".into(),
         field: 0,
     });
 
@@ -754,6 +757,61 @@ fn settings_ctrl_u_toggles_update_mode_and_saves_it() {
     // Enter carries the toggled mode out for persistence.
     match ov.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty())) {
         Action::SaveSettings { update_mode, .. } => assert_eq!(update_mode, UpdateMode::Notify),
+        other => panic!("expected SaveSettings, got {other:?}"),
+    }
+}
+
+/// The retries field accepts digits only, and Enter carries the parsed (clamped)
+/// attempt count out through `SaveSettings`.
+#[test]
+fn settings_retries_field_is_digit_only_and_clamped() {
+    use crate::app::Action;
+    use crate::app::overlay::SettingsState;
+
+    let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::empty());
+
+    let mk = || {
+        Overlay::Settings(SettingsState {
+            base_url: "u".into(),
+            orchestrator: "o".into(),
+            translator: "t".into(),
+            reviewer: "r".into(),
+            api_key: String::new(),
+            api_key_env: false,
+            update_mode: crate::model::UpdateMode::Auto,
+            // Focus the retries field (index 5).
+            max_attempts: String::new(),
+            field: 5,
+        })
+    };
+
+    // Non-digits are dropped; digits accumulate.
+    let mut ov = mk();
+    for c in "a1b2".chars() {
+        ov.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::empty()));
+    }
+    match &ov {
+        Overlay::Settings(st) => assert_eq!(st.max_attempts, "12", "letters ignored, digits kept"),
+        _ => panic!("settings overlay"),
+    }
+    match ov.handle_key(enter) {
+        Action::SaveSettings { max_attempts, .. } => assert_eq!(max_attempts, 12),
+        other => panic!("expected SaveSettings, got {other:?}"),
+    }
+
+    // Empty / 0 clamps up to 1; oversized clamps down to 20.
+    let mut empty = mk();
+    match empty.handle_key(enter) {
+        Action::SaveSettings { max_attempts, .. } => assert_eq!(max_attempts, 1, "empty → 1"),
+        other => panic!("expected SaveSettings, got {other:?}"),
+    }
+
+    let mut big = mk();
+    for c in "999".chars() {
+        big.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::empty()));
+    }
+    match big.handle_key(enter) {
+        Action::SaveSettings { max_attempts, .. } => assert_eq!(max_attempts, 20, "capped at 20"),
         other => panic!("expected SaveSettings, got {other:?}"),
     }
 }
