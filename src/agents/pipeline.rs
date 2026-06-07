@@ -402,7 +402,14 @@ fn build_reference_ctx(ws: &Workspace, chunk_text: &str) -> String {
     let mut chars = characters::load(ws);
     chars.retain(|c| {
         let jp = c.jp_name.trim();
-        !jp.is_empty() && chunk_text.contains(jp)
+        let by_name = !jp.is_empty() && chunk_text.contains(jp);
+        // Match alias forms too, so a chunk using a bare given name still pulls in
+        // the one canonical entry instead of looking like an unknown character.
+        let by_alias = c
+            .aliases
+            .iter()
+            .any(|a| !a.trim().is_empty() && chunk_text.contains(a.trim()));
+        by_name || by_alias
     });
     chars.truncate(MAX_CHARACTERS_IN_CTX);
     section(
@@ -1281,6 +1288,7 @@ mod tests {
                 honorific: None,
                 speech_style: None,
                 relationships: Vec::new(),
+                aliases: Vec::new(),
                 notes: None,
                 first_seen_chapter: None,
             },
@@ -1300,6 +1308,37 @@ mod tests {
         assert!(
             !ctx.contains("王都") && !ctx.contains("ราชธานี"),
             "absent term must NOT balloon the context:\n{ctx}"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A chunk that uses only a character's alias (bare given name) must still pull
+    /// in the one canonical entry, so the agents don't see them as a new person.
+    #[test]
+    fn reference_ctx_matches_alias() {
+        let (base, ws) = temp_ws("ref_alias");
+        let yuu = Character {
+            id: "yuu".into(),
+            jp_name: "有月勇".into(),
+            thai_name: "อาริทสึกิ ยู".into(),
+            romaji: Some("Aritsuki Yuu".into()),
+            gender: None,
+            honorific: None,
+            speech_style: None,
+            relationships: Vec::new(),
+            aliases: vec!["勇".into()],
+            notes: None,
+            first_seen_chapter: None,
+        };
+        // Persist the canonical entry with its alias.
+        characters::upsert(&ws, yuu).unwrap();
+
+        // The chunk only ever says 勇, never the full 有月勇.
+        let ctx = build_reference_ctx(&ws, "勇は立ち上がった。");
+        assert!(
+            ctx.contains("อาริทสึกิ ยู"),
+            "alias match must inject the canonical character:\n{ctx}"
         );
 
         let _ = std::fs::remove_dir_all(&base);

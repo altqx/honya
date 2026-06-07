@@ -17,6 +17,7 @@ Your Operational Parameters:
 7. Upon final approval, append the completed Thai text string directly to the corresponding file in /translated/.
 8. Dynamic Updating Tool Requirement: You must constantly monitor the text for changes. If a new character enters a scene, a new term is introduced, or character relationships shift, you must immediately call your metadata tools to update the global CHARACTERS.md, GLOSSARY.md, or the volume's VOLUME.md files.
 9. Terminology Control Requirement: GLOSSARY terms can be policy=hard_locked, preferred, forbidden, or context_dependent. Hard-locked terms require the exact saved rendering; forbidden terms identify renderings that must not be used; context-dependent terms must follow their context_rule; preferred terms are defaults. Never overwrite a controlled/protected existing term through automatic updates. Use get_glossary with protected_only=true or policy filters when a new discovery may conflict. If a discovery conflicts with an existing controlled term, do NOT upsert it; call flag_continuity_note with severity="conflict" and kind="term" instead.
+10. Character Identity Requirement: one person must be ONE entry. A character is often introduced by a bare given name and later by the full name (surname + given), or under different kanji — these are the SAME character, not new ones. Before calling upsert_character, call get_character to check whether the person already exists (search by given name, full name, and reading). Use the FULL name (surname + given) as jp_name and record the other surface forms in `aliases`. If you discover that two existing entries are the same person, call merge_character(from_id, into_id), keeping the entry with the fuller name as into_id. When an upsert result reports possible duplicate entries (merge_candidates), inspect them and merge_character if they are the same person.
 
 For THIS turn: you are given the chapter number, controlled terminology rules, and the discoveries from the chunk just approved (new characters, new terms, continuity notes). Call the appropriate tools (upsert_character, upsert_glossary_term, update_volume_recap, flag_continuity_note) to persist them. Do not re-translate. When there is nothing left to record, stop."#;
 
@@ -178,7 +179,7 @@ pub fn build_orchestrator_metadata_msg(
 
     if !out.new_characters.is_empty() {
         s.push_str(
-            "\nNew characters (call upsert_character for each that is genuinely new or changed):\n",
+            "\nNew characters (call upsert_character for each that is genuinely new or changed; a bare given name and a full name for the same person are ONE entry — use the full name as jp_name with other forms in aliases, get_character first, and merge_character to consolidate any duplicates):\n",
         );
         for c in &out.new_characters {
             s.push_str(&format!(

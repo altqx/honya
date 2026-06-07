@@ -141,6 +141,7 @@ impl EditForm {
             honorific: None,
             speech_style: None,
             relationships: Vec::new(),
+            aliases: Vec::new(),
             notes: opt(get(3)),
             first_seen_chapter: None,
         }
@@ -341,7 +342,9 @@ impl LexiconScreen {
         };
         let Some(ws) = ws else { return Action::None };
         let result = match form.kind {
-            SUB_CHARACTERS => crate::workspace::characters::upsert(ws, form.to_character()),
+            SUB_CHARACTERS => {
+                crate::workspace::characters::upsert(ws, form.to_character()).map(|_| ())
+            }
             SUB_STYLE => crate::workspace::style::append_note(
                 ws,
                 form.fields.first().map(|f| f.1.as_str()).unwrap_or(""),

@@ -327,6 +327,10 @@ pub struct Character {
     pub speech_style: Option<String>,
     #[serde(default)]
     pub relationships: Vec<Relationship>,
+    /// Alternate JP surface forms of this same character (given name, full name,
+    /// alternate kanji). Lets variant names dedup into one canonical entry.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
     #[serde(default)]
     pub notes: Option<String>,
     #[serde(default)]

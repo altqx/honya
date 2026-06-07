@@ -25,7 +25,7 @@ pub fn orchestrator_tools() -> serde_json::Value {
             "type": "function",
             "function": {
                 "name": "upsert_character",
-                "description": "Create or update a character in CHARACTERS.md. Use whenever a new character appears or an existing character's name, gender, honorific, speech style, or relationships change.",
+                "description": "Create or update a character in CHARACTERS.md. Use whenever a new character appears or an existing character's name, gender, honorific, speech style, or relationships change. To avoid duplicates, prefer the FULL name (surname + given name) as jp_name and list shorter/variant surface forms in `aliases`; call get_character first to check whether the character already exists.",
                 "parameters": {
                     "type": "object",
                     "additionalProperties": false,
@@ -50,8 +50,25 @@ pub fn orchestrator_tools() -> serde_json::Value {
                                 }
                             }
                         },
+                        "aliases": {"type": "array", "items": {"type": "string"}, "description": "Alternate JP surface forms of THIS SAME character (e.g. bare given name, alternate kanji). Used to fold name variants into one entry instead of creating duplicates."},
                         "notes": {"type": "string"},
                         "first_seen_chapter": {"type": "integer"}
+                    }
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "merge_character",
+                "description": "Consolidate two CHARACTERS.md entries that are the SAME person (e.g. a bare given name recorded separately from the full name, or the same character under different kanji). Keeps `into_id` as canonical, folds the other entry's fields/relationships in, records its name forms as aliases, repoints references, and removes `from_id`. Use this when get_character or an upsert result shows duplicate entries for one character.",
+                "parameters": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["from_id", "into_id"],
+                    "properties": {
+                        "from_id": {"type": "string", "description": "Id of the duplicate entry to remove."},
+                        "into_id": {"type": "string", "description": "Id of the surviving canonical entry (prefer the one with the fuller name)."}
                     }
                 }
             }
@@ -190,9 +207,17 @@ struct UpsertCharacterArgs {
     #[serde(default)]
     relationships: Vec<Relationship>,
     #[serde(default)]
+    aliases: Vec<String>,
+    #[serde(default)]
     notes: Option<String>,
     #[serde(default)]
     first_seen_chapter: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MergeCharacterArgs {
+    from_id: String,
+    into_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -316,24 +341,79 @@ pub async fn dispatch_tool(
                 honorific: a.honorific,
                 speech_style: a.speech_style,
                 relationships: a.relationships,
+                aliases: a.aliases,
                 notes: a.notes,
                 first_seen_chapter: a.first_seen_chapter.or(Some(chapter)),
             };
             match characters::upsert(ws, character) {
-                Ok(()) => {
+                Ok(outcome) => {
                     tx.send(AppEvent::CharacterUpserted {
                         id: id.clone(),
                         jp_name: a.jp_name.clone(),
                         thai_name: a.thai_name.clone(),
                     });
+                    let summary = match &outcome {
+                        characters::CharacterUpsertOutcome::Merged { into_id } => {
+                            format!("character {} merged into {}", a.jp_name, into_id)
+                        }
+                        _ => format!("character {} ({} → {})", id, a.jp_name, a.thai_name),
+                    };
                     tx.send(AppEvent::ToolInvoked {
                         chapter,
                         tool: name.to_string(),
-                        summary: format!("character {} ({} → {})", id, a.jp_name, a.thai_name),
+                        summary,
                     });
-                    ToolResult::ok(format!("Upserted character {} ({})", a.thai_name, id))
+                    match outcome {
+                        characters::CharacterUpsertOutcome::InsertedWithCandidates {
+                            id,
+                            candidates,
+                        } => ToolResult::data(
+                            format!(
+                                "Saved character {} ({}), but it may duplicate existing entr{}: {}. If any is the same person, call merge_character(from_id, into_id) to consolidate (keep the fuller name as into_id).",
+                                a.thai_name,
+                                id,
+                                if candidates.len() == 1 { "y" } else { "ies" },
+                                candidates.join(", "),
+                            ),
+                            json!({ "id": id, "merge_candidates": candidates }),
+                        ),
+                        characters::CharacterUpsertOutcome::Merged { into_id } => ToolResult::ok(
+                            format!("Merged character {} into {}", a.thai_name, into_id),
+                        ),
+                        characters::CharacterUpsertOutcome::Inserted => {
+                            ToolResult::ok(format!("Upserted character {} ({})", a.thai_name, id))
+                        }
+                    }
                 }
                 Err(e) => ToolResult::err(format!("failed to write character: {e}")),
+            }
+        }
+
+        "merge_character" => {
+            let a: MergeCharacterArgs = match serde_json::from_str(args_json) {
+                Ok(a) => a,
+                Err(e) => return ToolResult::err(format!("invalid merge_character args: {e}")),
+            };
+            match characters::merge(ws, &a.from_id, &a.into_id) {
+                Ok(true) => {
+                    tx.send(AppEvent::ToolInvoked {
+                        chapter,
+                        tool: name.to_string(),
+                        summary: format!("merged character {} into {}", a.from_id, a.into_id),
+                    });
+                    ToolResult::ok(format!(
+                        "Merged character {} into {}",
+                        a.from_id, a.into_id
+                    ))
+                }
+                Ok(false) => ToolResult::data(
+                    format!(
+                        "No merge performed: ids equal or not found (from_id={}, into_id={}).",
+                        a.from_id, a.into_id
+                    ),
+                    json!({ "merged": false }),
+                ),
+                Err(e) => ToolResult::err(format!("failed to merge characters: {e}")),
             }
         }
 
@@ -707,6 +787,134 @@ mod tests {
             Some("聖剣")
         );
 
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    fn character(id: &str, jp: &str, thai: &str, romaji: Option<&str>) -> Character {
+        Character {
+            id: id.into(),
+            jp_name: jp.into(),
+            thai_name: thai.into(),
+            romaji: romaji.map(|s| s.to_string()),
+            gender: None,
+            honorific: None,
+            speech_style: None,
+            relationships: Vec::new(),
+            aliases: Vec::new(),
+            notes: None,
+            first_seen_chapter: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn upsert_character_with_aliases_persists() {
+        let (base, ws) = temp_ws("char_aliases");
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let result = dispatch_tool(
+            &ws,
+            &EventTx(tx),
+            3,
+            "upsert_character",
+            r#"{"id":"yuu","jp_name":"有月勇","thai_name":"อาริทสึกิ ยู","aliases":["勇"]}"#,
+        )
+        .await;
+        assert!(result.ok, "{}", result.message);
+
+        let chars = characters::load(&ws);
+        let yuu = chars.iter().find(|c| c.id == "yuu").expect("saved");
+        assert!(yuu.aliases.iter().any(|a| a == "勇"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn upsert_character_suggests_merge_candidate() {
+        let (base, ws) = temp_ws("char_suggest");
+        characters::upsert(&ws, character("miya", "みや", "มิยะ", Some("Miya"))).unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        // Same reading, different kanji → suggest-only, must not auto-merge.
+        let result = dispatch_tool(
+            &ws,
+            &EventTx(tx),
+            3,
+            "upsert_character",
+            r#"{"id":"miya2","jp_name":"未夜","thai_name":"มิยะ","romaji":"Miya"}"#,
+        )
+        .await;
+        assert!(result.ok);
+
+        assert_eq!(characters::load(&ws).len(), 2, "homophone kept separate");
+        let cands = result
+            .data
+            .as_ref()
+            .and_then(|d| d.get("merge_candidates"))
+            .and_then(|v| v.as_array())
+            .expect("merge_candidates reported");
+        assert!(cands.iter().any(|v| v.as_str() == Some("miya")));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn merge_character_tool_repoints_and_logs() {
+        let (base, ws) = temp_ws("char_merge");
+        characters::upsert(
+            &ws,
+            character("yuu", "有月勇", "อาริทสึกิ ยู", Some("Aritsuki Yuu")),
+        )
+        .unwrap();
+        // Bare stub with no romaji → does not auto-merge; consolidate via the tool.
+        characters::upsert(&ws, character("yuu-bare", "勇", "ยู", None)).unwrap();
+        let mut miya = character("miya", "みや", "มิยะ", Some("Miya"));
+        miya.relationships = vec![Relationship {
+            target_id: "yuu-bare".into(),
+            relation: "neighbor".into(),
+        }];
+        characters::upsert(&ws, miya).unwrap();
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let result = dispatch_tool(
+            &ws,
+            &EventTx(tx),
+            5,
+            "merge_character",
+            r#"{"from_id":"yuu-bare","into_id":"yuu"}"#,
+        )
+        .await;
+        assert!(result.ok, "{}", result.message);
+
+        let chars = characters::load(&ws);
+        assert!(chars.iter().all(|c| c.id != "yuu-bare"), "from removed");
+        let miya = chars.iter().find(|c| c.id == "miya").unwrap();
+        assert_eq!(miya.relationships[0].target_id, "yuu", "ref repointed");
+
+        let mut saw_tool = false;
+        while let Ok(ev) = rx.try_recv() {
+            if let AppEvent::ToolInvoked { tool, .. } = ev {
+                saw_tool |= tool == "merge_character";
+            }
+        }
+        assert!(saw_tool, "merge emits a ToolInvoked log");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn get_character_by_alias() {
+        let (base, ws) = temp_ws("char_get_alias");
+        let mut yuu = character("yuu", "有月勇", "อาริทสึกิ ยู", Some("Aritsuki Yuu"));
+        yuu.aliases = vec!["勇".into()];
+        characters::upsert(&ws, yuu).unwrap();
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let result =
+            dispatch_tool(&ws, &EventTx(tx), 3, "get_character", r#"{"query":"勇"}"#).await;
+        assert!(result.ok);
+        let arr = result
+            .data
+            .as_ref()
+            .and_then(|d| d.get("characters"))
+            .and_then(|v| v.as_array())
+            .expect("characters array");
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0].get("id").and_then(|v| v.as_str()), Some("yuu"));
         let _ = std::fs::remove_dir_all(&base);
     }
 }
