@@ -678,7 +678,10 @@ mod tests {
         assert!(matches!(out, CharacterUpsertOutcome::Merged { .. }));
         let yuu = &chars[0];
         assert_eq!(yuu.jp_name, "有月勇", "fuller name stays canonical");
-        assert_eq!(yuu.thai_name, "อาริทสึกิ ยู", "shorter variant's Thai must not win");
+        assert_eq!(
+            yuu.thai_name, "อาริทสึกิ ยู",
+            "shorter variant's Thai must not win"
+        );
         assert!(yuu.aliases.iter().any(|a| a == "勇"));
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -703,8 +706,16 @@ mod tests {
     #[test]
     fn ambiguous_suffix_is_suggest_only() {
         let (base, ws) = temp_ws("ambiguous");
-        upsert(&ws, ch("a", "源道寺朝華", "เกนโดจิ อาซากะ", Some("Gendouji Asaka"))).unwrap();
-        upsert(&ws, ch("b", "香坂朝華", "โคซากะ อาซากะ", Some("Kousaka Asaka"))).unwrap();
+        upsert(
+            &ws,
+            ch("a", "源道寺朝華", "เกนโดจิ อาซากะ", Some("Gendouji Asaka")),
+        )
+        .unwrap();
+        upsert(
+            &ws,
+            ch("b", "香坂朝華", "โคซากะ อาซากะ", Some("Kousaka Asaka")),
+        )
+        .unwrap();
         let out = upsert(&ws, ch("c", "朝華", "อาซากะ", Some("Asaka"))).unwrap();
 
         let chars = load(&ws);

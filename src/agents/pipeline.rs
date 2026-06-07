@@ -1446,7 +1446,10 @@ mod tests {
             }
         }
 
-        assert!(!saw_failed, "a transient reviewer error must not fail the chapter");
+        assert!(
+            !saw_failed,
+            "a transient reviewer error must not fail the chapter"
+        );
         assert_eq!(
             final_state,
             Some(ChapterStatus::NeedsReview),

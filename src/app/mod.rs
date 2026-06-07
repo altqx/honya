@@ -115,6 +115,12 @@ pub enum Action {
     },
     /// Open the import wizard pre-targeted at the open project to add the next volume.
     AddVolume,
+    /// Export the given volume of the open project to the chosen deliverable
+    /// formats (merged Markdown / EPUB / DOCX), written under `<root>/exports/`.
+    ExportVolume {
+        vol: u32,
+        formats: Vec<crate::export::ExportFormat>,
+    },
     /// Permanently delete a project directory (raw + translations + metadata) from
     /// disk. Confirmed via a modal first; refuses if a run is in progress.
     DeleteProject {
@@ -267,6 +273,9 @@ pub struct App {
     pub toast: Option<Toast>,
     /// True while a pipeline run is live (drives the tab-3 spinner badge).
     pub run_active: bool,
+    /// True while a volume export is being written (guards against overlapping
+    /// exports; independent of `run_active` so it never blocks a translation run).
+    pub export_active: bool,
     /// Shared pause/stop control for the in-flight pipeline run (None when idle).
     pub run_ctl: Option<crate::agents::pipeline::RunControl>,
     /// Rolling activity log shown in the Log overlay.
@@ -334,6 +343,7 @@ impl App {
             lexicon: LexiconScreen::new(),
             toast: None,
             run_active: false,
+            export_active: false,
             run_ctl: None,
             log: Vec::new(),
             update_available: None,
@@ -544,6 +554,14 @@ impl App {
                 );
             }
             AppEvent::Error { context, msg } => {
+                // An export failure clears its guard and dismisses the export overlay
+                // so the error toast is visible.
+                if self.export_active {
+                    self.export_active = false;
+                    if matches!(self.overlay, Overlay::Export(_)) {
+                        self.overlay = Overlay::None;
+                    }
+                }
                 self.toast = Some(Toast::error(format!("{context}: {msg}")));
                 self.push_log(LogLevel::Error, format!("{context}: {msg}"));
             }
@@ -559,12 +577,39 @@ impl App {
                 self.overlay = Overlay::None;
                 self.refresh_projects();
                 self.toast = Some(Toast::info(format!("imported {project_id} · Vol.{vol:02}")));
-                self.push_log(LogLevel::Info, format!("imported {project_id} Vol.{vol:02}"));
+                self.push_log(
+                    LogLevel::Info,
+                    format!("imported {project_id} Vol.{vol:02}"),
+                );
                 self.open_project(project_id.clone());
                 // Land on the imported volume (Vol.01 for a fresh import, the new
                 // volume for an add-volume), keeping the cursor and active volume in
                 // sync so auto-follow doesn't flip it on the next keystroke.
                 self.focus_active_volume(*vol);
+            }
+            AppEvent::ExportProgress { done, total, label } => {
+                self.overlay.set_export_progress(*done, *total, label);
+            }
+            AppEvent::ExportFinished { paths, warnings } => {
+                self.export_active = false;
+                self.overlay
+                    .set_export_done(paths.clone(), warnings.clone());
+                let dir = paths
+                    .first()
+                    .and_then(|p| p.parent())
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default();
+                self.toast = Some(Toast::info(format!(
+                    "exported {} file(s) → {dir}",
+                    paths.len()
+                )));
+                self.push_log(
+                    LogLevel::Info,
+                    format!("exported {} file(s) to {dir}", paths.len()),
+                );
+                for w in warnings {
+                    self.push_log(LogLevel::Warn, format!("export: {w}"));
+                }
             }
             AppEvent::SynopsisTranslated { text } => {
                 self.overlay.set_synopsis_result(Ok(text.clone()));
@@ -1063,6 +1108,9 @@ impl App {
             Action::AddVolume => {
                 self.open_add_volume();
             }
+            Action::ExportVolume { vol, formats } => {
+                self.start_export(vol, formats);
+            }
             Action::DeleteProject { id } => {
                 self.delete_project(id);
             }
@@ -1288,7 +1336,9 @@ impl App {
     /// `remove_project_dir` refuses any directory that is not actually a project.
     fn delete_project(&mut self, id: String) {
         if self.run_active {
-            self.toast = Some(Toast::warn("can't delete a project while a run is in progress"));
+            self.toast = Some(Toast::warn(
+                "can't delete a project while a run is in progress",
+            ));
             return;
         }
         // The id comes from the rendered shelf (`self.projects`), so find it there;
@@ -1345,7 +1395,9 @@ impl App {
         self.project = ProjectScreen::new();
         self.screen = Screen::Project;
         self.toast = Some(if no_key {
-            Toast::info(format!("opened {id} · add an API key in Settings to translate"))
+            Toast::info(format!(
+                "opened {id} · add an API key in Settings to translate"
+            ))
         } else {
             Toast::info(format!("opened {id}"))
         });
@@ -1675,6 +1727,61 @@ impl App {
         });
     }
 
+    /// Gather the active project's `vol` and write it to the chosen deliverable
+    /// formats on a background task. Mirrors `start_import`: clone the owned inputs
+    /// out of `self.active`, spawn, and report back only via `AppEvent`s. Runs
+    /// independently of `run_active` (export is read-only on project data).
+    fn start_export(&mut self, vol: u32, formats: Vec<crate::export::ExportFormat>) {
+        if formats.is_empty() {
+            self.toast = Some(Toast::warn("no export formats selected"));
+            return;
+        }
+        if self.export_active {
+            self.toast = Some(Toast::warn("an export is already running"));
+            return;
+        }
+        let Some(active) = self.active.as_ref() else {
+            self.toast = Some(Toast::warn("open a project first"));
+            return;
+        };
+        let project = &active.project;
+        let Some(volume) = project.volumes.iter().find(|v| v.number == vol) else {
+            self.toast = Some(Toast::warn(format!("Vol.{vol:02} not found")));
+            return;
+        };
+        if volume.chapters.is_empty() {
+            self.toast = Some(Toast::warn(format!("Vol.{vol:02} has no chapters")));
+            return;
+        }
+
+        let root = project.dir.clone();
+        let project_id = project.id.clone();
+        let title = project.title.clone();
+        let vol_label = volume.label.clone();
+        let chapters = volume.chapters.clone();
+        let tx = self.tx.clone();
+
+        self.export_active = true;
+        // Seed the gauge immediately so the overlay shows progress before the first
+        // file lands (gather reads every chapter off disk first).
+        self.overlay
+            .set_export_progress(0, formats.len(), "gathering");
+        self.toast = Some(Toast::info(format!("exporting Vol.{vol:02} …")));
+
+        tokio::spawn(async move {
+            let ws = Workspace::new(root, vol);
+            let book =
+                crate::export::gather(&ws, &title, &project_id, vol, vol_label, &chapters).await;
+            match crate::export::export_volume(&ws, book, &formats, &tx).await {
+                Ok((paths, warnings)) => tx.send(AppEvent::ExportFinished { paths, warnings }),
+                Err(e) => tx.send(AppEvent::Error {
+                    context: "export".to_string(),
+                    msg: e.to_string(),
+                }),
+            }
+        });
+    }
+
     /// Spawn a background Translator round-trip for a volume synopsis. Uses the
     /// active project's client when one is open, else builds from config (the
     /// import wizard runs from the Shelf with no project open yet).
@@ -1914,7 +2021,12 @@ impl App {
         let current = self.reader.current_chapter();
         let mut items: Vec<JumpTarget> = Vec::new();
 
-        if let Some(volume) = active.project.volumes.iter().find(|v| v.number == active.vol) {
+        if let Some(volume) = active
+            .project
+            .volumes
+            .iter()
+            .find(|v| v.number == active.vol)
+        {
             for ch in &volume.chapters {
                 items.push(JumpTarget {
                     chapter: ch.number,

@@ -11,6 +11,7 @@ mod cleanse;
 mod config;
 mod epub;
 mod error;
+mod export;
 mod llm;
 mod model;
 mod theme;

@@ -2,20 +2,20 @@
 //! files. Tab cycles Glossary ↔ Characters ↔ Style. Entries can be added / edited /
 //! deleted inline, persisting via workspace::{glossary,characters}::upsert.
 
+use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
-use ratatui::Frame;
 
 use crate::model::{Character, GlossaryTerm, TermPolicy};
 use crate::theme::{self, Theme};
 use crate::ui::text::{pad_to_cols, thai_display_safe, truncate_cols};
 use crate::workspace::Workspace;
 
-use super::overlay::Overlay;
 use super::Action;
+use super::overlay::Overlay;
 
 const SUB_GLOSSARY: u8 = 0;
 const SUB_CHARACTERS: u8 = 1;

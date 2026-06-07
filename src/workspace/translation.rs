@@ -94,6 +94,43 @@ pub fn prose_only(text: &str) -> String {
     out.trim_matches('\n').to_string()
 }
 
+/// Like [`prose_only`], but also strips the visible `[REVIEW NEEDED]` banner so an
+/// exported deliverable carries clean Thai with no internal QA scaffolding. The
+/// banner is the contiguous blockquote introduced by the `**[REVIEW NEEDED]**` line
+/// (its spacer/reason `>` lines follow); everything else — including any legitimate
+/// blockquote the translator produced — is preserved. Used only by the export
+/// module; the QA panel and Reader diff keep the banner via [`prose_only`].
+pub fn export_prose(text: &str) -> String {
+    let stripped = prose_only(text);
+    let mut out = String::with_capacity(stripped.len());
+    let mut in_banner = false;
+    let mut blank_run = 0u32;
+    for line in stripped.lines() {
+        let t = line.trim_start();
+        if t.starts_with('>') && t.contains("[REVIEW NEEDED]") {
+            in_banner = true; // drop the banner's lead line …
+            continue;
+        }
+        if in_banner {
+            if t.starts_with('>') {
+                continue; // … and its trailing spacer / reason blockquote lines
+            }
+            in_banner = false;
+        }
+        if line.trim().is_empty() {
+            blank_run += 1;
+            if blank_run > 1 {
+                continue; // collapse the blank run the dropped banner leaves behind
+            }
+        } else {
+            blank_run = 0;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.trim_matches('\n').to_string()
+}
+
 /// Pull the reviewer's objection out of a review-needed banner block: the text after
 /// the `เหตุผลจากผู้ตรวจ:` blockquote line, trimmed; empty when that line is absent.
 /// Kept in lock-step with the banner `append_chunk_needs_review` writes.

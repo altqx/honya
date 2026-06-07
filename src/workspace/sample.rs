@@ -295,7 +295,10 @@ mod tests {
         assert_eq!(characters::load(&ws).len(), 2, "two characters");
         let data = volume::load(&ws);
         assert!(!data.synopsis_th.trim().is_empty(), "Thai synopsis present");
-        assert!(!data.synopsis_raw.trim().is_empty(), "source synopsis present");
+        assert!(
+            !data.synopsis_raw.trim().is_empty(),
+            "source synopsis present"
+        );
         assert_eq!(data.bookmarks.len(), 1, "one seeded bookmark");
         assert_eq!(data.annotations.len(), 1, "one seeded proofreading note");
         assert!(data.chapters.contains_key("1"), "ch1 summary present");

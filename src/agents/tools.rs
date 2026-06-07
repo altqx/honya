@@ -401,10 +401,7 @@ pub async fn dispatch_tool(
                         tool: name.to_string(),
                         summary: format!("merged character {} into {}", a.from_id, a.into_id),
                     });
-                    ToolResult::ok(format!(
-                        "Merged character {} into {}",
-                        a.from_id, a.into_id
-                    ))
+                    ToolResult::ok(format!("Merged character {} into {}", a.from_id, a.into_id))
                 }
                 Ok(false) => ToolResult::data(
                     format!(

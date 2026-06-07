@@ -884,6 +884,20 @@ pub enum AppEvent {
     SynopsisFailed {
         msg: String,
     },
+
+    /// Per-format progress while exporting a volume to deliverable files.
+    ExportProgress {
+        done: usize,
+        total: usize,
+        /// The format currently being written (e.g. "EPUB").
+        label: String,
+    },
+    /// A volume export finished: the files written and any non-fatal warnings
+    /// (chapters still NeedsReview / missing a translation / dangling images).
+    ExportFinished {
+        paths: Vec<PathBuf>,
+        warnings: Vec<String>,
+    },
 }
 
 /// Clonable sender handle background tasks use to talk to the UI.

@@ -222,6 +222,11 @@ impl ProjectScreen {
             }
             // Add a volume to this project (import wizard pre-targeted at it).
             KeyCode::Char('V') => Action::AddVolume,
+            // Export the volume under the cursor to deliverable formats.
+            KeyCode::Char('x') => {
+                let vol = self.selected_volume(active).unwrap_or(active.vol);
+                Action::show_overlay(Overlay::export(vol))
+            }
             // Translation QA inbox (App rebuilds the report from the live project).
             KeyCode::Char('Q') => Action::show_overlay(Overlay::qa_placeholder()),
             _ => Action::None,
@@ -562,6 +567,7 @@ impl ProjectScreen {
             ("t", "marked/current"),
             ("T", "whole vol"),
             ("V", "add vol"),
+            ("x", "export"),
             ("Space", "mark"),
             ("h/l", "tree/focus"),
             ("e", "edit ctx"),
@@ -936,7 +942,10 @@ mod tests {
         screen.handle_key(key(KeyCode::Down), Some(&active));
         let action = screen.handle_key(key(KeyCode::Down), Some(&active));
         assert!(matches!(action, Action::SetActiveVolume { vol: 2 }));
-        assert!(screen.selected.is_empty(), "marks clear when leaving a volume");
+        assert!(
+            screen.selected.is_empty(),
+            "marks clear when leaving a volume"
+        );
     }
 
     #[test]

@@ -99,7 +99,12 @@ pub fn highlight(lines: &mut [Line<'static>], needles: &[String], over: Style) {
 
 /// Re-emit `span`, splitting out every needle match into its own span tinted with
 /// `over` merged over the span's base style. Non-matching runs keep the base style.
-fn highlight_span(span: Span<'static>, needles: &[&str], over: Style, out: &mut Vec<Span<'static>>) {
+fn highlight_span(
+    span: Span<'static>,
+    needles: &[&str],
+    over: Style,
+    out: &mut Vec<Span<'static>>,
+) {
     let base = span.style;
     let content = span.content.into_owned();
     if content.is_empty() {
@@ -892,7 +897,11 @@ mod tests {
     #[test]
     fn highlight_tints_matches_and_preserves_other_text() {
         let mut lines = render_one("the 聖剣 glows");
-        highlight(&mut lines, &["聖剣".to_string()], Style::default().fg(Color::Red));
+        highlight(
+            &mut lines,
+            &["聖剣".to_string()],
+            Style::default().fg(Color::Red),
+        );
         // The visible text is unchanged — only spans were split.
         assert_eq!(line_text(&lines[0]), "the 聖剣 glows");
         let tinted = lines[0]

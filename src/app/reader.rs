@@ -531,8 +531,8 @@ impl ReaderScreen {
     /// A short preview of the current TH line, used as a bookmark label.
     pub fn current_line_preview(&self) -> String {
         // Clamp to the last line so a scroll-past-EOF cursor still yields real text.
-        let idx = (self.effective_th_scroll() as usize)
-            .min(self.th.lines().count().saturating_sub(1));
+        let idx =
+            (self.effective_th_scroll() as usize).min(self.th.lines().count().saturating_sub(1));
         let raw = self.th.lines().nth(idx).unwrap_or("");
         let cleaned = crate::workspace::translation::prose_only(raw);
         let text = if cleaned.trim().is_empty() {
@@ -738,7 +738,8 @@ impl ReaderScreen {
         } else {
             base
         };
-        let mut lines = crate::ui::markdown::render(render_content, fg, theme, inner.width as usize);
+        let mut lines =
+            crate::ui::markdown::render(render_content, fg, theme, inner.width as usize);
 
         // Glossary terms first (subtle tint), then search matches on top (standout),
         // so an active query always wins the cell where the two overlap.
@@ -956,7 +957,11 @@ impl ReaderScreen {
         spans.push(Span::styled(glyph(self.highlight), toggle(self.highlight)));
         spans.push(Span::styled(" · notes ", faint));
         spans.push(Span::styled(
-            format!("{} {}", glyph(self.show_annotations), self.annotations.len()),
+            format!(
+                "{} {}",
+                glyph(self.show_annotations),
+                self.annotations.len()
+            ),
             toggle(self.show_annotations),
         ));
         if !self.bookmark_lines.is_empty() {

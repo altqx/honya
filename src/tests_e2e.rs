@@ -195,6 +195,24 @@ fn renders_overlays_without_panic() {
         let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
         term.draw(|f| app.render(f)).unwrap();
 
+        // Export overlay, all three render phases: format checklist, live gauge,
+        // and the results panel (with a warning).
+        for phase in 0..3 {
+            let mut app = fresh_app();
+            let mut export = Overlay::export(1);
+            match phase {
+                1 => export.set_export_progress(1, 3, "EPUB"),
+                2 => export.set_export_done(
+                    vec![PathBuf::from("/tmp/novel_Vol_01.epub")],
+                    vec!["ch_009 “บทที่๙” — still NeedsReview".to_string()],
+                ),
+                _ => {}
+            }
+            app.overlay = export;
+            let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+            term.draw(|f| app.render(f)).unwrap();
+        }
+
         // Reader note editor overlay.
         let mut app = fresh_app();
         app.overlay = Overlay::reader_note(3, 12);
@@ -695,7 +713,10 @@ fn settings_api_key_field_edits_and_respects_env_override() {
     }
     match ov.handle_key(enter) {
         Action::SaveSettings { api_key, .. } => {
-            assert!(api_key.is_none(), "env override → config key left untouched")
+            assert!(
+                api_key.is_none(),
+                "env override → config key left untouched"
+            )
         }
         other => panic!("expected SaveSettings, got {other:?}"),
     }
@@ -779,7 +800,10 @@ fn onboarding_shows_welcome_on_first_run_only() {
     app.cfg.onboarded = true;
     app.overlay = Overlay::None;
     app.init_onboarding();
-    assert!(matches!(app.overlay, Overlay::None), "onboarded → no Welcome");
+    assert!(
+        matches!(app.overlay, Overlay::None),
+        "onboarded → no Welcome"
+    );
 
     // Returning user (has projects) without the flag → quietly marked, no Welcome.
     let mut app = fresh_app();
@@ -864,7 +888,10 @@ fn shelf_delete_confirm_removes_project() {
     );
     // `y` confirms → the directory is gone and the overlay closes.
     app.on_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::empty()));
-    assert!(!dir.exists(), "confirming delete removes the project directory");
+    assert!(
+        !dir.exists(),
+        "confirming delete removes the project directory"
+    );
     assert!(
         matches!(app.overlay, Overlay::None),
         "overlay closes after delete"
@@ -1669,6 +1696,55 @@ async fn end_to_end_import_and_mock_translate() {
         ch1.cost_usd
     ));
     assert!(approx(project.usage_total().cost_usd, ch1.cost_usd));
+
+    // ---- Export the finished volume to all three deliverable formats ----
+    {
+        use crate::export::{ExportFormat, export_volume, gather};
+        let ws = Workspace::new(project_root.clone(), 1);
+        let vol = &project.volumes[0];
+        let exbook = gather(
+            &ws,
+            &project.title,
+            &project.id,
+            1,
+            vol.label.clone(),
+            &vol.chapters,
+        )
+        .await;
+        let (tx2, _rx2) = tokio::sync::mpsc::unbounded_channel();
+        let (paths, _warnings) = export_volume(
+            &ws,
+            exbook,
+            &[
+                ExportFormat::Markdown,
+                ExportFormat::Epub,
+                ExportFormat::Docx,
+            ],
+            &EventTx(tx2),
+        )
+        .await
+        .expect("export_volume");
+
+        assert_eq!(paths.len(), 3, "one file per requested format");
+        for p in &paths {
+            let meta = std::fs::metadata(p).expect("export file exists");
+            assert!(meta.len() > 0, "export file non-empty: {}", p.display());
+            assert!(
+                p.parent().is_some_and(|d| d.ends_with("exports")),
+                "export lands under exports/: {}",
+                p.display()
+            );
+        }
+        // The exported EPUB must re-import cleanly through the production importer.
+        let epub = paths
+            .iter()
+            .find(|p| p.extension().and_then(|e| e.to_str()) == Some("epub"))
+            .expect("epub produced");
+        let reimport = base.join("reexport_work");
+        let reimported =
+            crate::epub::import::import_epub(epub, &reimport).expect("re-import exported epub");
+        assert!(!reimported.spine.is_empty(), "exported epub has a spine");
+    }
 
     let _ = std::fs::remove_dir_all(&base);
 }

@@ -645,7 +645,10 @@ mod tests {
 
         // A second toggle on the same (normalized) line removes it and reports `false`.
         assert!(!toggle_reader_bookmark(&ws, 3, 1, "ignored").unwrap());
-        assert!(reader_bookmarks(&ws).is_empty(), "toggle removes the bookmark");
+        assert!(
+            reader_bookmarks(&ws).is_empty(),
+            "toggle removes the bookmark"
+        );
 
         let _ = std::fs::remove_dir_all(&base);
     }

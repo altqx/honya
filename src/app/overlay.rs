@@ -15,6 +15,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
+use crate::export::ExportFormat;
 use crate::model::{AppConfig, LogLevel, ThemeId, UpdateMode};
 use crate::theme::{self, ALL_THEMES, Theme};
 use crate::ui::layout::{centered_modal, centered_pct};
@@ -488,6 +489,43 @@ pub struct WelcomeState {
 /// Number of selectable rows in the Welcome action menu.
 const WELCOME_ITEMS: usize = 4;
 
+/// Export-volume overlay: a format checklist, then a live gauge, then a results
+/// panel. `formats` mirrors [`ExportFormat::ALL`] order (Markdown · EPUB · DOCX).
+#[derive(Debug, Clone)]
+pub struct ExportState {
+    pub vol: u32,
+    /// Per-format on/off, indexed like [`ExportFormat::ALL`].
+    pub formats: [bool; 3],
+    /// Cursor row over the format list.
+    pub sel: usize,
+    /// Live progress (done, total, current-format label) once export starts.
+    pub progress: Option<(usize, usize, String)>,
+    /// Results once finished: (written file paths, warnings).
+    pub done: Option<(Vec<PathBuf>, Vec<String>)>,
+}
+
+impl ExportState {
+    fn new(vol: u32) -> Self {
+        // Default: all three formats selected (user opts out of what they don't want).
+        Self {
+            vol,
+            formats: [true, true, true],
+            sel: 0,
+            progress: None,
+            done: None,
+        }
+    }
+
+    /// Selected formats in display order.
+    fn selected_formats(&self) -> Vec<ExportFormat> {
+        ExportFormat::ALL
+            .iter()
+            .zip(self.formats)
+            .filter_map(|(f, on)| on.then_some(*f))
+            .collect()
+    }
+}
+
 // ============================================================================
 // OVERLAY
 // ============================================================================
@@ -518,6 +556,8 @@ pub enum Overlay {
     ReaderSearch(ReaderSearchState),
     /// Reader jump/outline picker (chapters · sections · bookmarks).
     ReaderJump(ReaderJumpState),
+    /// Export the active volume to deliverable formats (Markdown · EPUB · DOCX).
+    Export(ExportState),
 }
 
 impl Overlay {
@@ -680,12 +720,31 @@ impl Overlay {
         Overlay::settings_at(0)
     }
 
+    /// Export-volume overlay for `vol` (format checklist → gauge → results).
+    pub fn export(vol: u32) -> Self {
+        Overlay::Export(ExportState::new(vol))
+    }
+
     // ---- import progress passthrough (called from App::on_app_event) ------
 
     pub fn set_import_progress(&mut self, done: usize, total: usize, label: &str) {
         if let Overlay::Import(st) = self {
             st.step = 4;
             st.progress = Some((done, total, label.to_string()));
+        }
+    }
+
+    // ---- export passthrough (called from App::on_app_event) ----------------
+
+    pub fn set_export_progress(&mut self, done: usize, total: usize, label: &str) {
+        if let Overlay::Export(st) = self {
+            st.progress = Some((done, total, label.to_string()));
+        }
+    }
+
+    pub fn set_export_done(&mut self, paths: Vec<PathBuf>, warnings: Vec<String>) {
+        if let Overlay::Export(st) = self {
+            st.done = Some((paths, warnings));
         }
     }
 
@@ -751,6 +810,7 @@ impl Overlay {
             Overlay::ReaderNote(_) => self.handle_reader_note_key(key),
             Overlay::ReaderSearch(_) => self.handle_reader_search_key(key),
             Overlay::ReaderJump(_) => self.handle_reader_jump_key(key),
+            Overlay::Export(_) => self.handle_export_key(key),
             Overlay::Log(off) => match key.code {
                 KeyCode::Esc | KeyCode::Char('l') | KeyCode::Char('q') => Action::CloseOverlay,
                 KeyCode::Char('k') | KeyCode::Up => {
@@ -800,6 +860,55 @@ impl Overlay {
                 2 => Action::show_overlay(Overlay::settings_at(SETTINGS_KEY_FIELD)),
                 _ => Action::DismissWelcome,
             },
+            _ => Action::None,
+        }
+    }
+
+    fn handle_export_key(&mut self, key: KeyEvent) -> Action {
+        let Overlay::Export(st) = self else {
+            return Action::None;
+        };
+        // Results view: any acknowledge key closes.
+        if st.done.is_some() {
+            return match key.code {
+                KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q') => Action::CloseOverlay,
+                _ => Action::None,
+            };
+        }
+        // Running: Esc/q dismiss the overlay (the export finishes in the background).
+        if st.progress.is_some() {
+            return match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => Action::CloseOverlay,
+                _ => Action::None,
+            };
+        }
+        // Format checklist.
+        let n = st.formats.len();
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => Action::CloseOverlay,
+            KeyCode::Up | KeyCode::Char('k') => {
+                st.sel = (st.sel + n - 1) % n;
+                Action::None
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                st.sel = (st.sel + 1) % n;
+                Action::None
+            }
+            KeyCode::Char(' ') => {
+                st.formats[st.sel] = !st.formats[st.sel];
+                Action::None
+            }
+            KeyCode::Enter => {
+                let formats = st.selected_formats();
+                if formats.is_empty() {
+                    Action::None
+                } else {
+                    Action::ExportVolume {
+                        vol: st.vol,
+                        formats,
+                    }
+                }
+            }
             _ => Action::None,
         }
     }
@@ -1305,6 +1414,20 @@ impl Overlay {
                 ("↵", "jump"),
                 ("Esc", "close"),
             ],
+            Overlay::Export(st) => {
+                if st.done.is_some() {
+                    &[("↵/Esc", "close")]
+                } else if st.progress.is_some() {
+                    &[("Esc", "close")]
+                } else {
+                    &[
+                        ("↑↓", "move"),
+                        ("Space", "toggle"),
+                        ("↵", "export"),
+                        ("Esc", "cancel"),
+                    ]
+                }
+            }
             Overlay::Modal(dlg) if dlg.alternate.is_some() => {
                 // The two alternate-key modals differ by their alternate key, so
                 // pick a matching footer instead of a single hardcoded label set.
@@ -1345,6 +1468,7 @@ impl Overlay {
             Overlay::ReaderNote(st) => self.render_reader_note(f, area, theme, st),
             Overlay::ReaderSearch(st) => self.render_reader_search(f, area, theme, st),
             Overlay::ReaderJump(st) => self.render_reader_jump(f, area, theme, st),
+            Overlay::Export(st) => self.render_export(f, area, theme, st),
         }
     }
 
@@ -1579,7 +1703,13 @@ impl Overlay {
         );
     }
 
-    fn render_reader_search(&self, f: &mut Frame, area: Rect, theme: &Theme, st: &ReaderSearchState) {
+    fn render_reader_search(
+        &self,
+        f: &mut Frame,
+        area: Rect,
+        theme: &Theme,
+        st: &ReaderSearchState,
+    ) {
         let modal = centered_modal(64, 7, area);
         f.render_widget(Clear, modal);
         let block = self.modal_block("Search · ค้นหา (JA + TH)", theme);
@@ -1916,6 +2046,145 @@ impl Overlay {
             rows[1],
         );
         render_gauge(f, indent(rows[2], 2), done, total.max(1), theme);
+    }
+
+    fn render_export(&self, f: &mut Frame, area: Rect, theme: &Theme, st: &ExportState) {
+        let modal = centered_modal(66, 15, area);
+        f.render_widget(Clear, modal);
+        let title = format!("Export volume — Vol.{:02}", st.vol);
+        let block = self.modal_block(&title, theme);
+        let inner = block.inner(modal);
+        f.render_widget(block, modal);
+
+        if let Some((paths, warnings)) = st.done.as_ref() {
+            self.render_export_done(f, inner, theme, paths, warnings);
+        } else if let Some((done, total, label)) = st.progress.as_ref() {
+            let rows = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(2),
+                    Constraint::Length(1), // label
+                    Constraint::Length(1), // gauge
+                    Constraint::Min(0),
+                ])
+                .split(inner);
+            f.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled("  Writing  ", Style::default().fg(theme.ink_soft)),
+                    Span::styled(label.clone(), Style::default().fg(theme.accent_soft)),
+                ]))
+                .style(Style::default().bg(theme.bg_panel)),
+                rows[1],
+            );
+            render_gauge(f, indent(rows[2], 2), *done, (*total).max(1), theme);
+        } else {
+            self.render_export_pick(f, inner, theme, st);
+        }
+    }
+
+    fn render_export_pick(&self, f: &mut Frame, area: Rect, theme: &Theme, st: &ExportState) {
+        let mut lines = vec![
+            Line::from(Span::styled(
+                "  Choose formats, then ↵ to export:",
+                Style::default().fg(theme.ink_soft),
+            )),
+            Line::from(""),
+        ];
+        for (i, fmt) in ExportFormat::ALL.iter().enumerate() {
+            let on = st.formats[i];
+            let selected = i == st.sel;
+            let checkbox = if on { "[x]" } else { "[ ]" };
+            let name_style = if selected {
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD)
+            } else if on {
+                Style::default().fg(theme.ink)
+            } else {
+                Style::default().fg(theme.ink_faint)
+            };
+            lines.push(Line::from(vec![
+                Span::styled(
+                    if selected { "  › " } else { "    " },
+                    Style::default().fg(theme.accent),
+                ),
+                Span::styled(
+                    format!("{checkbox} "),
+                    Style::default().fg(if on {
+                        theme.status_done
+                    } else {
+                        theme.ink_faint
+                    }),
+                ),
+                Span::styled(format!("{:<9}", fmt.label()), name_style),
+                Span::styled(export_desc(*fmt), Style::default().fg(theme.ink_faint)),
+            ]));
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "  written to the project's exports/ folder",
+            Style::default().fg(theme.ink_faint),
+        )));
+        f.render_widget(
+            Paragraph::new(lines).style(Style::default().bg(theme.bg_panel)),
+            area,
+        );
+    }
+
+    fn render_export_done(
+        &self,
+        f: &mut Frame,
+        area: Rect,
+        theme: &Theme,
+        paths: &[PathBuf],
+        warnings: &[String],
+    ) {
+        let mut lines = vec![Line::from(Span::styled(
+            format!("  ✓ wrote {} file(s):", paths.len()),
+            Style::default().fg(theme.status_done),
+        ))];
+        for p in paths {
+            let name = p
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default()
+                .to_string();
+            lines.push(Line::from(Span::styled(
+                format!("    {name}"),
+                Style::default().fg(theme.ink),
+            )));
+        }
+        lines.push(Line::from(""));
+        if warnings.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "  no warnings",
+                Style::default().fg(theme.ink_faint),
+            )));
+        } else {
+            let shown = warnings.len().min(4);
+            lines.push(Line::from(Span::styled(
+                format!("  ! {} warning(s):", warnings.len()),
+                Style::default().fg(theme.status_warn),
+            )));
+            for w in warnings.iter().take(shown) {
+                lines.push(Line::from(Span::styled(
+                    format!("    {}", thai_display_safe(w)),
+                    Style::default().fg(theme.ink_soft),
+                )));
+            }
+            if warnings.len() > shown {
+                lines.push(Line::from(Span::styled(
+                    format!("    … +{} more (see activity log)", warnings.len() - shown),
+                    Style::default().fg(theme.ink_faint),
+                )));
+            }
+        }
+        f.render_widget(
+            Paragraph::new(lines)
+                .wrap(Wrap { trim: false })
+                .style(Style::default().bg(theme.bg_panel)),
+            area,
+        );
     }
 
     fn render_settings(
@@ -2713,6 +2982,15 @@ fn qa_default_detail(issue: &qa::QaIssue) -> &'static str {
         qa::QaKind::ChapterFailed => "translation failed — see activity log",
         qa::QaKind::ReviewChunk { .. } => "committed without passing review",
         qa::QaKind::Continuity { .. } => "continuity note",
+    }
+}
+
+/// Short one-line description of an export format for the picker.
+fn export_desc(fmt: ExportFormat) -> &'static str {
+    match fmt {
+        ExportFormat::Markdown => "merged .md + images",
+        ExportFormat::Epub => "e-reader (EPUB3)",
+        ExportFormat::Docx => "Word, for editors",
     }
 }
 
