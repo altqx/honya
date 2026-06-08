@@ -328,7 +328,7 @@
         หน้านี้สรุปสิ่งที่เปลี่ยนในแต่ละเวอร์ชัน เรียงจากใหม่ไปเก่า
         เลขเวอร์ชันอ้างอิงจาก <code>Cargo.toml</code>
       </p>
-      <span class="latest-pill"><span class="dot" aria-hidden="true"></span>เวอร์ชันล่าสุด <b>v0.1.16</b></span>
+      <span class="latest-pill"><span class="dot" aria-hidden="true"></span>เวอร์ชันล่าสุด <b>v0.1.17</b></span>
     </div>
   </section>
 
@@ -338,12 +338,24 @@
   <section class="log" aria-label="รายการเวอร์ชัน">
     <div class="wrap">
 
+      <!-- 0.1.17 -->
+      <article class="release">
+        <div class="rel-meta">
+          <span class="ver"><span class="v-pre">v</span>0.1.17</span>
+          <div class="rel-date">8 มิ.ย. 2026</div>
+          <span class="rel-badge">ล่าสุด</span>
+        </div>
+        <ul class="changes">
+          <li class="change"><span class="tag fix">แก้ไข</span><span class="txt">เมื่อสตรีมคำแปลถูกตัดกลางคันในรอบสุดท้ายและไม่มีผลแปลที่สมบูรณ์จากรอบก่อนหน้าให้ใช้ ระบบจะเก็บคำแปลบางส่วนที่สตรีมมาแล้วไว้เป็น <code>NeedsReview</code> แทนที่จะล้มทั้งบท</span></li>
+          <li class="change"><span class="tag fix">แก้ไข</span><span class="txt">ตัดประโยคจากบริบทต่อเนื่อง (continuity) ที่ถูกคัดลอกซ้ำได้ทุกตำแหน่งในคำแปล ไม่ใช่แค่ตอนต้น — ทั้งที่อยู่ท้าย แทรกกลาง หรือหลังตัวคั่นฉาก/รูปภาพ — แล้วยุบบรรทัดว่างที่เหลือให้คำแปลอ่านต่อเนื่อง</span></li>
+        </ul>
+      </article>
+
       <!-- 0.1.16 -->
       <article class="release">
         <div class="rel-meta">
           <span class="ver"><span class="v-pre">v</span>0.1.16</span>
           <div class="rel-date">8 มิ.ย. 2026</div>
-          <span class="rel-badge">ล่าสุด</span>
         </div>
         <ul class="changes">
           <li class="change"><span class="tag fix">แก้ไข</span><span class="txt">เมื่อสตรีมคำแปลถูกตัดกลางคันจน <code>translated_text</code> ไม่ครบ ระบบจะทิ้งผลที่ค้างแล้วแปลท่อนนั้นใหม่ทั้งหมดโดยอัตโนมัติแทนที่จะล้มทั้งบท และถ้าครบรอบสุดท้ายแล้วยังไม่สำเร็จจะเก็บคำแปลที่ดีที่สุดไว้เป็น <code>NeedsReview</code></span></li>
