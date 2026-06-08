@@ -10,6 +10,11 @@
   Content-Type: text/x-shellscript; charset=utf-8
   Cache-Control: public, max-age=300, must-revalidate
   X-Content-Type-Options: nosniff
+# PowerShell installer: plain-text MIME + short cache so `irm | iex` is fresh.
+/install.ps1
+  Content-Type: text/plain; charset=utf-8
+  Cache-Control: public, max-age=300, must-revalidate
+  X-Content-Type-Options: nosniff
 
 # Long, immutable cache for fingerprinted static assets, if present.
 /assets/*

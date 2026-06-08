@@ -328,7 +328,7 @@
         หน้านี้สรุปสิ่งที่เปลี่ยนในแต่ละเวอร์ชัน เรียงจากใหม่ไปเก่า
         เลขเวอร์ชันอ้างอิงจาก <code>Cargo.toml</code>
       </p>
-      <span class="latest-pill"><span class="dot" aria-hidden="true"></span>เวอร์ชันล่าสุด <b>v0.1.18</b></span>
+      <span class="latest-pill"><span class="dot" aria-hidden="true"></span>เวอร์ชันล่าสุด <b>v0.2.0</b></span>
     </div>
   </section>
 
@@ -338,12 +338,26 @@
   <section class="log" aria-label="รายการเวอร์ชัน">
     <div class="wrap">
 
+      <!-- 0.2.0 -->
+      <article class="release">
+        <div class="rel-meta">
+          <span class="ver"><span class="v-pre">v</span>0.2.0</span>
+          <div class="rel-date">9 มิ.ย. 2026</div>
+          <span class="rel-badge">ล่าสุด</span>
+        </div>
+        <ul class="changes">
+          <li class="change"><span class="tag add">เพิ่ม</span><span class="txt">รองรับ <code>Windows</code> แล้ว: มีไฟล์ติดตั้งสำเร็จรูปสำหรับ <code>x86_64</code> และ <code>aarch64</code> ติดตั้งได้ผ่าน <code>PowerShell</code> ด้วย <code>irm https://honya.altqx.com/install.ps1 | iex</code> และอัปเดตในตัวด้วย <code>honya update</code> ได้เช่นเดียวกับแพลตฟอร์มอื่น</span></li>
+          <li class="change"><span class="tag add">เพิ่ม</span><span class="txt">ติดตั้ง honya จาก crates.io ได้โดยตรงด้วย <code>cargo install honya</code> (เดิมต้องติดตั้งผ่าน <code>cargo install --git</code>)</span></li>
+          <li class="change"><span class="tag chg">ปรับปรุง</span><span class="txt">แสดงสถานะการแปลของทั้งโปรเจกต์แบบเรียลไทม์ (ฉบับร่าง / กำลังแปล / เสร็จสมบูรณ์) พร้อมจำนวนตอนที่แปลแล้วในแท็บ Project แทนคำว่า <code>draft</code> แบบตายตัวเดิม และบันทึกสถานะลงในไฟล์ <code>STYLE.md</code> กับ <code>PROJECT.md</code> เพื่อให้สถานะคงอยู่หลังเปิดโปรเจกต์ใหม่</span></li>
+          <li class="change"><span class="tag chg">ปรับปรุง</span><span class="txt">หน้าโปรเจกต์แสดงจำนวนเล่มข้าง <code>PROJECT.md</code> แทนคำว่า <code>synopsis</code> แบบเดิม</span></li>
+        </ul>
+      </article>
+
       <!-- 0.1.18 -->
       <article class="release">
         <div class="rel-meta">
           <span class="ver"><span class="v-pre">v</span>0.1.18</span>
           <div class="rel-date">8 มิ.ย. 2026</div>
-          <span class="rel-badge">ล่าสุด</span>
         </div>
         <ul class="changes">
           <li class="change"><span class="tag fix">แก้ไข</span><span class="txt">เมื่อโมเดลแปลไม่ได้ผลลัพธ์เลยหรือตอบเป็นคำปฏิเสธทั้งหมดจนครบทุกรอบ ระบบจะเก็บท่อนนั้นเป็น <code>NeedsReview</code> ที่ว่างไว้ (รันซ้ำแล้วจะตรวจให้ใหม่) แทนที่จะล้มทั้งบท และจะไม่นำข้อความปฏิเสธไปปนกับบริบทต่อเนื่องของท่อนถัดไป</span></li>

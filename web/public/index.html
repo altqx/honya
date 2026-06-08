@@ -1482,6 +1482,7 @@
   }
 
   var WIN_CMD = 'irm https://honya.altqx.com/install.ps1 | iex';
+  var winLabelText = 'Windows';  // becomes 'Linux / macOS' when this row is recast on Windows
   var winBtn = document.getElementById('winBtn');
   var winTimer;
   if (winBtn){
@@ -1489,11 +1490,11 @@
       copyText(WIN_CMD).then(function(){
         clearTimeout(winTimer);
         winBtn.classList.add('copied');
-        winBtn.setAttribute('aria-label','คัดลอกคำสั่งติดตั้งสำหรับ Windows แล้ว');
-        if (sr) sr.textContent = 'คัดลอกคำสั่งติดตั้งสำหรับ Windows ไปยังคลิปบอร์ดแล้ว';
+        winBtn.setAttribute('aria-label','คัดลอกคำสั่งติดตั้งสำหรับ ' + winLabelText + ' แล้ว');
+        if (sr) sr.textContent = 'คัดลอกคำสั่งติดตั้งสำหรับ ' + winLabelText + ' ไปยังคลิปบอร์ดแล้ว';
         winTimer = setTimeout(function(){
           winBtn.classList.remove('copied');
-          winBtn.setAttribute('aria-label','คัดลอกคำสั่งติดตั้งสำหรับ Windows ไปยังคลิปบอร์ด');
+          winBtn.setAttribute('aria-label','คัดลอกคำสั่งติดตั้งสำหรับ ' + winLabelText + ' ไปยังคลิปบอร์ด');
         }, 2200);
       }, function(){
         var code = document.getElementById('win-cmd');
@@ -1507,6 +1508,43 @@
       });
     });
   }
+
+  /* ───────── OS-aware install command ─────────
+     Surface the one-liner that matches the visitor's platform as the primary
+     command. The shell installer covers Linux + macOS, so only Windows differs:
+     there we promote the PowerShell installer to the main copybox and recast the
+     secondary PowerShell row as the Linux / macOS shell installer — so nothing
+     is shown twice. Detection is a progressive enhancement: if it can't tell,
+     the shell-primary default (works on Linux/macOS) stays. */
+  (function(){
+    var uaPlat = '';
+    try { uaPlat = (navigator.userAgentData && navigator.userAgentData.platform) || ''; } catch (e) { uaPlat = ''; }
+    var probe = (uaPlat + ' ' + (navigator.platform || '') + ' ' + (navigator.userAgent || '')).toLowerCase();
+    var isWindows = probe.indexOf('win') !== -1 && probe.indexOf('windows phone') === -1;
+    if (!isWindows) return;  // Linux / macOS / unknown keep the shell-primary default.
+
+    var SHELL_CMD = 'curl https://honya.altqx.com/install.sh | bash';
+    var PS_CMD    = 'irm https://honya.altqx.com/install.ps1 | iex';
+
+    // Promote PowerShell to the main copybox.
+    var main = document.getElementById('install-cmd');
+    if (main){
+      main.innerHTML = '<span class="cb-prompt" aria-hidden="true">PS&gt; </span>irm https://honya.altqx.com/install.ps1 <span class="cb-pipe">|</span> iex';
+    }
+    INSTALL_CMD = PS_CMD;
+
+    // Recast the secondary PowerShell row as the Linux / macOS shell installer.
+    var winCode = document.getElementById('win-cmd');
+    if (winCode){
+      winCode.textContent = SHELL_CMD;
+      var row = winCode.closest('.alt-install');
+      var orLabel = row ? row.querySelector('.or') : null;
+      if (orLabel) orLabel.textContent = 'Linux / macOS';
+    }
+    WIN_CMD = SHELL_CMD;
+    winLabelText = 'Linux / macOS';
+    if (winBtn) winBtn.setAttribute('aria-label', 'คัดลอกคำสั่งติดตั้งสำหรับ Linux / macOS ไปยังคลิปบอร์ด');
+  })();
 
   /* ───────── five-screen tab switcher: state only — htmx does the content swap ─────────
      htmx fetches each partial into #screen-panel; this listener only toggles the
