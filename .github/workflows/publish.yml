@@ -1,11 +1,18 @@
 name: publish
 
-# Auto-tag + release when Cargo.toml's version changes on main.
+# Auto-tag + release + crates.io publish when Cargo.toml's version changes on main.
 #
 # Bump the `version` in Cargo.toml and push to main; this creates the matching
-# vX.Y.Z tag and runs the release. (A tag pushed with GITHUB_TOKEN does NOT
-# trigger release.yml's tag-push trigger — GitHub's recursion guard — so we call
-# release.yml directly via workflow_call. No PAT required.)
+# vX.Y.Z tag, runs the binary release, and publishes the crate to crates.io.
+# (A tag pushed with GITHUB_TOKEN does NOT trigger release.yml's tag-push trigger
+# — GitHub's recursion guard — so we call release.yml directly via workflow_call.
+# No PAT required.)
+#
+# crates.io publish requires a `CRATES_IO_TOKEN` repo secret (Settings → Secrets
+# and variables → Actions). The publish-crate job is idempotent: it skips any
+# version already on crates.io, so editing this file or running it manually only
+# publishes when the current Cargo.toml version is genuinely missing there — which
+# also bootstraps the very first publish without needing a version bump.
 
 on:
   push:
@@ -13,6 +20,8 @@ on:
       - main
     paths:
       - "Cargo.toml"
+      - ".github/workflows/publish.yml"
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -67,3 +76,69 @@ jobs:
     with:
       tag: v${{ needs.tag.outputs.version }}
     secrets: inherit
+
+  # Publish the crate to crates.io. Not gated on `created`: it publishes whenever
+  # the current Cargo.toml version is missing from crates.io. So a version bump
+  # publishes the new version, and landing this workflow (or a manual dispatch)
+  # bootstraps the current version if it was never published. Already-published
+  # versions are skipped — crates.io releases are immutable.
+  publish-crate:
+    name: publish to crates.io
+    needs: tag
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - name: Checkout (the pushed commit — carries the Cargo.toml being published)
+        uses: actions/checkout@v4
+
+      - name: Decide whether this version needs publishing
+        id: gate
+        run: |
+          set -u
+          ver="${{ needs.tag.outputs.version }}"
+          if [ -z "${ver}" ]; then
+            echo "::error::could not read version from Cargo.toml"; exit 1
+          fi
+          # crates.io returns 200 for a published version, 404 otherwise.
+          # `-w '%{http_code}'` prints 000 on a connection failure (caught by the else).
+          code="$(curl -A "honya-release-workflow" -sS -o /dev/null \
+                    -w '%{http_code}' "https://crates.io/api/v1/crates/honya/${ver}")"
+          if [ "${code}" = "200" ]; then
+            echo "honya ${ver} is already on crates.io; nothing to publish."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          elif [ "${code}" = "404" ]; then
+            echo "honya ${ver} is not on crates.io; will publish."
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::unexpected crates.io status for honya ${ver}: HTTP ${code}"; exit 1
+          fi
+
+      - name: Install Rust toolchain
+        if: steps.gate.outputs.publish == 'true'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo build
+        if: steps.gate.outputs.publish == 'true'
+        uses: Swatinem/rust-cache@v2
+
+      # crates.io releases are immutable, so verify before the irreversible push.
+      # Mirror CI exactly (clippy as the gate, not rustfmt).
+      - name: Verify (clippy + tests)
+        if: steps.gate.outputs.publish == 'true'
+        run: |
+          cargo clippy --all-targets --locked -- -D warnings
+          cargo test --locked
+
+      - name: Publish to crates.io
+        if: steps.gate.outputs.publish == 'true'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+        run: |
+          set -u
+          if [ -z "${CARGO_REGISTRY_TOKEN:-}" ]; then
+            echo "::error::Missing CRATES_IO_TOKEN secret (Settings → Secrets and variables → Actions)."
+            exit 1
+          fi
+          cargo publish --locked

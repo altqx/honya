@@ -7,7 +7,7 @@
 # Downloads the latest prebuilt honya binary for your platform from the
 # altqx/honya GitHub releases, verifies its SHA-256 checksum, and installs it
 # into ~/.local/bin (override with HONYA_INSTALL_DIR or --dir). Falls back to
-# `cargo install` when no prebuilt asset matches your platform.
+# `cargo install honya` (from crates.io) when no prebuilt asset matches your platform.
 #
 # Environment:
 #   HONYA_VERSION       Pin a release tag (e.g. v0.1.0). Default: latest.
@@ -218,14 +218,17 @@ sha256_of() {
 install_from_source() {
   have cargo || die "cargo not found. Install Rust from https://rustup.rs and re-run with --source."
   step "Building ${BIN} from source via cargo (this can take a few minutes)…"
+  # Prefer the published crate (`cargo install honya`); fall back to a git build
+  # for tags not yet on crates.io. VERSION is a release tag like v0.1.0, so strip
+  # the leading "v" for the bare semver crates.io expects.
   if [ -n "$VERSION" ]; then
-    info "Pinning tag ${VERSION}"
-    cargo install --git "$SOURCE_GIT" --tag "$VERSION" --locked "$BIN" \
-      || cargo install --git "$SOURCE_GIT" --tag "$VERSION" "$BIN" \
+    info "Pinning version ${VERSION}"
+    cargo install "$BIN" --version "${VERSION#v}" --locked \
+      || cargo install --git "$SOURCE_GIT" --tag "$VERSION" --locked "$BIN" \
       || die "cargo install from source failed."
   else
-    cargo install --git "$SOURCE_GIT" --locked "$BIN" \
-      || cargo install --git "$SOURCE_GIT" "$BIN" \
+    cargo install "$BIN" --locked \
+      || cargo install --git "$SOURCE_GIT" --locked "$BIN" \
       || die "cargo install from source failed."
   fi
   cargo_bin="${CARGO_HOME:-$HOME/.cargo}/bin"

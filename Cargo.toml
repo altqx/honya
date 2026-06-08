@@ -2,6 +2,15 @@
 name = "honya"
 version = "0.1.18"
 edition = "2024"
+description = "A terminal app for AI-assisted Japanese→Thai light-novel translation (EPUB import + a three-agent LLM pipeline over an OpenRouter-compatible API)."
+license = "Apache-2.0"
+repository = "https://github.com/altqx/honya"
+homepage = "https://honya.altqx.com"
+readme = "README.md"
+keywords = ["epub", "translation", "tui", "japanese", "light-novel"]
+categories = ["command-line-utilities", "text-processing", "localization"]
+# Keep the published crate lean: ship only what a `cargo install honya` build needs.
+exclude = ["web/", "CLAUDE.md", "AGENTS.md", ".github/", ".remember/"]
 
 [dependencies]
 # --- TUI (single crossterm 0.29.0 in tree, verified via `cargo tree -i crossterm`) ---

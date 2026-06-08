@@ -84,7 +84,7 @@ On a platform without a prebuilt asset, the installer automatically falls back t
 ### With Cargo
 
 ```sh
-cargo install --git https://github.com/altqx/honya --locked honya
+cargo install honya
 ```
 
 ### From source
@@ -264,7 +264,8 @@ cargo clippy --all-targets --locked -- -D warnings   # lint clean, warnings as e
 ```
 
 The version in `Cargo.toml` is the **single source of truth** — CI auto-tags on a version change, so
-a release is cut simply by bumping `version` there.
+a release is cut simply by bumping `version` there. Each release also builds cross-platform binaries
+and publishes the crate to [crates.io](https://crates.io/crates/honya) (`cargo install honya`).
 
 ## License
 

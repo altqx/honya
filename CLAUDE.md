@@ -15,7 +15,7 @@ cargo clippy --all-targets --locked -- -D warnings   # CI lints with warnings-as
 
 Running the app (not the tests) requires an OpenRouter API key, resolved in order: `HONYA_API_KEY` → `OPENROUTER_API_KEY` env → `~/.config/honya/config.json` → interactive startup prompt. The test suite uses a mock client and needs no key.
 
-Version is the single source of truth in `Cargo.toml`; CI auto-tags on version change, so a release is cut by bumping `version` there.
+Version is the single source of truth in `Cargo.toml`; CI auto-tags on version change, so a release is cut by bumping `version` there. A version bump also publishes the crate to crates.io (`cargo install honya`) via `.github/workflows/publish.yml` — this needs a `CRATES_IO_TOKEN` repo secret, and the publish step is idempotent (skips versions already on crates.io).
 
 ## Changelog — only on an explicit version bump
 
