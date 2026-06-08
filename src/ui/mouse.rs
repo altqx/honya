@@ -146,14 +146,15 @@ mod tests {
 
     #[test]
     fn from_event_normalizes_only_the_four_gestures() {
-        let single = MouseInput::from_event(&ev(MouseEventKind::Down(MouseButton::Left), 3, 7), false)
-            .unwrap();
+        let single =
+            MouseInput::from_event(&ev(MouseEventKind::Down(MouseButton::Left), 3, 7), false)
+                .unwrap();
         assert_eq!(single.gesture, MouseGesture::Click { double: false });
         assert_eq!((single.col, single.row), (3, 7));
         assert!(single.is_click() && !single.is_double());
 
-        let dbl =
-            MouseInput::from_event(&ev(MouseEventKind::Down(MouseButton::Left), 3, 7), true).unwrap();
+        let dbl = MouseInput::from_event(&ev(MouseEventKind::Down(MouseButton::Left), 3, 7), true)
+            .unwrap();
         assert!(dbl.is_double());
 
         assert_eq!(
@@ -170,7 +171,8 @@ mod tests {
         // Ignored kinds yield nothing.
         assert!(MouseInput::from_event(&ev(MouseEventKind::Moved, 0, 0), false).is_none());
         assert!(
-            MouseInput::from_event(&ev(MouseEventKind::Up(MouseButton::Left), 0, 0), false).is_none()
+            MouseInput::from_event(&ev(MouseEventKind::Up(MouseButton::Left), 0, 0), false)
+                .is_none()
         );
         assert!(
             MouseInput::from_event(&ev(MouseEventKind::Drag(MouseButton::Left), 0, 0), false)

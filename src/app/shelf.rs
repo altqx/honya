@@ -534,7 +534,8 @@ mod tests {
         let mut s = ShelfScreen::new();
         let theme = ThemeId::default().build();
         let mut term = Terminal::new(TestBackend::new(90, 20)).unwrap();
-        term.draw(|f| s.render(f, f.area(), &projects, &theme)).unwrap();
+        term.draw(|f| s.render(f, f.area(), &projects, &theme))
+            .unwrap();
         let la = s.list_area;
 
         // Row 0 starts selected; click the second project row → selects, no open.

@@ -1503,9 +1503,7 @@ async fn partial_translator_stream_is_salvaged_as_needs_review() {
     impl LlmClient for TruncatingTranslatorClient {
         async fn chat(&self, req: &ChatRequest) -> LlmResult<ChatResponse> {
             let schema_name = match &req.response_format {
-                Some(ResponseFormat::JsonSchema { json_schema }) => {
-                    Some(json_schema.name.as_str())
-                }
+                Some(ResponseFormat::JsonSchema { json_schema }) => Some(json_schema.name.as_str()),
                 _ => None,
             };
             let content = match schema_name {
@@ -1554,7 +1552,8 @@ async fn partial_translator_stream_is_salvaged_as_needs_review() {
     )
     .expect("create_project");
     let ws = Workspace::new(project_root.clone(), 1);
-    crate::workspace::translation::write_raw(&ws, 1, "# 第一章\n\nこれはテストの文章です。").unwrap();
+    crate::workspace::translation::write_raw(&ws, 1, "# 第一章\n\nこれはテストの文章です。")
+        .unwrap();
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let ctx = PipelineCtx {

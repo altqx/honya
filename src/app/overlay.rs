@@ -3279,10 +3279,8 @@ mod tests {
             SynPhase::Done,
             SynPhase::Failed,
         ] {
-            let mut st = SynopsisState::new(
-                "源のあらすじ".to_string(),
-                "เรื่องย่อภาษาไทย".to_string(),
-            );
+            let mut st =
+                SynopsisState::new("源のあらすじ".to_string(), "เรื่องย่อภาษาไทย".to_string());
             st.phase = phase.clone();
             st.error = "แปลไม่สำเร็จ".to_string();
             let glyphs = rendered_glyphs(&st);

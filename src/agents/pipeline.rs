@@ -728,9 +728,7 @@ async fn process_chunk(
                                 chunk,
                                 "",
                                 attempt,
-                                format!(
-                                    "translator produced no output after {max} attempts: {e}"
-                                ),
+                                format!("translator produced no output after {max} attempts: {e}"),
                             )
                             .await;
                         }

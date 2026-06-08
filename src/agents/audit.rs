@@ -213,7 +213,11 @@ pub fn strip_copied_continuity(prev_thai: &[String], translated: &str) -> String
     let mut continuity: Vec<Vec<char>> = prev_thai
         .iter()
         .filter(|line| thai_char_count(line) >= 24)
-        .map(|line| normalize_for_duplicate_check(line).chars().collect::<Vec<char>>())
+        .map(|line| {
+            normalize_for_duplicate_check(line)
+                .chars()
+                .collect::<Vec<char>>()
+        })
         .filter(|norm| norm.len() >= 32)
         .collect();
     if continuity.is_empty() {
@@ -236,9 +240,9 @@ pub fn strip_copied_continuity(prev_thai: &[String], translated: &str) -> String
     let mut pos = 0usize;
     while pos < norm.len() {
         let remaining = norm.len() - pos;
-        let matched = continuity
-            .iter()
-            .find(|c| c.len() <= remaining && c.iter().enumerate().all(|(k, ch)| norm[pos + k].2 == *ch));
+        let matched = continuity.iter().find(|c| {
+            c.len() <= remaining && c.iter().enumerate().all(|(k, ch)| norm[pos + k].2 == *ch)
+        });
         match matched {
             Some(c) => {
                 cuts.push((norm[pos].0, norm[pos + c.len() - 1].1));
@@ -399,8 +403,7 @@ mod tests {
     fn strip_removes_leading_copied_continuity_and_clears_audit() {
         let prev = vec!["เธอกำมือแน่นพลางฝืนยิ้มทั้งที่เสียงยังสั่นอยู่เล็กน้อย".to_string()];
         let source = "彼女は振り返った。";
-        let raw =
-            "เธอกำมือแน่นพลางฝืนยิ้มทั้งที่เสียงยังสั่นอยู่เล็กน้อย\n\nเธอหันกลับไป";
+        let raw = "เธอกำมือแน่นพลางฝืนยิ้มทั้งที่เสียงยังสั่นอยู่เล็กน้อย\n\nเธอหันกลับไป";
 
         let cleaned = strip_copied_continuity(&prev, raw);
         assert_eq!(cleaned, "เธอหันกลับไป");
@@ -419,10 +422,7 @@ mod tests {
         // position, and the deterministic audit must come back clean.
         let prev = vec!["เธอกำมือแน่นพลางฝืนยิ้มทั้งที่เสียงยังสั่นอยู่เล็กน้อย".to_string()];
         let source = "彼女は振り返った。";
-        let raw = format!(
-            "เขาเดินเข้ามาในห้องอย่างเงียบงัน\n\n{}\n\nเธอหันกลับไป",
-            prev[0]
-        );
+        let raw = format!("เขาเดินเข้ามาในห้องอย่างเงียบงัน\n\n{}\n\nเธอหันกลับไป", prev[0]);
 
         let cleaned = strip_copied_continuity(&prev, &raw);
         assert!(!cleaned.contains(prev[0].as_str()));
