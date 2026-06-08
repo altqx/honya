@@ -719,10 +719,21 @@ async fn process_chunk(
                             )
                             .await;
                         }
-                        None => anyhow::bail!(
-                            "translator failed on chunk {} with no translation to keep: {e}",
-                            chunk.index
-                        ),
+                        // Nothing to keep, but don't sink the chapter: commit an
+                        // empty NeedsReview chunk (a re-run rechecks it).
+                        None => {
+                            return commit_chunk_needs_review(
+                                ctx,
+                                chapter,
+                                chunk,
+                                "",
+                                attempt,
+                                format!(
+                                    "translator produced no output after {max} attempts: {e}"
+                                ),
+                            )
+                            .await;
+                        }
                     }
                 }
             };
@@ -733,7 +744,8 @@ async fn process_chunk(
         // the metadata turn" append rule).
         let thai = strip_copied_continuity(&prev_thai, &out.translated_text);
         let refusal_feedback = refusal_retry_feedback(&thai);
-        if refusal_feedback.is_none() {
+        // Only a non-empty translation is a usable fallback candidate.
+        if refusal_feedback.is_none() && !thai.trim().is_empty() {
             candidate = Some(thai.clone());
         }
         let tok = to_tokens(&t_usage);
@@ -776,10 +788,19 @@ async fn process_chunk(
                     )
                     .await;
                 }
-                None => anyhow::bail!(
-                    "translator returned refusal/policy notice on chunk {} with no translation to keep",
-                    chunk.index
-                ),
+                // Commit an empty NeedsReview chunk, not the refusal text — the
+                // refusal would bleed into the next chunk's continuity tail.
+                None => {
+                    return commit_chunk_needs_review(
+                        ctx,
+                        chapter,
+                        chunk,
+                        "",
+                        attempt,
+                        format!("translator returned only refusals after {max} attempts"),
+                    )
+                    .await;
+                }
             }
         }
 
@@ -796,52 +817,59 @@ async fn process_chunk(
             chapter,
             state: ChapterStatus::Reviewing,
         });
-        ctx.tx.send(AppEvent::ReviewerRequested {
-            chapter,
-            chunk: chunk.index,
-            attempt,
-        });
-
-        let (review, r_usage) = match review_chunk(
-            ctx.client.as_ref(),
-            &ctx.models.reviewer,
-            &chunk.text,
-            &thai,
-            &reference_ctx,
-            &audit_findings,
-            &prev_thai,
-        )
-        .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                // The Reviewer couldn't return a verdict. Don't discard the
-                // translation we have: retry while attempts remain, otherwise
-                // commit it flagged NeedsReview instead of failing the chapter.
-                ctx.tx.send(AppEvent::Error {
-                    context: format!("reviewer ch{chapter} chunk{}", chunk.index),
-                    msg: e.to_string(),
-                });
-                if attempt < max {
-                    emit_attempt_failed_retry(
-                        ctx,
-                        chapter,
-                        chunk,
-                        attempt,
-                        max,
-                        &format!("reviewer error, retrying: {e}"),
-                    );
-                    continue;
-                }
-                return commit_chunk_needs_review(
-                    ctx,
+        // Retry the Reviewer in place on a missing verdict (empty/cut-off EOF)
+        // rather than re-translating — the Thai already passed audit.
+        let (review, r_usage) = {
+            let mut review_attempt = 1u32;
+            loop {
+                ctx.tx.send(AppEvent::ReviewerRequested {
                     chapter,
-                    chunk,
-                    &thai,
+                    chunk: chunk.index,
                     attempt,
-                    format!("reviewer unavailable; committed without review: {e}"),
+                });
+                match review_chunk(
+                    ctx.client.as_ref(),
+                    &ctx.models.reviewer,
+                    &chunk.text,
+                    &thai,
+                    &reference_ctx,
+                    &audit_findings,
+                    &prev_thai,
                 )
-                .await;
+                .await
+                {
+                    Ok(r) => break r,
+                    Err(e) => {
+                        ctx.tx.send(AppEvent::Error {
+                            context: format!("reviewer ch{chapter} chunk{}", chunk.index),
+                            msg: e.to_string(),
+                        });
+                        if review_attempt < max {
+                            ctx.tx.send(AppEvent::ChunkRetry {
+                                chapter,
+                                chunk: chunk.index,
+                                attempt: review_attempt,
+                                max,
+                                feedback: format!(
+                                    "reviewer returned no verdict, retrying reviewer: {e}"
+                                ),
+                            });
+                            review_attempt += 1;
+                            continue;
+                        }
+                        return commit_chunk_needs_review(
+                            ctx,
+                            chapter,
+                            chunk,
+                            &thai,
+                            attempt,
+                            format!(
+                                "reviewer returned no verdict after {review_attempt} attempts; committed without review: {e}"
+                            ),
+                        )
+                        .await;
+                    }
+                }
             }
         };
         acc.fold(&r_usage);

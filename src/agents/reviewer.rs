@@ -27,5 +27,7 @@ pub async fn review_chunk(
         ..ChatRequest::default()
     };
 
-    chat_structured::<ReviewerOut>(client, req, "review_result", reviewer_schema(), 2).await
+    // retries=0: the pipeline owns the Reviewer retry surface (like translator.rs);
+    // re-sending an identical temp=0 request would just re-hit the same result.
+    chat_structured::<ReviewerOut>(client, req, "review_result", reviewer_schema(), 0).await
 }

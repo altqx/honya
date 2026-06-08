@@ -6,7 +6,7 @@
 //! different take rather than the same sampling.
 
 use crate::agents::prompts::TRANSLATOR_SYSTEM;
-use crate::llm::client::{LlmClient, Result};
+use crate::llm::client::{LlmClient, LlmError, Result};
 use crate::llm::structured::{chat_structured, translator_schema};
 use crate::llm::{ChatRequest, Message, Usage};
 use crate::model::TranslatorOut;
@@ -47,7 +47,15 @@ pub async fn translate_synopsis(
     let (out, usage) =
         chat_structured::<TranslatorOut>(client, req, "translation_result", translator_schema(), 2)
             .await?;
-    Ok((out.translated_text.trim().to_string(), usage))
+    // An empty synopsis (cut-off/empty completion) must fail, not silently persist.
+    let thai = out.translated_text.trim().to_string();
+    if thai.is_empty() {
+        return Err(LlmError::Api {
+            status: 0,
+            message: "translator returned an empty synopsis".to_string(),
+        });
+    }
+    Ok((thai, usage))
 }
 
 #[cfg(test)]
