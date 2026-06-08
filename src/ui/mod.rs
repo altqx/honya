@@ -5,5 +5,6 @@ pub mod chrome;
 pub mod diff;
 pub mod layout;
 pub mod markdown;
+pub mod mouse;
 pub mod text;
 pub mod widgets;

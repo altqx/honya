@@ -11,6 +11,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 
 use crate::model::{Chapter, ChapterKind, ChapterStatus, Project, UsageStats, Volume};
 use crate::theme::{self, Theme, status_glyph};
+use crate::ui::mouse::{MouseGesture, MouseInput, row_index};
 use crate::ui::text::{col_width, pad_to_cols, thai_display_safe, truncate_cols};
 use crate::ui::widgets::{render_line_gauge, status_cell};
 
@@ -24,6 +25,13 @@ enum Row<'a> {
     Chapter { vol: u32, ch: &'a Chapter },
 }
 
+/// The owned identity of a clicked tree row, copied out so the borrow of the
+/// (immutable) row list ends before `handle_mouse` mutates screen state.
+enum TreeHit {
+    Volume(u32),
+    Chapter { vol: u32, ch: u32 },
+}
+
 pub struct ProjectScreen {
     tree: ListState,
     collapsed: HashSet<u32>,
@@ -31,6 +39,10 @@ pub struct ProjectScreen {
     focus_panel: u8,
     /// Multi-select set of chapter numbers (Space toggles).
     selected: HashSet<u32>,
+    /// Mouse hit-test rects, refreshed every frame: the chapter tree's inner area
+    /// and the right-hand context/detail column.
+    tree_area: Rect,
+    side_area: Rect,
 }
 
 impl ProjectScreen {
@@ -42,6 +54,8 @@ impl ProjectScreen {
             collapsed: HashSet::new(),
             focus_panel: 0,
             selected: HashSet::new(),
+            tree_area: Rect::default(),
+            side_area: Rect::default(),
         }
     }
 
@@ -246,6 +260,104 @@ impl ProjectScreen {
         action
     }
 
+    /// Mouse: the wheel walks the tree (auto-following the volume under the
+    /// cursor, like the keyboard does); a click selects a row; a double-click (or a
+    /// click on the selected row) opens a chapter or toggles a volume's collapse.
+    /// Clicking the right column focuses it (so `h` steps back to the tree).
+    pub fn handle_mouse(&mut self, m: MouseInput, active: Option<&ActiveProject>) -> Action {
+        let Some(active) = active else {
+            return Action::None;
+        };
+        match m.gesture {
+            MouseGesture::ScrollUp => {
+                self.move_tree(active, -1);
+                self.follow_volume(active)
+            }
+            MouseGesture::ScrollDown => {
+                self.move_tree(active, 1);
+                self.follow_volume(active)
+            }
+            MouseGesture::Click { double } => {
+                if !m.in_rect(self.tree_area) {
+                    if m.in_rect(self.side_area) {
+                        self.focus_panel = 1;
+                    }
+                    return Action::None;
+                }
+                self.focus_panel = 0;
+                let rows = self.rows(active);
+                let Some(idx) = row_index(self.tree_area, self.tree.offset(), rows.len(), m.row)
+                else {
+                    return Action::None;
+                };
+                let activate = double || self.tree.selected() == Some(idx);
+                self.tree.select(Some(idx));
+                // Copy the row's identity out so the `rows` borrow ends before we
+                // mutate `self.collapsed` / `self.selected`.
+                let hit = match &rows[idx] {
+                    Row::Chapter { vol, ch } => TreeHit::Chapter {
+                        vol: *vol,
+                        ch: ch.number,
+                    },
+                    Row::Volume(v) => TreeHit::Volume(v.number),
+                };
+                drop(rows);
+                match hit {
+                    TreeHit::Chapter { vol, ch } => {
+                        // Opening resolves against the active volume, so a cross-
+                        // volume click first switches volumes (a second click opens).
+                        if vol != active.vol {
+                            self.selected.clear();
+                            return Action::SetActiveVolume { vol };
+                        }
+                        if activate {
+                            return Action::OpenChapter { chapter: ch };
+                        }
+                        Action::None
+                    }
+                    TreeHit::Volume(vnum) => {
+                        if activate {
+                            if self.collapsed.contains(&vnum) {
+                                self.collapsed.remove(&vnum);
+                            } else {
+                                self.collapsed.insert(vnum);
+                            }
+                        }
+                        if vnum != active.vol {
+                            self.selected.clear();
+                            return Action::SetActiveVolume { vol: vnum };
+                        }
+                        Action::None
+                    }
+                }
+            }
+            MouseGesture::RightClick => Action::None,
+        }
+    }
+
+    /// Move the tree cursor by `delta`, clamped (no wrap, so scrolling can't loop).
+    fn move_tree(&mut self, active: &ActiveProject, delta: i32) {
+        let n = self.rows(active).len();
+        if n == 0 {
+            return;
+        }
+        let cur = self.tree.selected().unwrap_or(0) as i32;
+        let next = (cur + delta).clamp(0, n as i32 - 1) as usize;
+        self.tree.select(Some(next));
+    }
+
+    /// Auto-follow the cursor's volume (mirrors `handle_key`'s tail): switch the
+    /// active volume when the cursor lands in a different one, clearing marks.
+    fn follow_volume(&mut self, active: &ActiveProject) -> Action {
+        if let Some(v) = self.selected_volume(active)
+            && v != active.vol
+        {
+            self.selected.clear();
+            return Action::SetActiveVolume { vol: v };
+        }
+        Action::None
+    }
+
     /// Move the tree cursor onto a volume's header (expanding it), so the App can
     /// land the user on a freshly-added volume after import.
     pub fn focus_volume(&mut self, active: &ActiveProject, vol: u32) {
@@ -284,6 +396,7 @@ impl ProjectScreen {
             .constraints([Constraint::Min(40), Constraint::Length(34)])
             .split(panes[1]);
 
+        self.side_area = cols[1];
         self.render_tree(f, cols[0], active, theme);
         self.render_side(f, cols[1], active, theme);
     }
@@ -376,6 +489,7 @@ impl ProjectScreen {
             .style(Style::default().bg(theme.bg_panel));
         let inner = block.inner(area);
         f.render_widget(block, area);
+        self.tree_area = inner;
 
         let rows = self.rows(active);
         let n = rows.len();
@@ -956,6 +1070,63 @@ mod tests {
             screen.handle_key(key(KeyCode::Char('V')), Some(&active)),
             Action::AddVolume
         ));
+    }
+
+    fn click(double: bool, col: u16, row: u16) -> crate::ui::mouse::MouseInput {
+        crate::ui::mouse::MouseInput {
+            gesture: crate::ui::mouse::MouseGesture::Click { double },
+            col,
+            row,
+        }
+    }
+
+    /// Clicking a chapter row selects it; a double-click (or a click on the
+    /// selected row) opens it in the Reader.
+    #[test]
+    fn clicking_a_chapter_selects_then_opens() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let active = active_project(); // Vol.01 with chapters 1 & 2
+        let mut screen = ProjectScreen::new();
+        let theme = crate::model::ThemeId::default().build();
+        let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        term.draw(|f| screen.render(f, f.area(), Some(&active), &theme))
+            .unwrap();
+        let ta = screen.tree_area;
+
+        // Rows: 0 = Vol header, 1 = ch 1, 2 = ch 2. Click ch 1.
+        let a = screen.handle_mouse(click(false, ta.x + 4, ta.y + 1), Some(&active));
+        assert!(matches!(a, Action::None));
+        assert_eq!(screen.tree.selected(), Some(1));
+
+        // Clicking the selected chapter row opens it.
+        match screen.handle_mouse(click(false, ta.x + 4, ta.y + 1), Some(&active)) {
+            Action::OpenChapter { chapter } => assert_eq!(chapter, 1),
+            other => panic!("expected OpenChapter, got {other:?}"),
+        }
+    }
+
+    /// Clicking a row in another volume switches the active volume first (the same
+    /// auto-follow the keyboard does), rather than opening across volumes.
+    #[test]
+    fn clicking_into_another_volume_follows_it() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let active = two_vol_project(); // active.vol == 1
+        let mut screen = ProjectScreen::new();
+        let theme = crate::model::ThemeId::default().build();
+        let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        term.draw(|f| screen.render(f, f.area(), Some(&active), &theme))
+            .unwrap();
+        let ta = screen.tree_area;
+
+        // Rows: 0 Vol.01, 1 ch1, 2 ch2, 3 Vol.02, 4 ch1, 5 ch2. Click into Vol.02.
+        match screen.handle_mouse(click(false, ta.x + 4, ta.y + 3), Some(&active)) {
+            Action::SetActiveVolume { vol } => assert_eq!(vol, 2),
+            other => panic!("expected SetActiveVolume, got {other:?}"),
+        }
     }
 
     #[test]

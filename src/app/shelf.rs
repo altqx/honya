@@ -11,6 +11,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 
 use crate::model::{ChapterKind, ChapterStatus, Project};
 use crate::theme::{self, Theme, status_glyph};
+use crate::ui::mouse::{MouseGesture, MouseInput};
 use crate::ui::text::{col_width, pad_to_cols, thai_display_safe, truncate_cols};
 
 use super::Action;
@@ -20,6 +21,8 @@ use super::overlay::Overlay;
 pub struct ShelfScreen {
     list: ListState,
     unimported: Vec<(PathBuf, u64)>,
+    /// The list's drawn rectangle, captured each frame for mouse hit-testing.
+    list_area: Rect,
 }
 
 impl ShelfScreen {
@@ -29,6 +32,7 @@ impl ShelfScreen {
         Self {
             list,
             unimported: Vec::new(),
+            list_area: Rect::default(),
         }
     }
 
@@ -128,6 +132,74 @@ impl ShelfScreen {
         }
     }
 
+    /// Mouse: the wheel moves the cursor; a click selects the row under it; a
+    /// double-click (or a click on the already-selected row) opens it — opening a
+    /// project or, on the import row, the import wizard.
+    pub fn handle_mouse(&mut self, m: MouseInput, projects: &[Project]) -> Action {
+        match m.gesture {
+            MouseGesture::ScrollUp => {
+                self.select_delta(projects, -1);
+                Action::None
+            }
+            MouseGesture::ScrollDown => {
+                self.select_delta(projects, 1);
+                Action::None
+            }
+            MouseGesture::Click { double } => {
+                let Some(item) = self.item_at(projects, m.row) else {
+                    return Action::None;
+                };
+                // The import row and any unimported sub-rows collapse to one target.
+                let import_idx = self.import_row_index(projects);
+                let target = item.min(import_idx);
+                let already = self.list.selected() == Some(target);
+                self.list.select(Some(target));
+                if double || already {
+                    if target == import_idx {
+                        return Action::show_overlay(Overlay::import(self.epub_paths()));
+                    }
+                    if let Some(p) = projects.get(target) {
+                        return Action::OpenProject(p.id.clone());
+                    }
+                }
+                Action::None
+            }
+            MouseGesture::RightClick => Action::None,
+        }
+    }
+
+    /// Move the cursor by `delta`, clamped (no wrap — scroll shouldn't loop).
+    fn select_delta(&mut self, projects: &[Project], delta: i32) {
+        let rows = self.row_count(projects);
+        if rows == 0 {
+            return;
+        }
+        let cur = self.list.selected().unwrap_or(0) as i32;
+        let next = (cur + delta).clamp(0, rows as i32 - 1) as usize;
+        self.list.select(Some(next));
+    }
+
+    /// The list item index drawn at terminal `row`, walking item heights from the
+    /// widget's scroll offset (project rows are 1 line; the import item is 2).
+    fn item_at(&self, projects: &[Project], row: u16) -> Option<usize> {
+        if row < self.list_area.y || row >= self.list_area.y + self.list_area.height {
+            return None;
+        }
+        let import_idx = self.import_row_index(projects);
+        let total = import_idx + 1 + self.unimported.len();
+        let mut line = self.list_area.y;
+        let mut idx = self.list.offset();
+        while idx < total {
+            let h: u16 = if idx == import_idx { 2 } else { 1 };
+            if row >= line && row < line + h {
+                return Some(idx);
+            }
+            line += h;
+            idx += 1;
+        }
+        None
+    }
+
     pub fn render(&mut self, f: &mut Frame, area: Rect, projects: &[Project], theme: &Theme) {
         let rows = self.row_count(projects);
         if self.list.selected().is_none_or(|s| s >= rows) {
@@ -187,6 +259,7 @@ impl ShelfScreen {
             width: inner.width,
             height: inner.height.saturating_sub(2),
         };
+        self.list_area = list_area;
 
         let selected = self.list.selected().unwrap_or(0);
         let mut items: Vec<ListItem> = Vec::new();
@@ -423,4 +496,83 @@ fn human_size(bytes: u64) -> String {
 
 fn working_root() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::ThemeId;
+    use crate::ui::mouse::{MouseGesture, MouseInput};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    fn proj(id: &str) -> Project {
+        Project {
+            id: id.to_string(),
+            dir: std::env::temp_dir().join(id),
+            title: id.to_string(),
+            created: None,
+            touched: None,
+            volumes: Vec::new(),
+            models: None,
+        }
+    }
+
+    fn click(double: bool, col: u16, row: u16) -> MouseInput {
+        MouseInput {
+            gesture: MouseGesture::Click { double },
+            col,
+            row,
+        }
+    }
+
+    /// A single click selects the row under the pointer; clicking the (now)
+    /// selected row again opens the project.
+    #[test]
+    fn click_selects_then_opens() {
+        let projects = vec![proj("alpha"), proj("beta")];
+        let mut s = ShelfScreen::new();
+        let theme = ThemeId::default().build();
+        let mut term = Terminal::new(TestBackend::new(90, 20)).unwrap();
+        term.draw(|f| s.render(f, f.area(), &projects, &theme)).unwrap();
+        let la = s.list_area;
+
+        // Row 0 starts selected; click the second project row → selects, no open.
+        let a = s.handle_mouse(click(false, la.x + 4, la.y + 1), &projects);
+        assert!(matches!(a, Action::None));
+        assert_eq!(s.list.selected(), Some(1));
+
+        // Clicking the already-selected project opens it.
+        match s.handle_mouse(click(false, la.x + 4, la.y + 1), &projects) {
+            Action::OpenProject(id) => assert_eq!(id, "beta"),
+            other => panic!("expected OpenProject, got {other:?}"),
+        }
+    }
+
+    /// The wheel walks the selection (clamped, no wrap past the import row).
+    #[test]
+    fn wheel_moves_selection_clamped() {
+        let projects = vec![proj("alpha"), proj("beta")];
+        let mut s = ShelfScreen::new(); // rows = 2 projects + import = 3
+        s.handle_mouse(
+            MouseInput {
+                gesture: MouseGesture::ScrollUp,
+                col: 0,
+                row: 0,
+            },
+            &projects,
+        );
+        assert_eq!(s.list.selected(), Some(0), "scroll up at the top stays put");
+        for _ in 0..5 {
+            s.handle_mouse(
+                MouseInput {
+                    gesture: MouseGesture::ScrollDown,
+                    col: 0,
+                    row: 0,
+                },
+                &projects,
+            );
+        }
+        assert_eq!(s.list.selected(), Some(2), "clamps at the import row");
+    }
 }

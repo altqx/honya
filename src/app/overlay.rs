@@ -16,7 +16,8 @@ use crate::export::ExportFormat;
 use crate::model::{AppConfig, LogLevel, ThemeId, UpdateMode};
 use crate::theme::{self, ALL_THEMES, Theme};
 use crate::ui::layout::{centered_modal, centered_pct};
-use crate::ui::text::{pad_to_cols, thai_display_safe, truncate_cols};
+use crate::ui::mouse::{MouseGesture, MouseInput, hit};
+use crate::ui::text::{col_width, pad_to_cols, thai_display_safe, truncate_cols};
 use crate::ui::widgets::render_gauge;
 
 use super::qa;
@@ -826,6 +827,177 @@ impl Overlay {
                 }
                 _ => Action::None,
             },
+        }
+    }
+
+    /// Fold one mouse gesture into the open overlay. Scroll and right-click reuse
+    /// the keyboard handlers (navigation / scroll / dismiss logic stays in one
+    /// place); a left click is resolved against the overlay's modal geometry —
+    /// outside the modal dismisses, inside selects or activates a row / button.
+    pub fn handle_mouse(&mut self, m: MouseInput, area: Rect) -> Action {
+        match m.gesture {
+            MouseGesture::ScrollUp => return self.handle_key(synth(KeyCode::Up)),
+            MouseGesture::ScrollDown => return self.handle_key(synth(KeyCode::Down)),
+            MouseGesture::RightClick => return self.handle_key(synth(KeyCode::Esc)),
+            MouseGesture::Click { .. } => {}
+        }
+        let double = m.is_double();
+        let modal = self.modal_rect(area);
+        if !hit(modal, m.col, m.row) {
+            // A click off the modal dismisses / steps back (each overlay's Esc).
+            return self.handle_key(synth(KeyCode::Esc));
+        }
+        // Resolve the click against the modal's interior, then act on the outcome
+        // outside the borrow so the keyboard handlers can be reused.
+        let inner = inset(modal);
+        match self.resolve_click(m, inner, double) {
+            ClickOutcome::Nothing => Action::None,
+            ClickOutcome::Key(code) => self.handle_key(synth(code)),
+            ClickOutcome::Act(action) => action,
+        }
+    }
+
+    /// The centered rectangle each overlay variant draws into (mirrors its render
+    /// fn's `centered_modal` / `centered_pct` call), used for click hit-testing.
+    fn modal_rect(&self, area: Rect) -> Rect {
+        match self {
+            Overlay::None => area,
+            Overlay::Welcome(_) => centered_modal(76, 24, area),
+            Overlay::Import(st) => centered_modal(76, if st.step == 3 { 24 } else { 18 }, area),
+            Overlay::Settings(_) => centered_modal(72, 20, area),
+            Overlay::Theme(_) => centered_modal(60, 20, area),
+            Overlay::Palette(_) => centered_modal(60, 16, area),
+            Overlay::Log(_) => centered_pct(80, 80, area),
+            Overlay::Help(_) => centered_modal(72, 24, area),
+            Overlay::Modal(dlg) => {
+                centered_modal(64, if dlg.alternate.is_some() { 11 } else { 9 }, area)
+            }
+            Overlay::Synopsis(_) => centered_modal(76, 24, area),
+            Overlay::Qa(_) => centered_pct(80, 80, area),
+            Overlay::ReaderNote(_) => centered_modal(72, 14, area),
+            Overlay::ReaderSearch(_) => centered_modal(64, 7, area),
+            Overlay::ReaderJump(_) => centered_modal(72, 24, area),
+            Overlay::Export(_) => centered_modal(66, 15, area),
+        }
+    }
+
+    /// Map a click inside the modal interior to an outcome. Row selection is set
+    /// here (within the borrow); the actual activation key is synthesized by the
+    /// caller after the borrow ends. `inner` is the bordered modal's content rect.
+    fn resolve_click(&mut self, m: MouseInput, inner: Rect, double: bool) -> ClickOutcome {
+        match self {
+            Overlay::Modal(dlg) => {
+                // The button row is the last interior line.
+                let row = inner.y + inner.height.saturating_sub(1);
+                if m.row != row {
+                    return ClickOutcome::Nothing;
+                }
+                match modal_button_at(dlg, inner, m.col) {
+                    Some(ModalButton::Confirm) => ClickOutcome::Key(KeyCode::Enter),
+                    Some(ModalButton::Cancel) => ClickOutcome::Key(KeyCode::Esc),
+                    Some(ModalButton::Alternate(c)) => ClickOutcome::Key(KeyCode::Char(c)),
+                    None => ClickOutcome::Nothing,
+                }
+            }
+            // Welcome menu: 4 items at a fixed offset below the preamble (see
+            // `render_welcome` — 10 preamble lines precede the first item).
+            Overlay::Welcome(st) => {
+                let base = inner.y + 10;
+                if m.row >= base && (m.row - base) < WELCOME_ITEMS as u16 {
+                    let idx = (m.row - base) as usize;
+                    let already = st.sel == idx;
+                    st.sel = idx;
+                    if double || already {
+                        return ClickOutcome::Key(KeyCode::Enter);
+                    }
+                }
+                ClickOutcome::Nothing
+            }
+            // Theme list fills the interior above a 2-line swatch; windowed so the
+            // selection stays visible. Single click previews; double commits.
+            Overlay::Theme(st) => {
+                let list_h = inner.height.saturating_sub(2);
+                if m.row >= inner.y && (m.row - inner.y) < list_h {
+                    let start = windowed_start(st.sel, list_h);
+                    let idx = start + (m.row - inner.y) as usize;
+                    if idx < ALL_THEMES.len() {
+                        let already = st.sel == idx;
+                        st.sel = idx;
+                        if double || already {
+                            return ClickOutcome::Key(KeyCode::Enter);
+                        }
+                        return ClickOutcome::Act(Action::PreviewTheme(st.current()));
+                    }
+                }
+                ClickOutcome::Nothing
+            }
+            // Palette list starts 2 lines below the query and isn't windowed.
+            Overlay::Palette(st) => {
+                let top = inner.y + 2;
+                let len = st.matches().len();
+                if m.row >= top {
+                    let idx = (m.row - top) as usize;
+                    if idx < len {
+                        let already = st.sel == idx;
+                        st.sel = idx;
+                        if double || already {
+                            return ClickOutcome::Key(KeyCode::Enter);
+                        }
+                    }
+                }
+                ClickOutcome::Nothing
+            }
+            // Jump list starts 2 lines below the query and is windowed.
+            Overlay::ReaderJump(st) => {
+                let top = inner.y + 2;
+                let list_h = inner.height.saturating_sub(2);
+                let len = st.matches().len();
+                if m.row >= top && (m.row - top) < list_h {
+                    let start = windowed_start(st.sel, list_h);
+                    let idx = start + (m.row - top) as usize;
+                    if idx < len {
+                        let already = st.sel == idx;
+                        st.sel = idx;
+                        if double || already {
+                            return ClickOutcome::Key(KeyCode::Enter);
+                        }
+                    }
+                }
+                ClickOutcome::Nothing
+            }
+            // Export format checklist: rows start 2 lines down. A single click
+            // toggles the format under it; a double click exports.
+            Overlay::Export(st) => {
+                if st.done.is_some() || st.progress.is_some() {
+                    return if double {
+                        ClickOutcome::Key(KeyCode::Enter)
+                    } else {
+                        ClickOutcome::Nothing
+                    };
+                }
+                let base = inner.y + 2;
+                if m.row >= base && ((m.row - base) as usize) < st.formats.len() {
+                    st.sel = (m.row - base) as usize;
+                    return if double {
+                        ClickOutcome::Key(KeyCode::Enter)
+                    } else {
+                        ClickOutcome::Key(KeyCode::Char(' '))
+                    };
+                }
+                ClickOutcome::Nothing
+            }
+            // QA findings interleave non-selectable chapter headers, so a click
+            // just activates the current pick (the wheel moves it).
+            Overlay::Qa(_) => {
+                if double {
+                    ClickOutcome::Key(KeyCode::Enter)
+                } else {
+                    ClickOutcome::Nothing
+                }
+            }
+            // Text editors / progress views: inside-clicks do nothing (scroll and
+            // click-outside still work).
+            _ => ClickOutcome::Nothing,
         }
     }
 
@@ -2458,6 +2630,7 @@ impl Overlay {
                     ("Ctrl-T", "theme picker"),
                     ("` / l", "activity log (Project keeps l)"),
                     ("Esc / Backspace", "close overlay / dismiss toast"),
+                    ("Mouse", "click tabs/rows · wheel scrolls · dbl-click opens"),
                     ("q", "quit        Ctrl-C hard quit"),
                 ],
             ),
@@ -2784,6 +2957,75 @@ impl Overlay {
             rows[1],
         );
     }
+}
+
+/// What a resolved overlay click should do — a synthesized key (reusing the
+/// keyboard handlers), a direct action, or nothing.
+enum ClickOutcome {
+    Nothing,
+    Key(KeyCode),
+    Act(Action),
+}
+
+/// A confirm-dialog button identified by a click on the control row.
+enum ModalButton {
+    Confirm,
+    Cancel,
+    Alternate(char),
+}
+
+/// A key event with no modifiers — used to replay a gesture through the keyboard
+/// handlers so navigation / dismiss logic lives in exactly one place.
+fn synth(code: KeyCode) -> KeyEvent {
+    KeyEvent::new(code, KeyModifiers::empty())
+}
+
+/// The content rectangle inside a single-cell border (mirrors `Block::inner` for
+/// `Borders::ALL`), used to hit-test modal interiors.
+fn inset(r: Rect) -> Rect {
+    Rect {
+        x: r.x.saturating_add(1),
+        y: r.y.saturating_add(1),
+        width: r.width.saturating_sub(2),
+        height: r.height.saturating_sub(2),
+    }
+}
+
+/// First visible index of a windowed list that keeps `sel` on screen given a
+/// visible height of `cap` rows — the shared rule the list overlays render with.
+fn windowed_start(sel: usize, cap: u16) -> usize {
+    let cap = (cap as usize).max(1);
+    if sel >= cap { sel + 1 - cap } else { 0 }
+}
+
+/// Which confirm-dialog button (if any) sits at column `col` on the control row.
+/// The label spans mirror `render_modal`: `  [ y/↵ ] confirm`, an optional
+/// `[ key ] alt`, then `[ n / Esc ] cancel`, each separated by five spaces.
+fn modal_button_at(dlg: &Dialog, inner: Rect, col: u16) -> Option<ModalButton> {
+    let in_range = |start: u16, width: u16| col >= start && col < start.saturating_add(width);
+
+    let confirm = format!("  [ y/↵ ] {}", dlg.confirm_label);
+    let confirm_w = col_width(&confirm) as u16;
+    let mut x = inner.x;
+    if in_range(x, confirm_w) {
+        return Some(ModalButton::Confirm);
+    }
+    x = x.saturating_add(confirm_w).saturating_add(5);
+
+    if let Some(alt) = &dlg.alternate {
+        let s = format!("[ {} ] {}", alt.key, alt.label);
+        let w = col_width(&s) as u16;
+        if in_range(x, w) {
+            return Some(ModalButton::Alternate(alt.key));
+        }
+        x = x.saturating_add(w).saturating_add(5);
+    }
+
+    let cancel_w = col_width("[ n / Esc ] cancel") as u16;
+    if in_range(x, cancel_w) {
+        return Some(ModalButton::Cancel);
+    }
+    None
 }
 
 /// Phase-dependent footer hints for the synopsis editor (shared by the wizard

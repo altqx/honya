@@ -13,6 +13,7 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 use crate::model::{AgentRole, AppEvent, ReviewVerdict, UsageStats};
 use crate::theme::{self, Theme, agent_badge, spinner_frame};
+use crate::ui::mouse::{MouseGesture, MouseInput};
 use crate::ui::text::truncate_cols;
 use crate::ui::widgets::render_line_gauge;
 
@@ -52,6 +53,10 @@ pub struct TranslateScreen {
     last_note: String,
     /// Idle until a run starts; drives the header, border, and spinners.
     phase: RunPhase,
+    /// Mouse hit-test rects, refreshed every frame: the 3-row agent block (click
+    /// a line to focus that agent) and the streaming preview pane.
+    agent_area: Rect,
+    preview_area: Rect,
 }
 
 impl TranslateScreen {
@@ -72,6 +77,8 @@ impl TranslateScreen {
             retries: 0,
             last_note: String::new(),
             phase: RunPhase::Idle,
+            agent_area: Rect::default(),
+            preview_area: Rect::default(),
         }
     }
 
@@ -326,6 +333,53 @@ impl TranslateScreen {
         }
     }
 
+    /// Mouse: the wheel scrolls the preview (leaving follow-mode); clicking an
+    /// agent line focuses that agent (its spinner moves there); double-clicking the
+    /// preview opens the result in the Reader, matching Enter.
+    pub fn handle_mouse(&mut self, m: MouseInput) -> Action {
+        match m.gesture {
+            MouseGesture::ScrollUp => {
+                self.scroll_preview(-3);
+                Action::None
+            }
+            MouseGesture::ScrollDown => {
+                self.scroll_preview(3);
+                Action::None
+            }
+            MouseGesture::Click { double } => {
+                if m.in_rect(self.agent_area) {
+                    let i = (m.row - self.agent_area.y) as usize;
+                    if i < 3 {
+                        self.active_agent = i;
+                    }
+                    return Action::None;
+                }
+                if double && m.in_rect(self.preview_area) {
+                    return match self.current_chapter {
+                        Some(ch) => Action::OpenChapter { chapter: ch },
+                        None => Action::Goto(Screen::Reader),
+                    };
+                }
+                Action::None
+            }
+            MouseGesture::RightClick => Action::None,
+        }
+    }
+
+    /// Scroll the preview by `delta` lines, dropping follow-mode and resolving the
+    /// tail sentinel first (mirrors the j/k key handlers).
+    fn scroll_preview(&mut self, delta: i32) {
+        self.follow = false;
+        if self.scroll == u16::MAX {
+            self.scroll = self.last_bottom;
+        }
+        self.scroll = if delta >= 0 {
+            self.scroll.saturating_add(delta as u16)
+        } else {
+            self.scroll.saturating_sub((-delta) as u16)
+        };
+    }
+
     pub fn render(&mut self, f: &mut Frame, area: Rect, frame: u64, theme: &Theme) {
         let rows = Layout::default()
             .direction(Direction::Vertical)
@@ -336,7 +390,7 @@ impl TranslateScreen {
         self.render_preview(f, rows[1], theme);
     }
 
-    fn render_pipeline(&self, f: &mut Frame, area: Rect, frame: u64, theme: &Theme) {
+    fn render_pipeline(&mut self, f: &mut Frame, area: Rect, frame: u64, theme: &Theme) {
         let (title, accent) = match self.phase {
             RunPhase::Running => (
                 match self.current_chapter {
@@ -439,6 +493,7 @@ impl TranslateScreen {
             AgentRole::Reviewer,
         ];
         let agent_area = parts[2];
+        self.agent_area = agent_area;
         for (i, role) in roles.iter().enumerate() {
             let (badge, color) = agent_badge(*role, theme);
             let line_area = Rect {
@@ -542,6 +597,7 @@ impl TranslateScreen {
             .style(Style::default().bg(theme.bg_panel));
         let inner = block.inner(area);
         f.render_widget(block, area);
+        self.preview_area = inner;
 
         // Compose the preview lines: a faint placeholder when there's nothing yet,
         // otherwise the streaming Thai rendered as Markdown. A trailing indigo

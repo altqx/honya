@@ -15,6 +15,7 @@ use chrono::{DateTime, Utc};
 
 use crate::model::{ChapterRun, ReaderAnnotation};
 use crate::theme::{self, Theme};
+use crate::ui::mouse::{MouseGesture, MouseInput};
 use crate::workspace::Workspace;
 
 use super::Action;
@@ -87,6 +88,10 @@ pub struct ReaderScreen {
     bookmark_lines: Vec<u32>,
     /// Soft / hard chunk budgets used to align a TH chunk to its JA source (`s`).
     chunk_cfg: (usize, usize),
+    /// Pane rectangles, refreshed every frame, so the wheel scrolls whichever pane
+    /// the pointer is over when the two are decoupled. Empty when a pane is hidden.
+    ja_area: Rect,
+    th_area: Rect,
 }
 
 impl ReaderScreen {
@@ -111,6 +116,8 @@ impl ReaderScreen {
             review_lines: Vec::new(),
             bookmark_lines: Vec::new(),
             chunk_cfg: (DEFAULT_CHUNK_TARGET, DEFAULT_CHUNK_HARD_CAP),
+            ja_area: Rect::default(),
+            th_area: Rect::default(),
         }
     }
 
@@ -419,19 +426,39 @@ impl ReaderScreen {
         }
     }
 
+    /// Mouse: the wheel scrolls. When the panes are synced (or in diff mode) both
+    /// move together; when decoupled, only the pane under the pointer scrolls — so
+    /// you can read JA and TH at independent positions with the wheel.
+    pub fn handle_mouse(&mut self, m: MouseInput) -> Action {
+        match m.gesture {
+            MouseGesture::ScrollUp => self.scroll_targeted(m.col, -3),
+            MouseGesture::ScrollDown => self.scroll_targeted(m.col, 3),
+            MouseGesture::Click { .. } | MouseGesture::RightClick => {}
+        }
+        Action::None
+    }
+
+    fn scroll_targeted(&mut self, col: u16, delta: i32) {
+        // Diff and synced reading both move a single shared offset.
+        if self.diff_mode || self.sync {
+            self.scroll_by(delta);
+            return;
+        }
+        if col_in(self.th_area, col) {
+            self.th_scroll = step(self.th_scroll, delta);
+        } else if col_in(self.ja_area, col) {
+            self.scroll = step(self.scroll, delta);
+        } else {
+            self.scroll_by(delta);
+        }
+    }
+
     fn scroll_by(&mut self, delta: i32) {
-        let apply = |v: u16| -> u16 {
-            if delta >= 0 {
-                v.saturating_add(delta as u16)
-            } else {
-                v.saturating_sub((-delta) as u16)
-            }
-        };
-        self.scroll = apply(self.scroll);
+        self.scroll = step(self.scroll, delta);
         if self.sync {
             self.th_scroll = self.scroll;
         } else {
-            self.th_scroll = apply(self.th_scroll);
+            self.th_scroll = step(self.th_scroll, delta);
         }
     }
 
@@ -452,6 +479,8 @@ impl ReaderScreen {
 
         match self.layout_mode {
             MODE_JA => {
+                self.ja_area = body;
+                self.th_area = Rect::default();
                 self.render_pane(
                     f,
                     body,
@@ -465,6 +494,8 @@ impl ReaderScreen {
                 );
             }
             MODE_TH => {
+                self.ja_area = Rect::default();
+                self.th_area = body;
                 self.render_pane(
                     f,
                     body,
@@ -482,6 +513,8 @@ impl ReaderScreen {
                     .direction(Direction::Horizontal)
                     .constraints([Constraint::Percentage(48), Constraint::Percentage(52)])
                     .split(body);
+                self.ja_area = cols[0];
+                self.th_area = cols[1];
                 self.render_pane(
                     f,
                     cols[0],
@@ -1297,6 +1330,20 @@ fn qa_trend(old_failed: bool, old_review: u32, new_failed: bool, new_review: u32
         std::cmp::Ordering::Greater => QaTrend::Worse,
         std::cmp::Ordering::Equal => QaTrend::Same,
     }
+}
+
+/// Apply a signed scroll `delta` to an offset, saturating at the u16 bounds.
+fn step(v: u16, delta: i32) -> u16 {
+    if delta >= 0 {
+        v.saturating_add(delta as u16)
+    } else {
+        v.saturating_sub((-delta) as u16)
+    }
+}
+
+/// True when terminal column `col` falls within `area`'s horizontal span.
+fn col_in(area: Rect, col: u16) -> bool {
+    area.width > 0 && col >= area.x && col < area.x.saturating_add(area.width)
 }
 
 fn short_dt(dt: DateTime<Utc>) -> String {

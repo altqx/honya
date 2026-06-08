@@ -8,11 +8,21 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, Tabs};
+use ratatui::widgets::Paragraph;
 
 use crate::app::Screen;
 use crate::theme::{self, Theme};
 use crate::ui::text::{col_width, thai_display_safe};
+
+/// The five tabs, in `Screen` order — the order is load-bearing (digit routing
+/// and the tab bar both depend on it).
+const TAB_SCREENS: [Screen; 5] = [
+    Screen::Shelf,
+    Screen::Project,
+    Screen::Translate,
+    Screen::Reader,
+    Screen::Lexicon,
+];
 
 /// Aggregate chapter counts shown in the header's right-aligned tally.
 #[derive(Debug, Clone, Copy, Default)]
@@ -109,6 +119,11 @@ pub fn render_header(f: &mut Frame, area: Rect, crumb: &str, tally: &StatusTally
 
 /// Render the primary tab bar; when `run_active`, tab 3's `訳` glyph is swapped
 /// for the live spinner frame so the bar itself signals a running translation.
+///
+/// Rendered span-by-span (rather than via the `Tabs` widget) so each tab's
+/// clickable [`Rect`] is known exactly; the returned zones let the App route a
+/// click on a tab to its screen. Visual parity with the old widget: one space of
+/// padding either side of each title, a ` │ ` divider between tabs.
 pub fn render_tabbar(
     f: &mut Frame,
     area: Rect,
@@ -116,36 +131,67 @@ pub fn render_tabbar(
     run_active: bool,
     frame: u64,
     theme: &Theme,
-) {
+) -> Vec<(Rect, Screen)> {
     if area.width == 0 {
-        return;
+        return Vec::new();
     }
+    f.render_widget(
+        Paragraph::new("").style(Style::default().bg(theme.bg)),
+        area,
+    );
+
     let translate_glyph: &str = if run_active {
         theme::spinner_frame(frame)
     } else {
         "訳"
     };
-
-    let titles: Vec<Line> = vec![
-        Line::from("1 書架 Shelf"),
-        Line::from("2 棚 Project"),
-        Line::from(format!("3 {translate_glyph} Translate")),
-        Line::from("4 読 Reader"),
-        Line::from("5 辞 Lexicon"),
+    let titles = [
+        "1 書架 Shelf".to_string(),
+        "2 棚 Project".to_string(),
+        format!("3 {translate_glyph} Translate"),
+        "4 読 Reader".to_string(),
+        "5 辞 Lexicon".to_string(),
     ];
 
-    let tabs = Tabs::new(titles)
-        .select(active.index())
-        .style(Style::default().fg(theme.ink_soft).bg(theme.bg))
-        .highlight_style(
+    let mut spans: Vec<Span> = Vec::with_capacity(titles.len() * 4);
+    let mut zones: Vec<(Rect, Screen)> = Vec::with_capacity(titles.len());
+    let mut x = area.x;
+    let right = area.x.saturating_add(area.width);
+    for (i, title) in titles.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(" │ ", Style::default().fg(theme.rule)));
+            x = x.saturating_add(3);
+        }
+        // Clickable span is the padded ` title `; width is title cols + 2.
+        let tab_w = col_width(title) as u16 + 2;
+        if x < right {
+            let w = tab_w.min(right - x);
+            zones.push((
+                Rect {
+                    x,
+                    y: area.y,
+                    width: w,
+                    height: 1,
+                },
+                TAB_SCREENS[i],
+            ));
+        }
+        let style = if TAB_SCREENS[i] == active {
             Style::default()
                 .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        )
-        .divider(Span::styled(" │ ", Style::default().fg(theme.rule)))
-        .padding(" ", " ");
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.ink_soft)
+        };
+        spans.push(Span::styled(format!(" {title} "), style));
+        x = x.saturating_add(tab_w);
+    }
 
-    f.render_widget(tabs, area);
+    f.render_widget(
+        Paragraph::new(Line::from(spans)).style(Style::default().bg(theme.bg)),
+        area,
+    );
+    zones
 }
 
 /// Render the footer hint bar: each `(key, label)` then the always-present
@@ -239,4 +285,52 @@ pub fn render_footer(
         Paragraph::new(Line::from(spans)).style(Style::default().bg(theme.bg)),
         area,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    #[test]
+    fn tab_zones_cover_each_screen_left_to_right() {
+        let theme = crate::model::ThemeId::default().build();
+        let area = Rect {
+            x: 0,
+            y: 1,
+            width: 120,
+            height: 1,
+        };
+        let mut term = Terminal::new(TestBackend::new(120, 3)).unwrap();
+        let mut zones = Vec::new();
+        term.draw(|f| {
+            zones = render_tabbar(f, area, Screen::Shelf, false, 0, &theme);
+        })
+        .unwrap();
+
+        // One zone per tab, in Screen order, non-overlapping and left-to-right.
+        assert_eq!(zones.len(), 5);
+        let order = [
+            Screen::Shelf,
+            Screen::Project,
+            Screen::Translate,
+            Screen::Reader,
+            Screen::Lexicon,
+        ];
+        for (i, (rect, screen)) in zones.iter().enumerate() {
+            assert_eq!(*screen, order[i]);
+            assert_eq!(rect.y, 1);
+            assert!(rect.width > 0);
+            if i > 0 {
+                let prev = zones[i - 1].0;
+                assert!(
+                    rect.x >= prev.x + prev.width,
+                    "tab {i} overlaps its predecessor"
+                );
+            }
+        }
+        // The first tab starts at the bar's left edge.
+        assert_eq!(zones[0].0.x, 0);
+    }
 }

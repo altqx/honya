@@ -11,7 +11,8 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wra
 
 use crate::model::{Character, GlossaryTerm, TermPolicy};
 use crate::theme::{self, Theme};
-use crate::ui::text::{pad_to_cols, thai_display_safe, truncate_cols};
+use crate::ui::mouse::{MouseGesture, MouseInput};
+use crate::ui::text::{col_width, pad_to_cols, thai_display_safe, truncate_cols};
 use crate::workspace::Workspace;
 
 use super::Action;
@@ -155,6 +156,11 @@ pub struct LexiconScreen {
     filter: String,
     /// True while the `/` search field is capturing input.
     searching: bool,
+    /// Mouse hit-test rects, refreshed every frame: the section tabs, the table
+    /// body, and the whole screen area (for locating the inline edit modal).
+    tab_rects: Vec<(Rect, u8)>,
+    table_area: Rect,
+    screen_area: Rect,
 }
 
 impl LexiconScreen {
@@ -167,6 +173,9 @@ impl LexiconScreen {
             editing: None,
             filter: String::new(),
             searching: false,
+            tab_rects: Vec::new(),
+            table_area: Rect::default(),
+            screen_area: Rect::default(),
         }
     }
 
@@ -295,6 +304,94 @@ impl LexiconScreen {
             }
             KeyCode::Char('d') => self.begin_delete(ws),
             _ => Action::None,
+        }
+    }
+
+    /// Mouse: click a section tab to switch; click a table row to select it, then
+    /// double-click (or click the selected row again) to edit; the wheel moves the
+    /// cursor. While the inline editor is open the wheel cycles fields and a click
+    /// focuses the field under it.
+    pub fn handle_mouse(&mut self, m: MouseInput, ws: Option<&Workspace>) -> Action {
+        if self.editing.is_some() {
+            return self.handle_edit_mouse(m);
+        }
+        match m.gesture {
+            MouseGesture::ScrollUp => {
+                self.move_sel(ws, -1);
+                Action::None
+            }
+            MouseGesture::ScrollDown => {
+                self.move_sel(ws, 1);
+                Action::None
+            }
+            MouseGesture::Click { double } => {
+                // A section tab takes priority over the table below it.
+                if let Some((_, id)) = self.tab_rects.iter().copied().find(|(r, _)| m.in_rect(*r)) {
+                    if id != self.sub {
+                        self.sub = id;
+                        self.list.select(Some(0));
+                    }
+                    return Action::None;
+                }
+                // Style has no selectable rows; only the tabs are interactive.
+                if self.sub == SUB_STYLE || !m.in_rect(self.table_area) {
+                    return Action::None;
+                }
+                let len = self.current_len(ws);
+                // Row 0 of the table is the column header; data starts one below.
+                if m.row <= self.table_area.y {
+                    return Action::None;
+                }
+                let idx = (m.row - self.table_area.y - 1) as usize;
+                if idx >= len {
+                    return Action::None;
+                }
+                let already = self.list.selected() == Some(idx);
+                self.list.select(Some(idx));
+                if double || already {
+                    self.begin_edit(ws);
+                }
+                Action::None
+            }
+            MouseGesture::RightClick => Action::None,
+        }
+    }
+
+    fn handle_edit_mouse(&mut self, m: MouseInput) -> Action {
+        let Some(form) = self.editing.as_mut() else {
+            return Action::None;
+        };
+        match m.gesture {
+            MouseGesture::ScrollUp => form.prev_field(),
+            MouseGesture::ScrollDown => form.next_field(),
+            MouseGesture::Click { .. } => {
+                // Focus the field whose row was clicked. The modal mirrors
+                // `render_edit`: a centered 60-wide box, inner line 0 blank, then
+                // each field on inner line 1 + i*2.
+                let modal = crate::ui::layout::centered_modal(
+                    60,
+                    (form.fields.len() as u16) * 2 + 6,
+                    self.screen_area,
+                );
+                let inner_y = modal.y + 1;
+                for i in 0..form.fields.len() {
+                    if m.row == inner_y + 1 + (i as u16) * 2 {
+                        form.field = i;
+                        break;
+                    }
+                }
+            }
+            MouseGesture::RightClick => {}
+        }
+        Action::None
+    }
+
+    /// Row count of the active section (0 for Style, which isn't a list).
+    fn current_len(&self, ws: Option<&Workspace>) -> usize {
+        match (ws, self.sub) {
+            (Some(ws), SUB_GLOSSARY) => self.glossary(ws).len(),
+            (Some(ws), SUB_CHARACTERS) => self.characters(ws).len(),
+            _ => 0,
         }
     }
 
@@ -435,6 +532,7 @@ impl LexiconScreen {
     }
 
     pub fn render(&mut self, f: &mut Frame, area: Rect, ws: Option<&Workspace>, theme: &Theme) {
+        self.screen_area = area;
         let rows = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(1), Constraint::Min(0)])
@@ -448,26 +546,41 @@ impl LexiconScreen {
         }
     }
 
-    fn render_header(&self, f: &mut Frame, area: Rect, ws: Option<&Workspace>, theme: &Theme) {
+    fn render_header(&mut self, f: &mut Frame, area: Rect, ws: Option<&Workspace>, theme: &Theme) {
         let tabs = [
             ("Glossary", SUB_GLOSSARY),
             ("Characters", SUB_CHARACTERS),
             ("Style", SUB_STYLE),
         ];
         let mut spans = vec![Span::raw("  ")];
+        let mut x = area.x.saturating_add(2);
+        self.tab_rects.clear();
         for (label, id) in tabs {
+            let text = if id == self.sub {
+                format!("〔 {label} 〕")
+            } else {
+                format!("  {label}  ")
+            };
+            let w = col_width(&text) as u16;
+            self.tab_rects.push((
+                Rect {
+                    x,
+                    y: area.y,
+                    width: w,
+                    height: 1,
+                },
+                id,
+            ));
+            x = x.saturating_add(w).saturating_add(1); // + trailing space
             if id == self.sub {
                 spans.push(Span::styled(
-                    format!("〔 {label} 〕"),
+                    text,
                     Style::default()
                         .fg(theme.accent)
                         .add_modifier(Modifier::BOLD),
                 ));
             } else {
-                spans.push(Span::styled(
-                    format!("  {label}  "),
-                    Style::default().fg(theme.ink_faint),
-                ));
+                spans.push(Span::styled(text, Style::default().fg(theme.ink_faint)));
             }
             spans.push(Span::raw(" "));
         }
@@ -516,6 +629,7 @@ impl LexiconScreen {
             .style(Style::default().bg(theme.bg_panel));
         let inner = block.inner(area);
         f.render_widget(block, area);
+        self.table_area = inner;
 
         let Some(ws) = ws else {
             f.render_widget(

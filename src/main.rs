@@ -27,7 +27,10 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use ratatui::DefaultTerminal;
-use ratatui::crossterm::event::{Event, EventStream, KeyEventKind};
+use ratatui::crossterm::event::{
+    DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyEventKind,
+};
+use ratatui::crossterm::execute;
 
 use crate::app::App;
 use crate::llm::client::LlmClient;
@@ -93,7 +96,11 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let mut terminal = ratatui::init();
+    // Mouse reporting is opt-in; enable it so the TUI is fully click/scroll
+    // driven. Best-effort — a terminal that rejects it just stays keyboard-only.
+    let _ = execute!(std::io::stdout(), EnableMouseCapture);
     let result = run(&mut terminal, &mut app, rx).await;
+    let _ = execute!(std::io::stdout(), DisableMouseCapture);
     ratatui::restore();
 
     if let Err(err) = &result {
@@ -122,6 +129,7 @@ async fn run(
             maybe_event = events.next() => {
                 match maybe_event {
                     Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => app.on_key(key),
+                    Some(Ok(Event::Mouse(me))) => app.on_mouse(me),
                     Some(Ok(_)) => {}
                     Some(Err(_)) | None => {}
                 }

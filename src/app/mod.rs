@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use ratatui::Frame;
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -30,6 +30,7 @@ use crate::model::{
 use crate::theme::Theme;
 use crate::ui::chrome::{self, StatusTally};
 use crate::ui::layout::{self, Skeleton};
+use crate::ui::mouse::MouseInput;
 use crate::ui::text::{thai_display_safe, truncate_cols};
 use crate::workspace::Workspace;
 
@@ -52,17 +53,6 @@ pub enum Screen {
 }
 
 impl Screen {
-    /// 0-based tab index, used by the tab bar and `1`-`5` digit routing.
-    pub fn index(self) -> usize {
-        match self {
-            Screen::Shelf => 0,
-            Screen::Project => 1,
-            Screen::Translate => 2,
-            Screen::Reader => 3,
-            Screen::Lexicon => 4,
-        }
-    }
-
     /// Map a `1`..=`5` digit to its screen.
     pub fn from_digit(d: char) -> Option<Screen> {
         match d {
@@ -298,6 +288,15 @@ pub struct App {
     /// state). Recorded to VOLUME.md so reruns can be compared. One at a time:
     /// chapters run sequentially.
     pending_chapter_run: Option<PendingChapterRun>,
+    /// Mouse hit-testing state, refreshed every frame in `render`. The skeleton
+    /// gives the header/tabs/body/footer regions; `tab_zones` maps each tab's
+    /// rectangle to its screen; `last_area` is the full frame (for overlay modal
+    /// geometry). `last_click` carries the previous left-press for double-click
+    /// detection.
+    last_area: Rect,
+    last_skeleton: Option<Skeleton>,
+    tab_zones: Vec<(Rect, Screen)>,
+    last_click: Option<(std::time::Instant, u16, u16)>,
 }
 
 /// Accumulates one chapter's run facts between `ChapterStarted` and its terminal
@@ -353,6 +352,10 @@ impl App {
             pending_recovery: None,
             active_run: None,
             pending_chapter_run: None,
+            last_area: Rect::default(),
+            last_skeleton: None,
+            tab_zones: Vec::new(),
+            last_click: None,
         }
     }
 
@@ -976,6 +979,90 @@ impl App {
     pub fn on_key(&mut self, key: KeyEvent) {
         let action = self.route_key(key);
         self.apply(action);
+    }
+
+    /// Fold one terminal mouse event into state. Motion / drag / button-up are
+    /// dropped in [`MouseInput::from_event`]; the rest become an `Action` through
+    /// the same `apply` funnel keys use. Left-press double-click is detected here
+    /// (the App owns the clock) before the gesture is normalized.
+    pub fn on_mouse(&mut self, me: MouseEvent) {
+        let double = if matches!(me.kind, MouseEventKind::Down(MouseButton::Left)) {
+            let now = std::time::Instant::now();
+            let is_double = self.last_click.is_some_and(|(t, c, r)| {
+                c == me.column
+                    && r == me.row
+                    && now.duration_since(t) < std::time::Duration::from_millis(400)
+            });
+            // Consume the pair so a third press doesn't read as another double.
+            self.last_click = if is_double {
+                None
+            } else {
+                Some((now, me.column, me.row))
+            };
+            is_double
+        } else {
+            false
+        };
+        let Some(input) = MouseInput::from_event(&me, double) else {
+            return;
+        };
+        let action = self.route_mouse(input);
+        self.apply(action);
+    }
+
+    /// Decide what a mouse gesture means given the current overlay / chrome /
+    /// screen regions (mirrors `route_key`'s precedence: overlay first, then the
+    /// global chrome, then the active screen).
+    fn route_mouse(&mut self, m: MouseInput) -> Action {
+        // 1) An open overlay gets first refusal, just like keys.
+        if !matches!(self.overlay, Overlay::None) {
+            return self.overlay.handle_mouse(m, self.last_area);
+        }
+        let Some(sk) = self.last_skeleton else {
+            return Action::None;
+        };
+
+        // 2) The wheel always scrolls the active screen, wherever the pointer is.
+        if m.is_scroll() {
+            return self.route_mouse_to_screen(m);
+        }
+
+        // 3) Clicking the toast row dismisses it (matches Esc/Backspace).
+        if self.toast.is_some() && m.in_rect(sk.toast) {
+            self.toast = None;
+            return Action::None;
+        }
+
+        // 4) Tab bar click → switch to that screen.
+        if m.in_rect(sk.tabs) {
+            if let Some((_, screen)) = self.tab_zones.iter().copied().find(|(r, _)| m.in_rect(*r)) {
+                return Action::Goto(screen);
+            }
+            return Action::None;
+        }
+
+        // 5) Breadcrumb / header click → home to the Shelf.
+        if m.is_click() && m.in_rect(sk.header) {
+            return Action::Goto(Screen::Shelf);
+        }
+
+        // 6) Body → the active screen decides (select / activate / focus).
+        if m.in_rect(sk.body) {
+            return self.route_mouse_to_screen(m);
+        }
+        Action::None
+    }
+
+    fn route_mouse_to_screen(&mut self, m: MouseInput) -> Action {
+        match self.screen {
+            Screen::Shelf => self.shelf.handle_mouse(m, &self.projects),
+            Screen::Project => self.project.handle_mouse(m, self.active.as_ref()),
+            Screen::Translate => self.translate.handle_mouse(m),
+            Screen::Reader => self.reader.handle_mouse(m),
+            Screen::Lexicon => self
+                .lexicon
+                .handle_mouse(m, self.active.as_ref().map(|a| &a.workspace)),
+        }
     }
 
     /// Decide what a key means given the current overlay / screen / focus state.
@@ -2083,6 +2170,9 @@ impl App {
         let area = f.area();
         let show_toast = self.toast.is_some();
         let sk: Skeleton = layout::skeleton(area, show_toast);
+        // Stash this frame's geometry so the next mouse event can hit-test it.
+        self.last_area = area;
+        self.last_skeleton = Some(sk);
 
         f.render_widget(
             Paragraph::new("").style(Style::default().bg(self.theme.bg)),
@@ -2093,7 +2183,7 @@ impl App {
         let tally = self.tally();
         chrome::render_header(f, sk.header, &crumb, &tally, &self.theme);
 
-        chrome::render_tabbar(
+        self.tab_zones = chrome::render_tabbar(
             f,
             sk.tabs,
             self.screen,
@@ -2717,6 +2807,104 @@ fn extract_attr(tag: &str, attr: &str) -> Option<String> {
             .find(|c: char| c.is_whitespace() || c == '>' || c == '/')
             .unwrap_or(after.len());
         Some(after[..end].to_string())
+    }
+}
+
+#[cfg(test)]
+mod mouse_tests {
+    use super::*;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+    use crate::app::overlay::Overlay;
+
+    fn app() -> App {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        App::new(EventTx(tx), AppConfig::default())
+    }
+
+    fn render(app: &mut App, w: u16, h: u16) {
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| app.render(f)).unwrap();
+    }
+
+    fn ev(kind: MouseEventKind, col: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column: col,
+            row,
+            modifiers: KeyModifiers::empty(),
+        }
+    }
+
+    fn click(app: &mut App, col: u16, row: u16) {
+        app.on_mouse(ev(MouseEventKind::Down(MouseButton::Left), col, row));
+    }
+
+    /// Clicking a tab in the bar switches to that screen; the zones the bar
+    /// reports really land on their labels.
+    #[test]
+    fn clicking_tabs_switches_screens() {
+        let mut app = app();
+        for target in [Screen::Lexicon, Screen::Project, Screen::Reader, Screen::Shelf] {
+            render(&mut app, 120, 40);
+            let (rect, _) = app
+                .tab_zones
+                .iter()
+                .copied()
+                .find(|(_, s)| *s == target)
+                .unwrap_or_else(|| panic!("no zone for {target:?}"));
+            click(&mut app, rect.x + rect.width / 2, rect.y);
+            assert_eq!(app.screen, target);
+        }
+    }
+
+    /// The wheel scrolls the active screen wherever the pointer sits, panic-free.
+    #[test]
+    fn wheel_routes_to_active_screen() {
+        let mut app = app();
+        app.screen = Screen::Reader;
+        render(&mut app, 80, 24);
+        app.on_mouse(ev(MouseEventKind::ScrollDown, 10, 10));
+        app.on_mouse(ev(MouseEventKind::ScrollUp, 10, 10));
+        // Over the tab bar too (still routes to the body, not the tabs).
+        app.on_mouse(ev(MouseEventKind::ScrollDown, 5, 1));
+    }
+
+    /// Clicking the breadcrumb / header goes home to the Shelf.
+    #[test]
+    fn header_click_goes_home() {
+        let mut app = app();
+        app.screen = Screen::Reader;
+        render(&mut app, 80, 24);
+        click(&mut app, 2, 0); // header is row 0
+        assert_eq!(app.screen, Screen::Shelf);
+    }
+
+    /// A click off an open overlay dismisses it (the overlay's Esc).
+    #[test]
+    fn click_outside_overlay_dismisses() {
+        let mut app = app();
+        app.overlay = Overlay::Help(0);
+        render(&mut app, 120, 40);
+        click(&mut app, 0, 0); // top-left corner is outside the centered modal
+        assert!(matches!(app.overlay, Overlay::None));
+    }
+
+    /// Clicking a confirm dialog's confirm button runs its wrapped action.
+    #[test]
+    fn clicking_confirm_button_runs_action() {
+        let mut app = app();
+        app.overlay = Overlay::confirm("Title", "Body", Action::Goto(Screen::Lexicon));
+        render(&mut app, 80, 24);
+        // Resolve the modal the same way the render/hit-test path does, then click
+        // the start of the confirm label on the button (last interior) row.
+        let modal = crate::ui::layout::centered_modal(64, 9, app.last_area);
+        let button_row = modal.y + modal.height - 2; // inner bottom line
+        click(&mut app, modal.x + 4, button_row);
+        assert!(matches!(app.overlay, Overlay::None));
+        assert_eq!(app.screen, Screen::Lexicon);
     }
 }
 
