@@ -3,29 +3,29 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-<title>honya 本屋 — แอปเทอร์มินัลเงียบสงบสำหรับแปลไลต์โนเวล ญี่ปุ่น→ไทย</title>
-<meta name="description" content="honya (本屋) คือ TUI สไตล์วรรณกรรมที่เงียบสงบ สร้างด้วย Ratatui บนภาษา Rust สำหรับการแปลไลต์โนเวลญี่ปุ่นเป็นไทยโดยมี AI ช่วย เพียงวางไฟล์ EPUB ลงไป ไปป์ไลน์สามเอเจนต์ Orchestrator·Translator·Reviewer จะคอยอัปเดตคลังศัพท์ ตัวละคร และบันทึกของคุณให้เป็นปัจจุบันเสมอ ใช้คีย์ OpenRouter ของคุณเอง โอเพนซอร์ส" />
+<title>honya 本屋 — TUI สำหรับแปลไลต์โนเวลญี่ปุ่นเป็นไทย</title>
+<meta name="description" content="honya (本屋) เป็นแอปเทอร์มินัลสำหรับจัดโปรเจกต์แปลไลต์โนเวลญี่ปุ่นเป็นไทย: นำเข้า EPUB, แยกบท, เก็บไฟล์ Markdown, เรียกโมเดลผ่าน API ที่รองรับ OpenRouter และให้คุณตรวจงานใน TUI ใช้คีย์ของคุณเองและเก็บงานเป็นไฟล์บนดิสก์" />
 <meta name="color-scheme" content="light" />
 <meta name="theme-color" content="#F3EFE6" />
 
 <!-- OpenGraph -->
 <meta property="og:type" content="website" />
 <meta property="og:site_name" content="honya 本屋" />
-<meta property="og:title" content="honya — แปลไลต์โนเวลญี่ปุ่น→ไทย ในเทอร์มินัลของคุณ" />
-<meta property="og:description" content="TUI สไตล์วรรณกรรมที่เงียบสงบด้วย Ratatui สำหรับการแปลไลต์โนเวลญี่ปุ่นเป็นไทยโดยมี AI ช่วย สามเอเจนต์ — Orchestrator, Translator, Reviewer — คอยดูแลคลังศัพท์และบันทึกของคุณให้เป็นปัจจุบัน ใช้คีย์ OpenRouter ของคุณเอง โอเพนซอร์ส" />
+<meta property="og:title" content="honya — TUI สำหรับแปลไลต์โนเวลญี่ปุ่น→ไทย" />
+<meta property="og:description" content="นำเข้า EPUB, แยกบทเป็น chunk, เรียกโมเดลผ่าน API ที่รองรับ OpenRouter และเก็บศัพท์ ตัวละคร โน้ต และคำแปลเป็นไฟล์ที่อ่านและแก้เองได้" />
 <meta property="og:url" content="https://honya.altqx.com/" />
 <meta property="og:locale" content="th_TH" />
 <meta property="og:image" content="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1200' height='630'%3E%3Crect width='1200' height='630' fill='%23F3EFE6'/%3E%3Crect x='40' y='40' width='1120' height='550' rx='14' fill='%23ECE7DC' stroke='%23CEC6B8'/%3E%3Ctext x='90' y='300' font-family='serif' font-size='180' fill='%232D2A26'%3E%E6%9C%AC%E5%B1%8B%3C/text%3E%3Ctext x='96' y='370' font-family='monospace' font-size='38' fill='%235C564E'%3Ehonya — JA%E2%86%92TH light-novel translation%3C/text%3E%3Ctext x='96' y='430' font-family='monospace' font-size='30' fill='%233A5078'%3EOrchestrator %C2%B7 Translator %C2%B7 Reviewer%3C/text%3E%3C/svg%3E" />
-<meta property="og:image:alt" content="honya 本屋 — แอปเทอร์มินัลเงียบสงบสำหรับแปลไลต์โนเวลญี่ปุ่นเป็นไทย" />
+<meta property="og:image:alt" content="honya 本屋 — TUI สำหรับแปลไลต์โนเวลญี่ปุ่นเป็นไทย" />
 <meta property="og:image:width" content="1200" />
 <meta property="og:image:height" content="630" />
 
 <!-- Twitter -->
 <meta name="twitter:card" content="summary_large_image" />
-<meta name="twitter:title" content="honya — แปลไลต์โนเวลญี่ปุ่น→ไทย ในเทอร์มินัลของคุณ" />
-<meta name="twitter:description" content="TUI สไตล์วรรณกรรมที่เงียบสงบด้วย Ratatui สำหรับการแปลไลต์โนเวลญี่ปุ่นเป็นไทยโดยมี AI ช่วย ใช้คีย์ OpenRouter ของคุณเอง โอเพนซอร์ส" />
+<meta name="twitter:title" content="honya — TUI สำหรับแปลไลต์โนเวลญี่ปุ่น→ไทย" />
+<meta name="twitter:description" content="แอปเทอร์มินัลที่ช่วยนำเข้า EPUB, แปลทีละ chunk ผ่าน API ที่รองรับ OpenRouter และเก็บโปรเจกต์เป็นไฟล์ที่ตรวจเองได้" />
 <meta name="twitter:image" content="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1200' height='630'%3E%3Crect width='1200' height='630' fill='%23F3EFE6'/%3E%3Ctext x='90' y='340' font-family='serif' font-size='220' fill='%232D2A26'%3E%E6%9C%AC%E5%B1%8B%3C/text%3E%3C/svg%3E" />
-<meta name="twitter:image:alt" content="honya 本屋 — แอปเทอร์มินัลเงียบสงบสำหรับแปลไลต์โนเวลญี่ปุ่นเป็นไทย" />
+<meta name="twitter:image:alt" content="honya 本屋 — TUI สำหรับแปลไลต์โนเวลญี่ปุ่นเป็นไทย" />
 <link rel="canonical" href="https://honya.altqx.com/" />
 
 <!-- inline SVG favicon: a waxing moon on washi (the chapter-status motif) -->
@@ -392,7 +392,7 @@
   .agent.idle .msg{color:var(--ink-faint)}
 
   /* usage meter — mirrors the app's two-row run/chapter readout: in · out ·
-     total tokens, tool calls, BYOK cost, and run retries. Fixed cell widths +
+     total tokens, tool calls, own-key cost, and run retries. Fixed cell widths +
      tabular-nums + nowrap so streaming digits never reflow or wrap the row. */
   .meter{display:flex; gap:0 6px; flex-wrap:nowrap; white-space:nowrap; overflow:hidden;
     font-size:10.5px; color:var(--ink-faint-text); height:15px; align-items:center}
@@ -833,22 +833,21 @@
     <div class="wrap">
       <div class="hero-grid">
         <div class="hero-copy">
-          <span class="eyebrow">Ratatui TUI · สร้างด้วย Rust</span>
+          <span class="eyebrow">Ratatui TUI · Rust · ใช้คีย์ของคุณเอง</span>
           <h1 id="hero-h">
-            ห้องทำงานอันเงียบสงบสำหรับการแปลไลต์โนเวล
+            แปลไลต์โนเวลญี่ปุ่นเป็นไทย
             <span class="accent">JA→TH</span>
-            ใน<span class="wordmark" lang="ja">本屋</span>ของคุณ
+            ในเทอร์มินัลด้วย <span class="wordmark" lang="ja">本屋</span>
           </h1>
           <p class="hero-sub">
-            เพียงวางไฟล์ EPUB ลงในโฟลเดอร์ <b>honya</b> จะจัดเรียงเนื้อหาตามลำดับสันหนังสือ
-            ย้ายภาพประกอบ ล้าง HTML ให้เป็น Markdown แล้วเดินงานผ่านไปป์ไลน์สามเอเจนต์
-            บน API ที่รองรับ OpenRouter — พร้อมอัปเดตคลังศัพท์ ตารางตัวละคร และบันทึกประจำเล่ม
-            ของคุณให้เป็นปัจจุบันไปตลอดทาง
+            <b>honya</b> นำเข้า EPUB แล้วแตกเป็นโปรเจกต์บนดิสก์: บทที่ล้างเป็น Markdown,
+            โฟลเดอร์ภาพ, ไฟล์ศัพท์ ตัวละคร สไตล์ และคำแปลแยกตามเล่ม จากนั้นเรียกโมเดลผ่าน
+            API ที่รองรับ OpenRouter เพื่อแปลทีละ chunk พร้อมหน้าจอสำหรับตรวจงานเอง
           </p>
           <div class="cta-row">
             <a class="btn btn-primary" href="#install">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
-              เริ่มต้นใช้งาน
+              ติดตั้ง
             </a>
             <a class="btn btn-ghost" href="https://github.com/altqx/honya" rel="noopener">
               <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2C6.48 2 2 6.58 2 12.25c0 4.53 2.87 8.37 6.84 9.73.5.1.68-.22.68-.49 0-.24-.01-.88-.01-1.72-2.78.62-3.37-1.37-3.37-1.37-.45-1.18-1.11-1.5-1.11-1.5-.91-.64.07-.62.07-.62 1 .07 1.53 1.06 1.53 1.06.89 1.56 2.34 1.11 2.91.85.09-.66.35-1.11.63-1.37-2.22-.26-4.56-1.14-4.56-5.06 0-1.12.39-2.03 1.03-2.75-.1-.26-.45-1.3.1-2.71 0 0 .84-.27 2.75 1.05a9.4 9.4 0 0 1 5 0c1.91-1.32 2.75-1.05 2.75-1.05.55 1.41.2 2.45.1 2.71.64.72 1.03 1.63 1.03 2.75 0 3.93-2.34 4.79-4.57 5.05.36.32.68.94.68 1.9 0 1.37-.01 2.47-.01 2.81 0 .27.18.6.69.49A10.04 10.04 0 0 0 22 12.25C22 6.58 17.52 2 12 2Z"/></svg>
@@ -857,15 +856,15 @@
           </div>
           <div class="hero-meta">
             <span><span class="dot"></span>ใช้คีย์ OpenRouter ของคุณเอง</span>
+            <span><span class="dot"></span>โปรเจกต์เป็นไฟล์ในเครื่อง</span>
             <span><span class="dot"></span>ฟรีและโอเพนซอร์ส</span>
-            <span><span class="dot"></span>ไม่มีการเก็บข้อมูล</span>
           </div>
         </div>
 
         <aside class="hero-aside" aria-label="ตัวอย่างการแปลแบบสด">
           <div class="term-shell">
             <div class="term-shadow" aria-hidden="true"></div>
-            <div class="terminal" role="img" aria-label="ภาพจำลองหน้าจอเทอร์มินัลของ honya แท็บ Translate (3 訳) กำลังทำงานอยู่ แผนผังโปรเจกต์แสดงรายการบทพร้อมสัญลักษณ์สถานะรูปดวงจันทร์ข้างขึ้น แถบความคืบหน้าของ Chunk ค่อย ๆ เต็มขึ้น เอเจนต์สามตัว — Orchestrator, Translator, Reviewer — รายงานความเคลื่อนไหว มาตรวัดโทเคนนับเพิ่มขึ้น และข้อความภาษาไทยทยอยปรากฏใต้ต้นฉบับภาษาญี่ปุ่น">
+            <div class="terminal" role="img" aria-label="ภาพจำลองหน้าจอ Translate ของ honya แสดงรายการบท สถานะการแปล ความคืบหน้าเป็น chunk เอเจนต์ Orchestrator, Translator, Reviewer จำนวนโทเคน ค่าใช้จ่ายโดยประมาณ และตัวอย่างภาษาไทยที่สตรีมกลับมาระหว่างแปล">
               <div class="titlebar">
                 <div class="dots" aria-hidden="true"><i></i><i></i><i></i></div>
                 <div class="title"><span class="ja" lang="ja">本屋</span> honya — <span lang="ja">訳</span> Translate</div>
@@ -953,7 +952,7 @@
               </div>
             </div>
           </div>
-          <p class="term-cap">ภาพสะท้อนที่ตรงตาม TUI จริงทุกประการ — สีและอักขระแบบเดียวกับในแอปจริง</p>
+          <p class="term-cap">ตัวอย่างหน้าจอโดยย่อ — สี สัญลักษณ์ และข้อมูลอิงจากแอปจริง</p>
         </aside>
       </div>
     </div>
@@ -965,22 +964,21 @@
     <div class="wrap">
       <div class="sec-head">
         <span class="eyebrow">คืออะไร</span>
-        <h2 id="what-h">เครื่องมือสไตล์วรรณกรรมที่เงียบสงบสำหรับงานฝีมือที่ต้องใช้เวลา — ไม่ใช่เครื่องแปลแบบเร่งรีบ</h2>
-        <p>honya ปฏิบัติต่อไลต์โนเวลเหมือนบรรณาธิการคนหนึ่ง: ทีละเล่ม ทีละบท ทีละ Chunk —
-        โดยส่งต่อความต่อเนื่องไปข้างหน้าและบันทึกการตัดสินใจเอาไว้เสมอ</p>
+        <h2 id="what-h">เครื่องมือสำหรับจัดงานแปลยาว ๆ ในเทอร์มินัล</h2>
+        <p>honya ไม่ได้แทนที่คนตรวจแปล แต่ช่วยจัดไฟล์ บริบท และรอบแปลให้ตามงานได้ง่ายขึ้น
+        เมื่อโปรเจกต์มีหลายบทหรือหลายเล่ม</p>
       </div>
 
       <div class="what-grid">
         <div class="what-text">
-          <p class="big">คุณป้อนไฟล์ EPUB เข้าไป มันคืนโฟลเดอร์โปรเจกต์ที่คุณอ่าน แก้ไข
-          และไว้ใจได้ — ภาษาญี่ปุ่นอยู่ทางซ้าย <span class="ja" lang="ja">タイ語</span> ภาษาไทยอยู่ทางขวา</p>
-          <p>ขั้นตอนเตรียมข้อมูลจะจัดบทให้เรียงตามลำดับสันหนังสือ ย้ายภาพประกอบที่แทรกอยู่
-          และล้าง HTML ให้เหลือเป็น Markdown ล้วน จากนั้นทุกบทจะถูกแบ่งเป็น Chunk ขนาดราว 1,000 โทเคน
-          แล้วเดินผ่านไปป์ไลน์ โดยมีประโยคภาษาไทยห้าประโยคสุดท้ายจาก Chunk ก่อนหน้าแทรกเข้ามา
-          เพื่อรักษาความต่อเนื่อง</p>
-          <p>honya เชื่อมต่อกับ <b>API ที่รองรับ OpenRouter</b> จึงต้องใช้คีย์ เมื่อเปิดครั้งแรก
-          มันจะให้คุณวางคีย์ลงไปและบันทึกไว้ที่ <code>~/.config/honya</code> เพื่อให้คุณถูกถาม
-          เพียงครั้งเดียว</p>
+          <p class="big">คุณเริ่มจาก EPUB แล้วได้โฟลเดอร์โปรเจกต์ที่เปิดอ่าน แก้ และ diff ได้ —
+          ต้นฉบับญี่ปุ่นอยู่ใน <code>raw/</code> และผลแปลไทยอยู่ใน <code>translated/</code></p>
+          <p>ขั้นตอนนำเข้าจะจัดบทตามลำดับสันหนังสือ ย้ายภาพประกอบ และล้าง HTML ให้เหลือ Markdown
+          จากนั้นแต่ละบทจะถูกแบ่งเป็น chunk ขนาดประมาณ 1,000 โทเคน พร้อมส่งบริบทที่จำเป็น เช่น
+          ศัพท์ ตัวละคร สไตล์ และข้อความก่อนหน้า ให้โมเดลในแต่ละรอบ</p>
+          <p>honya ไม่มาพร้อมโมเดลในตัว ต้องใช้ <b>API ที่รองรับ OpenRouter</b> เมื่อเปิดครั้งแรก
+          โปรแกรมจะถามคีย์และบันทึกไว้ที่ <code>~/.config/honya</code> หรือจะตั้ง
+          <code>HONYA_API_KEY</code> เองก็ได้</p>
         </div>
         <div class="what-vis">
           <div class="layout-card" aria-label="โครงสร้างโปรเจกต์บนดิสก์">
@@ -1008,9 +1006,9 @@
     <div class="wrap">
       <div class="sec-head">
         <span class="eyebrow">ห้าหน้าจอ</span>
-        <h2 id="screens-h">ใช้แท็บ ควบคุมด้วยคีย์บอร์ด และเงียบสงบโดยการออกแบบ</h2>
-        <p>กด <span class="kbd">1</span>–<span class="kbd">5</span> ในแอปเพื่อสลับระหว่างมุมมอง
-        แต่ละหน้าจอทำสิ่งเดียวได้ดี — เลือกแท็บเพื่อดู</p>
+        <h2 id="screens-h">ห้าหน้าจอสำหรับนำเข้า แปล ตรวจ และแก้บริบท</h2>
+        <p>กด <span class="kbd">1</span>–<span class="kbd">5</span> ในแอปเพื่อสลับมุมมอง
+        แต่ละหน้าจอมีงานหลักของตัวเอง — เลือกแท็บเพื่อดูตัวอย่าง</p>
       </div>
 
       <!-- tab bar mirrors the TUI tab strip; htmx swaps each partial into #screen-panel -->
@@ -1052,7 +1050,7 @@
               <span class="scr-ja" lang="ja">訳</span>
               <span class="scr-en">Translate</span>
             </div>
-            <p>การทำงานแบบสด แถบวัด Chunk ค่อย ๆ เต็มขึ้นขณะที่สามเอเจนต์ — <span class="mono">◆ Orchestrator</span>, <span class="mono">▲ Translator</span>, <span class="mono">■ Reviewer</span> — ทำงานในบท มาตรวัดโทเคนนับเพิ่มขึ้น และภาษาไทยทยอยปรากฏใต้ต้นฉบับภาษาญี่ปุ่น</p>
+            <p>หน้า Translate แสดงความคืบหน้าเป็น chunk, สถานะของ <span class="mono">◆ Orchestrator</span>, <span class="mono">▲ Translator</span>, <span class="mono">■ Reviewer</span>, จำนวนโทเคน ค่าใช้จ่ายโดยประมาณ และตัวอย่างภาษาไทยที่สตรีมกลับมาระหว่างแปล</p>
             <div class="scr-keys">
               <span class="klbl">ปุ่ม</span>
               <span class="kkey"><span class="kbd">p</span> หยุดชั่วคราว</span>
@@ -1089,17 +1087,17 @@
   <section class="pipeline" id="pipeline" aria-labelledby="pipe-h">
     <div class="wrap">
       <div class="sec-head">
-        <span class="eyebrow">ไปป์ไลน์สามเอเจนต์</span>
-        <h2 id="pipe-h">Orchestrator, Translator, Reviewer — ทีละ Chunk พร้อมความจำ</h2>
-        <p>แต่ละบทถูกแบ่งเป็น Chunk ขนาดราว 1,000 โทเคน ความต่อเนื่องและบริบทเดินทางไปกับทุก Chunk
-        ผู้ตรวจสามารถส่งงานกลับไปแก้ก่อนที่จะมีการเขียนสิ่งใดลงไป</p>
+        <span class="eyebrow">วิธีแปล</span>
+        <h2 id="pipe-h">แปลทีละ Chunk พร้อมบริบทที่จำเป็น</h2>
+        <p>แต่ละบทถูกแบ่งเป็น chunk ขนาดประมาณ 1,000 โทเคน Orchestrator เตรียมบริบท,
+        Translator ร่างคำแปล และ Reviewer ตรวจเบื้องต้นก่อนที่แอปจะเขียนผลลงไฟล์</p>
       </div>
 
       <div class="pipe-wrap">
         <div class="pipe-svg-card">
           <svg class="pipe-svg" viewBox="0 0 920 280" role="img" aria-labelledby="pipe-svg-title pipe-svg-desc" preserveAspectRatio="xMidYMid meet">
             <title id="pipe-svg-title">แผนภาพไปป์ไลน์สามเอเจนต์ของ honya</title>
-            <desc id="pipe-svg-desc">Chunk และบริบทไหลเข้าสู่ Orchestrator ซึ่งรวบรวมบริบทของคลังศัพท์ ตัวละคร โปรเจกต์ และสไตล์ จากนั้น Translator ร่างภาษาไทย ส่วน Reviewer จะอนุมัติ — โดยผนวกภาษาไทยและเดินหน้าบทสรุป — หรือปฏิเสธพร้อมฟีดแบ็กแยกเป็นข้อ ๆ ที่ส่งกลับไปยัง Translator เพื่อลองใหม่</desc>
+            <desc id="pipe-svg-desc">Chunk และบริบทไหลเข้าสู่ Orchestrator ซึ่งเลือกศัพท์ ตัวละคร โปรเจกต์ และสไตล์ที่เกี่ยวข้อง จากนั้น Translator ร่างภาษาไทย ส่วน Reviewer จะอนุมัติให้แอปผนวกคำแปล หรือปฏิเสธพร้อมฟีดแบ็กที่ส่งกลับไปให้ Translator ลองใหม่</desc>
             <defs>
               <marker id="arrow" markerWidth="9" markerHeight="9" refX="6.5" refY="4.5" orient="auto">
                 <path d="M0 0 L9 4.5 L0 9 Z" fill="#5C564E"/>
@@ -1170,29 +1168,28 @@
           <div class="pstep">
             <span class="role"><span class="ja" lang="ja">指揮</span> Orchestrator</span>
             <h4>จัดเตรียมทุกอย่าง</h4>
-            <p>รวบรวมคลังศัพท์ ตารางตัวละคร บทสรุปโปรเจกต์ และสไตล์ — พร้อมห้าประโยคภาษาไทย
-            สุดท้ายของ Chunk ก่อนหน้า — แล้วส่งพรอมต์ที่สะอาดและมีบริบทต่อไป</p>
+            <p>เลือกข้อมูลที่ควรส่งให้โมเดลในรอบนั้น เช่น ศัพท์ ตัวละคร สไตล์ บทสรุป
+            และประโยคภาษาไทยท้าย ๆ จาก chunk ก่อนหน้า</p>
           </div>
           <div class="pstep">
             <span class="role"><span class="ja" lang="ja">訳者</span> Translator</span>
             <h4>ร่างภาษาไทย</h4>
-            <p>แปล Chunk โดยคงน้ำเสียงของเรื่อง สตรีมโทเคนเข้าสู่ตัวอย่างแบบสด เพื่อให้คุณได้เห็น
-            ถ้อยความค่อย ๆ ปรากฏแทนที่จะรอวงล้อหมุน</p>
+            <p>ร่างคำแปลของ chunk ปัจจุบันและสตรีมข้อความกลับมาให้เห็นระหว่างรัน
+            เพื่อให้รู้ว่างานยังเดินอยู่</p>
           </div>
           <div class="pstep">
             <span class="role"><span class="ja" lang="ja">校正</span> Reviewer</span>
             <h4>อนุมัติหรือส่งกลับ</h4>
-            <p>ตรวจสอบความตรงต้นฉบับและความสอดคล้อง เมื่ออนุมัติ ภาษาไทยจะถูกผนวกเข้าไป
-            อย่างแน่นอนโดยฝั่งแอป เมื่อปฏิเสธ ฟีดแบ็กแยกข้อจะถูกส่งกลับไปลองใหม่</p>
+            <p>ตรวจความตรงต้นฉบับและข้อผิดพลาดชัดเจนในรอบอัตโนมัติ ถ้าไม่ผ่าน
+            ฟีดแบ็กจะถูกส่งกลับไปให้ Translator ลองใหม่</p>
           </div>
         </div>
 
         <div class="pipe-note">
-          เมื่ออนุมัติ Orchestrator จะ<b>บันทึกตัวละคร ศัพท์ และโน้ตใหม่</b>ผ่านการเรียกใช้เครื่องมือ
-          และเดินหน้าบทสรุป — <span class="ja" lang="ja">辞</span> Lexicon ของคุณดูแลตัวเอง
-          เมื่อปฏิเสธ จะไม่มีการเขียนสิ่งใดลงไป:
-          <span class="vermilion">ฟีดแบ็กของผู้ตรวจ</span>จะถูกส่งกลับไปยัง Translator ทันที
-          จนกว่า Chunk จะผ่าน
+          เมื่อ Reviewer อนุมัติ แอปจะ<b>ผนวกคำแปลและบันทึกศัพท์ ตัวละคร หรือโน้ตใหม่</b>
+          ลงไฟล์โปรเจกต์ จากนั้นจึงอัปเดตบทสรุป เมื่อปฏิเสธ จะยังไม่เขียนผลแปล:
+          <span class="vermilion">ฟีดแบ็กของ Reviewer</span>จะถูกส่งกลับไปยัง Translator
+          จนกว่า chunk จะผ่าน
         </div>
       </div>
     </div>
@@ -1204,9 +1201,9 @@
       <div class="install-card">
         <div class="sec-head" style="text-align:center">
           <span class="eyebrow" style="justify-content:center">ติดตั้ง</span>
-          <h2 id="install-h">คำสั่งบรรทัดเดียวสู่ร้านหนังสือที่พร้อมใช้งาน</h2>
-          <p style="margin-inline:auto">ไม่ต้องผ่านขั้นตอนบิลด์ รันขึ้นมา วางคีย์ OpenRouter
-          เมื่อระบบถาม แล้วเริ่มแปลได้เลย</p>
+          <h2 id="install-h">ติดตั้งจากสคริปต์หรือ cargo</h2>
+          <p style="margin-inline:auto">สคริปต์จะดาวน์โหลดไบนารีจาก GitHub Release
+          เปิดครั้งแรกค่อยวางคีย์สำหรับ API ที่รองรับ OpenRouter</p>
         </div>
 
         <div class="copybox-wrap">
@@ -1234,9 +1231,9 @@
           <p class="install-update" style="margin:14px 0 0; text-align:center; color:var(--ink-faint-text); font-size:13.5px">ติดตั้งไว้แล้ว? อัปเดตได้ทันทีด้วย <code>honya update</code></p>
 
           <div class="install-foot">
-            <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>API ที่รองรับ OpenRouter</span>
+            <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>ทำงานกับ API ที่รองรับ OpenRouter</span>
             <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>ขอคีย์ของคุณเมื่อรันครั้งแรก</span>
-            <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>เก็บเป็นไฟล์ธรรมดาบนดิสก์</span>
+            <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>โปรเจกต์เก็บบนดิสก์</span>
           </div>
         </div>
       </div>
@@ -1249,30 +1246,30 @@
   <section aria-labelledby="feat-h">
     <div class="wrap">
       <div class="sec-head">
-        <span class="eyebrow">รายละเอียดตามจริงสองสามข้อ</span>
-        <h2 id="feat-h">ออกแบบมาเพื่อวิธีการแปลที่เกิดขึ้นจริง</h2>
-        <p>ไม่มีเวทมนตร์ ไม่มีการอวดตัวเลข มีเพียงชุดการตัดสินใจที่ทำให้โปรเจกต์ยาว ๆ ยังคงสอดคล้องกัน</p>
+        <span class="eyebrow">สิ่งที่ควรรู้</span>
+        <h2 id="feat-h">honya ช่วยจัดงาน ไม่ได้สัญญาว่าคำแปลสมบูรณ์</h2>
+        <p>ผลลัพธ์ยังควรอ่านตรวจเอง โดยเฉพาะชื่อเฉพาะ น้ำเสียง และประโยคที่พึ่งพาบริบทมาก</p>
       </div>
 
       <div class="feat-grid">
         <div class="feat">
           <span class="ficon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v4M12 18v4M4.9 4.9l2.9 2.9M16.2 16.2l2.9 2.9M2 12h4M18 12h4M4.9 19.1l2.9-2.9M16.2 7.8l2.9-2.9"/></svg></span>
           <h3>ใช้คีย์ของคุณเอง</h3>
-          <p>honya ทำงานกับ OpenRouter โดยตรง ระบบจะขอคีย์เมื่อเปิดครั้งแรกและบันทึกไว้ในเครื่อง
+          <p>honya ทำงานกับ API ที่รองรับ OpenRouter ระบบจะขอคีย์เมื่อเปิดครั้งแรกและบันทึกไว้ในเครื่อง
           ที่ <code>~/.config/honya</code> — หรือจะอ่าน <code>HONYA_API_KEY</code> จากตัวแปร
-          สภาพแวดล้อมก็ได้ ไม่ต้องมีบัญชี ไม่มีการเก็บข้อมูล</p>
+          สภาพแวดล้อมก็ได้ ไม่มีบัญชีของ honya; คำขอแปลยังถูกส่งไปยัง provider ที่คุณเลือก</p>
         </div>
         <div class="feat">
           <span class="ficon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="2.4"/><circle cx="18" cy="6" r="2.4"/><circle cx="12" cy="18" r="2.4"/><path d="M8.4 6h7.2M7.2 8 11 15.6M16.8 8 13 15.6"/></svg></span>
           <h3>ไปป์ไลน์สามเอเจนต์</h3>
-          <p>Orchestrator, Translator และ Reviewer แบ่งงานกันทีละ Chunk ผู้ตรวจสามารถปฏิเสธ
-          พร้อมฟีดแบ็กแยกข้อก่อนที่สิ่งใดจะถูกบันทึกลงดิสก์</p>
+          <p>Orchestrator, Translator และ Reviewer แบ่งงานกันทีละ chunk เป็นวงจรร่าง ตรวจ
+          และลองใหม่ก่อนที่ผลแปลจะถูกบันทึกลงดิสก์</p>
         </div>
         <div class="feat">
           <span class="ficon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h11l5 5v11a0 0 0 0 1 0 0H4a0 0 0 0 1 0 0Z"/><path d="M15 4v5h5M8 13h8M8 17h6"/></svg></span>
           <h3>การเตรียมข้อมูล EPUB</h3>
-          <p>จัดบทตามลำดับสันหนังสือ ย้ายภาพประกอบ และล้าง HTML ให้เป็น Markdown ที่เรียบร้อย
-          — เพื่อให้เอเจนต์อ่านข้อความที่สะอาด ไม่ใช่มาร์กอัป</p>
+          <p>จัดบทตามลำดับสันหนังสือ ย้ายภาพประกอบ และล้าง HTML ให้เป็น Markdown
+          เพื่อให้โมเดลอ่านเนื้อหา ไม่ใช่มาร์กอัปจาก EPUB</p>
         </div>
         <div class="feat">
           <span class="ficon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M12 4v16M6 9h3M6 13h3M15 9h3M15 13h3"/></svg></span>
@@ -1282,9 +1279,9 @@
         </div>
         <div class="feat">
           <span class="ficon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5V6a2 2 0 0 1 2-2h11v16H6a2 2 0 0 0-2 2Z"/><path d="M9 8h5M9 11h5"/></svg></span>
-          <h3>คลังศัพท์ที่ดูแลตัวเอง</h3>
-          <p>เอเจนต์อัปเดต GLOSSARY, CHARACTERS และโน้ตให้เป็นปัจจุบันผ่านการเรียกใช้เครื่องมือ
-          ไปพร้อมกับเรื่องที่ดำเนินไป — ศัพท์ต่าง ๆ คงเส้นคงวาตลอดทุกเล่ม</p>
+          <h3>ไฟล์บริบทที่แก้เองได้</h3>
+          <p>GLOSSARY, CHARACTERS และโน้ตถูกอัปเดตผ่าน tool calls ระหว่างแปล
+          คุณยังเปิดไฟล์เหล่านี้มาแก้เองได้เมื่อคำศัพท์หรือชื่อตัวละครต้องล็อกให้ชัด</p>
         </div>
         <div class="feat">
           <span class="ficon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7l9-4 9 4-9 4-9-4Z"/><path d="M3 7v6l9 4 9-4V7"/></svg></span>
@@ -1299,14 +1296,14 @@
   <!-- ───────── END BAND ───────── -->
   <section class="endband" aria-labelledby="end-h">
     <div class="wrap">
-      <span class="eyebrow">เปิดร้านหนังสือ</span>
-      <h2 id="end-h">วางไฟล์ EPUB ลงไป แล้วปล่อยให้ <span class="ja" lang="ja">本屋</span> ทำงานอย่างใจเย็น</h2>
-      <p>ฟรีและโอเพนซอร์ส เตรียมคีย์ที่รองรับ OpenRouter วางไฟล์ EPUB ลงไป
-      แล้วปล่อยให้สามเอเจนต์ทำงานอย่างใจเย็น</p>
+      <span class="eyebrow">ลองใช้งาน</span>
+      <h2 id="end-h">นำเข้า EPUB แล้วตรวจงานแปลในที่เดียว</h2>
+      <p>เหมาะกับคนที่ต้องการโปรเจกต์แปลเป็นไฟล์ อ่าน diff ได้ และยอมตรวจคำแปลเอง
+      ไม่ใช่บริการแปลสำเร็จรูป</p>
       <div class="cta-row">
         <a class="btn btn-primary" href="#install">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
-          เริ่มต้นใช้งาน
+          ติดตั้ง
         </a>
         <a class="btn btn-ghost" href="https://github.com/altqx/honya" rel="noopener">
           <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2C6.48 2 2 6.58 2 12.25c0 4.53 2.87 8.37 6.84 9.73.5.1.68-.22.68-.49 0-.24-.01-.88-.01-1.72-2.78.62-3.37-1.37-3.37-1.37-.45-1.18-1.11-1.5-1.11-1.5-.91-.64.07-.62.07-.62 1 .07 1.53 1.06 1.53 1.06.89 1.56 2.34 1.11 2.91.85.09-.66.35-1.11.63-1.37-2.22-.26-4.56-1.14-4.56-5.06 0-1.12.39-2.03 1.03-2.75-.1-.26-.45-1.3.1-2.71 0 0 .84-.27 2.75 1.05a9.4 9.4 0 0 1 5 0c1.91-1.32 2.75-1.05 2.75-1.05.55 1.41.2 2.45.1 2.71.64.72 1.03 1.63 1.03 2.75 0 3.93-2.34 4.79-4.57 5.05.36.32.68.94.68 1.9 0 1.37-.01 2.47-.01 2.81 0 .27.18.6.69.49A10.04 10.04 0 0 0 22 12.25C22 6.58 17.52 2 12 2Z"/></svg>
@@ -1330,8 +1327,8 @@
           </span>
           <span class="name"><span class="ja" lang="ja">本屋</span>honya</span>
         </a>
-        <p>แอปเทอร์มินัลสไตล์วรรณกรรมที่เงียบสงบ สำหรับการแปลไลต์โนเวลญี่ปุ่นเป็นไทย
-        โดยมี AI ช่วย สร้างด้วย Rust และ Ratatui</p>
+        <p>TUI สำหรับจัดโปรเจกต์แปลไลต์โนเวลญี่ปุ่นเป็นไทยผ่าน API ที่รองรับ OpenRouter
+        สร้างด้วย Rust และ Ratatui</p>
       </div>
 
       <div class="foot-cols">
@@ -1359,7 +1356,7 @@
     </div>
 
     <div class="foot-bottom">
-      <span><span class="ja" lang="ja">本屋</span> — เครื่องมือเงียบ ๆ สำหรับงานฝีมือ ฟรีและโอเพนซอร์ส</span>
+      <span><span class="ja" lang="ja">本屋</span> — TUI สำหรับโปรเจกต์แปล JA→TH ฟรีและโอเพนซอร์ส</span>
       <span><a href="https://github.com/altqx/honya" rel="noopener">github.com/altqx/honya</a></span>
     </div>
   </div>
@@ -1629,7 +1626,7 @@
   }
   /* tokens render like the app's human_tok: ≥1000 → "1.4k", else the integer. */
   function fmtTok(n){ return n >= 1000 ? (n/1000).toFixed(1)+"k" : String(Math.round(n)); }
-  var TOK_RATE = 0.0000018; // ≈ blended $/token, for a plausible BYOK cost readout
+  var TOK_RATE = 0.0000018; // ≈ blended $/token, for a plausible own-key cost readout
   /* paint both meter rows from state; run and chapter share values in this
      single-chapter demo (the app resets `chap` at each chapter boundary). */
   function drawMeter(){

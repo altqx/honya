@@ -4,7 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <title>honya 本屋 — บันทึกการเปลี่ยนแปลง (Changelog)</title>
-<meta name="description" content="บันทึกการเปลี่ยนแปลงของ honya (本屋) — ฟีเจอร์ใหม่ การปรับปรุง และการแก้ไขในแต่ละเวอร์ชัน ตั้งแต่รีลีสแรกจนถึงปัจจุบัน" />
+<meta name="description" content="บันทึกการเปลี่ยนแปลงของ honya (本屋): สิ่งที่เพิ่ม ปรับ และแก้ในแต่ละเวอร์ชัน เรียงจากรีลีสล่าสุดไปยังรีลีสแรก" />
 <meta name="color-scheme" content="light" />
 <meta name="theme-color" content="#F3EFE6" />
 
@@ -12,7 +12,7 @@
 <meta property="og:type" content="website" />
 <meta property="og:site_name" content="honya 本屋" />
 <meta property="og:title" content="honya — บันทึกการเปลี่ยนแปลง" />
-<meta property="og:description" content="ฟีเจอร์ใหม่ การปรับปรุง และการแก้ไขในแต่ละเวอร์ชันของ honya — แอปเทอร์มินัลแปลไลต์โนเวลญี่ปุ่น→ไทย" />
+<meta property="og:description" content="รายการเปลี่ยนแปลงของ honya ในแต่ละเวอร์ชัน ตั้งแต่ฟีเจอร์ใหม่ไปจนถึงบั๊กที่แก้แล้ว" />
 <meta property="og:url" content="https://honya.altqx.com/changelog" />
 <meta property="og:locale" content="th_TH" />
 
@@ -323,10 +323,10 @@
   <section class="log-hero" aria-labelledby="log-h">
     <div class="wrap">
       <span class="eyebrow">บันทึกการเปลี่ยนแปลง</span>
-      <h1 id="log-h">ทุกเวอร์ชันของ <span class="ja" lang="ja">本屋</span><br />สิ่งที่เพิ่ม ปรับ และแก้</h1>
+      <h1 id="log-h">บันทึกการเปลี่ยนแปลงของ <span class="ja" lang="ja">本屋</span></h1>
       <p>
-        ทุกฟีเจอร์ใหม่ การปรับปรุง และการแก้ไขจะถูกบันทึกไว้ที่นี่ จัดกลุ่มตามเวอร์ชัน
-        โดยเรียงจากใหม่ไปเก่า เวอร์ชันคือแหล่งความจริงเดียวใน <code>Cargo.toml</code>
+        หน้านี้สรุปสิ่งที่เปลี่ยนในแต่ละเวอร์ชัน เรียงจากใหม่ไปเก่า
+        เลขเวอร์ชันอ้างอิงจาก <code>Cargo.toml</code>
       </p>
       <span class="latest-pill"><span class="dot" aria-hidden="true"></span>เวอร์ชันล่าสุด <b>v0.1.14</b></span>
     </div>
@@ -349,7 +349,7 @@
           <li class="change"><span class="tag add">เพิ่ม</span><span class="txt"><b>รองรับเมาส์ทั่วทั้งแอป</b> — คลิกแท็บเพื่อสลับหน้า · คลิกรายการเพื่อเลือกแล้วดับเบิลคลิก (หรือคลิกซ้ำที่รายการเดิม) เพื่อเปิด · หมุนล้อเพื่อเลื่อนดู</span></li>
           <li class="change"><span class="tag add">เพิ่ม</span><span class="txt">คลิกปุ่มในกล่องยืนยัน เลือกรายการในหน้าต่างซ้อน (command palette, ธีม, กระโดดไปบท, ส่งออก) และคลิกนอกหน้าต่างเพื่อปิดได้</span></li>
           <li class="change"><span class="tag add">เพิ่ม</span><span class="txt">ในหน้าอ่าน (Reader) หมุนล้อเพื่อเลื่อนเฉพาะช่องที่เมาส์ชี้อยู่เมื่อปลดการเลื่อนพร้อมกัน (sync) ออก</span></li>
-          <li class="change"><span class="tag fix">แก้ไข</span><span class="txt">บางครั้งคำแปล โดยเฉพาะช่วงบทแรก ๆ จะมีประโยคที่แปลไว้แล้วจากบริบทต่อเนื่อง (continuity) ซ้ำขึ้นต้นมา — ตอนนี้ระบบจะตัดส่วนที่ซ้ำออกให้อัตโนมัติ แปลเฉพาะเนื้อหาท่อนปัจจุบัน โดยไม่เปลืองรอบแปลซ้ำ</span></li>
+          <li class="change"><span class="tag fix">แก้ไข</span><span class="txt">บางครั้งคำแปล โดยเฉพาะช่วงบทแรก ๆ จะดึงประโยคจากบริบทต่อเนื่อง (continuity) มาซ้ำตอนต้น — ตอนนี้ระบบตัดส่วนซ้ำออกและแปลเฉพาะท่อนปัจจุบัน</span></li>
         </ul>
       </article>
 
@@ -360,7 +360,7 @@
           <div class="rel-date">7 มิ.ย. 2026</div>
         </div>
         <ul class="changes">
-          <li class="change"><span class="tag fix">แก้ไข</span><span class="txt">สระ ำ ที่ยังแสดงผลเลอะข้ามช่องบนป้ายสถานะของหน้าต่างแก้ไขเรื่องย่อ (synopsis) — ตอนนี้แยกอักขระให้แสดงผลถูกต้องเหมือนส่วนอื่นของแอป</span></li>
+          <li class="change"><span class="tag fix">แก้ไข</span><span class="txt">สระ ำ ที่ยังแสดงผลข้ามช่องบนป้ายสถานะของหน้าต่างแก้ไขเรื่องย่อ (synopsis) — ตอนนี้แยกอักขระให้แสดงผลตรงช่องเหมือนส่วนอื่นของแอป</span></li>
         </ul>
       </article>
 
@@ -529,16 +529,16 @@
           <span class="rel-badge first">รีลีสแรก</span>
         </div>
         <ul class="changes">
-          <li class="change"><span class="tag add">เพิ่ม</span><span class="txt"><b>รีลีสแรกของ honya</b> — แอปเทอร์มินัล (TUI) สำหรับแปลไลต์โนเวลญี่ปุ่น→ไทยโดยมี AI ช่วย</span></li>
+          <li class="change"><span class="tag add">เพิ่ม</span><span class="txt"><b>รีลีสแรกของ honya</b> — แอปเทอร์มินัล (TUI) สำหรับจัดโปรเจกต์แปลไลต์โนเวลญี่ปุ่น→ไทยผ่าน API ที่รองรับ OpenRouter</span></li>
           <li class="change"><span class="tag add">เพิ่ม</span><span class="txt"><b>นำเข้า EPUB</b> โดยเรียงตามลำดับสันหนังสือ ย้ายภาพประกอบ และล้าง HTML ให้เป็น Markdown</span></li>
           <li class="change"><span class="tag add">เพิ่ม</span><span class="txt"><b>ไปป์ไลน์สามเอเจนต์</b> — Orchestrator · Translator · Reviewer</span></li>
           <li class="change"><span class="tag add">เพิ่ม</span><span class="txt"><b>TUI ห้าหน้าจอ</b> — 書架 / 棚 / 訳 / 読 / 辞</span></li>
-          <li class="change"><span class="tag add">เพิ่ม</span><span class="txt"><b>เชื่อมต่อ OpenRouter</b> พร้อมถามคีย์ตอนเริ่มต้นใช้งาน (BYOK)</span></li>
+          <li class="change"><span class="tag add">เพิ่ม</span><span class="txt"><b>เชื่อมต่อ OpenRouter</b> พร้อมถามคีย์ของคุณตอนเริ่มต้นใช้งาน</span></li>
         </ul>
       </article>
 
       <div class="log-foot">
-        <span>ดูรายละเอียดทางเทคนิคของแต่ละรีลีสได้ที่ GitHub</span>
+        <span>ดูไฟล์และรายละเอียดของแต่ละรีลีสได้ที่ GitHub</span>
         <a href="https://github.com/altqx/honya/releases" rel="noopener">
           <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2C6.48 2 2 6.58 2 12.25c0 4.53 2.87 8.37 6.84 9.73.5.1.68-.22.68-.49 0-.24-.01-.88-.01-1.72-2.78.62-3.37-1.37-3.37-1.37-.45-1.18-1.11-1.5-1.11-1.5-.91-.64.07-.62.07-.62 1 .07 1.53 1.06 1.53 1.06.89 1.56 2.34 1.11 2.91.85.09-.66.35-1.11.63-1.37-2.22-.26-4.56-1.14-4.56-5.06 0-1.12.39-2.03 1.03-2.75-.1-.26-.45-1.3.1-2.71 0 0 .84-.27 2.75 1.05a9.4 9.4 0 0 1 5 0c1.91-1.32 2.75-1.05 2.75-1.05.55 1.41.2 2.45.1 2.71.64.72 1.03 1.63 1.03 2.75 0 3.93-2.34 4.79-4.57 5.05.36.32.68.94.68 1.9 0 1.37-.01 2.47-.01 2.81 0 .27.18.6.69.49A10.04 10.04 0 0 0 22 12.25C22 6.58 17.52 2 12 2Z"/></svg>
           รีลีสทั้งหมดบน GitHub
@@ -562,8 +562,8 @@
           </span>
           <span class="name"><span class="ja" lang="ja">本屋</span>honya</span>
         </a>
-        <p>แอปเทอร์มินัลสไตล์วรรณกรรมที่เงียบสงบ สำหรับการแปลไลต์โนเวลญี่ปุ่นเป็นไทย
-        โดยมี AI ช่วย สร้างด้วย Rust และ Ratatui</p>
+        <p>TUI สำหรับจัดโปรเจกต์แปลไลต์โนเวลญี่ปุ่นเป็นไทยผ่าน API ที่รองรับ OpenRouter
+        สร้างด้วย Rust และ Ratatui</p>
       </div>
 
       <div class="foot-cols">
@@ -590,7 +590,7 @@
     </div>
 
     <div class="foot-bottom">
-      <span><span class="ja" lang="ja">本屋</span> — เครื่องมือเงียบ ๆ สำหรับงานฝีมือ ฟรีและโอเพนซอร์ส</span>
+      <span><span class="ja" lang="ja">本屋</span> — TUI สำหรับโปรเจกต์แปล JA→TH ฟรีและโอเพนซอร์ส</span>
       <span><a href="https://github.com/altqx/honya" rel="noopener">github.com/altqx/honya</a></span>
     </div>
   </div>
