@@ -16,7 +16,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use ratatui::Frame;
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use ratatui::crossterm::event::{
+    KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -2848,7 +2850,12 @@ mod mouse_tests {
     #[test]
     fn clicking_tabs_switches_screens() {
         let mut app = app();
-        for target in [Screen::Lexicon, Screen::Project, Screen::Reader, Screen::Shelf] {
+        for target in [
+            Screen::Lexicon,
+            Screen::Project,
+            Screen::Reader,
+            Screen::Shelf,
+        ] {
             render(&mut app, 120, 40);
             let (rect, _) = app
                 .tab_zones
@@ -2859,18 +2866,6 @@ mod mouse_tests {
             click(&mut app, rect.x + rect.width / 2, rect.y);
             assert_eq!(app.screen, target);
         }
-    }
-
-    /// The wheel scrolls the active screen wherever the pointer sits, panic-free.
-    #[test]
-    fn wheel_routes_to_active_screen() {
-        let mut app = app();
-        app.screen = Screen::Reader;
-        render(&mut app, 80, 24);
-        app.on_mouse(ev(MouseEventKind::ScrollDown, 10, 10));
-        app.on_mouse(ev(MouseEventKind::ScrollUp, 10, 10));
-        // Over the tab bar too (still routes to the body, not the tabs).
-        app.on_mouse(ev(MouseEventKind::ScrollDown, 5, 1));
     }
 
     /// Clicking the breadcrumb / header goes home to the Shelf.

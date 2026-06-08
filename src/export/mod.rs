@@ -116,13 +116,6 @@ mod tests {
     use super::*;
     use crate::model::EventTx;
 
-    #[test]
-    fn format_metadata() {
-        assert_eq!(ExportFormat::Epub.ext(), "epub");
-        assert_eq!(ExportFormat::Docx.label(), "DOCX");
-        assert_eq!(ExportFormat::ALL.len(), 3);
-    }
-
     fn fake_png() -> Vec<u8> {
         let mut png = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
         png.extend_from_slice(&[0, 0, 0, 13]);

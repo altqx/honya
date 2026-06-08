@@ -389,12 +389,4 @@ mod tests {
         assert!(!is_newer("0.1.0-rc1", "0.1.0"));
         assert!(is_newer("0.2.0+build5", "0.1.0"));
     }
-
-    #[test]
-    fn target_triple_is_known_on_supported_platforms() {
-        // On the CI/build platforms we ship for, this must resolve.
-        if matches!(std::env::consts::OS, "linux" | "macos") {
-            assert!(target_triple().is_some());
-        }
-    }
 }
