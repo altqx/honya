@@ -12,7 +12,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 use crate::model::{AgentRole, AppEvent, ReviewVerdict, UsageStats};
-use crate::theme::{self, Theme, agent_badge, spinner_frame};
+use crate::theme::{self, Theme, agent_badge, agent_spinner_frame, spinner_frame};
 use crate::ui::mouse::{MouseGesture, MouseInput};
 use crate::ui::text::truncate_cols;
 use crate::ui::widgets::render_line_gauge;
@@ -86,6 +86,15 @@ impl TranslateScreen {
     /// project when a `ChapterStarted` event arrives).
     pub fn set_chapter_title(&mut self, title: String) {
         self.chapter_title = title;
+    }
+
+    /// The agent currently doing work, so the tab bar can mirror its spinner.
+    pub fn active_agent_role(&self) -> AgentRole {
+        match self.active_agent {
+            0 => AgentRole::Orchestrator,
+            2 => AgentRole::Reviewer,
+            _ => AgentRole::Translator,
+        }
     }
 
     pub fn on_app_event(&mut self, ev: &AppEvent) {
@@ -507,7 +516,7 @@ impl TranslateScreen {
             }
             let active = self.phase == RunPhase::Running && i == self.active_agent;
             let spin = if active {
-                format!("{} ", spinner_frame(frame))
+                format!("{} ", agent_spinner_frame(*role, frame))
             } else {
                 "  ".to_string()
             };
@@ -522,7 +531,7 @@ impl TranslateScreen {
             };
             let line = Line::from(vec![
                 Span::styled(format!(" {badge:<9} "), Style::default().fg(color)),
-                Span::styled(spin, Style::default().fg(theme.status_working)),
+                Span::styled(spin, Style::default().fg(color)),
                 Span::styled(body, body_style),
             ]);
             f.render_widget(

@@ -401,6 +401,20 @@ pub const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦"
 pub fn spinner_frame(frame: u64) -> &'static str {
     SPINNER[(frame as usize) % SPINNER.len()]
 }
+
+/// Per-agent spinner, ~10fps. Each echoes its agent's badge glyph so the live
+/// indicator reads as that agent's signature: the Orchestrator's diamond
+/// breathes like a beacon coordinating the run (◇→◆), the Translator's triangle
+/// turns clockwise as it churns through the text (▲), and the Reviewer's square
+/// sweeps corner-to-corner as it scans the draft (■).
+pub fn agent_spinner_frame(role: AgentRole, frame: u64) -> &'static str {
+    let frames: &[&str] = match role {
+        AgentRole::Orchestrator => &["◇", "◈", "◆", "◈"],
+        AgentRole::Translator => &["◤", "◥", "◢", "◣"],
+        AgentRole::Reviewer => &["◰", "◳", "◲", "◱"],
+    };
+    frames[(frame as usize) % frames.len()]
+}
 /// Status glyph + semantic color, using a waxing-moon metaphor (○ → ◐/◑ → ●).
 pub fn status_glyph(kind: ChapterKind, status: ChapterStatus, t: &Theme) -> (char, Color) {
     if matches!(kind, ChapterKind::ImageOnly) {

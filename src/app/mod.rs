@@ -2188,6 +2188,7 @@ impl App {
             sk.tabs,
             self.screen,
             self.run_active,
+            self.translate.active_agent_role(),
             self.frame,
             &self.theme,
         );

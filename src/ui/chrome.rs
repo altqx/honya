@@ -11,6 +11,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use crate::app::Screen;
+use crate::model::AgentRole;
 use crate::theme::{self, Theme};
 use crate::ui::text::{col_width, thai_display_safe};
 
@@ -118,7 +119,8 @@ pub fn render_header(f: &mut Frame, area: Rect, crumb: &str, tally: &StatusTally
 }
 
 /// Render the primary tab bar; when `run_active`, tab 3's `訳` glyph is swapped
-/// for the live spinner frame so the bar itself signals a running translation.
+/// for the spinner of `active_agent` so the bar mirrors whichever agent is
+/// currently working (Orchestrator ◆ / Translator ▲ / Reviewer ■).
 ///
 /// Rendered span-by-span (rather than via the `Tabs` widget) so each tab's
 /// clickable [`Rect`] is known exactly; the returned zones let the App route a
@@ -129,6 +131,7 @@ pub fn render_tabbar(
     area: Rect,
     active: Screen,
     run_active: bool,
+    active_agent: AgentRole,
     frame: u64,
     theme: &Theme,
 ) -> Vec<(Rect, Screen)> {
@@ -141,7 +144,7 @@ pub fn render_tabbar(
     );
 
     let translate_glyph: &str = if run_active {
-        theme::spinner_frame(frame)
+        theme::agent_spinner_frame(active_agent, frame)
     } else {
         "訳"
     };
@@ -305,7 +308,15 @@ mod tests {
         let mut term = Terminal::new(TestBackend::new(120, 3)).unwrap();
         let mut zones = Vec::new();
         term.draw(|f| {
-            zones = render_tabbar(f, area, Screen::Shelf, false, 0, &theme);
+            zones = render_tabbar(
+                f,
+                area,
+                Screen::Shelf,
+                false,
+                AgentRole::Translator,
+                0,
+                &theme,
+            );
         })
         .unwrap();
 
