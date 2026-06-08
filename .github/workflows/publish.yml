@@ -9,10 +9,9 @@ name: publish
 # No PAT required.)
 #
 # crates.io publish requires a `CRATES_IO_TOKEN` repo secret (Settings → Secrets
-# and variables → Actions). The publish-crate job is idempotent: it skips any
-# version already on crates.io, so editing this file or running it manually only
-# publishes when the current Cargo.toml version is genuinely missing there — which
-# also bootstraps the very first publish without needing a version bump.
+# and variables → Actions). Publishing only runs when this workflow creates a new
+# tag for a Cargo.toml version bump; already-tagged versions are not retried from
+# later pushes.
 
 on:
   push:
@@ -20,7 +19,6 @@ on:
       - main
     paths:
       - "Cargo.toml"
-      - ".github/workflows/publish.yml"
   workflow_dispatch:
 
 permissions:
@@ -77,14 +75,12 @@ jobs:
       tag: v${{ needs.tag.outputs.version }}
     secrets: inherit
 
-  # Publish the crate to crates.io. Not gated on `created`: it publishes whenever
-  # the current Cargo.toml version is missing from crates.io. So a version bump
-  # publishes the new version, and landing this workflow (or a manual dispatch)
-  # bootstraps the current version if it was never published. Already-published
-  # versions are skipped — crates.io releases are immutable.
+  # Publish the crate to crates.io only for the new tag created by this run.
+  # Already-tagged versions are skipped before this job starts.
   publish-crate:
     name: publish to crates.io
     needs: tag
+    if: needs.tag.outputs.created == 'true'
     runs-on: ubuntu-latest
     environment: release
     steps:
