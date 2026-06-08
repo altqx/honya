@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 
-use crate::agents::audit::audit_translation_with_terms;
+use crate::agents::audit::{audit_translation_with_terms, strip_copied_continuity};
 use crate::agents::chunk::{Chunk, chunk_chapter};
 use crate::agents::continuity;
 use crate::agents::prompts::{ORCHESTRATOR_SYSTEM, build_orchestrator_metadata_msg};
@@ -621,7 +621,11 @@ async fn process_chunk(
                 }
             };
 
-        let thai = out.translated_text.clone();
+        // Deterministically drop any continuity tail the Translator echoed back
+        // before it reaches the audit/Reviewer/append — a disobedient copy costs
+        // no retry this way (matches the app-side, "everything deterministic but
+        // the metadata turn" append rule).
+        let thai = strip_copied_continuity(&prev_thai, &out.translated_text);
         candidate = Some(thai.clone());
         let tok = to_tokens(&t_usage);
         acc.fold(&t_usage);

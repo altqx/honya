@@ -180,6 +180,74 @@ fn expected_hard_locked_rendering(term: &GlossaryTerm) -> &str {
     }
 }
 
+/// The Translator receives the previous chunk's last Thai sentences as
+/// `<<CONTINUITY>>` context and is told to use them only for flow, never to
+/// repeat them. When the surrounding context is sparse (early chapters, before
+/// the glossary/character/recap files fill in) it disobeys most often, echoing
+/// that tail back at the start of `translated_text`. Deterministically strip a
+/// *leading* run of continuity copies so only the current chunk's translation is
+/// committed — sparing a retry the Reviewer would otherwise spend rejecting it.
+///
+/// Matching is done on the whitespace-stripped character stream, so it catches
+/// the copy whether the model echoed each sentence on its own line, merged the
+/// whole tail onto one line, or ran the tail straight into the first real
+/// sentence. Conservative by design: only continuity lines the audit itself
+/// would flag (see [`copied_continuity`]'s thresholds) are consumed, only from
+/// the very start, and if stripping would leave nothing the original is returned
+/// untouched so the audit/Reviewer can still flag it.
+pub fn strip_copied_continuity(prev_thai: &[String], translated: &str) -> String {
+    if prev_thai.is_empty() {
+        return translated.to_string();
+    }
+
+    // The continuity lines the audit recognizes as a "substantial copy" if
+    // echoed back, as char vectors for exact prefix matching.
+    let mut continuity: Vec<Vec<char>> = prev_thai
+        .iter()
+        .filter(|line| thai_char_count(line) >= 24)
+        .map(|line| normalize_for_duplicate_check(line).chars().collect::<Vec<char>>())
+        .filter(|norm| norm.len() >= 32)
+        .collect();
+    if continuity.is_empty() {
+        return translated.to_string();
+    }
+    // Longest first, so a copied tail is consumed maximally per step.
+    continuity.sort_by_key(|c| std::cmp::Reverse(c.len()));
+
+    // Non-whitespace chars of the output tagged with their byte offset, so a
+    // normalized prefix match maps cleanly back to a cut point in the original.
+    let norm: Vec<(usize, char)> = translated
+        .char_indices()
+        .filter(|(_, c)| !c.is_whitespace())
+        .collect();
+
+    // Greedily consume leading continuity copies (in any order/subset).
+    let mut pos = 0usize;
+    loop {
+        let remaining = norm.len() - pos;
+        let matched = continuity
+            .iter()
+            .find(|c| c.len() <= remaining && c.iter().enumerate().all(|(k, ch)| norm[pos + k].1 == *ch));
+        match matched {
+            Some(c) => pos += c.len(),
+            None => break,
+        }
+    }
+
+    // Nothing copied at the start, or the whole output was the copy: leave it for
+    // the audit/Reviewer to flag rather than committing an empty chunk.
+    if pos == 0 || pos >= norm.len() {
+        return translated.to_string();
+    }
+
+    let remainder = translated[norm[pos].0..].trim_start();
+    if remainder.trim().is_empty() {
+        translated.to_string()
+    } else {
+        remainder.to_string()
+    }
+}
+
 fn copied_continuity(prev_thai: &[String], translated: &str) -> bool {
     let translated_norm = normalize_for_duplicate_check(translated);
     if translated_norm.is_empty() {
@@ -299,6 +367,80 @@ mod tests {
         let findings = audit_translation_with_terms(source, thai, &prev, &[]);
 
         assert!(findings.iter().any(|f| f.contains("continuity context")));
+    }
+
+    #[test]
+    fn strip_removes_leading_copied_continuity_and_clears_audit() {
+        let prev = vec!["เธอกำมือแน่นพลางฝืนยิ้มทั้งที่เสียงยังสั่นอยู่เล็กน้อย".to_string()];
+        let source = "彼女は振り返った。";
+        let raw =
+            "เธอกำมือแน่นพลางฝืนยิ้มทั้งที่เสียงยังสั่นอยู่เล็กน้อย\n\nเธอหันกลับไป";
+
+        let cleaned = strip_copied_continuity(&prev, raw);
+        assert_eq!(cleaned, "เธอหันกลับไป");
+
+        // After stripping, the deterministic audit no longer flags continuity.
+        let findings = audit_translation_with_terms(source, &cleaned, &prev, &[]);
+        assert!(!findings.iter().any(|f| f.contains("continuity context")));
+    }
+
+    #[test]
+    fn strip_collapses_merged_continuity_block() {
+        // The model dumped the whole tail concatenated onto one line, then the
+        // real translation on the next.
+        let prev = vec![
+            "เธอกำมือแน่นพลางฝืนยิ้มทั้งที่เสียงยังสั่นอยู่เล็กน้อย".to_string(),
+            "ก่อนจะก้าวเดินออกไปจากห้องนั้นอย่างเงียบงัน".to_string(),
+        ];
+        let raw = format!("{} {}\n\nเขาเปิดประตู", prev[0], prev[1]);
+
+        assert_eq!(strip_copied_continuity(&prev, &raw), "เขาเปิดประตู");
+    }
+
+    #[test]
+    fn strip_handles_copy_sharing_a_line_with_real_text() {
+        // The tail runs straight into the first real sentence on one line.
+        let prev = vec!["เธอกำมือแน่นพลางฝืนยิ้มทั้งที่เสียงยังสั่นอยู่เล็กน้อย".to_string()];
+        let raw = format!("{} เขาเปิดประตูแล้วเดินจากไป", prev[0]);
+
+        assert_eq!(
+            strip_copied_continuity(&prev, &raw),
+            "เขาเปิดประตูแล้วเดินจากไป"
+        );
+    }
+
+    #[test]
+    fn strip_handles_continuity_reflowed_across_lines() {
+        // The model re-broke one continuity sentence over two lines before the
+        // real text — whitespace-insensitive matching still removes it.
+        let line = "เธอกำมือแน่นพลางฝืนยิ้มทั้งที่เสียงยังสั่นอยู่เล็กน้อย";
+        let prev = vec![line.to_string()];
+        let half = line.chars().count() / 2;
+        let (a, b): (String, String) = (
+            line.chars().take(half).collect(),
+            line.chars().skip(half).collect(),
+        );
+        let raw = format!("{a}\n{b}\n\nเขาเปิดประตู");
+
+        assert_eq!(strip_copied_continuity(&prev, &raw), "เขาเปิดประตู");
+    }
+
+    #[test]
+    fn strip_preserves_clean_translation() {
+        let prev = vec!["เธอกำมือแน่นพลางฝืนยิ้มทั้งที่เสียงยังสั่นอยู่เล็กน้อย".to_string()];
+        let clean = "เธอหันกลับไปแล้วเดินจากไป\n\nเขายืนนิ่งอยู่ตรงนั้น";
+
+        assert_eq!(strip_copied_continuity(&prev, clean), clean);
+    }
+
+    #[test]
+    fn strip_keeps_original_when_only_the_copy_is_present() {
+        // Nothing new to keep — leave it for the audit/Reviewer to flag rather
+        // than committing an empty translation.
+        let prev = vec!["เธอกำมือแน่นพลางฝืนยิ้มทั้งที่เสียงยังสั่นอยู่เล็กน้อย".to_string()];
+        let raw = "เธอกำมือแน่นพลางฝืนยิ้มทั้งที่เสียงยังสั่นอยู่เล็กน้อย";
+
+        assert_eq!(strip_copied_continuity(&prev, raw), raw);
     }
 
     #[test]
