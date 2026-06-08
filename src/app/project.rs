@@ -568,8 +568,14 @@ impl ProjectScreen {
             progress.status.label_en().to_string()
         };
 
+        // PROJECT.md is project-level, so its note mirrors the project's scope (volume
+        // count) rather than a static "synopsis" word — the editable synopsis is
+        // per-volume (VOLUME.md), not a PROJECT.md field.
+        let vols = active.project.volumes.len();
+        let vol_note = format!("{vols} vol{}", if vols == 1 { "" } else { "s" });
+
         let files = [
-            ("●", "PROJECT.md", "synopsis".to_string(), theme.status_done),
+            ("●", "PROJECT.md", vol_note, theme.status_done),
             (
                 "●",
                 "CHARACTERS.md",
