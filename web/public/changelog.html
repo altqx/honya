@@ -328,7 +328,7 @@
         หน้านี้สรุปสิ่งที่เปลี่ยนในแต่ละเวอร์ชัน เรียงจากใหม่ไปเก่า
         เลขเวอร์ชันอ้างอิงจาก <code>Cargo.toml</code>
       </p>
-      <span class="latest-pill"><span class="dot" aria-hidden="true"></span>เวอร์ชันล่าสุด <b>v0.1.14</b></span>
+      <span class="latest-pill"><span class="dot" aria-hidden="true"></span>เวอร์ชันล่าสุด <b>v0.1.15</b></span>
     </div>
   </section>
 
@@ -338,17 +338,29 @@
   <section class="log" aria-label="รายการเวอร์ชัน">
     <div class="wrap">
 
+      <!-- 0.1.15 -->
+      <article class="release">
+        <div class="rel-meta">
+          <span class="ver"><span class="v-pre">v</span>0.1.15</span>
+          <div class="rel-date">8 มิ.ย. 2026</div>
+          <span class="rel-badge">ล่าสุด</span>
+        </div>
+        <ul class="changes">
+          <li class="change"><span class="tag chg">ปรับปรุง</span><span class="txt">ตัวหมุนสถานะตอนแปลให้แสดงตามเอเจนต์ที่กำลังทำงาน ทั้งในแถบแท็บและหน้า Translate</span></li>
+        </ul>
+      </article>
+
       <!-- 0.1.14 -->
       <article class="release">
         <div class="rel-meta">
           <span class="ver"><span class="v-pre">v</span>0.1.14</span>
           <div class="rel-date">8 มิ.ย. 2026</div>
-          <span class="rel-badge">ล่าสุด</span>
         </div>
         <ul class="changes">
           <li class="change"><span class="tag add">เพิ่ม</span><span class="txt"><b>รองรับเมาส์ทั่วทั้งแอป</b> — คลิกแท็บเพื่อสลับหน้า · คลิกรายการเพื่อเลือกแล้วดับเบิลคลิก (หรือคลิกซ้ำที่รายการเดิม) เพื่อเปิด · หมุนล้อเพื่อเลื่อนดู</span></li>
           <li class="change"><span class="tag add">เพิ่ม</span><span class="txt">คลิกปุ่มในกล่องยืนยัน เลือกรายการในหน้าต่างซ้อน (command palette, ธีม, กระโดดไปบท, ส่งออก) และคลิกนอกหน้าต่างเพื่อปิดได้</span></li>
           <li class="change"><span class="tag add">เพิ่ม</span><span class="txt">ในหน้าอ่าน (Reader) หมุนล้อเพื่อเลื่อนเฉพาะช่องที่เมาส์ชี้อยู่เมื่อปลดการเลื่อนพร้อมกัน (sync) ออก</span></li>
+          <li class="change"><span class="tag add">เพิ่ม</span><span class="txt">ตัวเลือก <code>Retry attempts</code> ใน Settings เพื่อกำหนดจำนวนรอบ <code>Translator</code>↔<code>Reviewer</code> ต่อท่อนแปลได้เอง (1–20)</span></li>
           <li class="change"><span class="tag fix">แก้ไข</span><span class="txt">บางครั้งคำแปล โดยเฉพาะช่วงบทแรก ๆ จะดึงประโยคจากบริบทต่อเนื่อง (continuity) มาซ้ำตอนต้น — ตอนนี้ระบบตัดส่วนซ้ำออกและแปลเฉพาะท่อนปัจจุบัน</span></li>
         </ul>
       </article>
