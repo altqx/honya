@@ -7,13 +7,13 @@ use std::path::Path;
 use chrono::Local;
 use serde::{Deserialize, Serialize};
 
-use crate::model::ModelSet;
+use crate::model::{ModelSet, ProjectStatus};
 use crate::workspace::Workspace;
 use crate::workspace::data_block;
 use crate::workspace::{characters, glossary, volume};
 
 /// PROJECT.md machine payload (kept minimal; expanded by the app over time).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct ProjectMeta {
     title: String,
     created: String,
@@ -24,11 +24,66 @@ struct ProjectMeta {
 }
 
 /// STYLE.md machine payload — toggles the style-guide rendering reads.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct StyleMeta {
     created: String,
-    /// Draft vs finalized; surfaced as the STYLE.md status in the Context panel.
+    /// Translation progress (`draft` / `in_progress` / `done`); surfaced as the
+    /// STYLE.md status line and the Context panel. Kept in sync by [`sync_status`].
     status: String,
+}
+
+/// Markdown bullet whose value [`sync_status`] rewrites in STYLE.md / PROJECT.md.
+const STATUS_LINE_PREFIX: &str = "- **สถานะ / Status:**";
+
+/// Replace the value of the "สถานะ / Status:" bullet, preserving every other line
+/// (appended style notes, the synopsis, etc.). Returns the body unchanged when no
+/// such line is present.
+fn rewrite_status_line(body: &str, label: &str) -> String {
+    let mut replaced = false;
+    let lines: Vec<String> = body
+        .lines()
+        .map(|line| {
+            if !replaced && line.trim_start().starts_with(STATUS_LINE_PREFIX) {
+                replaced = true;
+                format!("{STATUS_LINE_PREFIX} {label}")
+            } else {
+                line.to_string()
+            }
+        })
+        .collect();
+    lines.join("\n")
+}
+
+/// Persist the project's live translation `status` into STYLE.md (body line + data
+/// block) and PROJECT.md (body line), surgically — appended style notes, the
+/// synopsis, and the rest of each data block are preserved. A no-op for files that
+/// don't exist yet, and skips the write when nothing would change.
+pub fn sync_status(ws: &Workspace, status: ProjectStatus) -> std::io::Result<()> {
+    // STYLE.md: update both the human-readable line and the machine status field.
+    let style_path = ws.style_md();
+    if style_path.exists() {
+        let body = data_block::read_body(&style_path);
+        let mut meta: StyleMeta = data_block::read_data_block(&style_path);
+        let new_body = rewrite_status_line(&body, status.label_th());
+        if meta.status != status.slug() || new_body != body {
+            meta.status = status.slug().to_string();
+            data_block::write_with_data(&style_path, &new_body, &meta)?;
+        }
+    }
+
+    // PROJECT.md: only the body line — its data block (title/synopsis/models) is
+    // re-read and written back verbatim so the synopsis is never clobbered.
+    let project_path = ws.project_md();
+    if project_path.exists() {
+        let body = data_block::read_body(&project_path);
+        let new_body = rewrite_status_line(&body, status.label_th());
+        if new_body != body {
+            let meta: ProjectMeta = data_block::read_data_block(&project_path);
+            data_block::write_with_data(&project_path, &new_body, &meta)?;
+        }
+    }
+
+    Ok(())
 }
 
 /// Create the project tree and write all root metadata + the first volume.
@@ -184,4 +239,60 @@ struct EmptyCharacters {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct EmptyTerms {
     terms: Vec<serde_json::Value>,
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+    use crate::workspace::style;
+
+    fn temp_root(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("honya_status_{}_{}", tag, std::process::id()))
+    }
+
+    #[test]
+    fn sync_status_updates_style_and_project_surgically() {
+        let root = temp_root("sync");
+        let _ = std::fs::remove_dir_all(&root);
+        let ws = Workspace::new(root.clone(), 1);
+        create_project(&root, "Test", &ModelSet::default(), 1).unwrap();
+
+        // A style note the Orchestrator might append must survive a status sync.
+        style::append_note(&ws, "ห้ามแปลชื่อสกิล").unwrap();
+
+        sync_status(&ws, ProjectStatus::Done).unwrap();
+
+        let style = std::fs::read_to_string(ws.style_md()).unwrap();
+        assert!(style.contains("สถานะ / Status:** เสร็จสมบูรณ์ (done)"));
+        // Machine field flipped too, and the appended note is preserved.
+        let meta: StyleMeta = data_block::read_data_block(&ws.style_md());
+        assert_eq!(meta.status, "done");
+        assert!(style.contains("ห้ามแปลชื่อสกิล"));
+
+        // PROJECT.md's "importing" line advances; its data block is untouched.
+        let project = std::fs::read_to_string(ws.project_md()).unwrap();
+        assert!(project.contains("สถานะ / Status:** เสร็จสมบูรณ์ (done)"));
+        assert!(!project.contains("กำลังนำเข้า (importing)"));
+        let pmeta: ProjectMeta = data_block::read_data_block(&ws.project_md());
+        assert_eq!(pmeta.title, "Test");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn sync_status_noop_when_unchanged() {
+        let root = temp_root("noop");
+        let _ = std::fs::remove_dir_all(&root);
+        let ws = Workspace::new(root.clone(), 1);
+        create_project(&root, "Test", &ModelSet::default(), 1).unwrap();
+
+        // Fresh project is already "draft"; re-syncing draft must not rewrite the file.
+        sync_status(&ws, ProjectStatus::Draft).unwrap();
+        let before = std::fs::read_to_string(ws.style_md()).unwrap();
+        sync_status(&ws, ProjectStatus::Draft).unwrap();
+        let after = std::fs::read_to_string(ws.style_md()).unwrap();
+        assert_eq!(before, after);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

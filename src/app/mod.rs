@@ -540,6 +540,9 @@ impl App {
                     *stopped,
                     *run,
                 );
+                // Mirror the now-current progress into STYLE.md / PROJECT.md so the
+                // file views advance draft → in progress → done with the run.
+                self.persist_project_status();
                 // The run reached its end (finished, stopped, or all-failed): the
                 // recovery checkpoint has served its purpose, so retire it.
                 crate::workspace::session::clear();
@@ -669,6 +672,24 @@ impl App {
     fn set_chapter_status(&mut self, chapter: u32, status: ChapterStatus) {
         if let Some(ch) = self.chapter_in_event_vol_mut(chapter) {
             ch.status = status;
+        }
+    }
+
+    /// Best-effort: mirror the active project's live translation status into its
+    /// STYLE.md / PROJECT.md so the file views match the Context panel. Cheap and
+    /// idempotent — [`scaffold::sync_status`] only writes on an actual change, so
+    /// it's safe to call on every project open and run completion.
+    fn persist_project_status(&mut self) {
+        let Some(active) = self.active.as_ref() else {
+            return;
+        };
+        let status = active.project.translation_progress().status;
+        let ws = active.workspace.clone();
+        if let Err(e) = crate::workspace::scaffold::sync_status(&ws, status) {
+            self.push_log(
+                LogLevel::Warn,
+                format!("could not update project status: {e}"),
+            );
         }
     }
 
@@ -1487,6 +1508,9 @@ impl App {
         self.lexicon.reset();
         self.project = ProjectScreen::new();
         self.screen = Screen::Project;
+        // Reconcile STYLE.md / PROJECT.md with the freshly-scanned progress, so a
+        // project finished in a previous session no longer shows a stale "draft".
+        self.persist_project_status();
         self.toast = Some(if no_key {
             Toast::info(format!(
                 "opened {id} · add an API key in Settings to translate"

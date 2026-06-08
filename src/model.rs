@@ -92,6 +92,39 @@ impl Project {
         }
         t
     }
+
+    /// Live translation progress across every volume, counting only prose chapters
+    /// (image-only / empty pages need no agent work, so they never gate "done").
+    /// Draft until the first prose chapter completes or a run is active; Done once
+    /// every prose chapter is complete.
+    pub fn translation_progress(&self) -> TranslationProgress {
+        let mut total = 0u32;
+        let mut done = 0u32;
+        let mut active = false;
+        for v in &self.volumes {
+            for c in &v.chapters {
+                if c.kind != ChapterKind::Prose {
+                    continue;
+                }
+                total += 1;
+                if c.status.is_complete() {
+                    done += 1;
+                } else if c.status.is_active() || c.status == ChapterStatus::Paused {
+                    active = true;
+                }
+            }
+        }
+        let status = if total == 0 {
+            ProjectStatus::Draft
+        } else if done == total {
+            ProjectStatus::Done
+        } else if done > 0 || active {
+            ProjectStatus::InProgress
+        } else {
+            ProjectStatus::Draft
+        };
+        TranslationProgress { status, done, total }
+    }
 }
 
 /// What sort of content a chapter holds — decides whether agents run.
@@ -134,6 +167,61 @@ impl ChapterStatus {
             ChapterStatus::Chunking | ChapterStatus::Translating | ChapterStatus::Reviewing
         )
     }
+    /// Completed with translated output written — clean (`Done`) or flagged
+    /// (`NeedsReview`), but not `Failed`. Drives project-level progress.
+    pub fn is_complete(self) -> bool {
+        matches!(self, ChapterStatus::Done | ChapterStatus::NeedsReview)
+    }
+}
+
+/// Project-wide translation progress, derived live from chapter statuses across
+/// every volume. Surfaced as the STYLE.md / PROJECT.md status line and the
+/// Project tab Context panel — replaces the old hardcoded "draft" stub.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectStatus {
+    /// Imported, but no prose chapter has been translated yet.
+    Draft,
+    /// Some prose chapters are translated (or a run is in flight), but not all.
+    InProgress,
+    /// Every translatable (prose) chapter is complete.
+    Done,
+}
+
+impl ProjectStatus {
+    /// Bilingual label for the Markdown status line (matches the Thai-localized files).
+    pub fn label_th(self) -> &'static str {
+        match self {
+            ProjectStatus::Draft => "ฉบับร่าง (draft)",
+            ProjectStatus::InProgress => "กำลังแปล (in progress)",
+            ProjectStatus::Done => "เสร็จสมบูรณ์ (done)",
+        }
+    }
+    /// Terse English label for the Context panel.
+    pub fn label_en(self) -> &'static str {
+        match self {
+            ProjectStatus::Draft => "draft",
+            ProjectStatus::InProgress => "in progress",
+            ProjectStatus::Done => "done",
+        }
+    }
+    /// Machine value persisted to the STYLE.md data block.
+    pub fn slug(self) -> &'static str {
+        match self {
+            ProjectStatus::Draft => "draft",
+            ProjectStatus::InProgress => "in_progress",
+            ProjectStatus::Done => "done",
+        }
+    }
+}
+
+/// Snapshot of translation progress: status + completed/total translatable chapters.
+#[derive(Debug, Clone, Copy)]
+pub struct TranslationProgress {
+    pub status: ProjectStatus,
+    /// Prose chapters complete (`Done` or `NeedsReview`).
+    pub done: u32,
+    /// Translatable (prose) chapters total.
+    pub total: u32,
 }
 
 /// Per-chunk sub-state (the inner loop the Translate screen renders as rows).
@@ -907,5 +995,96 @@ pub struct EventTx(pub tokio::sync::mpsc::UnboundedSender<AppEvent>);
 impl EventTx {
     pub fn send(&self, e: AppEvent) {
         let _ = self.0.send(e);
+    }
+}
+
+#[cfg(test)]
+mod progress_tests {
+    use super::*;
+
+    fn ch(number: u32, kind: ChapterKind, status: ChapterStatus) -> Chapter {
+        Chapter {
+            number,
+            title: String::new(),
+            kind,
+            status,
+            source_segments: 0,
+            total_chunks: 0,
+            committed_chunks: 0,
+            last_run: None,
+            usage: UsageStats::default(),
+        }
+    }
+
+    fn project(volumes: Vec<Vec<Chapter>>) -> Project {
+        Project {
+            id: "p".into(),
+            dir: PathBuf::from("/tmp/p"),
+            title: "p".into(),
+            created: None,
+            touched: None,
+            volumes: volumes
+                .into_iter()
+                .enumerate()
+                .map(|(i, chapters)| Volume {
+                    number: i as u32 + 1,
+                    dir: PathBuf::from("/tmp/p"),
+                    label: None,
+                    chapters,
+                })
+                .collect(),
+            models: None,
+        }
+    }
+
+    #[test]
+    fn draft_when_nothing_translated() {
+        let p = project(vec![vec![
+            ch(1, ChapterKind::Prose, ChapterStatus::Pending),
+            ch(2, ChapterKind::Prose, ChapterStatus::Pending),
+        ]]);
+        let pr = p.translation_progress();
+        assert_eq!(pr.status, ProjectStatus::Draft);
+        assert_eq!((pr.done, pr.total), (0, 2));
+    }
+
+    #[test]
+    fn in_progress_when_some_done_or_active() {
+        let partial = project(vec![vec![
+            ch(1, ChapterKind::Prose, ChapterStatus::Done),
+            ch(2, ChapterKind::Prose, ChapterStatus::Pending),
+        ]]);
+        assert_eq!(partial.translation_progress().status, ProjectStatus::InProgress);
+
+        let running = project(vec![vec![
+            ch(1, ChapterKind::Prose, ChapterStatus::Translating),
+            ch(2, ChapterKind::Prose, ChapterStatus::Pending),
+        ]]);
+        assert_eq!(running.translation_progress().status, ProjectStatus::InProgress);
+    }
+
+    #[test]
+    fn done_spans_all_volumes_and_ignores_non_prose() {
+        // Image-only / empty pages don't gate completion; NeedsReview counts as done.
+        let p = project(vec![
+            vec![
+                ch(1, ChapterKind::Prose, ChapterStatus::Done),
+                ch(2, ChapterKind::ImageOnly, ChapterStatus::Pending),
+            ],
+            vec![ch(1, ChapterKind::Prose, ChapterStatus::NeedsReview)],
+        ]);
+        let pr = p.translation_progress();
+        assert_eq!(pr.status, ProjectStatus::Done);
+        assert_eq!((pr.done, pr.total), (2, 2));
+    }
+
+    #[test]
+    fn second_volume_pending_keeps_project_in_progress() {
+        // Finishing vol 1 but adding an untranslated vol 2 is not "done".
+        let p = project(vec![
+            vec![ch(1, ChapterKind::Prose, ChapterStatus::Done)],
+            vec![ch(1, ChapterKind::Prose, ChapterStatus::Pending)],
+        ]);
+        assert_eq!(p.translation_progress().status, ProjectStatus::InProgress);
     }
 }

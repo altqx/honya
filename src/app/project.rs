@@ -549,6 +549,25 @@ impl ProjectScreen {
         let chars = crate::workspace::characters::load(&active.workspace).len();
         let terms = crate::workspace::glossary::load(&active.workspace).len();
 
+        // Live translation status (across all volumes) replaces the old hardcoded
+        // STYLE.md "draft" stub, so the panel reflects real progress in realtime.
+        let progress = active.project.translation_progress();
+        let (style_glyph, style_color) = match progress.status {
+            crate::model::ProjectStatus::Done => ("●", theme.status_done),
+            crate::model::ProjectStatus::InProgress => ("◐", theme.status_working),
+            crate::model::ProjectStatus::Draft => ("○", theme.ink_faint),
+        };
+        let style_note = if progress.total > 0 {
+            format!(
+                "{} · {}/{} ch",
+                progress.status.label_en(),
+                progress.done,
+                progress.total
+            )
+        } else {
+            progress.status.label_en().to_string()
+        };
+
         let files = [
             ("●", "PROJECT.md", "synopsis".to_string(), theme.status_done),
             (
@@ -563,7 +582,7 @@ impl ProjectScreen {
                 format!("{terms} terms"),
                 theme.status_done,
             ),
-            ("◐", "STYLE.md", "draft".to_string(), theme.status_working),
+            (style_glyph, "STYLE.md", style_note, style_color),
         ];
         let mut lines = Vec::new();
         for (glyph, name, note, color) in files {
