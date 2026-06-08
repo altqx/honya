@@ -21,6 +21,12 @@ static TRANSLATION_LABEL: Lazy<Regex> = Lazy::new(|| {
         .expect("translation-label regex is valid")
 });
 
+/// A blank-line run — two or more newlines with any surrounding spaces/tabs —
+/// left behind after excising a copied span. Collapsed to a single blank line so
+/// removing a copy from the middle of a chunk doesn't leave a gap.
+static BLANK_RUN: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"[ \t]*\n[ \t\n]*\n[ \t]*").expect("blank-run regex is valid"));
+
 /// Return concise, actionable findings with deterministic terminology checks for
 /// scoped glossary terms that appear in this source chunk.
 pub fn audit_translation_with_terms(
@@ -184,24 +190,26 @@ fn expected_hard_locked_rendering(term: &GlossaryTerm) -> &str {
 /// `<<CONTINUITY>>` context and is told to use them only for flow, never to
 /// repeat them. When the surrounding context is sparse (early chapters, before
 /// the glossary/character/recap files fill in) it disobeys most often, echoing
-/// that tail back at the start of `translated_text`. Deterministically strip a
-/// *leading* run of continuity copies so only the current chunk's translation is
-/// committed — sparing a retry the Reviewer would otherwise spend rejecting it.
+/// that tail back into `translated_text`. Deterministically strip those copies so
+/// only the current chunk's translation is committed — sparing a retry the
+/// Reviewer/audit would otherwise spend rejecting it.
 ///
-/// Matching is done on the whitespace-stripped character stream, so it catches
-/// the copy whether the model echoed each sentence on its own line, merged the
-/// whole tail onto one line, or ran the tail straight into the first real
-/// sentence. Conservative by design: only continuity lines the audit itself
-/// would flag (see [`copied_continuity`]'s thresholds) are consumed, only from
-/// the very start, and if stripping would leave nothing the original is returned
-/// untouched so the audit/Reviewer can still flag it.
+/// Removes copies **anywhere** in the output — leading, trailing, merged onto one
+/// line, reflowed across lines, or preceded by a preserved scene divider / image
+/// / lead-in sentence (the chapter-1 case that otherwise re-flags the audit every
+/// attempt). This mirrors [`copied_continuity`]'s "appears anywhere" detection, so
+/// once stripped the audit can no longer flag the same copy. Matching is on the
+/// whitespace-stripped character stream and consumes only continuity lines the
+/// audit itself would flag (see [`copied_continuity`]'s thresholds). If stripping
+/// would leave nothing (the whole output was the copy) the original is returned
+/// untouched so the audit/Reviewer can still flag it rather than committing empty.
 pub fn strip_copied_continuity(prev_thai: &[String], translated: &str) -> String {
     if prev_thai.is_empty() {
         return translated.to_string();
     }
 
     // The continuity lines the audit recognizes as a "substantial copy" if
-    // echoed back, as char vectors for exact prefix matching.
+    // echoed back, as char vectors for exact matching.
     let mut continuity: Vec<Vec<char>> = prev_thai
         .iter()
         .filter(|line| thai_char_count(line) >= 24)
@@ -211,40 +219,58 @@ pub fn strip_copied_continuity(prev_thai: &[String], translated: &str) -> String
     if continuity.is_empty() {
         return translated.to_string();
     }
-    // Longest first, so a copied tail is consumed maximally per step.
+    // Longest first, so a copied run is consumed maximally per match.
     continuity.sort_by_key(|c| std::cmp::Reverse(c.len()));
 
-    // Non-whitespace chars of the output tagged with their byte offset, so a
-    // normalized prefix match maps cleanly back to a cut point in the original.
-    let norm: Vec<(usize, char)> = translated
+    // Non-whitespace chars of the output tagged with their byte span, so a
+    // normalized match maps cleanly back to a byte range in the original.
+    let norm: Vec<(usize, usize, char)> = translated
         .char_indices()
         .filter(|(_, c)| !c.is_whitespace())
+        .map(|(i, c)| (i, i + c.len_utf8(), c))
         .collect();
 
-    // Greedily consume leading continuity copies (in any order/subset).
+    // Greedily find every non-overlapping continuity copy, recording the original
+    // byte range each one spans (its internal whitespace included).
+    let mut cuts: Vec<(usize, usize)> = Vec::new();
     let mut pos = 0usize;
-    loop {
+    while pos < norm.len() {
         let remaining = norm.len() - pos;
         let matched = continuity
             .iter()
-            .find(|c| c.len() <= remaining && c.iter().enumerate().all(|(k, ch)| norm[pos + k].1 == *ch));
+            .find(|c| c.len() <= remaining && c.iter().enumerate().all(|(k, ch)| norm[pos + k].2 == *ch));
         match matched {
-            Some(c) => pos += c.len(),
-            None => break,
+            Some(c) => {
+                cuts.push((norm[pos].0, norm[pos + c.len() - 1].1));
+                pos += c.len();
+            }
+            None => pos += 1,
         }
     }
-
-    // Nothing copied at the start, or the whole output was the copy: leave it for
-    // the audit/Reviewer to flag rather than committing an empty chunk.
-    if pos == 0 || pos >= norm.len() {
+    if cuts.is_empty() {
         return translated.to_string();
     }
 
-    let remainder = translated[norm[pos].0..].trim_start();
-    if remainder.trim().is_empty() {
+    // Rebuild the output minus the copied spans.
+    let mut kept = String::with_capacity(translated.len());
+    let mut last = 0usize;
+    for (start, end) in cuts {
+        kept.push_str(&translated[last..start]);
+        last = end;
+    }
+    kept.push_str(&translated[last..]);
+
+    // Excising a span can leave a blank-line run (or stray spaces) where the copy
+    // used to be; collapse them so the committed chunk reads cleanly.
+    let cleaned = BLANK_RUN.replace_all(&kept, "\n\n");
+    let cleaned = cleaned.trim();
+
+    // The whole output was the copy: leave the original for the audit/Reviewer to
+    // flag rather than committing an empty chunk.
+    if cleaned.is_empty() {
         translated.to_string()
     } else {
-        remainder.to_string()
+        cleaned.to_string()
     }
 }
 
@@ -380,6 +406,29 @@ mod tests {
         assert_eq!(cleaned, "เธอหันกลับไป");
 
         // After stripping, the deterministic audit no longer flags continuity.
+        let findings = audit_translation_with_terms(source, &cleaned, &prev, &[]);
+        assert!(!findings.iter().any(|f| f.contains("continuity context")));
+    }
+
+    #[test]
+    fn strip_removes_non_leading_copied_continuity_and_clears_audit() {
+        // The chapter-1 case that used to re-flag the audit every attempt: the
+        // model wrote a genuine lead-in sentence, THEN echoed the continuity tail
+        // before continuing. The copy isn't leading, so the old leading-only strip
+        // left it and the audit flagged it. It must now be removed regardless of
+        // position, and the deterministic audit must come back clean.
+        let prev = vec!["เธอกำมือแน่นพลางฝืนยิ้มทั้งที่เสียงยังสั่นอยู่เล็กน้อย".to_string()];
+        let source = "彼女は振り返った。";
+        let raw = format!(
+            "เขาเดินเข้ามาในห้องอย่างเงียบงัน\n\n{}\n\nเธอหันกลับไป",
+            prev[0]
+        );
+
+        let cleaned = strip_copied_continuity(&prev, &raw);
+        assert!(!cleaned.contains(prev[0].as_str()));
+        assert!(cleaned.contains("เขาเดินเข้ามาในห้องอย่างเงียบงัน"));
+        assert!(cleaned.contains("เธอหันกลับไป"));
+
         let findings = audit_translation_with_terms(source, &cleaned, &prev, &[]);
         assert!(!findings.iter().any(|f| f.contains("continuity context")));
     }

@@ -665,24 +665,36 @@ async fn process_chunk(
                             feedback = Some(PARTIAL_STREAM_RETRY_FEEDBACK.to_string());
                             continue;
                         }
-                        match candidate {
-                            Some(thai) => {
-                                return commit_chunk_needs_review(
-                                    ctx,
-                                    chapter,
-                                    chunk,
-                                    &thai,
-                                    attempt,
-                                    "translator stream stopped after partial output on the final attempt"
+                        // Final attempt: keep the best Thai we have rather than
+                        // sinking the whole chapter over one cut-off stream. Prefer
+                        // an earlier *complete* translation; otherwise salvage the
+                        // partial translated_text we streamed before the cutoff. A
+                        // chunk flagged [REVIEW NEEDED] is far better than aborting,
+                        // and the streamed text is real Thai a human can finish.
+                        let (thai, reason) = match candidate {
+                            Some(thai) => (
+                                thai,
+                                "translator stream stopped after partial output on the final attempt"
+                                    .to_string(),
+                            ),
+                            None => {
+                                let salvaged = strip_copied_continuity(&prev_thai, &partial);
+                                let thai = if salvaged.trim().is_empty() {
+                                    partial.clone()
+                                } else {
+                                    salvaged
+                                };
+                                (
+                                    thai,
+                                    "translator stream cut off mid-output; salvaged the partial translation for review"
                                         .to_string(),
                                 )
-                                .await;
                             }
-                            None => anyhow::bail!(
-                                "translator stream stopped after partial output on chunk {} with no complete translation to keep",
-                                chunk.index
-                            ),
-                        }
+                        };
+                        return commit_chunk_needs_review(
+                            ctx, chapter, chunk, &thai, attempt, reason,
+                        )
+                        .await;
                     }
                     if attempt < max {
                         emit_attempt_failed_retry(

@@ -1479,6 +1479,119 @@ async fn end_to_end_import_and_mock_translate() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+/// A Translator stream that gets cut off mid-JSON (provider truncation / hitting a
+/// token ceiling) must NOT sink the whole chapter. The streamed `translated_text`
+/// captured before the cutoff is salvaged onto disk flagged `[REVIEW NEEDED]`, so the
+/// run completes and a human can finish that one chunk — never `bail!` with nothing.
+#[tokio::test]
+async fn partial_translator_stream_is_salvaged_as_needs_review() {
+    use crate::agents::pipeline::{PipelineCtx, RunControl, run_pipeline};
+    use crate::llm::client::{LlmClient, Result as LlmResult};
+    use crate::llm::{ChatRequest, ChatResponse, Choice, ResponseFormat, ResponseMessage, Usage};
+    use crate::model::AppEvent;
+    use crate::workspace::Workspace;
+    use async_trait::async_trait;
+
+    const PARTIAL: &str = "สวัสดีนี่คือบทแปลที่ถูกตัดกลางคัน";
+
+    /// Returns a `translation_result` whose JSON is truncated mid-`translated_text`
+    /// (no closing quote/brace), mirroring a real stream cutoff. Note the schema-order
+    /// violation (`continuity_notes`/`new_characters` first) seen in the wild.
+    struct TruncatingTranslatorClient;
+
+    #[async_trait]
+    impl LlmClient for TruncatingTranslatorClient {
+        async fn chat(&self, req: &ChatRequest) -> LlmResult<ChatResponse> {
+            let schema_name = match &req.response_format {
+                Some(ResponseFormat::JsonSchema { json_schema }) => {
+                    Some(json_schema.name.as_str())
+                }
+                _ => None,
+            };
+            let content = match schema_name {
+                Some("translation_result") => format!(
+                    "{{\"continuity_notes\":[],\"new_characters\":[],\"new_terms\":[],\
+                     \"thought_process\":{{\"scene_analysis\":\"a\",\"glossary_check\":\"b\"}},\
+                     \"translated_text\":\"{PARTIAL}"
+                ),
+                Some("review_result") => "{\"status\":\"approve\",\"feedback\":[]}".to_string(),
+                _ => "(mock)".to_string(),
+            };
+            Ok(ChatResponse {
+                id: Some("mock".to_string()),
+                model: Some("honya/mock".to_string()),
+                choices: vec![Choice {
+                    index: 0,
+                    message: ResponseMessage {
+                        role: Some("assistant".to_string()),
+                        content: Some(content),
+                        tool_calls: None,
+                    },
+                    // A length-capped provider reports "length"; the JSON is truncated
+                    // either way, which is what drives the recovery path.
+                    finish_reason: Some("length".to_string()),
+                }],
+                usage: Some(Usage {
+                    prompt_tokens: 10,
+                    completion_tokens: 5,
+                    total_tokens: 15,
+                    cost: 0.001,
+                    cost_details: None,
+                }),
+            })
+        }
+    }
+
+    let base = std::env::temp_dir().join(format!("honya_partial_salvage_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let project_root = base.join("novel");
+    std::fs::create_dir_all(&project_root).unwrap();
+    crate::workspace::scaffold::create_project(
+        &project_root,
+        "Salvage Test",
+        &ModelSet::default(),
+        1,
+    )
+    .expect("create_project");
+    let ws = Workspace::new(project_root.clone(), 1);
+    crate::workspace::translation::write_raw(&ws, 1, "# 第一章\n\nこれはテストの文章です。").unwrap();
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let ctx = PipelineCtx {
+        client: Arc::new(TruncatingTranslatorClient) as Arc<dyn LlmClient>,
+        ws,
+        models: ModelSet::default(),
+        cfg: AppConfig::default(),
+        tx: EventTx(tx),
+        ctl: RunControl::new(),
+    };
+    // Must complete by salvaging, never bail the chapter on a cut-off stream.
+    run_pipeline(ctx, vec![1])
+        .await
+        .expect("run_pipeline salvages the partial instead of bailing");
+
+    let mut needs_review = false;
+    while let Ok(ev) = rx.try_recv() {
+        if let AppEvent::ChunkNeedsReview { chapter: 1, .. } = ev {
+            needs_review = true;
+        }
+    }
+    assert!(needs_review, "a ChunkNeedsReview event was emitted");
+
+    let translated = std::fs::read_to_string(project_root.join("Vol_01/translated/ch_001.md"))
+        .expect("translated file written despite the cutoff");
+    assert!(
+        translated.contains(PARTIAL),
+        "salvaged partial Thai landed on disk: {translated}"
+    );
+    assert!(
+        translated.contains(crate::workspace::translation::REVIEW_NEEDED_MARKER),
+        "salvaged chunk is flagged for manual review: {translated}"
+    );
+
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 /// In a multi-volume project, chapter numbers collide across volumes (each `Vol_NN`
 /// has its own `ch_001`). A pipeline event must update the *running* volume's
 /// chapter (recorded in the checkpoint), never another volume's same-numbered one —
