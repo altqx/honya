@@ -328,7 +328,7 @@
         หน้านี้สรุปสิ่งที่เปลี่ยนในแต่ละเวอร์ชัน เรียงจากใหม่ไปเก่า
         เลขเวอร์ชันอ้างอิงจาก <code>Cargo.toml</code>
       </p>
-      <span class="latest-pill"><span class="dot" aria-hidden="true"></span>เวอร์ชันล่าสุด <b>v0.1.15</b></span>
+      <span class="latest-pill"><span class="dot" aria-hidden="true"></span>เวอร์ชันล่าสุด <b>v0.1.16</b></span>
     </div>
   </section>
 
@@ -338,12 +338,25 @@
   <section class="log" aria-label="รายการเวอร์ชัน">
     <div class="wrap">
 
+      <!-- 0.1.16 -->
+      <article class="release">
+        <div class="rel-meta">
+          <span class="ver"><span class="v-pre">v</span>0.1.16</span>
+          <div class="rel-date">8 มิ.ย. 2026</div>
+          <span class="rel-badge">ล่าสุด</span>
+        </div>
+        <ul class="changes">
+          <li class="change"><span class="tag fix">แก้ไข</span><span class="txt">เมื่อสตรีมคำแปลถูกตัดกลางคันจน <code>translated_text</code> ไม่ครบ ระบบจะทิ้งผลที่ค้างแล้วแปลท่อนนั้นใหม่ทั้งหมดโดยอัตโนมัติแทนที่จะล้มทั้งบท และถ้าครบรอบสุดท้ายแล้วยังไม่สำเร็จจะเก็บคำแปลที่ดีที่สุดไว้เป็น <code>NeedsReview</code></span></li>
+          <li class="change"><span class="tag fix">แก้ไข</span><span class="txt">เมื่อโมเดลตอบเป็นคำปฏิเสธหรือข้อความเชิงนโยบายแทนคำแปล ระบบจะลองใหม่พร้อมคำแนะนำแก้ไข และถ้าครบรอบสุดท้ายจะเก็บคำแปลที่ดีที่สุดไว้เป็น <code>NeedsReview</code> แทนที่จะล้มทั้งบท</span></li>
+          <li class="change"><span class="tag chg">ปรับปรุง</span><span class="txt">ปรับพรอมป์ของ <code>Translator</code>, <code>Reviewer</code> และ <code>Orchestrator</code> ให้จัดการเนื้อหาเรตผู้ใหญ่หรือเนื้อหามืดหม่นอย่างซื่อสัตย์ตามต้นฉบับ ไม่ปฏิเสธ ไม่เซ็นเซอร์ ไม่ทำให้อ่อนลงหรือเพิ่มความโจ่งแจ้งเกินต้นฉบับ</span></li>
+        </ul>
+      </article>
+
       <!-- 0.1.15 -->
       <article class="release">
         <div class="rel-meta">
           <span class="ver"><span class="v-pre">v</span>0.1.15</span>
           <div class="rel-date">8 มิ.ย. 2026</div>
-          <span class="rel-badge">ล่าสุด</span>
         </div>
         <ul class="changes">
           <li class="change"><span class="tag chg">ปรับปรุง</span><span class="txt">ตัวหมุนสถานะตอนแปลให้แสดงตามเอเจนต์ที่กำลังทำงาน ทั้งในแถบแท็บและหน้า Translate</span></li>
