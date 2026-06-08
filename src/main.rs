@@ -38,6 +38,9 @@ use crate::model::{AppConfig, AppEvent, EventTx};
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() -> anyhow::Result<()> {
+    // Reap a stale Windows self-update sidecar; no-op elsewhere.
+    update::cleanup_stale_old_exe();
+
     // Subcommands run before the TUI: update/version/help must not require an API key.
     match std::env::args().nth(1).as_deref() {
         Some("update" | "self-update" | "upgrade") => return update::run_self_update().await,
@@ -94,6 +97,14 @@ async fn main() -> anyhow::Result<()> {
             }
         });
     }
+
+    // Restore the terminal before panic output; normal teardown does not run on panic.
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = execute!(std::io::stdout(), DisableMouseCapture);
+        ratatui::restore();
+        prev_hook(info);
+    }));
 
     let mut terminal = ratatui::init();
     // Mouse reporting is opt-in; enable it so the TUI is fully click/scroll

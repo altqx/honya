@@ -55,6 +55,7 @@ Prebuilt binaries are published for:
 |----|---------------|
 | **Linux** (gnu) | `x86_64` · `aarch64` |
 | **macOS** | `x86_64` (Intel) · `aarch64` (Apple Silicon) |
+| **Windows** (msvc) | `x86_64` · `aarch64` |
 
 <details>
 <summary>Installer options</summary>
@@ -80,6 +81,24 @@ curl https://honya.altqx.com/install.sh | bash -s -- --source
 On a platform without a prebuilt asset, the installer automatically falls back to a `cargo` source build.
 
 </details>
+
+### Windows (PowerShell)
+
+```powershell
+irm https://honya.altqx.com/install.ps1 | iex
+```
+
+Downloads the prebuilt `honya.exe` for your architecture, **verifies its SHA-256**, installs it to
+`%LOCALAPPDATA%\Programs\honya`, and adds that directory to your user `PATH`. To pin a version or
+change the directory, pass flags through the one-liner:
+
+```powershell
+iex "& { $(irm https://honya.altqx.com/install.ps1) } -Version v0.1.0 -Dir C:\tools\honya"
+```
+
+`$env:HONYA_VERSION` and `$env:HONYA_INSTALL_DIR` work too. On a platform without a prebuilt asset the
+script falls back to `cargo install honya` (run with `-Source` to force it). Windows Terminal — or
+Windows 10 1809+ — is recommended for full color/Unicode rendering.
 
 ### With Cargo
 
@@ -249,6 +268,10 @@ honya update          # download the latest release, verify its checksum, replac
 `honya update` (aliases: `self-update`, `upgrade`) replaces the installed binary **in place** — it
 downloads the latest GitHub release for your platform, verifies its SHA-256 against the published
 checksum, and atomically swaps the running executable. Re-running the installer works too.
+
+On Windows the running `honya.exe` can't be overwritten while it's mapped, so `honya update` moves the
+old binary aside and installs the new one **immediately** — the updated version runs from the next
+launch onward, and the moved-aside file is reaped automatically the next time honya starts.
 
 At startup honya does a **best-effort, non-blocking** check for a newer release and shows a footer
 hint (`⬆ … honya update`) when one is out. Opt out with `HONYA_NO_UPDATE_CHECK=1`.

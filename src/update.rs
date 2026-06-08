@@ -1,9 +1,10 @@
 //! Version check + in-place self-update from GitHub Releases.
 //!
-//! Mirrors `web/public/install.sh`: same repo, `honya-<target>.tar.gz` assets, `.sha256`
-//! sidecars, and the system `tar` + sha256 tools (resolved via PATH — run only with a
-//! trusted PATH). Atomically renames the new binary over the running exe; on Unix the live
-//! process keeps the old inode, so replacing a running binary is safe.
+//! Mirrors `web/public/install.sh` / `install.ps1`: same repo, archive naming, and
+//! `.sha256` sidecars. Checksums are computed in-process with `sha2`.
+//!
+//! Unix can rename over the running executable. Windows cannot replace a mapped
+//! image, so updates rename `honya.exe` aside and reap the `.old` sidecar at startup.
 
 use std::path::Path;
 use std::time::Duration;
@@ -30,8 +31,15 @@ pub fn target_triple() -> Option<&'static str> {
         ("linux", "aarch64") => Some("aarch64-unknown-linux-gnu"),
         ("macos", "x86_64") => Some("x86_64-apple-darwin"),
         ("macos", "aarch64") => Some("aarch64-apple-darwin"),
+        ("windows", "x86_64") => Some("x86_64-pc-windows-msvc"),
+        ("windows", "aarch64") => Some("aarch64-pc-windows-msvc"),
         _ => None,
     }
+}
+
+/// The release archive extension for this platform.
+const fn archive_ext() -> &'static str {
+    if cfg!(windows) { ".zip" } else { ".tar.gz" }
 }
 
 /// Parse a `v1.2.3`/`1.2.3-rc1` tag into (major, minor, patch); pre-release/build metadata dropped.
@@ -172,41 +180,74 @@ pub async fn run_self_update() -> Result<()> {
 /// so it is safe to call from inside the TUI.
 async fn install_release(tag: &str, target: &str) -> Result<()> {
     let base = format!("https://github.com/{REPO}/releases/download/{tag}");
-    let archive = format!("honya-{target}.tar.gz");
+    let archive = format!("honya-{target}{}", archive_ext());
 
-    // Private, unpredictable temp dir (0700, exclusive) so a local user can't swap files mid-update.
+    // Private 0700 staging prevents local file swaps mid-update.
     let tmp = private_staging_dir(tag)?;
     let guard = TempDir(tmp.clone());
 
-    let tar_path = tmp.join(&archive);
-    download_to_file(&format!("{base}/{archive}"), &tar_path)
+    let archive_path = tmp.join(&archive);
+    download_to_file(&format!("{base}/{archive}"), &archive_path)
         .await
         .with_context(|| format!("downloading {archive}"))?;
 
-    // Verify the sha256 sidecar (fail closed). Asset is honya-<target>.sha256, no .tar.gz suffix.
+    // Fail closed: checksum assets have no archive suffix.
     let sumfile = download_text(&format!("{base}/honya-{target}.sha256"))
         .await
         .with_context(|| {
             format!("could not fetch the checksum for {archive}; refusing to install an unverified binary")
         })?;
-    verify_sha256(&tar_path, &sumfile)?;
+    verify_sha256(&archive_path, &sumfile)?;
 
-    let status = std::process::Command::new("tar")
-        .arg("-xzf")
-        .arg(&tar_path)
-        .arg("-C")
-        .arg(&tmp)
-        .status()
-        .context("running `tar` to extract the archive (is tar installed?)")?;
-    if !status.success() {
-        bail!("`tar` failed to extract {archive}");
-    }
+    extract_archive(&archive_path, &tmp)?;
     let new_bin = find_honya_binary(&tmp)
         .ok_or_else(|| anyhow!("the downloaded archive did not contain a `honya` binary"))?;
 
     let current_exe = std::env::current_exe().context("resolving the current executable path")?;
     replace_executable(&new_bin, &current_exe)?;
     drop(guard);
+    Ok(())
+}
+
+/// Extract the downloaded release archive into `dest_dir`.
+#[cfg(windows)]
+fn extract_archive(archive: &Path, dest_dir: &Path) -> Result<()> {
+    let file = std::fs::File::open(archive)
+        .with_context(|| format!("opening {} to extract", archive.display()))?;
+    let mut zip = zip::ZipArchive::new(file).context("reading the downloaded zip archive")?;
+    for i in 0..zip.len() {
+        let mut entry = zip.by_index(i)?;
+        // `enclosed_name` rejects absolute and `..`-escaping paths.
+        let Some(rel) = entry.enclosed_name() else {
+            bail!("the downloaded archive contained an unsafe path entry");
+        };
+        let out_path = dest_dir.join(rel);
+        if entry.is_dir() {
+            std::fs::create_dir_all(&out_path)?;
+            continue;
+        }
+        if let Some(parent) = out_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut out = std::fs::File::create(&out_path)
+            .with_context(|| format!("writing {}", out_path.display()))?;
+        std::io::copy(&mut entry, &mut out).context("extracting an archive entry")?;
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn extract_archive(archive: &Path, dest_dir: &Path) -> Result<()> {
+    let status = std::process::Command::new("tar")
+        .arg("-xzf")
+        .arg(archive)
+        .arg("-C")
+        .arg(dest_dir)
+        .status()
+        .context("running `tar` to extract the archive (is tar installed?)")?;
+    if !status.success() {
+        bail!("`tar` failed to extract {}", archive.display());
+    }
     Ok(())
 }
 
@@ -259,31 +300,30 @@ fn verify_sha256(file: &Path, sumfile: &str) -> Result<()> {
     Ok(())
 }
 
-/// Compute a file's sha256 using the same tools install.sh relies on.
+/// Compute a file's sha256 in-process as lower hex.
 fn sha256_hex(file: &Path) -> Result<String> {
-    let out = std::process::Command::new("sha256sum")
-        .arg(file)
-        .output()
-        .or_else(|_| {
-            std::process::Command::new("shasum")
-                .arg("-a")
-                .arg("256")
-                .arg(file)
-                .output()
-        })
-        .context("no sha256 tool found (need `sha256sum` or `shasum`)")?;
-    if !out.status.success() {
-        bail!("the sha256 tool exited with an error");
+    use sha2::{Digest, Sha256};
+    let mut f = std::fs::File::open(file)
+        .with_context(|| format!("opening {} to checksum", file.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = std::io::Read::read(&mut f, &mut buf).context("reading the archive to checksum")?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
     }
-    let text = String::from_utf8_lossy(&out.stdout);
-    Ok(text
-        .split_whitespace()
-        .next()
-        .unwrap_or_default()
-        .to_lowercase())
+    let digest = hasher.finalize();
+    let mut out = String::with_capacity(digest.len() * 2);
+    for &byte in digest.iter() {
+        out.push(char::from(b"0123456789abcdef"[(byte >> 4) as usize]));
+        out.push(char::from(b"0123456789abcdef"[(byte & 0x0f) as usize]));
+    }
+    Ok(out)
 }
 
-/// Atomically replace `current_exe` with `new_bin` (same-dir stage + rename).
+/// Replace `current_exe` with `new_bin`, staging in the same dir to avoid cross-device renames.
 fn replace_executable(new_bin: &Path, current_exe: &Path) -> Result<()> {
     let dir = current_exe.parent().unwrap_or_else(|| Path::new("."));
     let staged = dir.join(".honya-update.new");
@@ -299,19 +339,72 @@ fn replace_executable(new_bin: &Path, current_exe: &Path) -> Result<()> {
         std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))
             .context("setting executable permission on the new binary")?;
     }
-    std::fs::rename(&staged, current_exe).map_err(|e| {
-        let _ = std::fs::remove_file(&staged);
-        anyhow!(
-            "could not replace {}: {e}\n\
-             If honya is installed system-wide, re-run with sudo, or reinstall:\n  \
-             curl https://honya.altqx.com/install.sh | bash",
-            current_exe.display(),
-        )
-    })?;
+
+    #[cfg(not(windows))]
+    {
+        std::fs::rename(&staged, current_exe).map_err(|e| {
+            let _ = std::fs::remove_file(&staged);
+            anyhow!(
+                "could not replace {}: {e}\n\
+                 If honya is installed system-wide, re-run with sudo, or reinstall:\n  \
+                 curl https://honya.altqx.com/install.sh | bash",
+                current_exe.display(),
+            )
+        })?;
+    }
+
+    #[cfg(windows)]
+    {
+        let old = old_exe_path(current_exe);
+        // Free the rename-aside slot from any prior update.
+        let _ = std::fs::remove_file(&old);
+        std::fs::rename(current_exe, &old).map_err(|e| {
+            let _ = std::fs::remove_file(&staged);
+            anyhow!(
+                "could not move the running {} aside: {e}\n\
+                 Re-run the installer to upgrade:\n  \
+                 irm https://honya.altqx.com/install.ps1 | iex",
+                current_exe.display(),
+            )
+        })?;
+        if let Err(e) = std::fs::rename(&staged, current_exe) {
+            // Roll back: restore the original exe and drop the staged copy.
+            let _ = std::fs::rename(&old, current_exe);
+            let _ = std::fs::remove_file(&staged);
+            return Err(anyhow!(
+                "could not install the new {}: {e}\n\
+                 Re-run the installer to upgrade:\n  \
+                 irm https://honya.altqx.com/install.ps1 | iex",
+                current_exe.display(),
+            ));
+        }
+        // The old image is still mapped, so this often waits until the next launch.
+        let _ = std::fs::remove_file(&old);
+    }
+
     Ok(())
 }
 
-/// Private (0700), unpredictable, exclusively-created staging dir; fails closed if a candidate exists.
+/// The `<exe>.old` sidecar path used by the Windows rename-aside swap.
+#[cfg(windows)]
+fn old_exe_path(current_exe: &Path) -> std::path::PathBuf {
+    let mut name = current_exe.as_os_str().to_os_string();
+    name.push(".old");
+    std::path::PathBuf::from(name)
+}
+
+/// Reap the `honya.exe.old` left behind by a previous Windows self-update.
+#[cfg(windows)]
+pub fn cleanup_stale_old_exe() {
+    if let Ok(current_exe) = std::env::current_exe() {
+        let _ = std::fs::remove_file(old_exe_path(&current_exe));
+    }
+}
+
+#[cfg(not(windows))]
+pub fn cleanup_stale_old_exe() {}
+
+/// Private 0700 staging dir; fails closed if a candidate exists.
 fn private_staging_dir(tag: &str) -> Result<std::path::PathBuf> {
     let base = std::env::temp_dir();
     for attempt in 0..32u64 {
@@ -341,10 +434,10 @@ fn private_staging_dir(tag: &str) -> Result<std::path::PathBuf> {
     );
 }
 
-/// Locate the `honya` binary inside the extracted tree: the archive root first,
-/// then any nested match — mirroring install.sh's find-fallback.
+/// Locate the honya binary inside the extracted tree, including nested archive layouts.
 fn find_honya_binary(root: &Path) -> Option<std::path::PathBuf> {
-    let direct = root.join("honya");
+    let bin_name = format!("honya{}", std::env::consts::EXE_SUFFIX);
+    let direct = root.join(&bin_name);
     if direct.is_file() {
         return Some(direct);
     }
@@ -357,7 +450,7 @@ fn find_honya_binary(root: &Path) -> Option<std::path::PathBuf> {
             let path = entry.path();
             if path.is_dir() {
                 stack.push(path);
-            } else if path.file_name().and_then(|n| n.to_str()) == Some("honya") {
+            } else if path.file_name().and_then(|n| n.to_str()) == Some(bin_name.as_str()) {
                 return Some(path);
             }
         }

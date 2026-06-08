@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use crate::model::AppConfig;
 
-/// The honya config directory: `$XDG_CONFIG_HOME/honya`, else `~/.config/honya`.
+/// The honya config directory: `$XDG_CONFIG_HOME/honya`, Windows app data, then `~/.config/honya`.
 pub fn config_dir() -> PathBuf {
     if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
         let xdg = PathBuf::from(xdg);
@@ -13,10 +13,23 @@ pub fn config_dir() -> PathBuf {
             return xdg.join("honya");
         }
     }
+    // Prefer roaming app data on Windows, where HOME is often unset.
+    #[cfg(windows)]
+    {
+        if let Some(appdata) = std::env::var_os("APPDATA") {
+            return PathBuf::from(appdata).join("honya");
+        }
+        if let Some(profile) = std::env::var_os("USERPROFILE") {
+            return PathBuf::from(profile).join(".config").join("honya");
+        }
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            return PathBuf::from(local).join("honya");
+        }
+    }
     if let Some(home) = std::env::var_os("HOME") {
         return PathBuf::from(home).join(".config").join("honya");
     }
-    // Last resort when neither var is set: a local ./.config/honya.
+    // Last resort: a local ./.config/honya.
     PathBuf::from(".config").join("honya")
 }
 

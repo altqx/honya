@@ -1,9 +1,10 @@
 name: release
 
 # Build cross-platform release binaries and attach them to the GitHub Release.
-# Asset convention (must match web/public/install.sh exactly):
-#   honya-<target>.tar.gz   (gzip tar containing a single executable named `honya`)
-#   honya-<target>.sha256   (sha256 checksum line for the .tar.gz; note: no .tar.gz in the name)
+# Asset convention (must match web/public/install.sh + install.ps1 exactly):
+#   honya-<target>.tar.gz   (Unix executable `honya`)
+#   honya-<target>.zip      (Windows executable `honya.exe`)
+#   honya-<target>.sha256   (checksum line for the archive; no archive suffix)
 
 on:
   push:
@@ -57,6 +58,15 @@ jobs:
             os: macos-latest
           - target: aarch64-apple-darwin
             os: macos-latest
+          # x86_64 Windows also covers ARM64 Windows through x64 emulation.
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+          # Build ARM64 Windows natively; aws-lc-sys cannot cross-compile here.
+          - target: aarch64-pc-windows-msvc
+            os: windows-11-arm
+    # Use aws-lc-sys bundled NASM objects on x86_64 Windows.
+    env:
+      AWS_LC_SYS_PREBUILT_NASM: 1
     steps:
       - name: Checkout
         uses: actions/checkout@v4

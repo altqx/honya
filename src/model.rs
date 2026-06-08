@@ -123,7 +123,11 @@ impl Project {
         } else {
             ProjectStatus::Draft
         };
-        TranslationProgress { status, done, total }
+        TranslationProgress {
+            status,
+            done,
+            total,
+        }
     }
 }
 
@@ -1054,13 +1058,19 @@ mod progress_tests {
             ch(1, ChapterKind::Prose, ChapterStatus::Done),
             ch(2, ChapterKind::Prose, ChapterStatus::Pending),
         ]]);
-        assert_eq!(partial.translation_progress().status, ProjectStatus::InProgress);
+        assert_eq!(
+            partial.translation_progress().status,
+            ProjectStatus::InProgress
+        );
 
         let running = project(vec![vec![
             ch(1, ChapterKind::Prose, ChapterStatus::Translating),
             ch(2, ChapterKind::Prose, ChapterStatus::Pending),
         ]]);
-        assert_eq!(running.translation_progress().status, ProjectStatus::InProgress);
+        assert_eq!(
+            running.translation_progress().status,
+            ProjectStatus::InProgress
+        );
     }
 
     #[test]

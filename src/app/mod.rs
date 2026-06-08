@@ -2557,7 +2557,7 @@ fn status_tag(status: ChapterStatus) -> &'static str {
     }
 }
 
-/// Filesystem-safe slug: ASCII lowered, punctuation runs → single `-`; non-ASCII (CJK/Thai) preserved verbatim.
+/// Filesystem-safe slug: ASCII lowered, punctuation collapsed, CJK/Thai preserved.
 pub fn slugify(title: &str) -> String {
     let mut out = String::with_capacity(title.len());
     let mut prev_dash = false;
@@ -2575,9 +2575,26 @@ pub fn slugify(title: &str) -> String {
             prev_dash = false;
         }
     }
-    let trimmed = out.trim_matches('-').to_string();
+    // Windows path components cannot end with '.' or ' '.
+    let trimmed = out
+        .trim_matches('-')
+        .trim_end_matches(['.', ' '])
+        .to_string();
     if trimmed.is_empty() {
-        "project".to_string()
+        return "project".to_string();
+    }
+    // Avoid Windows device basenames, case-insensitive and before any extension.
+    const RESERVED: &[&str] = &[
+        "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
+        "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+    ];
+    let stem = trimmed
+        .split('.')
+        .next()
+        .unwrap_or(&trimmed)
+        .to_ascii_lowercase();
+    if RESERVED.contains(&stem.as_str()) {
+        format!("_{trimmed}")
     } else {
         trimmed
     }
@@ -2777,13 +2794,13 @@ fn base_name(path: &str) -> String {
     path.rsplit('/').next().unwrap_or(path).to_string()
 }
 
-/// Cheap, dependency-free scan for raw `<img>`/SVG `<image>` src strings (heavy parsing is cleanse's job).
+/// Cheap scan for raw `<img>` / SVG `<image>` source strings.
 fn collect_img_srcs(html: &str) -> Vec<String> {
     let mut out = Vec::new();
     let bytes = html.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
-        // Handle both <img src> and SVG <image xlink:href|href> (cover encoding); check "<image" first.
+        // Check `<image` first so SVG tags do not get caught as `<img`.
         let rest = &bytes[i..];
         let (matched, prefer_src) = if rest.starts_with(b"<image") {
             (true, false)

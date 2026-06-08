@@ -71,8 +71,8 @@ pub fn write_with_data<T: Serialize>(
     atomic_write(path, &out)
 }
 
-/// Atomic write via temp sibling + `fs::rename` so a reader never sees a
-/// half-written file (rename is atomic within a filesystem). Creates parent dir.
+/// Atomic write via temp sibling + replace. Windows falls back to remove-then-rename
+/// because `fs::rename` cannot overwrite an existing destination there.
 pub fn atomic_write(path: &Path, contents: &str) -> std::io::Result<()> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
@@ -88,12 +88,29 @@ pub fn atomic_write(path: &Path, contents: &str) -> std::io::Result<()> {
         f.sync_all()?;
     }
 
-    // Best-effort cleanup of the temp file if the rename fails.
-    match std::fs::rename(&tmp, path) {
+    // Best-effort cleanup if the replace fails.
+    match replace_through(&tmp, path) {
         Ok(()) => Ok(()),
         Err(e) => {
             let _ = std::fs::remove_file(&tmp);
             Err(e)
+        }
+    }
+}
+
+/// Move `tmp` onto `dst`, overwriting when the platform permits it.
+#[cfg(not(windows))]
+fn replace_through(tmp: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::rename(tmp, dst)
+}
+
+#[cfg(windows)]
+fn replace_through(tmp: &Path, dst: &Path) -> std::io::Result<()> {
+    match std::fs::rename(tmp, dst) {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            let _ = std::fs::remove_file(dst);
+            std::fs::rename(tmp, dst)
         }
     }
 }

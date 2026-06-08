@@ -24,7 +24,7 @@ const IMAGE_PREFIX: &str = "../../images/";
 /// Default image alt text (Thai: "illustration").
 const IMAGE_ALT: &str = "ภาพประกอบ";
 
-// Private-use sentinels wrapping emitted image markdown, so the textual post-pass never corrupts an image alt/URL.
+// Sentinels keep the textual post-pass from changing image alt text or URLs.
 const IMG_OPEN: char = '\u{E000}';
 const IMG_CLOSE: char = '\u{E001}';
 
@@ -80,7 +80,7 @@ fn walk(node: NodeRef<'_, Node>, image_map: &HashMap<String, String>, out: &mut 
         Node::Element(el) => {
             let tag = el.name();
             match tag {
-                // Drop metadata containers wholesale: script/style text must never leak into the markdown.
+                // Script/style text must never leak into the markdown.
                 "head" | "script" | "style" | "title" => {}
                 "br" => {
                     // Scene-break divider. Light novels use empty <p><br></p> paragraphs
@@ -104,7 +104,7 @@ fn walk(node: NodeRef<'_, Node>, image_map: &HashMap<String, String>, out: &mut 
                     out.push(')');
                     out.push(IMG_CLOSE);
                 }
-                // SVG-wrapped illustration; href may be namespaced, so match "href" or any ":href"-suffixed key.
+                // SVG href may be namespaced, so match "href" or ":href".
                 "image" => {
                     let src = el
                         .attrs()
@@ -150,7 +150,7 @@ fn walk(node: NodeRef<'_, Node>, image_map: &HashMap<String, String>, out: &mut 
                 // Loose rt/rp outside a <ruby>: ignore quietly.
                 "rt" | "rp" => {}
                 _ => {
-                    // Transparent; block elements get a surrounding blank line so paragraphs separate.
+                    // Transparent; block elements still separate paragraphs.
                     if is_block(tag) {
                         ensure_block_break(out);
                         walk_children(node, image_map, out);
@@ -290,8 +290,8 @@ fn blank_line_re() -> &'static Regex {
 
 fn trailing_ws_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    // Trailing spaces/tabs at end of any line.
-    RE.get_or_init(|| Regex::new(r"(?m)[ \t]+$").unwrap())
+    // Strip trailing whitespace, including stray CR from non-conforming input.
+    RE.get_or_init(|| Regex::new(r"(?m)[ \t\r]+$").unwrap())
 }
 
 fn run_spaces_re() -> &'static Regex {

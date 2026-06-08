@@ -70,7 +70,7 @@
     --ink:#2D2A26;
     --ink-soft:#5C564E;
     --ink-faint:#968E82;            /* decorative / hairline only */
-    --ink-faint-text:#675F54;       /* AA-legible supporting text on washi/panel/inset (>=4.5 on all) */
+    --ink-faint-text:#675F54;       /* AA supporting text */
     --ink-mute:#6F6759;             /* AA muted ink for small meaningful text */
     --rule:#CEC6B8;
     /* 藍 indigo — the one accent */
@@ -287,7 +287,7 @@
   .hero-meta span{display:inline-flex; align-items:center; gap:7px}
   .hero-meta .dot{width:6px; height:6px; border-radius:50%; background:var(--sage); flex:none}
 
-  /* ============ THE TERMINAL (from #2, framed in #5) ============ */
+  /* terminal mock */
   .term-shell{position:relative; min-width:0}
   .term-shadow{
     position:absolute; inset:18px 6px -22px; border-radius:18px;
@@ -692,7 +692,7 @@
     display:inline-flex; align-items:center; justify-content:center; gap:9px;
     transition:background .16s var(--ease), color .16s var(--ease);
   }
-  /* fixed width so คัดลอก → คัดลอกแล้ว never resizes the button (sized to the wider "คัดลอกแล้ว") */
+  /* fixed width so the copied label does not resize the button */
   .copy-btn .copy-label{display:inline-block; width:5.6em; text-align:left; white-space:nowrap}
   .copy-btn:hover{background:#3a352f}
   .copy-btn svg{width:16px; height:16px; flex:none}
@@ -1228,6 +1228,17 @@
             </span>
           </div>
 
+          <div class="alt-install">
+            <span class="or">Windows (PowerShell)</span>
+            <span class="alt-pill">
+              <code id="win-cmd">irm https://honya.altqx.com/install.ps1 | iex</code>
+              <button class="alt-copy" id="winBtn" type="button" aria-label="คัดลอกคำสั่งติดตั้งสำหรับ Windows ไปยังคลิปบอร์ด">
+                <svg class="ico-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>
+                <svg class="ico-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>
+              </button>
+            </span>
+          </div>
+
           <p class="install-update" style="margin:14px 0 0; text-align:center; color:var(--ink-faint-text); font-size:13.5px">ติดตั้งไว้แล้ว? อัปเดตได้ทันทีด้วย <code>honya update</code></p>
 
           <div class="install-foot">
@@ -1459,6 +1470,33 @@
         }, 2200);
       }, function(){
         var code = document.getElementById('cargo-cmd');
+        if (code){
+          var range = document.createRange();
+          range.selectNodeContents(code);
+          var sel = window.getSelection();
+          sel.removeAllRanges();
+          sel.addRange(range);
+        }
+      });
+    });
+  }
+
+  var WIN_CMD = 'irm https://honya.altqx.com/install.ps1 | iex';
+  var winBtn = document.getElementById('winBtn');
+  var winTimer;
+  if (winBtn){
+    winBtn.addEventListener('click', function(){
+      copyText(WIN_CMD).then(function(){
+        clearTimeout(winTimer);
+        winBtn.classList.add('copied');
+        winBtn.setAttribute('aria-label','คัดลอกคำสั่งติดตั้งสำหรับ Windows แล้ว');
+        if (sr) sr.textContent = 'คัดลอกคำสั่งติดตั้งสำหรับ Windows ไปยังคลิปบอร์ดแล้ว';
+        winTimer = setTimeout(function(){
+          winBtn.classList.remove('copied');
+          winBtn.setAttribute('aria-label','คัดลอกคำสั่งติดตั้งสำหรับ Windows ไปยังคลิปบอร์ด');
+        }, 2200);
+      }, function(){
+        var code = document.getElementById('win-cmd');
         if (code){
           var range = document.createRange();
           range.selectNodeContents(code);
