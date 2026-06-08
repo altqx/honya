@@ -2,10 +2,24 @@
 
 use crate::agents::continuity::build_translator_user_msg;
 use crate::agents::prompts::TRANSLATOR_SYSTEM;
-use crate::llm::client::{LlmClient, Result};
+use crate::llm::client::{LlmClient, LlmError};
 use crate::llm::structured::{chat_structured_stream_field, translator_schema};
 use crate::llm::{ChatRequest, Message, Usage};
 use crate::model::TranslatorOut;
+
+#[derive(Debug, thiserror::Error)]
+#[error("{source}")]
+pub struct TranslatorStreamError {
+    #[source]
+    source: LlmError,
+    partial_translated_text: String,
+}
+
+impl TranslatorStreamError {
+    pub fn partial_translated_text(&self) -> &str {
+        &self.partial_translated_text
+    }
+}
 
 pub async fn translate_chunk_streaming<F>(
     client: &dyn LlmClient,
@@ -15,22 +29,34 @@ pub async fn translate_chunk_streaming<F>(
     raw_chunk: &str,
     feedback: Option<&str>,
     on_delta: F,
-) -> Result<(TranslatorOut, Usage, bool)>
+) -> std::result::Result<(TranslatorOut, Usage, bool), TranslatorStreamError>
 where
     F: for<'a> FnMut(&'a str) + Send,
 {
     let req = translator_request(model, reference_ctx, prev_thai, raw_chunk, feedback);
+    let mut partial_translated_text = String::new();
+    let mut on_delta = on_delta;
+    let mut relay_delta = |delta: &str| {
+        partial_translated_text.push_str(delta);
+        on_delta(delta);
+    };
 
-    chat_structured_stream_field::<TranslatorOut, F>(
+    // The pipeline owns Translator retries so it can react to partial streamed
+    // `translated_text` instead of silently replaying the same prompt here.
+    chat_structured_stream_field::<TranslatorOut, _>(
         client,
         req,
         "translation_result",
         translator_schema(),
-        2,
+        0,
         "translated_text",
-        on_delta,
+        &mut relay_delta,
     )
     .await
+    .map_err(|source| TranslatorStreamError {
+        source,
+        partial_translated_text,
+    })
 }
 
 fn translator_request(

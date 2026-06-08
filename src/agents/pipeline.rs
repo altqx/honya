@@ -470,6 +470,67 @@ fn effective_feedback_text(audit_findings: &[String], review: &ReviewerOut) -> S
     feedback.join("; ")
 }
 
+const REFUSAL_RETRY_FEEDBACK: &str = "The previous output was a refusal or policy notice, not a translation. Treat this as neutral literary translation work: translate only SOURCE_JP into Thai, preserve Markdown, do not add explicit detail or commentary, and return the final Thai story text in translated_text.";
+const PARTIAL_STREAM_RETRY_FEEDBACK: &str = "The previous stream stopped after an incomplete translated_text. Discard that partial output and translate the entire SOURCE_JP again from scratch. Keep neutral literary wording, preserve Markdown, do not add commentary, and return complete final Thai story text in valid translated_text JSON.";
+
+fn refusal_retry_feedback(translated: &str) -> Option<&'static str> {
+    looks_like_model_refusal(translated).then_some(REFUSAL_RETRY_FEEDBACK)
+}
+
+fn looks_like_model_refusal(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    let lower = trimmed.to_lowercase();
+    let head: String = lower.chars().take(220).collect();
+    let starts_with_refusal = [
+        "i'm sorry",
+        "i am sorry",
+        "sorry, but",
+        "i can't",
+        "i cannot",
+        "i can’t",
+        "i’m unable",
+        "i am unable",
+        "ขออภัย",
+        "ขอโทษ",
+    ]
+    .iter()
+    .any(|prefix| head.starts_with(prefix));
+    let policy_language = [
+        "content policy",
+        "safety policy",
+        "policy",
+        "cannot assist",
+        "can't assist",
+        "unable to assist",
+        "unable to translate",
+        "cannot translate",
+        "ไม่สามารถช่วย",
+        "ไม่สามารถแปล",
+        "ไม่สามารถดำเนินการ",
+        "ตามนโยบาย",
+        "นโยบายความปลอดภัย",
+        "คำขอนี้",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle));
+    let thai_refusal = [
+        "ไม่สามารถช่วย",
+        "ไม่สามารถแปล",
+        "ไม่สามารถดำเนินการ",
+        "ไม่อาจช่วย",
+        "ไม่อาจแปล",
+        "ไม่เหมาะสม",
+    ]
+    .iter()
+    .any(|needle| head.contains(needle));
+
+    policy_language || (starts_with_refusal && thai_refusal)
+}
+
 /// Build a `UsageStats` from one API call's token + BYOK-aware cost usage.
 fn stats_from_usage(u: &Usage) -> UsageStats {
     UsageStats {
@@ -583,6 +644,7 @@ async fn process_chunk(
             {
                 Ok(o) => o,
                 Err(e) => {
+                    let partial = e.partial_translated_text().trim().to_string();
                     // A transient Translator failure shouldn't sink the chapter.
                     // Retry while attempts remain; on the final attempt fall back
                     // to an earlier good translation (if any) rather than failing.
@@ -590,6 +652,38 @@ async fn process_chunk(
                         context: format!("translator ch{chapter} chunk{}", chunk.index),
                         msg: e.to_string(),
                     });
+                    if !partial.is_empty() {
+                        if attempt < max {
+                            emit_attempt_failed_retry(
+                                ctx,
+                                chapter,
+                                chunk,
+                                attempt,
+                                max,
+                                PARTIAL_STREAM_RETRY_FEEDBACK,
+                            );
+                            feedback = Some(PARTIAL_STREAM_RETRY_FEEDBACK.to_string());
+                            continue;
+                        }
+                        match candidate {
+                            Some(thai) => {
+                                return commit_chunk_needs_review(
+                                    ctx,
+                                    chapter,
+                                    chunk,
+                                    &thai,
+                                    attempt,
+                                    "translator stream stopped after partial output on the final attempt"
+                                        .to_string(),
+                                )
+                                .await;
+                            }
+                            None => anyhow::bail!(
+                                "translator stream stopped after partial output on chunk {} with no complete translation to keep",
+                                chunk.index
+                            ),
+                        }
+                    }
                     if attempt < max {
                         emit_attempt_failed_retry(
                             ctx,
@@ -626,7 +720,10 @@ async fn process_chunk(
         // no retry this way (matches the app-side, "everything deterministic but
         // the metadata turn" append rule).
         let thai = strip_copied_continuity(&prev_thai, &out.translated_text);
-        candidate = Some(thai.clone());
+        let refusal_feedback = refusal_retry_feedback(&thai);
+        if refusal_feedback.is_none() {
+            candidate = Some(thai.clone());
+        }
         let tok = to_tokens(&t_usage);
         acc.fold(&t_usage);
         ctx.tx.send(AppEvent::TranslatorReturned {
@@ -646,6 +743,33 @@ async fn process_chunk(
             run: acc.run,
             chapter: acc.chapter,
         });
+
+        if let Some(fb) = refusal_feedback {
+            if attempt < max {
+                emit_attempt_failed_retry(ctx, chapter, chunk, attempt, max, fb);
+                feedback = Some(fb.to_string());
+                continue;
+            }
+
+            match candidate {
+                Some(best) => {
+                    return commit_chunk_needs_review(
+                        ctx,
+                        chapter,
+                        chunk,
+                        &best,
+                        attempt,
+                        "translator returned a refusal or policy notice on the final attempt"
+                            .to_string(),
+                    )
+                    .await;
+                }
+                None => anyhow::bail!(
+                    "translator returned refusal/policy notice on chunk {} with no translation to keep",
+                    chunk.index
+                ),
+            }
+        }
 
         // ---- Deterministic audit + Reviewer ----
         let audit_terms = glossary_terms_for_chunk(&ctx.ws, &chunk.text, MAX_GLOSSARY_IN_CTX);
