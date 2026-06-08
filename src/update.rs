@@ -416,6 +416,7 @@ fn private_staging_dir(tag: &str) -> Result<std::path::PathBuf> {
             t ^ ((std::process::id() as u64) << 32) ^ attempt.wrapping_mul(0x9E37_79B9_7F4A_7C15)
         };
         let cand = base.join(format!("honya-update-{tag}-{nonce:016x}"));
+        #[cfg_attr(not(unix), allow(unused_mut))]
         let mut builder = std::fs::DirBuilder::new();
         #[cfg(unix)]
         {
