@@ -263,10 +263,6 @@ cargo test       # full suite: cleanse rules, EPUB parse/segment, Markdown rende
 cargo clippy --all-targets --locked -- -D warnings   # lint clean, warnings as errors
 ```
 
-The version in `Cargo.toml` is the **single source of truth** — CI auto-tags on a version change, so
-a release is cut simply by bumping `version` there. Each release also builds cross-platform binaries
-and publishes the crate to [crates.io](https://crates.io/crates/honya) (`cargo install honya`).
-
 ## License
 
 Licensed under the [Apache License 2.0](LICENSE).
