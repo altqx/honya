@@ -37,8 +37,9 @@ pub struct ProjectScreen {
     collapsed: HashSet<u32>,
     /// 0 = tree, 1 = context/detail panel (h/l moves focus between them).
     focus_panel: u8,
-    /// Multi-select set of chapter numbers (Space toggles).
-    selected: HashSet<u32>,
+    /// Multi-select set of `(volume, chapter)` ids (Space toggles). Keyed by
+    /// volume too so same-numbered chapters in other volumes don't ghost-mark.
+    selected: HashSet<(u32, u32)>,
     /// Mouse hit-test rects, refreshed every frame: the chapter tree's inner area
     /// and the right-hand context/detail column.
     tree_area: Rect,
@@ -86,6 +87,16 @@ impl ProjectScreen {
         }
     }
 
+    /// The `(volume, chapter)` id under the cursor, if the row is a chapter.
+    fn selected_chapter_id(&self, active: &ActiveProject) -> Option<(u32, u32)> {
+        let rows = self.rows(active);
+        let idx = self.tree.selected()?;
+        match rows.get(idx)? {
+            Row::Chapter { vol, ch } => Some((*vol, ch.number)),
+            Row::Volume(_) => None,
+        }
+    }
+
     fn selected_volume(&self, active: &ActiveProject) -> Option<u32> {
         let rows = self.rows(active);
         let idx = self.tree.selected()?;
@@ -100,13 +111,14 @@ impl ProjectScreen {
             .project
             .volumes
             .iter()
-            .flat_map(|v| v.chapters.iter().map(|ch| ch.number))
-            .collect();
+            .find(|v| v.number == active.vol)
+            .map(|v| v.chapters.iter().map(|ch| ch.number).collect())
+            .unwrap_or_default();
         let mut chapters: Vec<u32> = self
             .selected
             .iter()
-            .copied()
-            .filter(|ch| known.contains(ch))
+            .filter(|(vol, ch)| *vol == active.vol && known.contains(ch))
+            .map(|(_, ch)| *ch)
             .collect();
         chapters.sort_unstable();
         chapters
@@ -173,10 +185,10 @@ impl ProjectScreen {
                 }
             }
             KeyCode::Char(' ') => {
-                if let Some(ch) = self.selected_chapter(active)
-                    && !self.selected.insert(ch)
+                if let Some(id) = self.selected_chapter_id(active)
+                    && !self.selected.insert(id)
                 {
-                    self.selected.remove(&ch);
+                    self.selected.remove(&id);
                 }
                 Action::None
             }
@@ -519,10 +531,10 @@ impl ProjectScreen {
                     inner.width,
                     theme,
                 ),
-                Row::Chapter { ch, .. } => chapter_row(
+                Row::Chapter { vol, ch } => chapter_row(
                     ch,
                     i == sel,
-                    self.selected.contains(&ch.number),
+                    self.selected.contains(&(*vol, ch.number)),
                     name_w,
                     theme,
                 ),
@@ -1034,7 +1046,7 @@ mod tests {
             screen.handle_key(key(KeyCode::Char(' ')), Some(&active)),
             Action::None
         ));
-        assert!(screen.selected.contains(&1));
+        assert!(screen.selected.contains(&(1, 1)));
 
         // Move the cursor to chapter 2. Pressing `t` must translate the marked
         // chapter, not the cursor row, then clear the mark state.
@@ -1087,7 +1099,7 @@ mod tests {
         // Mark chapter 1 in Vol.01.
         screen.handle_key(key(KeyCode::Down), Some(&active));
         screen.handle_key(key(KeyCode::Char(' ')), Some(&active));
-        assert!(screen.selected.contains(&1));
+        assert!(screen.selected.contains(&(1, 1)));
 
         // Crossing into Vol.02 clears the marks (they key off per-volume numbers).
         screen.handle_key(key(KeyCode::Down), Some(&active));
@@ -1096,6 +1108,23 @@ mod tests {
         assert!(
             screen.selected.is_empty(),
             "marks clear when leaving a volume"
+        );
+    }
+
+    #[test]
+    fn marks_are_scoped_to_their_volume() {
+        // Marking Vol.01's chapter 1 must not ghost-mark Vol.02's chapter 1
+        // (the tree renders every volume, and they share chapter numbers).
+        let active = two_vol_project();
+        let mut screen = ProjectScreen::new();
+
+        screen.handle_key(key(KeyCode::Down), Some(&active));
+        screen.handle_key(key(KeyCode::Char(' ')), Some(&active));
+
+        assert!(screen.selected.contains(&(1, 1)));
+        assert!(
+            !screen.selected.contains(&(2, 1)),
+            "same-numbered chapter in another volume must not be marked"
         );
     }
 
