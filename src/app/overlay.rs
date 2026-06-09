@@ -13,7 +13,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
 use crate::export::ExportFormat;
-use crate::model::{AppConfig, LogLevel, ThemeId, UpdateMode};
+use crate::model::{AppConfig, LogLevel, ServiceTier, ThemeId, UpdateMode};
 use crate::theme::{self, ALL_THEMES, Theme};
 use crate::ui::input::{self, EditOpts, Edited};
 use crate::ui::layout::{centered_modal, centered_pct};
@@ -257,6 +257,8 @@ pub struct SettingsState {
     pub api_key_env: bool,
     /// Startup update behavior; toggled with Ctrl-U (not a text field).
     pub update_mode: UpdateMode,
+    /// OpenRouter request tier; cycled with Ctrl-Y (not a text field).
+    pub service_tier: Option<ServiceTier>,
     /// Max Translator↔Reviewer retry attempts per chunk, as typed (digits only).
     /// Parsed and clamped to 1..=20 on save via [`SettingsState::max_attempts_value`].
     pub max_attempts: String,
@@ -284,6 +286,7 @@ impl SettingsState {
             api_key: cfg.api_key.clone().unwrap_or_default(),
             api_key_env: crate::config::api_key_from_env().is_some(),
             update_mode: cfg.update_mode,
+            service_tier: cfg.service_tier,
             max_attempts: cfg.max_attempts.to_string(),
             loop_stall_secs: cfg.loop_stall_secs.to_string(),
             max_chapter_retranslates: cfg.max_chapter_retranslates.to_string(),
@@ -807,6 +810,7 @@ impl Overlay {
             api_key: String::new(),
             api_key_env: false,
             update_mode: UpdateMode::default(),
+            service_tier: None,
             max_attempts: String::new(),
             loop_stall_secs: String::new(),
             max_chapter_retranslates: String::new(),
@@ -1333,6 +1337,11 @@ impl Overlay {
                 st.update_mode = st.update_mode.toggled();
                 Action::None
             }
+            // Ctrl-Y cycles the OpenRouter service tier (Off → Flex → Priority).
+            KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                st.service_tier = ServiceTier::cycled(st.service_tier);
+                Action::None
+            }
             KeyCode::Enter => Action::SaveSettings {
                 base_url: st.base_url.clone(),
                 orchestrator: st.orchestrator.clone(),
@@ -1345,6 +1354,7 @@ impl Overlay {
                     Some(st.api_key.clone())
                 },
                 update_mode: st.update_mode,
+                service_tier: st.service_tier,
                 max_attempts: st.max_attempts_value(),
                 loop_stall_secs: st.loop_stall_secs_value(),
                 max_chapter_retranslates: st.max_chapter_retranslates_value(),
@@ -2559,6 +2569,17 @@ impl Overlay {
             ),
             Span::styled(st.update_mode.label(), Style::default().fg(theme.accent)),
             Span::styled("   Ctrl-U to toggle", Style::default().fg(theme.ink_faint)),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled(
+                "   Service tier         ",
+                Style::default().fg(theme.ink_faint),
+            ),
+            Span::styled(
+                ServiceTier::label(st.service_tier),
+                Style::default().fg(theme.accent),
+            ),
+            Span::styled("   Ctrl-Y to cycle", Style::default().fg(theme.ink_faint)),
         ]));
         lines.push(Line::raw(""));
         let footer = if st.api_key_env {

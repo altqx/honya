@@ -9,7 +9,7 @@ use futures::StreamExt;
 use reqwest::StatusCode;
 use serde::Deserialize;
 
-use crate::model::AppConfig;
+use crate::model::{AppConfig, ServiceTier};
 
 use super::{ChatRequest, ChatResponse, Choice, ResponseMessage, Usage};
 
@@ -66,6 +66,8 @@ pub struct ClientConfig {
     pub referer: Option<String>,
     /// `X-Title` ranking header (optional).
     pub title: Option<String>,
+    /// `service_tier` stamped onto every request when set (`flex`/`priority`).
+    pub service_tier: Option<ServiceTier>,
     /// Per-request timeout.
     pub timeout: Duration,
 }
@@ -78,6 +80,7 @@ impl ClientConfig {
             api_key,
             referer: cfg.referer.clone(),
             title: cfg.title.clone(),
+            service_tier: cfg.service_tier,
             timeout: Duration::from_secs(120),
         }
     }
@@ -210,11 +213,20 @@ impl OpenRouterClient {
     }
 
     fn request_builder(&self, req: &ChatRequest) -> reqwest::RequestBuilder {
-        let mut builder = self
+        let post = self
             .http
             .post(self.cfg.endpoint())
-            .bearer_auth(&self.cfg.api_key)
-            .json(req);
+            .bearer_auth(&self.cfg.api_key);
+
+        // Stamp the configured service tier unless the caller already set one.
+        let mut builder = match (self.cfg.service_tier, req.service_tier) {
+            (Some(tier), None) => {
+                let mut req = req.clone();
+                req.service_tier = Some(tier);
+                post.json(&req)
+            }
+            _ => post.json(req),
+        };
 
         if let Some(referer) = &self.cfg.referer {
             builder = builder.header("HTTP-Referer", referer);
@@ -423,5 +435,47 @@ mod tests {
         assert_eq!(stream_resp.model.as_deref(), Some("test/model"));
         assert_eq!(stream_resp.role.as_deref(), Some("assistant"));
         assert_eq!(stream_resp.usage.expect("final usage").total_tokens, 3);
+    }
+
+    fn client_with_tier(service_tier: Option<ServiceTier>) -> OpenRouterClient {
+        OpenRouterClient::new(ClientConfig {
+            base_url: "https://example.test/api/v1".into(),
+            api_key: "k".into(),
+            referer: None,
+            title: None,
+            service_tier,
+            timeout: Duration::from_secs(1),
+        })
+        .unwrap()
+    }
+
+    fn body_json(client: &OpenRouterClient, req: &ChatRequest) -> serde_json::Value {
+        let built = client.request_builder(req).build().unwrap();
+        let bytes = built.body().unwrap().as_bytes().unwrap();
+        serde_json::from_slice(bytes).unwrap()
+    }
+
+    #[test]
+    fn configured_service_tier_is_stamped_onto_requests() {
+        let client = client_with_tier(Some(ServiceTier::Flex));
+        let json = body_json(&client, &ChatRequest::new("m", vec![]));
+        assert_eq!(json["service_tier"], "flex");
+    }
+
+    #[test]
+    fn caller_service_tier_overrides_config() {
+        let client = client_with_tier(Some(ServiceTier::Flex));
+        let req = ChatRequest {
+            service_tier: Some(ServiceTier::Priority),
+            ..ChatRequest::new("m", vec![])
+        };
+        assert_eq!(body_json(&client, &req)["service_tier"], "priority");
+    }
+
+    #[test]
+    fn no_service_tier_field_when_unconfigured() {
+        let client = client_with_tier(None);
+        let json = body_json(&client, &ChatRequest::new("m", vec![]));
+        assert!(json.get("service_tier").is_none());
     }
 }

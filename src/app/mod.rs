@@ -195,6 +195,8 @@ pub enum Action {
         api_key: Option<String>,
         /// Startup update behavior (auto-install vs. notify only).
         update_mode: crate::model::UpdateMode,
+        /// OpenRouter `service_tier` for every request (`None` = provider default).
+        service_tier: Option<crate::model::ServiceTier>,
         /// Max Translator↔Reviewer retry attempts per chunk (already clamped 1..=20).
         max_attempts: u32,
         /// Loop-watchdog stall window in seconds (already clamped; 0 disables it).
@@ -1454,6 +1456,7 @@ impl App {
                 reviewer,
                 api_key,
                 update_mode,
+                service_tier,
                 max_attempts,
                 loop_stall_secs,
                 max_chapter_retranslates,
@@ -1465,6 +1468,7 @@ impl App {
                     reviewer,
                     api_key,
                     update_mode,
+                    service_tier,
                     max_attempts,
                     loop_stall_secs,
                     max_chapter_retranslates,
@@ -2420,6 +2424,7 @@ impl App {
         reviewer: String,
         api_key: Option<String>,
         update_mode: crate::model::UpdateMode,
+        service_tier: Option<crate::model::ServiceTier>,
         max_attempts: u32,
         loop_stall_secs: u64,
         max_chapter_retranslates: u32,
@@ -2429,6 +2434,8 @@ impl App {
         self.cfg.models.translator = translator;
         self.cfg.models.reviewer = reviewer;
         self.cfg.update_mode = update_mode;
+        let tier_changed = self.cfg.service_tier != service_tier;
+        self.cfg.service_tier = service_tier;
         self.cfg.max_attempts = max_attempts;
         self.cfg.loop_stall_secs = loop_stall_secs;
         self.cfg.max_chapter_retranslates = max_chapter_retranslates;
@@ -2441,9 +2448,9 @@ impl App {
         } else {
             false
         };
-        // Rebuild the active client so a newly-added/changed/cleared key takes hold
-        // without reopening the project.
-        if key_changed && let Some(active) = self.active.as_mut() {
+        // Rebuild the active client so a newly-added/changed/cleared key — or a new
+        // service tier (snapshotted into ClientConfig) — takes hold without reopening.
+        if (key_changed || tier_changed) && let Some(active) = self.active.as_mut() {
             active.client = crate::build_client(&self.cfg).ok();
         }
         match crate::config::save(&self.cfg) {

@@ -33,6 +33,10 @@ pub struct ChatRequest {
     pub max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream: Option<bool>,
+    /// `flex`/`priority` request tier. Normally left `None` here and stamped from
+    /// [`ClientConfig`](client::ClientConfig) at send time so it applies uniformly.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<crate::model::ServiceTier>,
 }
 
 impl ChatRequest {
@@ -46,6 +50,7 @@ impl ChatRequest {
             temperature: None,
             max_tokens: None,
             stream: None,
+            service_tier: None,
         }
     }
 }
@@ -379,5 +384,27 @@ mod usage_tests {
         assert!(approx(acc.cost, 0.75));
         // 0.75 OpenRouter fees + 5.0 upstream.
         assert!(approx(acc.cost_usd(), 5.75));
+    }
+}
+
+#[cfg(test)]
+mod service_tier_tests {
+    use super::*;
+    use crate::model::ServiceTier;
+
+    #[test]
+    fn service_tier_omitted_when_unset() {
+        let json = serde_json::to_value(ChatRequest::new("m", vec![])).unwrap();
+        assert!(json.get("service_tier").is_none());
+    }
+
+    #[test]
+    fn service_tier_serializes_as_lowercase_string() {
+        let req = ChatRequest {
+            service_tier: Some(ServiceTier::Priority),
+            ..ChatRequest::new("m", vec![])
+        };
+        let json = serde_json::to_value(req).unwrap();
+        assert_eq!(json["service_tier"], "priority");
     }
 }

@@ -311,6 +311,38 @@ impl UpdateMode {
     }
 }
 
+/// OpenRouter/OpenAI `service_tier` request parameter, trading latency for cost.
+/// Stored as `Option` in [`AppConfig`]: `None` omits the field entirely so the
+/// provider applies its own default; `Some(_)` sends the chosen tier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ServiceTier {
+    /// Slower, cheaper batch tier (`"flex"`).
+    Flex,
+    /// Faster, higher-priority tier (`"priority"`).
+    Priority,
+}
+
+impl ServiceTier {
+    /// Short label for the Settings line.
+    pub fn label(this: Option<Self>) -> &'static str {
+        match this {
+            None => "Off",
+            Some(ServiceTier::Flex) => "Flex",
+            Some(ServiceTier::Priority) => "Priority",
+        }
+    }
+
+    /// Cycle through Off → Flex → Priority for the Settings toggle.
+    pub fn cycled(this: Option<Self>) -> Option<Self> {
+        match this {
+            None => Some(ServiceTier::Flex),
+            Some(ServiceTier::Flex) => Some(ServiceTier::Priority),
+            Some(ServiceTier::Priority) => None,
+        }
+    }
+}
+
 /// Global, persisted app configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -356,6 +388,10 @@ pub struct AppConfig {
     /// pre-update-mode configs loading, and defaults them to auto-install).
     #[serde(default)]
     pub update_mode: UpdateMode,
+    /// OpenRouter `service_tier` sent on every chat request (`flex` = cheaper and
+    /// slower, `priority` = faster). `None` omits the field — the provider default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<ServiceTier>,
 }
 
 /// Default loop-watchdog stall window (seconds). Sits above the 120 s per-request
@@ -388,6 +424,7 @@ impl Default for AppConfig {
             theme: ThemeId::default(),
             onboarded: false,
             update_mode: UpdateMode::default(),
+            service_tier: None,
         }
     }
 }
