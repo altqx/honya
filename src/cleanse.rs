@@ -7,6 +7,16 @@
 //! `<img>`->`![ภาพประกอบ](../../images/FILE.png)`; other tags stripped; block elements
 //! separated by a blank line; 3+ newlines collapsed to 2.
 //!
+//! Gaiji (外字): an inline `<img>`/SVG `<image>` that is a single external glyph
+//! (class/id/filename marked `gaiji`, or a lone non-ASCII `alt`) is emitted as
+//! prose inline — NOT as an illustration link — so the sentence stays whole.
+//! Its `alt`/`title` is usually the glyph itself ("!!!", "あ゛", "40°") → emitted
+//! verbatim; some publishers instead store the punctuation's *name* ("かんたんふ"
+//! = 感嘆符) → mapped to the real mark ("!!!"); a label-less gaiji is dropped.
+//! Source text is also scrubbed of Private-Use-Area codepoints
+//! (`sanitize_external_chars`) — they collide with the IMG sentinels below and
+//! don't render anyway.
+//!
 //! Ordering matters: emphasis/ruby/img happen during the DOM walk; quotes + whitespace
 //! run in a textual post-pass guarded by IMG_OPEN/IMG_CLOSE sentinels so they never
 //! touch image alt/URL. Entities are NOT re-decoded — html5ever already did.
@@ -25,6 +35,8 @@ const IMAGE_PREFIX: &str = "../../images/";
 const IMAGE_ALT: &str = "ภาพประกอบ";
 
 // Sentinels keep the textual post-pass from changing image alt text or URLs.
+// Both live in the Private Use Area where gaiji codepoints also live, so source
+// text is scrubbed of PUA (`sanitize_external_chars`) before it reaches `out`.
 const IMG_OPEN: char = '\u{E000}';
 const IMG_CLOSE: char = '\u{E001}';
 
@@ -75,7 +87,7 @@ pub fn xhtml_to_markdown(html: &str, image_map: &HashMap<String, String>) -> Str
 fn walk(node: NodeRef<'_, Node>, image_map: &HashMap<String, String>, out: &mut String) {
     match node.value() {
         Node::Text(text) => {
-            out.push_str(text);
+            push_sanitized(out, text);
         }
         Node::Element(el) => {
             let tag = el.name();
@@ -94,15 +106,7 @@ fn walk(node: NodeRef<'_, Node>, image_map: &HashMap<String, String>, out: &mut 
                 }
                 "img" => {
                     let src = el.attr("src").unwrap_or("");
-                    let file = resolve_image(src, image_map);
-                    out.push(IMG_OPEN);
-                    out.push_str("![");
-                    out.push_str(IMAGE_ALT);
-                    out.push_str("](");
-                    out.push_str(IMAGE_PREFIX);
-                    out.push_str(&file);
-                    out.push(')');
-                    out.push(IMG_CLOSE);
+                    emit_image_or_gaiji(el, src, image_map, out);
                 }
                 // SVG href may be namespaced, so match "href" or ":href".
                 "image" => {
@@ -111,15 +115,7 @@ fn walk(node: NodeRef<'_, Node>, image_map: &HashMap<String, String>, out: &mut 
                         .find(|(k, _)| *k == "href" || k.ends_with(":href"))
                         .map(|(_, v)| v)
                         .unwrap_or("");
-                    let file = resolve_image(src, image_map);
-                    out.push(IMG_OPEN);
-                    out.push_str("![");
-                    out.push_str(IMAGE_ALT);
-                    out.push_str("](");
-                    out.push_str(IMAGE_PREFIX);
-                    out.push_str(&file);
-                    out.push(')');
-                    out.push(IMG_CLOSE);
+                    emit_image_or_gaiji(el, src, image_map, out);
                 }
                 "b" | "strong" => {
                     out.push_str("**");
@@ -198,7 +194,7 @@ fn collect_ruby(
 ) {
     for child in node.children() {
         match child.value() {
-            Node::Text(t) => base.push_str(t),
+            Node::Text(t) => push_sanitized(base, t),
             Node::Element(el) => match el.name() {
                 "rt" => {
                     let mut sub = String::new();
@@ -252,6 +248,114 @@ fn ensure_block_break(out: &mut String) {
     if !out.ends_with("\n\n") {
         out.push('\n');
     }
+}
+
+/// Emit an `<img>` / SVG `<image>`: an inline gaiji becomes its substitute text
+/// (see `gaiji_replacement`) as prose so the sentence stays intact; anything
+/// else is a relocated illustration link wrapped in IMG sentinels.
+fn emit_image_or_gaiji(
+    el: &scraper::node::Element,
+    src: &str,
+    image_map: &HashMap<String, String>,
+    out: &mut String,
+) {
+    if let Some(text) = gaiji_replacement(el, src) {
+        out.push_str(&text);
+        return;
+    }
+    let file = resolve_image(src, image_map);
+    out.push(IMG_OPEN);
+    out.push_str("![");
+    out.push_str(IMAGE_ALT);
+    out.push_str("](");
+    out.push_str(IMAGE_PREFIX);
+    out.push_str(&file);
+    out.push(')');
+    out.push(IMG_CLOSE);
+}
+
+/// The inline substitute for a gaiji glyph (see the module doc for the policy):
+/// `None` = ordinary illustration (stays an image link), `Some("")` = drop it.
+fn gaiji_replacement(el: &scraper::node::Element, src: &str) -> Option<String> {
+    let alt = el.attr("alt").map(str::trim).filter(|s| !s.is_empty());
+    if !is_gaiji_img(el, src, alt) {
+        return None;
+    }
+    let label = alt.or_else(|| el.attr("title").map(str::trim).filter(|s| !s.is_empty()));
+    let Some(label) = label else {
+        return Some(String::new());
+    };
+    // A punctuation NAME ("かんたんふ") must become the mark, never the literal
+    // word — else the translator renders "exclamation mark" as prose.
+    if let Some(glyph) = punctuation_name_to_glyph(label) {
+        return Some(glyph.to_string());
+    }
+    // Otherwise the label IS the glyph; drop any raw PUA it carries.
+    Some(sanitize_external_chars(label))
+}
+
+/// Map a punctuation-mark *name* that some publishers put in a gaiji `alt`
+/// (e.g. "かんたんふ" = 感嘆符) to the actual mark. Safe because it is only
+/// reached for detected gaiji, so the label is a mark name, not prose. The
+/// exclamation glyph these books ship is a triple "!!!". Extend as needed.
+fn punctuation_name_to_glyph(label: &str) -> Option<&'static str> {
+    match label {
+        "かんたんふ" | "かんたんぷ" | "感嘆符" | "感歎符" => Some("!!!"),
+        "ぎもんふ" | "ぎもんぷ" | "疑問符" => Some("?"),
+        "かんたんふぎもんふ" | "感嘆符疑問符" => Some("!?"),
+        _ => None,
+    }
+}
+
+/// A gaiji image carries an explicit `gaiji` marker on its class/id/filename, or
+/// an `alt` that is a single non-ASCII glyph (the character itself, not a caption).
+fn is_gaiji_img(el: &scraper::node::Element, src: &str, alt: Option<&str>) -> bool {
+    fn has_gaiji_token(s: &str) -> bool {
+        s.to_ascii_lowercase().contains("gaiji")
+    }
+    if el
+        .attr("class")
+        .is_some_and(|c| c.split_whitespace().any(has_gaiji_token))
+    {
+        return true;
+    }
+    if el.attr("id").is_some_and(has_gaiji_token) {
+        return true;
+    }
+    if has_gaiji_token(basename(src)) {
+        return true;
+    }
+    if let Some(a) = alt {
+        let mut chars = a.chars();
+        if let (Some(c), None) = (chars.next(), chars.next()) {
+            return !c.is_ascii();
+        }
+    }
+    false
+}
+
+/// Drop every Private-Use-Area codepoint from source text. The PUA holds
+/// non-standard gaiji *and* our IMG sentinels (U+E000/E001), so a raw PUA char
+/// in prose would both fail to render and corrupt the sentinel-based post-pass.
+fn sanitize_external_chars(s: &str) -> String {
+    if !s.chars().any(is_private_use) {
+        return s.to_string();
+    }
+    s.chars().filter(|&c| !is_private_use(c)).collect()
+}
+
+fn is_private_use(c: char) -> bool {
+    matches!(
+        c as u32,
+        0xE000..=0xF8FF            // BMP PUA (includes the IMG_OPEN/IMG_CLOSE sentinels)
+        | 0xF_0000..=0xF_FFFD     // Plane 15 (PUA-A)
+        | 0x10_0000..=0x10_FFFD   // Plane 16 (PUA-B)
+    )
+}
+
+/// Append `text` to `out`, scrubbing any external-character (PUA) codepoints.
+fn push_sanitized(out: &mut String, text: &str) {
+    out.push_str(&sanitize_external_chars(text));
 }
 
 /// Resolve an `<img src>` to a relocated basename. Lookup order:
@@ -567,5 +671,85 @@ mod tests {
     fn mixed_paragraph_with_ruby_and_quote() {
         let html = "<p>「<ruby>君<rt>きみ</rt></ruby>」</p>";
         assert_eq!(md(html), "\u{201C}君 (きみ)\u{201D}");
+    }
+
+    #[test]
+    fn gaiji_punctuation_name_alt_maps_to_mark() {
+        // Real publisher convention: alt is the punctuation NAME (感嘆符 =
+        // "かんたんふ"), not the glyph. It must become "!!!", never the word.
+        assert_eq!(md(r#"飲んでないよ<img class="gaiji" alt="かんたんふ"/>"#), "飲んでないよ!!!");
+        assert_eq!(md(r#"なに<img class="gaiji" alt="感嘆符"/>"#), "なに!!!");
+    }
+
+    #[test]
+    fn gaiji_literal_glyph_alt_is_emitted_verbatim() {
+        // Sibling volumes store the glyph itself in alt — emit it as-is.
+        assert_eq!(md(r#"だめ<img class="gaiji" alt="!!!"/>"#), "だめ!!!");
+        assert_eq!(md(r#"<img class="gaiji" alt="あ゛"/>"#), "あ゛");
+        assert_eq!(md(r#"<img class="gaiji" alt="40°"/>"#), "40°");
+    }
+
+    #[test]
+    fn gaiji_without_label_is_dropped() {
+        // No alt/title and no name to map → emit nothing (no tofu marker), so the
+        // surrounding text simply joins up.
+        assert_eq!(md(r#"名は<img class="gaiji" src="g.png"/>った"#), "名はった");
+        assert_eq!(md(r#"名は<img id="gaiji_3" src="x.png"/>った"#), "名はった");
+    }
+
+    #[test]
+    fn gaiji_detected_by_src_basename() {
+        assert_eq!(
+            md(r#"名は<img src="../image/gaiji-001.png" alt="彁"/>った"#),
+            "名は彁った"
+        );
+    }
+
+    #[test]
+    fn single_glyph_alt_is_treated_as_gaiji() {
+        // No gaiji marker, but a lone non-ASCII alt IS the character.
+        assert_eq!(md(r#"名は<img src="x.png" alt="彁"/>った"#), "名は彁った");
+    }
+
+    #[test]
+    fn gaiji_with_pua_alt_is_dropped() {
+        // alt holds a raw PUA codepoint — unrenderable and hint-less, so drop it.
+        assert_eq!(md("名は<img class=\"gaiji\" alt=\"\u{E5C0}\"/>った"), "名はった");
+    }
+
+    #[test]
+    fn ordinary_illustration_still_renders_as_image_link() {
+        // Regression: a normal alt (caption, multi-char) is NOT mistaken for gaiji.
+        assert_eq!(
+            md(r#"<img src="i001.png" alt="挿絵1"/>"#),
+            "![ภาพประกอบ](../../images/i001.png)"
+        );
+    }
+
+    #[test]
+    fn gaiji_inside_quotes_keeps_sentence_intact() {
+        assert_eq!(
+            md(r#"「飲めるか<img class="gaiji" alt="かんたんふ"/>」"#),
+            "\u{201C}飲めるか!!!\u{201D}"
+        );
+    }
+
+    #[test]
+    fn pua_in_source_text_is_dropped_not_corrupting_sentinels() {
+        // A raw PUA char in prose — including the exact IMG sentinel codepoints
+        // U+E000/U+E001 — is removed, so it can't derail the sentinel post-pass.
+        assert_eq!(md("名\u{E000}は\u{E001}る"), "名はる");
+        assert_eq!(md("名\u{F8FF}る"), "名る");
+    }
+
+    #[test]
+    fn pua_in_text_does_not_eat_adjacent_image() {
+        // A stray PUA char immediately before a real image must not swallow the
+        // following image markdown (the bug a literal IMG_OPEN would have caused).
+        // (alt is a multi-char caption, so the image stays an illustration link.)
+        assert_eq!(
+            md("あ\u{E000}<img src=\"i.png\" alt=\"挿絵の説明\"/>"),
+            "あ![ภาพประกอบ](../../images/i.png)"
+        );
     }
 }
