@@ -32,7 +32,7 @@ pub async fn chat_structured<T: DeserializeOwned>(
         let usage = resp.usage.unwrap_or_default();
         let choice = resp.choices.first().ok_or(LlmError::EmptyChoices)?;
         let finish_reason = choice.finish_reason.clone();
-        let raw = choice.message.content.clone().unwrap_or_default();
+        let raw = structured_payload(&choice.message);
         let cleaned = strip_fences(&raw);
 
         if cleaned.is_empty() {
@@ -98,7 +98,7 @@ where
         let usage = resp.usage.unwrap_or_default();
         let choice = resp.choices.first().ok_or(LlmError::EmptyChoices)?;
         let finish_reason = choice.finish_reason.clone();
-        let raw = choice.message.content.clone().unwrap_or_default();
+        let raw = structured_payload(&choice.message);
         let cleaned = strip_fences(&raw);
 
         if cleaned.is_empty() {
@@ -313,6 +313,24 @@ impl JsonStringFieldStream {
     }
 }
 
+/// Pull the structured-output payload out of a response message.
+///
+/// Normally that's the assistant `content`. But some OpenRouter providers honor a
+/// strict `json_schema` request by emitting the JSON as a tool/function call and
+/// leaving `content` null — the dashboard reconstructs and shows the JSON, while a
+/// naive reader sees empty content. Fall back to the first tool call's `arguments`.
+fn structured_payload(msg: &super::ResponseMessage) -> String {
+    let content = msg.content.clone().unwrap_or_default();
+    if !content.trim().is_empty() {
+        return content;
+    }
+    msg.tool_calls
+        .as_ref()
+        .and_then(|calls| calls.first())
+        .map(|call| call.function.arguments.clone())
+        .unwrap_or_default()
+}
+
 /// Strip a single ```json/```/~~~ fence wrapping JSON; returns a trimmed borrowed slice.
 pub fn strip_fences(s: &str) -> &str {
     let trimmed = s.trim();
@@ -416,15 +434,16 @@ pub fn reviewer_schema() -> serde_json::Value {
 mod tests {
     use super::{JsonStringFieldStream, chat_structured};
     use crate::llm::client::{LlmClient, LlmError, Result};
-    use crate::llm::{ChatRequest, ChatResponse, Choice, ResponseMessage};
+    use crate::llm::{ChatRequest, ChatResponse, Choice, FunctionCall, ResponseMessage, ToolCall};
     use async_trait::async_trait;
 
-    struct EmptyContentClient {
+    struct OneShotClient {
+        message: ResponseMessage,
         finish_reason: Option<String>,
     }
 
     #[async_trait]
-    impl LlmClient for EmptyContentClient {
+    impl LlmClient for OneShotClient {
         async fn chat(&self, _req: &ChatRequest) -> Result<ChatResponse> {
             Ok(ChatResponse {
                 id: None,
@@ -432,39 +451,44 @@ mod tests {
                 usage: None,
                 choices: vec![Choice {
                     index: 0,
-                    message: ResponseMessage {
-                        role: Some("assistant".to_string()),
-                        content: None,
-                        tool_calls: None,
-                    },
+                    message: self.message.clone(),
                     finish_reason: self.finish_reason.clone(),
                 }],
             })
         }
     }
 
+    fn message(content: Option<&str>, tool_calls: Option<Vec<ToolCall>>) -> ResponseMessage {
+        ResponseMessage {
+            role: Some("assistant".to_string()),
+            content: content.map(str::to_string),
+            tool_calls,
+        }
+    }
+
     #[derive(Debug, serde::Deserialize)]
     struct Dummy {
-        #[allow(dead_code)]
         ok: bool,
     }
 
-    #[tokio::test]
-    async fn empty_content_reports_finish_reason_not_eof_parse_error() {
-        let client = EmptyContentClient {
-            finish_reason: Some("length".to_string()),
-        };
-        let err = chat_structured::<Dummy>(
-            &client,
+    async fn run(client: &OneShotClient) -> Result<(Dummy, crate::llm::Usage)> {
+        chat_structured::<Dummy>(
+            client,
             ChatRequest::new("m", vec![]),
             "review_result",
             serde_json::json!({}),
             0,
         )
         .await
-        .unwrap_err();
+    }
 
-        match err {
+    #[tokio::test]
+    async fn empty_content_reports_finish_reason_not_eof_parse_error() {
+        let client = OneShotClient {
+            message: message(None, None),
+            finish_reason: Some("length".to_string()),
+        };
+        match run(&client).await.unwrap_err() {
             LlmError::EmptyContent {
                 target,
                 finish_reason,
@@ -474,6 +498,24 @@ mod tests {
             }
             other => panic!("expected EmptyContent, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn falls_back_to_tool_call_arguments_when_content_is_null() {
+        let tool_call = ToolCall {
+            id: "call_1".to_string(),
+            kind: "function".to_string(),
+            function: FunctionCall {
+                name: "review_result".to_string(),
+                arguments: r#"{"ok":true}"#.to_string(),
+            },
+        };
+        let client = OneShotClient {
+            message: message(None, Some(vec![tool_call])),
+            finish_reason: Some("tool_calls".to_string()),
+        };
+        let (value, _usage) = run(&client).await.expect("tool-call args should parse");
+        assert!(value.ok);
     }
 
     #[test]
