@@ -32,6 +32,16 @@ pub enum LlmError {
     #[error("the model returned no choices")]
     EmptyChoices,
 
+    /// A choice came back with empty/`null` content — usually a reasoning model
+    /// hitting `finish_reason=length` (its whole token budget went to hidden
+    /// reasoning before any answer). Distinct from [`Self::Parse`] so the message
+    /// reads as "empty content", not a bogus JSON error on an empty string.
+    #[error("the model returned empty content for {target} (finish_reason={finish_reason})")]
+    EmptyContent {
+        target: &'static str,
+        finish_reason: String,
+    },
+
     /// A structured response failed to deserialize into the target type.
     #[error("failed to parse {target}: {source} — raw: {raw}")]
     Parse {

@@ -31,8 +31,17 @@ pub async fn chat_structured<T: DeserializeOwned>(
         let resp = client.chat(&req).await?;
         let usage = resp.usage.unwrap_or_default();
         let choice = resp.choices.first().ok_or(LlmError::EmptyChoices)?;
+        let finish_reason = choice.finish_reason.clone();
         let raw = choice.message.content.clone().unwrap_or_default();
         let cleaned = strip_fences(&raw);
+
+        if cleaned.is_empty() {
+            last_err = Some(LlmError::EmptyContent {
+                target: schema_name,
+                finish_reason: finish_reason.unwrap_or_else(|| "unknown".to_string()),
+            });
+            continue;
+        }
 
         match serde_json::from_str::<T>(cleaned) {
             Ok(value) => return Ok((value, usage)),
@@ -88,8 +97,17 @@ where
         let resp = client.chat_stream(&req, &mut raw_delta).await?;
         let usage = resp.usage.unwrap_or_default();
         let choice = resp.choices.first().ok_or(LlmError::EmptyChoices)?;
+        let finish_reason = choice.finish_reason.clone();
         let raw = choice.message.content.clone().unwrap_or_default();
         let cleaned = strip_fences(&raw);
+
+        if cleaned.is_empty() {
+            last_err = Some(LlmError::EmptyContent {
+                target: schema_name,
+                finish_reason: finish_reason.unwrap_or_else(|| "unknown".to_string()),
+            });
+            continue;
+        }
 
         match serde_json::from_str::<T>(cleaned) {
             Ok(value) => return Ok((value, usage, streamed_any)),
@@ -396,7 +414,67 @@ pub fn reviewer_schema() -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
-    use super::JsonStringFieldStream;
+    use super::{JsonStringFieldStream, chat_structured};
+    use crate::llm::client::{LlmClient, LlmError, Result};
+    use crate::llm::{ChatRequest, ChatResponse, Choice, ResponseMessage};
+    use async_trait::async_trait;
+
+    struct EmptyContentClient {
+        finish_reason: Option<String>,
+    }
+
+    #[async_trait]
+    impl LlmClient for EmptyContentClient {
+        async fn chat(&self, _req: &ChatRequest) -> Result<ChatResponse> {
+            Ok(ChatResponse {
+                id: None,
+                model: None,
+                usage: None,
+                choices: vec![Choice {
+                    index: 0,
+                    message: ResponseMessage {
+                        role: Some("assistant".to_string()),
+                        content: None,
+                        tool_calls: None,
+                    },
+                    finish_reason: self.finish_reason.clone(),
+                }],
+            })
+        }
+    }
+
+    #[derive(Debug, serde::Deserialize)]
+    struct Dummy {
+        #[allow(dead_code)]
+        ok: bool,
+    }
+
+    #[tokio::test]
+    async fn empty_content_reports_finish_reason_not_eof_parse_error() {
+        let client = EmptyContentClient {
+            finish_reason: Some("length".to_string()),
+        };
+        let err = chat_structured::<Dummy>(
+            &client,
+            ChatRequest::new("m", vec![]),
+            "review_result",
+            serde_json::json!({}),
+            0,
+        )
+        .await
+        .unwrap_err();
+
+        match err {
+            LlmError::EmptyContent {
+                target,
+                finish_reason,
+            } => {
+                assert_eq!(target, "review_result");
+                assert_eq!(finish_reason, "length");
+            }
+            other => panic!("expected EmptyContent, got {other:?}"),
+        }
+    }
 
     #[test]
     fn field_stream_emits_only_target_string_value() {
