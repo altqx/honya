@@ -15,4 +15,4 @@ pub mod tokenize;
 pub mod tools;
 pub mod translator;
 
-pub use pipeline::run_pipeline;
+pub use pipeline::{VolumePlan, run_pipeline, run_project_pipeline};

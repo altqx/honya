@@ -149,6 +149,11 @@ pub enum Action {
     RestartTranslation {
         chapters: Vec<u32>,
     },
+    /// One-click auto-translate the whole project: every not-yet-done chapter
+    /// across every volume, resume-aware. Raises a confirm first.
+    StartProjectTranslation,
+    /// Confirmed: begin the whole-project auto-translate run.
+    BeginProjectTranslation,
     PauseRun,
     StopRun,
     /// Resume the interrupted run recorded in the recovery checkpoint (reopen the
@@ -174,6 +179,10 @@ pub enum Action {
         update_mode: crate::model::UpdateMode,
         /// Max Translator↔Reviewer retry attempts per chunk (already clamped 1..=20).
         max_attempts: u32,
+        /// Loop-watchdog stall window in seconds (already clamped; 0 disables it).
+        loop_stall_secs: u64,
+        /// Whole-chapter re-translates before a looping chapter aborts the run.
+        max_chapter_retranslates: u32,
     },
     /// Create the bundled sample project (if absent) and open it.
     CreateSample,
@@ -285,6 +294,12 @@ pub struct App {
     /// Checkpoint for the currently running pipeline. Kept in memory so the final
     /// `PipelineFinished` event can close the matching VOLUME.md run-history row.
     pub active_run: Option<crate::workspace::session::SessionCheckpoint>,
+    /// The volume the running pipeline is *currently* on, for an auto project run
+    /// that walks volumes (`VolumeStarted`). Decoupled from `active_run.vol` (which
+    /// stays at a stable volume so the run-history row keys consistently across
+    /// resume) so per-chapter events — whose numbers repeat across volumes — scope
+    /// to the live volume. `None` outside a multi-volume run.
+    running_vol: Option<u32>,
     /// The per-chapter run record being assembled across this run's events (cost is
     /// folded in from `ChapterUsage`, QA/glossary deltas computed at the terminal
     /// state). Recorded to VOLUME.md so reruns can be compared. One at a time:
@@ -353,6 +368,7 @@ impl App {
             update_installed: None,
             pending_recovery: None,
             active_run: None,
+            running_vol: None,
             pending_chapter_run: None,
             last_area: Rect::default(),
             last_skeleton: None,
@@ -404,17 +420,20 @@ impl App {
         &self,
         cp: &crate::workspace::session::SessionCheckpoint,
     ) -> (usize, usize) {
-        let total = cp.chapters.len();
-        let done = self
+        let project = self
             .projects
             .iter()
             .find(|p| p.dir == cp.project_dir)
-            .map(|p| done_recovery_chapters(p, cp))
-            .or_else(|| {
-                crate::workspace::scan::scan_one_project(&cp.project_dir)
-                    .map(|p| done_recovery_chapters(&p, cp))
-            })
-            .unwrap_or(0);
+            .cloned()
+            .or_else(|| crate::workspace::scan::scan_one_project(&cp.project_dir));
+        if cp.whole_project {
+            // Whole-project run: count prose chapters across every volume.
+            return project
+                .map(|p| project_prose_progress(&p, &self.cfg))
+                .unwrap_or((0, 0));
+        }
+        let total = cp.chapters.len();
+        let done = project.map(|p| done_recovery_chapters(&p, cp)).unwrap_or(0);
         (done, total)
     }
 
@@ -433,6 +452,35 @@ impl App {
             }
             AppEvent::ChapterQueued { chapter } => {
                 self.set_chapter_status(*chapter, ChapterStatus::Pending);
+            }
+            AppEvent::VolumeStarted { vol, label } => {
+                // The project run advanced to a new volume: re-point the live
+                // volume so subsequent per-chapter events scope correctly, and
+                // surface which volume is running.
+                self.running_vol = Some(*vol);
+                self.set_active_volume(*vol);
+                let name = label
+                    .as_deref()
+                    .map(|l| format!("Vol.{vol:02} · {l}"))
+                    .unwrap_or_else(|| format!("Vol.{vol:02}"));
+                self.toast = Some(Toast::info(format!("translating {name}")));
+                self.push_log(LogLevel::Info, format!("run advanced to {name}"));
+            }
+            AppEvent::ChapterLooping {
+                chapter,
+                reason,
+                attempt,
+                max,
+            } => {
+                self.toast = Some(Toast::warn(format!(
+                    "ch {chapter} {reason} · re-translating whole chapter ({attempt}/{max})"
+                )));
+                self.push_log(
+                    LogLevel::Warn,
+                    format!(
+                        "ch {chapter} {reason}; re-translating whole chapter ({attempt}/{max})"
+                    ),
+                );
             }
             AppEvent::ChapterStateChanged { chapter, state } => {
                 self.set_chapter_status(*chapter, *state);
@@ -530,6 +578,7 @@ impl App {
             } => {
                 self.run_active = false;
                 self.run_ctl = None;
+                self.running_vol = None;
                 // A chapter interrupted by Stop never reaches a terminal state event,
                 // so drop any half-built record rather than mis-recording it.
                 self.pending_chapter_run = None;
@@ -649,9 +698,8 @@ impl App {
     /// multi-volume project — every event-driven mutator scopes through here so a
     /// run on Vol.02 never touches Vol.01's same-numbered chapter.
     fn event_vol(&self) -> Option<u32> {
-        self.active_run
-            .as_ref()
-            .map(|cp| cp.vol)
+        self.running_vol
+            .or_else(|| self.active_run.as_ref().map(|cp| cp.vol))
             .or_else(|| self.active.as_ref().map(|a| a.vol))
     }
 
@@ -1283,6 +1331,12 @@ impl App {
             Action::RestartTranslation { chapters } => {
                 self.begin_translation(chapters, true);
             }
+            Action::StartProjectTranslation => {
+                self.request_project_translation();
+            }
+            Action::BeginProjectTranslation => {
+                self.begin_project_translation(None);
+            }
             Action::PauseRun => match &self.run_ctl {
                 Some(ctl) => {
                     ctl.toggle_pause();
@@ -1334,6 +1388,8 @@ impl App {
                 api_key,
                 update_mode,
                 max_attempts,
+                loop_stall_secs,
+                max_chapter_retranslates,
             } => {
                 self.save_settings(
                     base_url,
@@ -1343,6 +1399,8 @@ impl App {
                     api_key,
                     update_mode,
                     max_attempts,
+                    loop_stall_secs,
+                    max_chapter_retranslates,
                 );
             }
             Action::CreateSample => {
@@ -1566,7 +1624,14 @@ impl App {
         }
         // Continue (not restart): keep committed chunks, fill the gaps, and keep
         // writing to the same durable run-history row.
-        self.begin_translation_with_checkpoint(cp.chapters.clone(), false, Some(cp));
+        if cp.whole_project {
+            // Whole-project run: the queue is recomputed from the freshly-scanned
+            // project across all volumes (the checkpoint only recorded the segment
+            // in flight at crash time), so resume is inherently gap-filling.
+            self.begin_project_translation(Some(cp));
+        } else {
+            self.begin_translation_with_checkpoint(cp.chapters.clone(), false, Some(cp));
+        }
     }
 
     fn open_chapter(&mut self, chapter: u32) {
@@ -1740,6 +1805,8 @@ impl App {
         };
         self.run_ctl = Some(ctl);
         self.active_run = Some(checkpoint.clone());
+        // Single-volume run: per-chapter events scope through active_run.vol.
+        self.running_vol = None;
         let chapters_for_task = checkpoint.chapters.clone();
         let tx = self.tx.clone();
         tokio::spawn(async move {
@@ -1756,6 +1823,208 @@ impl App {
             "{} {} chapter(s)",
             if restart { "restarting" } else { "translating" },
             chapters.len()
+        )));
+    }
+
+    /// The auto project-translate queue: every volume's not-yet-done prose chapters
+    /// (resume-aware), mirroring the per-chapter `translatable` rule the Project
+    /// screen uses — Done / NeedsReview are skipped, Failed / Pending / interrupted
+    /// are (re)queued. Volumes with nothing to do are dropped, so each `VolumePlan`
+    /// has at least one chapter.
+    fn project_translation_plan(&self) -> Vec<crate::agents::VolumePlan> {
+        let Some(active) = self.active.as_ref() else {
+            return Vec::new();
+        };
+        active
+            .project
+            .volumes
+            .iter()
+            .filter_map(|v| {
+                let ws = Workspace::new(active.project.dir.clone(), v.number);
+                let chapters: Vec<u32> = v
+                    .chapters
+                    .iter()
+                    .filter(|c| {
+                        if !matches!(c.kind, crate::model::ChapterKind::Prose) {
+                            return false;
+                        }
+                        // Obviously outstanding (Pending / active / Paused / Failed),
+                        // OR it scans terminal-clean/flagged but is actually missing
+                        // chunks on disk (an interrupted chapter the snapshot can't
+                        // tell from a finished one). The pipeline's chunk-level resume
+                        // then re-spends only on the missing chunks.
+                        !c.status.is_terminal()
+                            || c.status == ChapterStatus::Failed
+                            || !chapter_complete_on_disk(&ws, c.number, &self.cfg)
+                    })
+                    .map(|c| c.number)
+                    .collect();
+                (!chapters.is_empty()).then(|| crate::agents::VolumePlan {
+                    vol: v.number,
+                    label: v.label.clone(),
+                    chapters,
+                })
+            })
+            .collect()
+    }
+
+    /// Entry point for the one-click whole-project translate: validate, then raise
+    /// a confirm summarizing the queue before [`Self::begin_project_translation`].
+    fn request_project_translation(&mut self) {
+        if self.run_active {
+            self.toast = Some(Toast::warn("a run is already in progress"));
+            return;
+        }
+        if self.active.is_none() {
+            self.toast = Some(Toast::warn("no project open"));
+            return;
+        }
+        let plan = self.project_translation_plan();
+        if plan.is_empty() {
+            self.toast = Some(Toast::info("project already fully translated"));
+            return;
+        }
+        let vols = plan.len();
+        let chapters: usize = plan.iter().map(|p| p.chapters.len()).sum();
+        let body = format!(
+            "Queue {chapters} not-yet-done chapter(s) across {vols} volume(s) and translate them one after another. Finished chapters are skipped (no tokens re-spent). If a chapter gets stuck in a loop it is re-translated whole, up to {} time(s); a chapter still looping past that aborts the run.",
+            self.cfg.max_chapter_retranslates
+        );
+        self.overlay = Overlay::confirm(
+            "Auto-translate the whole project?",
+            body,
+            Action::BeginProjectTranslation,
+        );
+    }
+
+    /// Begin (or resume) the whole-project auto-translate: spawn
+    /// [`crate::agents::run_project_pipeline`] over every volume's queue, under one
+    /// recovery checkpoint flagged `whole_project`. The plan is recomputed from the
+    /// freshly-scanned project each time, so it is inherently resume-aware.
+    fn begin_project_translation(
+        &mut self,
+        checkpoint: Option<crate::workspace::session::SessionCheckpoint>,
+    ) {
+        if self.run_active {
+            self.toast = Some(Toast::warn("a run is already in progress"));
+            return;
+        }
+        let plan = self.project_translation_plan();
+        if plan.is_empty() {
+            self.toast = Some(Toast::info("project already fully translated"));
+            return;
+        }
+        let Some((project_dir, project_id, project_title, models, history_vol)) =
+            self.active.as_ref().map(|active| {
+                // Key the run-history row to the project's LOWEST volume number,
+                // which is stable across resumes (earlier volumes finishing never
+                // removes them). Keying to the first *plan* volume would strand a
+                // "Running" row when a resume's recomputed plan starts on a later
+                // volume.
+                let history_vol = active
+                    .project
+                    .volumes
+                    .iter()
+                    .map(|v| v.number)
+                    .min()
+                    .unwrap_or(active.vol);
+                (
+                    active.project.dir.clone(),
+                    active.project.id.clone(),
+                    active.project.title.clone(),
+                    active.models.clone(),
+                    history_vol,
+                )
+            })
+        else {
+            self.toast = Some(Toast::warn("no project open"));
+            return;
+        };
+        let Some(client) = self.ensure_active_client() else {
+            self.toast = Some(if crate::config::resolve_api_key(&self.cfg).is_none() {
+                Toast::warn("no API key — open Settings ( : → Settings ) to add one")
+            } else {
+                match crate::build_client(&self.cfg) {
+                    Err(e) => Toast::error(format!("LLM client unavailable: {e}")),
+                    Ok(_) => Toast::warn("could not start translation"),
+                }
+            });
+            return;
+        };
+
+        // The run-history row keys to the stable `history_vol` (the live volume
+        // tracks via `running_vol`, not the checkpoint). `cp.chapters` records the
+        // full cross-volume queue so the checkpoint stays resumable and the history
+        // row reflects the project-wide scope.
+        let ws = Workspace::new(project_dir.clone(), history_vol);
+        let all_chapters: Vec<u32> = plan.iter().flat_map(|p| p.chapters.clone()).collect();
+
+        let mut checkpoint = checkpoint.unwrap_or_else(|| {
+            crate::workspace::session::SessionCheckpoint::new(
+                project_dir.clone(),
+                project_id,
+                project_title,
+                history_vol,
+                all_chapters.clone(),
+            )
+        });
+        checkpoint.whole_project = true;
+        checkpoint.vol = history_vol;
+        checkpoint.chapters = all_chapters;
+        checkpoint.ensure_run_id();
+        if let Err(e) = crate::workspace::session::save(&checkpoint) {
+            self.push_log(
+                LogLevel::Warn,
+                format!("could not write recovery checkpoint: {e}"),
+            );
+        }
+        let history_version = if checkpoint.honya_version.trim().is_empty() {
+            crate::update::current_version().to_string()
+        } else {
+            checkpoint.honya_version.clone()
+        };
+        // The run-history row lives in `history_vol`'s VOLUME.md, keyed by run_id;
+        // record_run_started updates-or-inserts, so a resume re-uses the same row.
+        // Accurate cross-volume done/failed counts are filled in at finish.
+        let history = RunHistoryEntry::started(
+            checkpoint.run_id.clone(),
+            checkpoint.started_at,
+            checkpoint.chapters.clone(),
+            history_version,
+        );
+        if let Err(e) = crate::workspace::volume::record_run_started(&ws, history) {
+            self.push_log(LogLevel::Warn, format!("could not write run history: {e}"));
+        }
+
+        let ctl = crate::agents::pipeline::RunControl::new();
+        let ctx = crate::agents::pipeline::PipelineCtx {
+            client,
+            ws,
+            models,
+            cfg: self.cfg.clone(),
+            tx: self.tx.clone(),
+            ctl: ctl.clone(),
+        };
+        self.run_ctl = Some(ctl);
+        self.active_run = Some(checkpoint);
+        // The first `VolumeStarted` (emitted before any chapter event of that
+        // volume) sets the live volume; no per-chapter event can arrive before it.
+        self.running_vol = None;
+        let vols = plan.len();
+        let total: usize = plan.iter().map(|p| p.chapters.len()).sum();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            if let Err(e) = crate::agents::run_project_pipeline(ctx, plan).await {
+                tx.send(AppEvent::Error {
+                    context: "pipeline".to_string(),
+                    msg: e.to_string(),
+                });
+            }
+        });
+        self.run_active = true;
+        self.screen = Screen::Translate;
+        self.toast = Some(Toast::info(format!(
+            "auto-translating {total} chapter(s) across {vols} volume(s)"
         )));
     }
 
@@ -1956,6 +2225,8 @@ impl App {
         api_key: Option<String>,
         update_mode: crate::model::UpdateMode,
         max_attempts: u32,
+        loop_stall_secs: u64,
+        max_chapter_retranslates: u32,
     ) {
         self.cfg.base_url = base_url;
         self.cfg.models.orchestrator = orchestrator;
@@ -1963,6 +2234,8 @@ impl App {
         self.cfg.models.reviewer = reviewer;
         self.cfg.update_mode = update_mode;
         self.cfg.max_attempts = max_attempts;
+        self.cfg.loop_stall_secs = loop_stall_secs;
+        self.cfg.max_chapter_retranslates = max_chapter_retranslates;
         let key_changed = if let Some(k) = api_key {
             let k = k.trim();
             let next = (!k.is_empty()).then(|| k.to_string());
@@ -2395,6 +2668,61 @@ impl App {
     }
 }
 
+/// (done, total) prose chapters across every volume — the recovery progress for a
+/// whole-project run, whose queue spans all volumes. Completeness is re-derived
+/// from disk (every chunk committed), NOT from the scanned status: a chapter
+/// interrupted mid-way scans as `Done`/`NeedsReview` (any non-empty translated
+/// file) yet is missing chunks, and must NOT count as done or the recovery prompt
+/// would silently clear a run with real work left.
+fn project_prose_progress(project: &Project, cfg: &AppConfig) -> (usize, usize) {
+    let mut done = 0;
+    let mut total = 0;
+    for v in &project.volumes {
+        let ws = Workspace::new(project.dir.clone(), v.number);
+        for c in &v.chapters {
+            if c.kind != crate::model::ChapterKind::Prose {
+                continue;
+            }
+            total += 1;
+            if chapter_complete_on_disk(&ws, c.number, cfg) {
+                done += 1;
+            }
+        }
+    }
+    (done, total)
+}
+
+/// Whether a chapter's translated output is fully present on disk: every chunk the
+/// raw produces has a committed marker (clean or flagged-needs-review both count as
+/// "written"). This is the authoritative completeness signal — the scanned
+/// `ChapterStatus` cannot distinguish a finished chapter from one interrupted with
+/// only some chunks committed (the translated file is non-empty either way), so any
+/// "skip if done" decision for the whole-project run must consult this instead.
+/// Mirrors `pipeline::process_chapter`'s own resume/skip accounting.
+fn chapter_complete_on_disk(ws: &Workspace, chapter: u32, cfg: &AppConfig) -> bool {
+    let raw = std::fs::read_to_string(ws.raw(chapter)).unwrap_or_default();
+    if raw.trim().is_empty() {
+        // No source to translate → nothing outstanding.
+        return true;
+    }
+    let translated = std::fs::read_to_string(ws.translated(chapter)).unwrap_or_default();
+    // Image-only / no-prose chapters are written straight to translated/ at import;
+    // their completeness is just "the file exists".
+    if crate::cleanse::is_image_only(&raw) {
+        return !translated.trim().is_empty();
+    }
+    let chunks = crate::agents::chunk::chunk_chapter(
+        &raw,
+        cfg.chunk_target_tokens,
+        cfg.chunk_hard_cap_tokens,
+    );
+    if chunks.is_empty() {
+        return !translated.trim().is_empty();
+    }
+    let committed = crate::workspace::translation::committed_chunk_indices_in(&translated);
+    chunks.iter().all(|c| committed.contains(&(c.index as u32)))
+}
+
 fn done_recovery_chapters(
     project: &Project,
     cp: &crate::workspace::session::SessionCheckpoint,
@@ -2450,9 +2778,14 @@ fn recovery_body(
     } else {
         format!("{total} chapter(s) queued")
     };
+    let scope = if cp.whole_project {
+        "whole project".to_string()
+    } else {
+        format!("Vol.{:02}", cp.vol)
+    };
     format!(
-        "honya didn't shut down cleanly during a translation run — «{}» Vol.{:02} · {progress}. Resume picks up from the last committed chunk (finished chunks are skipped, so no tokens are re-spent). Discard forgets this run; Esc keeps it for next launch.",
-        cp.project_title, cp.vol
+        "honya didn't shut down cleanly during a translation run — «{}» {scope} · {progress}. Resume picks up from the last committed chunk (finished chunks are skipped, so no tokens are re-spent). Discard forgets this run; Esc keeps it for next launch.",
+        cp.project_title
     )
 }
 
@@ -2964,5 +3297,77 @@ mod img_src_tests {
             srcs.contains(&"bare.png".to_string()),
             "svg bare href: {srcs:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod completeness_tests {
+    use super::chapter_complete_on_disk;
+    use crate::model::AppConfig;
+    use crate::workspace::{Workspace, translation};
+
+    fn temp_ws(tag: &str) -> (std::path::PathBuf, Workspace) {
+        let base =
+            std::env::temp_dir().join(format!("honya_complete_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let ws = Workspace::new(base.clone(), 1);
+        (base, ws)
+    }
+
+    /// The crux of the whole-project resume fix: a chapter with only some chunks
+    /// committed must read as INCOMPLETE even though `derive_status` would scan its
+    /// non-empty translated file as `Done`. Otherwise the project run silently skips
+    /// it and its remaining chunks are never translated.
+    #[tokio::test]
+    async fn partial_chapter_is_incomplete_until_every_chunk_is_committed() {
+        let (base, ws) = temp_ws("partial");
+        let cfg = AppConfig {
+            chunk_target_tokens: 4,
+            chunk_hard_cap_tokens: 8,
+            ..AppConfig::default()
+        };
+        let raw =
+            "# 第一章\n\n一文目。\n\n二文目。\n\n三文目。\n\n四文目。\n\n五文目。\n\n六文目。";
+        translation::write_raw(&ws, 1, raw).unwrap();
+        let chunks = crate::agents::chunk::chunk_chapter(
+            raw,
+            cfg.chunk_target_tokens,
+            cfg.chunk_hard_cap_tokens,
+        );
+        assert!(chunks.len() >= 3, "fixture must produce several chunks");
+
+        // No translation yet → incomplete.
+        assert!(!chapter_complete_on_disk(&ws, 1, &cfg));
+
+        // Commit only the first chunk → still incomplete (the bug: scans as Done).
+        translation::append_chunk(&ws, 1, 0, "ประโยคแรก")
+            .await
+            .unwrap();
+        assert!(
+            !chapter_complete_on_disk(&ws, 1, &cfg),
+            "a chapter missing chunks must not read as complete"
+        );
+
+        for c in &chunks[1..] {
+            translation::append_chunk(&ws, 1, c.index as u32, "ประโยค")
+                .await
+                .unwrap();
+        }
+        assert!(
+            chapter_complete_on_disk(&ws, 1, &cfg),
+            "all chunks committed → complete"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// An empty / no-prose chapter has nothing outstanding (avoids queueing it forever).
+    #[test]
+    fn empty_raw_is_trivially_complete() {
+        let (base, ws) = temp_ws("empty");
+        translation::write_raw(&ws, 1, "   ").unwrap();
+        assert!(chapter_complete_on_disk(&ws, 1, &AppConfig::default()));
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

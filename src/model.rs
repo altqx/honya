@@ -326,6 +326,18 @@ pub struct AppConfig {
     pub chunk_hard_cap_tokens: usize,
     /// Sentences of prior Thai injected for continuity.
     pub continuity_sentences: usize,
+    /// Loop watchdog: a chapter that makes no pipeline progress for this many
+    /// seconds — a degenerate repetition loop or a dead stall — is abandoned and
+    /// re-translated whole. `0` disables the time/stall arm of the watchdog (the
+    /// streamed-output repetition detector still runs). Used by the auto
+    /// project-translate run; see [`crate::agents::pipeline`].
+    #[serde(default = "default_loop_stall_secs")]
+    pub loop_stall_secs: u64,
+    /// How many times a single chapter may be re-translated from scratch after the
+    /// loop watchdog trips before the whole run aborts. `0` aborts on the first
+    /// detected loop (no re-translate).
+    #[serde(default = "default_max_chapter_retranslates")]
+    pub max_chapter_retranslates: u32,
     /// HTTP referer/title sent to OpenRouter (ranking headers).
     pub referer: Option<String>,
     pub title: Option<String>,
@@ -346,6 +358,19 @@ pub struct AppConfig {
     pub update_mode: UpdateMode,
 }
 
+/// Default loop-watchdog stall window (seconds). Sits above the 120 s per-request
+/// HTTP timeout so a single slow-but-legit call never trips it — only a genuine
+/// multi-call stall or a stream that never converges does.
+fn default_loop_stall_secs() -> u64 {
+    180
+}
+
+/// Default whole-chapter re-translations allowed before a looping chapter aborts
+/// the run.
+fn default_max_chapter_retranslates() -> u32 {
+    2
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -355,6 +380,8 @@ impl Default for AppConfig {
             chunk_target_tokens: 1000,
             chunk_hard_cap_tokens: 1200,
             continuity_sentences: 5,
+            loop_stall_secs: default_loop_stall_secs(),
+            max_chapter_retranslates: default_max_chapter_retranslates(),
             referer: Some("https://github.com/altqx/honya".into()),
             title: Some("honya".into()),
             api_key: None,
@@ -808,6 +835,22 @@ pub enum AppEvent {
     },
     ChapterStarted {
         chapter: u32,
+    },
+    /// The auto project-translate run advanced to a new volume. The UI re-points
+    /// its "running volume" here so subsequent per-chapter events (whose numbers
+    /// repeat across volumes) land on the right volume.
+    VolumeStarted {
+        vol: u32,
+        label: Option<String>,
+    },
+    /// The loop watchdog tripped on a chapter (degenerate repetition or a stall):
+    /// the whole chapter is being re-translated from scratch. `attempt` is the
+    /// 1-based re-translate count, `max` the configured ceiling.
+    ChapterLooping {
+        chapter: u32,
+        reason: String,
+        attempt: u32,
+        max: u32,
     },
     ChapterChunked {
         chapter: u32,

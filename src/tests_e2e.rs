@@ -359,6 +359,8 @@ fn settings_api_key_field_edits_and_respects_env_override() {
         api_key_env: false,
         update_mode: crate::model::UpdateMode::Auto,
         max_attempts: "3".into(),
+        loop_stall_secs: "180".into(),
+        max_chapter_retranslates: "2".into(),
         field: 4,
     });
     for c in "sk-or-1".chars() {
@@ -379,6 +381,8 @@ fn settings_api_key_field_edits_and_respects_env_override() {
         api_key_env: true,
         update_mode: crate::model::UpdateMode::Auto,
         max_attempts: "3".into(),
+        loop_stall_secs: "180".into(),
+        max_chapter_retranslates: "2".into(),
         field: 4,
     });
     ov.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::empty()));
@@ -415,6 +419,8 @@ fn settings_ctrl_u_toggles_update_mode_and_saves_it() {
         api_key_env: false,
         update_mode: UpdateMode::Auto,
         max_attempts: "3".into(),
+        loop_stall_secs: "180".into(),
+        max_chapter_retranslates: "2".into(),
         field: 0,
     });
 
@@ -455,6 +461,8 @@ fn settings_retries_field_is_digit_only_and_clamped() {
             update_mode: crate::model::UpdateMode::Auto,
             // Focus the retries field (index 5).
             max_attempts: String::new(),
+            loop_stall_secs: String::new(),
+            max_chapter_retranslates: String::new(),
             field: 5,
         })
     };

@@ -677,7 +677,10 @@ mod tests {
     fn gaiji_punctuation_name_alt_maps_to_mark() {
         // Real publisher convention: alt is the punctuation NAME (感嘆符 =
         // "かんたんふ"), not the glyph. It must become "!!!", never the word.
-        assert_eq!(md(r#"飲んでないよ<img class="gaiji" alt="かんたんふ"/>"#), "飲んでないよ!!!");
+        assert_eq!(
+            md(r#"飲んでないよ<img class="gaiji" alt="かんたんふ"/>"#),
+            "飲んでないよ!!!"
+        );
         assert_eq!(md(r#"なに<img class="gaiji" alt="感嘆符"/>"#), "なに!!!");
     }
 
@@ -693,7 +696,10 @@ mod tests {
     fn gaiji_without_label_is_dropped() {
         // No alt/title and no name to map → emit nothing (no tofu marker), so the
         // surrounding text simply joins up.
-        assert_eq!(md(r#"名は<img class="gaiji" src="g.png"/>った"#), "名はった");
+        assert_eq!(
+            md(r#"名は<img class="gaiji" src="g.png"/>った"#),
+            "名はった"
+        );
         assert_eq!(md(r#"名は<img id="gaiji_3" src="x.png"/>った"#), "名はった");
     }
 
@@ -714,7 +720,10 @@ mod tests {
     #[test]
     fn gaiji_with_pua_alt_is_dropped() {
         // alt holds a raw PUA codepoint — unrenderable and hint-less, so drop it.
-        assert_eq!(md("名は<img class=\"gaiji\" alt=\"\u{E5C0}\"/>った"), "名はった");
+        assert_eq!(
+            md("名は<img class=\"gaiji\" alt=\"\u{E5C0}\"/>った"),
+            "名はった"
+        );
     }
 
     #[test]

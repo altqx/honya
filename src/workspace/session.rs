@@ -46,6 +46,12 @@ pub struct SessionCheckpoint {
     pub run_id: String,
     /// honya version that wrote the checkpoint (forward-compat / debugging).
     pub honya_version: String,
+    /// True when this run was the one-click auto project-translate (every volume).
+    /// On resume the queue is recomputed from disk across all volumes rather than
+    /// read from `vol`/`chapters`, which only record the segment in flight at
+    /// checkpoint time. Default keeps older checkpoints loadable.
+    #[serde(default)]
+    pub whole_project: bool,
 }
 
 impl SessionCheckpoint {
@@ -69,6 +75,7 @@ impl SessionCheckpoint {
             started_at,
             run_id: make_run_id(started_at),
             honya_version: crate::update::current_version().to_string(),
+            whole_project: false,
         }
     }
 
@@ -177,6 +184,24 @@ mod tests {
         save_at(&file, &cp).unwrap();
         let loaded = load_at(&file).expect("checkpoint loads back");
         assert_eq!(loaded, cp, "checkpoint survives a save/load round-trip");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn whole_project_flag_round_trips() {
+        let dir = scratch("whole_project");
+        let file = dir.join("session.json");
+        let mut cp = sample(dir.clone());
+        cp.whole_project = true;
+
+        save_at(&file, &cp).unwrap();
+        let loaded = load_at(&file).expect("checkpoint loads back");
+        assert!(
+            loaded.whole_project,
+            "whole_project flag survives a round-trip"
+        );
+        assert_eq!(loaded, cp);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

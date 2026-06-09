@@ -216,11 +216,23 @@ impl ImportState {
 }
 
 /// Number of focusable Settings fields (base URL, 3 models, API key, retries).
-const SETTINGS_FIELDS: u8 = 6;
+const SETTINGS_FIELDS: u8 = 8;
 /// Index of the API-key field within Settings.
 const SETTINGS_KEY_FIELD: u8 = 4;
 /// Index of the retry-attempts field within Settings (digits only).
 const SETTINGS_RETRIES_FIELD: u8 = 5;
+/// Index of the loop-watchdog stall field within Settings (digits only, seconds).
+const SETTINGS_STALL_FIELD: u8 = 6;
+/// Index of the per-chapter re-translate-limit field within Settings (digits only).
+const SETTINGS_RETRANSLATE_FIELD: u8 = 7;
+
+/// Whether a Settings field index is a digits-only numeric field.
+fn settings_numeric_field(field: u8) -> bool {
+    matches!(
+        field,
+        SETTINGS_RETRIES_FIELD | SETTINGS_STALL_FIELD | SETTINGS_RETRANSLATE_FIELD
+    )
+}
 
 /// Settings: editable base URL + model ids + an editable, masked API key.
 #[derive(Debug, Clone)]
@@ -239,7 +251,14 @@ pub struct SettingsState {
     /// Max Translator↔Reviewer retry attempts per chunk, as typed (digits only).
     /// Parsed and clamped to 1..=20 on save via [`SettingsState::max_attempts_value`].
     pub max_attempts: String,
-    /// Which field is focused (0..=5).
+    /// Loop-watchdog stall window in seconds, as typed (digits only; 0 disables
+    /// the time arm). Parsed via [`SettingsState::loop_stall_secs_value`].
+    pub loop_stall_secs: String,
+    /// Whole-chapter re-translations allowed on a detected loop before the run
+    /// aborts, as typed (digits only). Parsed via
+    /// [`SettingsState::max_chapter_retranslates_value`].
+    pub max_chapter_retranslates: String,
+    /// Which field is focused (0..=7).
     pub field: u8,
 }
 
@@ -254,6 +273,8 @@ impl SettingsState {
             api_key_env: crate::config::api_key_from_env().is_some(),
             update_mode: cfg.update_mode,
             max_attempts: cfg.max_attempts.to_string(),
+            loop_stall_secs: cfg.loop_stall_secs.to_string(),
+            max_chapter_retranslates: cfg.max_chapter_retranslates.to_string(),
             field: field.min(SETTINGS_FIELDS - 1),
         }
     }
@@ -265,7 +286,9 @@ impl SettingsState {
             2 => &mut self.translator,
             3 => &mut self.reviewer,
             4 => &mut self.api_key,
-            _ => &mut self.max_attempts,
+            5 => &mut self.max_attempts,
+            6 => &mut self.loop_stall_secs,
+            _ => &mut self.max_chapter_retranslates,
         }
     }
 
@@ -277,6 +300,30 @@ impl SettingsState {
             .parse::<u32>()
             .unwrap_or(0)
             .clamp(1, 20)
+    }
+
+    /// Loop-watchdog stall window in seconds (0 disables the time arm). Non-numeric
+    /// falls back to the default; capped at 3600 s.
+    fn loop_stall_secs_value(&self) -> u64 {
+        let raw = self.loop_stall_secs.trim();
+        if raw.is_empty() {
+            return AppConfig::default().loop_stall_secs;
+        }
+        raw.parse::<u64>()
+            .unwrap_or_else(|_| AppConfig::default().loop_stall_secs)
+            .min(3600)
+    }
+
+    /// Whole-chapter re-translations allowed before a looping chapter aborts the
+    /// run. Non-numeric falls back to the default; capped at 10.
+    fn max_chapter_retranslates_value(&self) -> u32 {
+        let raw = self.max_chapter_retranslates.trim();
+        if raw.is_empty() {
+            return AppConfig::default().max_chapter_retranslates;
+        }
+        raw.parse::<u32>()
+            .unwrap_or_else(|_| AppConfig::default().max_chapter_retranslates)
+            .min(10)
     }
 }
 
@@ -332,6 +379,10 @@ impl PaletteState {
             PaletteItem {
                 label: "Go: Translate 訳",
                 action: Action::Goto(Screen::Translate),
+            },
+            PaletteItem {
+                label: "Translate whole project 全",
+                action: Action::StartProjectTranslation,
             },
             PaletteItem {
                 label: "Go: Reader 読",
@@ -715,6 +766,8 @@ impl Overlay {
             api_key_env: false,
             update_mode: UpdateMode::default(),
             max_attempts: String::new(),
+            loop_stall_secs: String::new(),
+            max_chapter_retranslates: String::new(),
             field: field.min(SETTINGS_FIELDS - 1),
         })
     }
@@ -864,7 +917,9 @@ impl Overlay {
             Overlay::None => area,
             Overlay::Welcome(_) => centered_modal(76, 24, area),
             Overlay::Import(st) => centered_modal(76, if st.step == 3 { 24 } else { 18 }, area),
-            Overlay::Settings(_) => centered_modal(72, 20, area),
+            // Must mirror render_settings' centered_modal(72, 26, …) so clicks
+            // near the modal's top/bottom hit-test inside it (not as a dismiss).
+            Overlay::Settings(_) => centered_modal(72, 26, area),
             Overlay::Theme(_) => centered_modal(60, 20, area),
             Overlay::Palette(_) => centered_modal(60, 16, area),
             Overlay::Log(_) => centered_pct(80, 80, area),
@@ -1248,6 +1303,8 @@ impl Overlay {
                 },
                 update_mode: st.update_mode,
                 max_attempts: st.max_attempts_value(),
+                loop_stall_secs: st.loop_stall_secs_value(),
+                max_chapter_retranslates: st.max_chapter_retranslates_value(),
             },
             KeyCode::Tab | KeyCode::Down => {
                 st.field = (st.field + 1) % SETTINGS_FIELDS;
@@ -1262,8 +1319,8 @@ impl Overlay {
                 st.field_mut().pop();
                 Action::None
             }
-            // The retries field is numeric: accept digits only, drop everything else.
-            KeyCode::Char(c) if st.field == SETTINGS_RETRIES_FIELD => {
+            // The retries / loop-watchdog fields are numeric: digits only.
+            KeyCode::Char(c) if settings_numeric_field(st.field) => {
                 if c.is_ascii_digit() {
                     st.field_mut().push(c);
                 }
@@ -2342,7 +2399,7 @@ impl Overlay {
         cfg: &AppConfig,
         st: &SettingsState,
     ) {
-        let modal = centered_modal(72, 20, area);
+        let modal = centered_modal(72, 26, area);
         f.render_widget(Clear, modal);
         let block = self.modal_block("Settings", theme);
         let inner = block.inner(modal);
@@ -2406,6 +2463,25 @@ impl Overlay {
         ));
         lines.push(Line::from(Span::styled(
             "      ↳ Translator↔Reviewer loop per chunk (1–20)",
+            Style::default().fg(theme.ink_faint),
+        )));
+
+        lines.push(field_line(
+            "Loop watchdog (s)",
+            st.loop_stall_secs.clone(),
+            st.field == SETTINGS_STALL_FIELD,
+        ));
+        lines.push(Line::from(Span::styled(
+            "      ↳ stuck/looping chapter re-translated after N s (0 = off)",
+            Style::default().fg(theme.ink_faint),
+        )));
+        lines.push(field_line(
+            "Loop re-translates",
+            st.max_chapter_retranslates.clone(),
+            st.field == SETTINGS_RETRANSLATE_FIELD,
+        ));
+        lines.push(Line::from(Span::styled(
+            "      ↳ whole-chapter re-translates before the run aborts (0–10)",
             Style::default().fg(theme.ink_faint),
         )));
 

@@ -17,6 +17,10 @@ Running the app (not the tests) requires an OpenRouter API key, resolved in orde
 
 Version is the single source of truth in `Cargo.toml`; CI auto-tags on version change, so a release is cut by bumping `version` there. A version bump also publishes the crate to crates.io (`cargo install honya`) via `.github/workflows/publish.yml` — this needs a `CRATES_IO_TOKEN` repo secret, and the publish step is idempotent (skips versions already on crates.io).
 
+## Comments — write few, keep them short
+
+Prefer self-explanatory code (clear names, small functions) over comments. **Default to no comment.** Don't narrate what the code already says, restate a name, or label obvious blocks. Add a comment only when the *why* is genuinely non-obvious — a subtle invariant, a non-local consequence, a workaround, or a deliberate trade-off — and when you do, keep it to a line or two. When in doubt, leave it out.
+
 ## Changelog — only on an explicit version bump
 
 **Do not** touch the web changelog (`web/public/changelog.html`) for ordinary feature/fix work. Update it **only** when I explicitly tell you to bump the version — never edit a version block that has already been released. The changelog page is the user-facing history shown at `https://honya.altqx.com/changelog`.

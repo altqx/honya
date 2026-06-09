@@ -11,8 +11,9 @@
 //!     retries the chunk is committed with a review-needed marker.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, Ordering};
-use std::time::Duration;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::time::{Duration, Instant};
 
 use crate::agents::audit::{audit_translation_with_terms, strip_copied_continuity};
 use crate::agents::chunk::{Chunk, chunk_chapter};
@@ -67,12 +68,245 @@ impl Default for RunControl {
     }
 }
 
+/// Why the loop watchdog tripped on a chapter.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum LoopReason {
+    /// The streamed translation degenerated into repeating the same text.
+    Repetition,
+    /// The chapter made no pipeline progress for `loop_stall_secs`.
+    Stall,
+}
+
+impl LoopReason {
+    fn describe(self) -> &'static str {
+        match self {
+            LoopReason::Repetition => "output stuck repeating itself",
+            LoopReason::Stall => "no progress for too long",
+        }
+    }
+}
+
+// Repetition-detector tuning. A degenerate loop repeats a short unit many times;
+// these thresholds are high enough that ordinary prose (even with a refrain) does
+// not trip, while a model spinning on the same phrase does.
+const REP_WINDOW: usize = 400; // chars of streamed tail examined
+const REP_MIN_UNIT: usize = 4; // shortest repeating unit considered
+const REP_MIN_REPEATS: usize = 8; // consecutive copies of the unit to call it a loop
+const REP_MIN_TOTAL: usize = 48; // don't judge until this much text has streamed
+const REP_MIN_LINES: usize = 6; // identical consecutive lines to call it a loop
+const REP_MIN_LINE_LEN: usize = 3; // ignore repeated blank/tiny lines
+const REP_CHECK_EVERY: usize = 48; // re-run the (bounded) scan every N new chars
+
+/// True when the tail of streamed text looks like a degenerate repetition loop:
+/// either a short character-level cycle repeated many times, or the same non-empty
+/// line repeated several times in a row. Pure + bounded (examines only the last
+/// [`REP_WINDOW`] chars) so it is cheap to call as text streams in.
+fn looks_like_repetition_loop(text: &str) -> bool {
+    let trimmed = text.trim_end();
+    if trimmed.chars().count() < REP_MIN_TOTAL {
+        return false;
+    }
+
+    // Character-cycle check over the last REP_WINDOW chars.
+    let window: Vec<char> = {
+        let mut rev: Vec<char> = trimmed.chars().rev().take(REP_WINDOW).collect();
+        rev.reverse();
+        rev
+    };
+    let n = window.len();
+    let max_unit = n / REP_MIN_REPEATS;
+    let mut p = REP_MIN_UNIT;
+    while p <= max_unit {
+        let needed = p * REP_MIN_REPEATS;
+        let start = n - needed;
+        let unit = &window[start..start + p];
+        let is_cycle =
+            (1..REP_MIN_REPEATS).all(|r| &window[start + r * p..start + (r + 1) * p] == unit);
+        if is_cycle && !unit.iter().all(|c| c.is_whitespace()) {
+            return true;
+        }
+        p += 1;
+    }
+
+    // Line-repeat check: the last REP_MIN_LINES non-empty lines are all identical.
+    let lines: Vec<&str> = trimmed
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    if lines.len() >= REP_MIN_LINES {
+        let tail = &lines[lines.len() - REP_MIN_LINES..];
+        let first = tail[0];
+        if first.chars().count() >= REP_MIN_LINE_LEN && tail.iter().all(|l| *l == first) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Detects a chapter that is "stuck in a loop" two ways at once: a wall-clock
+/// **stall** (no pipeline progress for `stall`) and streamed-output **repetition**.
+/// The pipeline pings it at each step and feeds it the Translator's stream; a
+/// concurrent [`Watchdog::watch`] future resolves the moment either arm trips.
+struct Watchdog {
+    /// Master switch (`loop_stall_secs > 0`). When off, neither arm ever trips, so
+    /// runs behave exactly as before the watchdog existed (loops grind through
+    /// `max_attempts` and degrade to `NeedsReview` rather than re-translate/abort).
+    enabled: bool,
+    /// Stall window; `None` disables only the time arm (repetition still runs).
+    stall: Option<Duration>,
+    /// Last time the pipeline reported progress (a step or a streamed delta).
+    last_progress: Mutex<Instant>,
+    /// Rolling tail of the current chunk's streamed Thai (bounded).
+    repeat_buf: Mutex<String>,
+    /// Chars accumulated since the last repetition scan (throttle).
+    since_check: Mutex<usize>,
+    /// Set once the repetition detector fires; cleared per chunk/chapter.
+    repetition: AtomicBool,
+}
+
+impl Watchdog {
+    fn new(cfg: &AppConfig) -> Self {
+        let enabled = cfg.loop_stall_secs > 0;
+        let stall = enabled.then(|| Duration::from_secs(cfg.loop_stall_secs));
+        Self {
+            enabled,
+            stall,
+            last_progress: Mutex::new(Instant::now()),
+            repeat_buf: Mutex::new(String::new()),
+            since_check: Mutex::new(0),
+            repetition: AtomicBool::new(false),
+        }
+    }
+
+    /// Construct with an explicit stall window, watchdog enabled (tests use a
+    /// sub-second value so the stall arm trips without a real multi-second wait).
+    #[cfg(test)]
+    fn with_stall(stall: Option<Duration>) -> Self {
+        Self {
+            enabled: true,
+            stall,
+            last_progress: Mutex::new(Instant::now()),
+            repeat_buf: Mutex::new(String::new()),
+            since_check: Mutex::new(0),
+            repetition: AtomicBool::new(false),
+        }
+    }
+
+    /// Record pipeline progress (resets the stall timer).
+    fn ping(&self) {
+        *self.last_progress.lock().unwrap() = Instant::now();
+    }
+
+    /// Feed a streamed Translator delta: counts as progress and feeds the
+    /// repetition detector (a loop streams plenty, so it must not look like a stall).
+    fn feed_stream(&self, delta: &str) {
+        self.ping();
+        if !self.enabled || self.repetition.load(Ordering::Relaxed) {
+            return;
+        }
+        let mut buf = self.repeat_buf.lock().unwrap();
+        buf.push_str(delta);
+        // Keep only the tail we examine, on a char boundary.
+        let cap = REP_WINDOW * 2;
+        if buf.chars().count() > cap {
+            let keep: String = buf
+                .chars()
+                .rev()
+                .take(cap)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            *buf = keep;
+        }
+        let mut since = self.since_check.lock().unwrap();
+        *since += delta.chars().count();
+        if *since >= REP_CHECK_EVERY {
+            *since = 0;
+            if looks_like_repetition_loop(&buf) {
+                self.repetition.store(true, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Reset the per-chunk repetition state (new chunk, same chapter).
+    fn reset_chunk(&self) {
+        self.repeat_buf.lock().unwrap().clear();
+        *self.since_check.lock().unwrap() = 0;
+        self.repetition.store(false, Ordering::Relaxed);
+        self.ping();
+    }
+
+    /// Reset everything for a fresh chapter attempt.
+    fn reset_chapter(&self) {
+        self.reset_chunk();
+    }
+
+    /// Resolve as soon as the watchdog trips. Polls a few times a second; treats a
+    /// paused/stopped run as progress so neither falsely reads as a stall.
+    async fn watch(&self, ctl: &RunControl) -> LoopReason {
+        // Disabled: never trips, so `process_chapter` always wins the select and
+        // behaves exactly as it did before the watchdog existed.
+        if !self.enabled {
+            std::future::pending::<()>().await;
+        }
+        let poll = self
+            .stall
+            .map(|s| (s / 4).clamp(Duration::from_millis(100), Duration::from_millis(500)))
+            .unwrap_or(Duration::from_millis(250));
+        loop {
+            tokio::time::sleep(poll).await;
+            if ctl.is_paused() || ctl.is_stopped() {
+                self.ping();
+                continue;
+            }
+            if self.repetition.load(Ordering::Relaxed) {
+                return LoopReason::Repetition;
+            }
+            if let Some(stall) = self.stall
+                && self.last_progress.lock().unwrap().elapsed() >= stall
+            {
+                return LoopReason::Stall;
+            }
+        }
+    }
+}
+
+/// One volume's slice of an auto project-translate run: the volume number, its
+/// optional label (for the `VolumeStarted` UI event), and the chapter queue.
+#[derive(Clone, Debug)]
+pub struct VolumePlan {
+    pub vol: u32,
+    pub label: Option<String>,
+    pub chapters: Vec<u32>,
+}
+
+/// Running per-run chapter tallies, summed across every volume of a project run.
+#[derive(Default)]
+struct Totals {
+    done: u32,
+    failed: u32,
+    need_review: u32,
+}
+
+/// How a volume's chapter loop ended.
+enum Halt {
+    /// All chapters processed; the run may continue to the next volume.
+    Completed,
+    /// The user stopped the run, or a chapter looped past its re-translate limit.
+    /// Either way the whole run halts.
+    Stopped,
+}
+
 /// How a chapter finished: ran to completion, completed with ≥1 chunk committed
-/// unreviewed (flagged for a human), or the user stopped the run.
+/// unreviewed (flagged for a human), the user stopped the run, or it looped past
+/// its re-translate limit (which aborts the whole run).
 enum Outcome {
     Completed,
     NeedsReview,
     Stopped,
+    Aborted { reason: String },
 }
 
 /// How a single chunk resolved: committed after approval, or committed unreviewed
@@ -106,26 +340,106 @@ impl PipelineCtx {
             .and_then(|digits| digits.trim_start_matches('0').parse::<u32>().ok())
             .unwrap_or(1)
     }
+
+    /// A clone of this context re-pointed at volume `vol` (same project root,
+    /// shared client / config / event channel / run control). Used by the auto
+    /// project-translate run to step through volumes with one set of controls.
+    fn with_volume(&self, vol: u32) -> PipelineCtx {
+        PipelineCtx {
+            client: self.client.clone(),
+            ws: Workspace::new(self.ws.root.clone(), vol),
+            models: self.models.clone(),
+            cfg: self.cfg.clone(),
+            tx: self.tx.clone(),
+            ctl: self.ctl.clone(),
+        }
+    }
 }
 
-/// Run the pipeline across `chapters` (in the given order), emitting the full
-/// `AppEvent` sequence. A per-chapter failure is reported as `ChapterFailed`
-/// but does NOT abort the whole run; `PipelineFinished` always fires at the end.
+/// Run the pipeline across `chapters` of one volume (in the given order),
+/// emitting the full `AppEvent` sequence. A per-chapter failure is reported as
+/// `ChapterFailed` but does NOT abort the run; `PipelineFinished` always fires at
+/// the end.
 pub async fn run_pipeline(ctx: PipelineCtx, chapters: Vec<u32>) -> anyhow::Result<()> {
-    let mut done = 0u32;
-    let mut failed = 0u32;
-    let mut need_review = 0u32;
-    let mut stopped = false;
+    let wd = Watchdog::new(&ctx.cfg);
     let mut acc = Acc::default();
+    let mut totals = Totals::default();
+    let halt = run_volume_chapters(&ctx, &chapters, &wd, &mut acc, &mut totals).await;
+    ctx.tx.send(AppEvent::PipelineFinished {
+        chapters_done: totals.done,
+        chapters_failed: totals.failed,
+        chapters_need_review: totals.need_review,
+        stopped: matches!(halt, Halt::Stopped),
+        run: acc.run,
+    });
+    Ok(())
+}
 
-    for chapter in chapters {
+/// Run the auto project-translate: every volume's queued chapters in `plan` order,
+/// under one shared run control / watchdog / cost accumulator, emitting a single
+/// `PipelineFinished` at the very end. A `VolumeStarted` precedes each volume so
+/// the UI re-points its running volume (chapter numbers repeat across volumes).
+/// Stop and a loop-abort halt the whole project, not just the current volume.
+pub async fn run_project_pipeline(ctx: PipelineCtx, plan: Vec<VolumePlan>) -> anyhow::Result<()> {
+    let wd = Watchdog::new(&ctx.cfg);
+    let mut acc = Acc::default();
+    let mut totals = Totals::default();
+    let mut stopped = false;
+
+    for vp in &plan {
         if ctx.ctl.is_stopped() {
             stopped = true;
+            break;
+        }
+        let vctx = ctx.with_volume(vp.vol);
+        vctx.tx.send(AppEvent::VolumeStarted {
+            vol: vp.vol,
+            label: vp.label.clone(),
+        });
+        vctx.tx.send(AppEvent::Log {
+            level: LogLevel::Info,
+            msg: format!(
+                "translating Vol.{:02} · {} chapter(s)",
+                vp.vol,
+                vp.chapters.len()
+            ),
+        });
+        let halt = run_volume_chapters(&vctx, &vp.chapters, &wd, &mut acc, &mut totals).await;
+        if matches!(halt, Halt::Stopped) {
+            stopped = true;
+            break;
+        }
+    }
+
+    ctx.tx.send(AppEvent::PipelineFinished {
+        chapters_done: totals.done,
+        chapters_failed: totals.failed,
+        chapters_need_review: totals.need_review,
+        stopped,
+        run: acc.run,
+    });
+    Ok(())
+}
+
+/// Drive one volume's chapter queue, folding tallies into `totals` and cost into
+/// `acc`. Returns [`Halt::Stopped`] if the user stopped the run or a chapter
+/// looped past its re-translate limit (both halt the whole run); otherwise
+/// [`Halt::Completed`]. Does NOT emit `PipelineFinished` — the caller owns that so
+/// a project run emits exactly one across all volumes.
+async fn run_volume_chapters(
+    ctx: &PipelineCtx,
+    chapters: &[u32],
+    wd: &Watchdog,
+    acc: &mut Acc,
+    totals: &mut Totals,
+) -> Halt {
+    for &chapter in chapters {
+        if ctx.ctl.is_stopped() {
             ctx.tx.send(AppEvent::Log {
                 level: LogLevel::Warn,
                 msg: "run stopped before chapter".to_string(),
             });
-            break;
+            return Halt::Stopped;
         }
         ctx.tx.send(AppEvent::ChapterStarted { chapter });
         ctx.tx.send(AppEvent::ChapterStateChanged {
@@ -133,10 +447,11 @@ pub async fn run_pipeline(ctx: PipelineCtx, chapters: Vec<u32>) -> anyhow::Resul
             state: ChapterStatus::Chunking,
         });
 
-        let outcome = process_chapter(&ctx, chapter, &mut acc).await;
+        let outcome = process_chapter_watched(ctx, chapter, acc, wd).await;
 
         // Persist this chapter's spend to VOLUME.md (cumulative lifetime accounting)
         // however it ended, then reset the per-chapter sub-total for the next one.
+        // A loop-retranslate's wasted spend stays folded in: it was really spent.
         if !acc.chapter.is_zero() {
             if let Err(e) = volume::add_chapter_usage(&ctx.ws, chapter, &acc.chapter) {
                 ctx.tx.send(AppEvent::Log {
@@ -153,7 +468,7 @@ pub async fn run_pipeline(ctx: PipelineCtx, chapters: Vec<u32>) -> anyhow::Resul
 
         match outcome {
             Ok(Outcome::Completed) => {
-                done += 1;
+                totals.done += 1;
                 ctx.tx.send(AppEvent::ChapterStateChanged {
                     chapter,
                     state: ChapterStatus::Done,
@@ -164,8 +479,8 @@ pub async fn run_pipeline(ctx: PipelineCtx, chapters: Vec<u32>) -> anyhow::Resul
                 // The chapter is fully written, but ≥1 chunk was committed without
                 // passing review. It "completed" (counts toward `done`) yet stays
                 // flagged `NeedsReview` instead of `Done` so a human can fix it.
-                done += 1;
-                need_review += 1;
+                totals.done += 1;
+                totals.need_review += 1;
                 ctx.tx.send(AppEvent::ChapterStateChanged {
                     chapter,
                     state: ChapterStatus::NeedsReview,
@@ -176,15 +491,34 @@ pub async fn run_pipeline(ctx: PipelineCtx, chapters: Vec<u32>) -> anyhow::Resul
                 });
             }
             Ok(Outcome::Stopped) => {
-                stopped = true;
                 ctx.tx.send(AppEvent::Log {
                     level: LogLevel::Warn,
                     msg: format!("run stopped during chapter {chapter}"),
                 });
-                break;
+                return Halt::Stopped;
+            }
+            Ok(Outcome::Aborted { reason }) => {
+                // A chapter looped past its re-translate limit. Mark it Failed and
+                // halt the entire run (the user chose abort-on-loop semantics).
+                totals.failed += 1;
+                ctx.tx.send(AppEvent::ChapterStateChanged {
+                    chapter,
+                    state: ChapterStatus::Failed,
+                });
+                ctx.tx.send(AppEvent::ChapterFailed {
+                    chapter,
+                    reason: reason.clone(),
+                });
+                ctx.tx.send(AppEvent::Error {
+                    context: format!("chapter {chapter}"),
+                    msg: reason,
+                });
+                // Stop so a project run does not advance to the next volume.
+                ctx.ctl.stop();
+                return Halt::Stopped;
             }
             Err(e) => {
-                failed += 1;
+                totals.failed += 1;
                 let reason = e.to_string();
                 ctx.tx.send(AppEvent::ChapterStateChanged {
                     chapter,
@@ -201,15 +535,81 @@ pub async fn run_pipeline(ctx: PipelineCtx, chapters: Vec<u32>) -> anyhow::Resul
             }
         }
     }
+    Halt::Completed
+}
 
-    ctx.tx.send(AppEvent::PipelineFinished {
-        chapters_done: done,
-        chapters_failed: failed,
-        chapters_need_review: need_review,
-        stopped,
-        run: acc.run,
-    });
-    Ok(())
+/// Process a chapter under the loop watchdog. Runs [`process_chapter`] and a
+/// concurrent [`Watchdog::watch`]; if the watchdog trips first the in-flight work
+/// is cancelled, the chapter is reset, and it is re-translated whole — up to
+/// `cfg.max_chapter_retranslates` times, after which the chapter resolves to
+/// [`Outcome::Aborted`] (the run then halts).
+async fn process_chapter_watched(
+    ctx: &PipelineCtx,
+    chapter: u32,
+    acc: &mut Acc,
+    wd: &Watchdog,
+) -> anyhow::Result<Outcome> {
+    let max_retranslates = ctx.cfg.max_chapter_retranslates;
+    let mut retranslates = 0u32;
+    loop {
+        wd.reset_chapter();
+        let run = tokio::select! {
+            biased;
+            res = process_chapter(ctx, chapter, acc, wd) => ChapterRun::Finished(res),
+            reason = wd.watch(&ctx.ctl) => ChapterRun::Looped(reason),
+        };
+
+        match run {
+            ChapterRun::Finished(res) => return res,
+            ChapterRun::Looped(reason) => {
+                if retranslates >= max_retranslates {
+                    let msg = format!(
+                        "chapter {chapter} stuck in a loop ({}) after {retranslates} re-translation(s) — aborting run",
+                        reason.describe()
+                    );
+                    ctx.tx.send(AppEvent::Log {
+                        level: LogLevel::Error,
+                        msg: msg.clone(),
+                    });
+                    return Ok(Outcome::Aborted { reason: msg });
+                }
+                retranslates += 1;
+                ctx.tx.send(AppEvent::ChapterLooping {
+                    chapter,
+                    reason: reason.describe().to_string(),
+                    attempt: retranslates,
+                    max: max_retranslates,
+                });
+                ctx.tx.send(AppEvent::Log {
+                    level: LogLevel::Warn,
+                    msg: format!(
+                        "chapter {chapter} {} — re-translating whole chapter ({retranslates}/{max_retranslates})",
+                        reason.describe()
+                    ),
+                });
+                // Wipe the chapter so the re-translate starts clean (a poisoned
+                // continuity tail or half-looped chunk must not carry over).
+                if let Err(e) = translation::reset_chapter(&ctx.ws, chapter) {
+                    ctx.tx.send(AppEvent::Log {
+                        level: LogLevel::Warn,
+                        msg: format!("could not reset chapter {chapter} for re-translate: {e}"),
+                    });
+                }
+                ctx.tx.send(AppEvent::ChapterStateChanged {
+                    chapter,
+                    state: ChapterStatus::Chunking,
+                });
+            }
+        }
+    }
+}
+
+/// Result of one watchdog-guarded chapter attempt.
+enum ChapterRun {
+    /// `process_chapter` ran to its own conclusion (the watchdog never tripped).
+    Finished(anyhow::Result<Outcome>),
+    /// The watchdog tripped; the attempt was cancelled.
+    Looped(LoopReason),
 }
 
 /// Process one chapter end to end. Image-only chapters short-circuit (the image
@@ -219,6 +619,7 @@ async fn process_chapter(
     ctx: &PipelineCtx,
     chapter: u32,
     acc: &mut Acc,
+    wd: &Watchdog,
 ) -> anyhow::Result<Outcome> {
     let raw_path = ctx.ws.raw(chapter);
     let raw = tokio::fs::read_to_string(&raw_path)
@@ -304,7 +705,10 @@ async fn process_chapter(
             total,
             est_tokens: chunk.est_tokens,
         });
-        match process_chunk(ctx, chapter, chunk, acc).await? {
+        // Fresh repetition state per chunk so one chunk's tail can't trip on the
+        // next chunk's start.
+        wd.reset_chunk();
+        match process_chunk(ctx, chapter, chunk, acc, wd).await? {
             ChunkOutcome::Committed | ChunkOutcome::NeedsReview => {}
         }
     }
@@ -577,7 +981,10 @@ async fn process_chunk(
     chapter: u32,
     chunk: &Chunk,
     acc: &mut Acc,
+    wd: &Watchdog,
 ) -> anyhow::Result<ChunkOutcome> {
+    // Each step below counts as progress for the stall arm of the watchdog.
+    wd.ping();
     ctx.tx.send(AppEvent::ChunkStateChanged {
         chapter,
         chunk: chunk.index,
@@ -632,6 +1039,9 @@ async fn process_chunk(
                 &chunk.text,
                 feedback.as_deref(),
                 move |delta| {
+                    // Feed the watchdog: streaming is progress (resets the stall
+                    // timer) and the repetition detector sees the live tail.
+                    wd.feed_stream(delta);
                     tx.send(AppEvent::StreamDelta {
                         chapter,
                         chunk: chunk.index,
@@ -820,6 +1230,8 @@ async fn process_chunk(
         let (review, r_usage) = {
             let mut review_attempt = 1u32;
             loop {
+                // The Reviewer streams no deltas, so ping the stall arm around it.
+                wd.ping();
                 ctx.tx.send(AppEvent::ReviewerRequested {
                     chapter,
                     chunk: chunk.index,
@@ -870,6 +1282,7 @@ async fn process_chunk(
                 }
             }
         };
+        wd.ping();
         acc.fold(&r_usage);
         ctx.tx.send(AppEvent::UsageUpdate {
             run: acc.run,
@@ -918,7 +1331,25 @@ async fn process_chunk(
             });
 
             // ---- Orchestrator metadata turn (everything-uses-tools) ----
-            match run_orchestrator_metadata_turn(ctx, chapter, &out).await {
+            // This post-commit, best-effort turn is up to 8 *serial* non-streaming
+            // tool-loop calls — each bounded by the HTTP timeout, but together they
+            // can exceed the stall window with no stream deltas to feed the watchdog.
+            // Without intervention the stall arm would falsely trip, cancel the
+            // chapter, wipe its already-committed chunks, and re-translate (then
+            // abort). Run a keep-alive that pings every 500ms for the turn's whole
+            // duration so the stall arm only ever observes a genuinely wedged turn.
+            let orch = {
+                let turn = run_orchestrator_metadata_turn(ctx, chapter, &out);
+                tokio::pin!(turn);
+                loop {
+                    tokio::select! {
+                        biased;
+                        r = &mut turn => break r,
+                        _ = tokio::time::sleep(Duration::from_millis(500)) => wd.ping(),
+                    }
+                }
+            };
+            match orch {
                 Ok((o_usage, n_tool_calls)) => {
                     acc.fold(&o_usage);
                     acc.add_tool_calls(n_tool_calls as u32);
@@ -1319,7 +1750,8 @@ mod tests {
             est_tokens: 1,
         };
 
-        match process_chunk(&ctx, 1, &chunk, &mut acc)
+        let wd = Watchdog::new(&ctx.cfg);
+        match process_chunk(&ctx, 1, &chunk, &mut acc, &wd)
             .await
             .expect("process_chunk")
         {
@@ -1660,6 +2092,215 @@ mod tests {
         assert!(
             ctx.contains("VOLUME_SYNOPSIS") && ctx.contains("เรื่องย่อสำหรับบริบท"),
             "synopsis must be injected as context:\n{ctx}"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn repetition_detector_flags_char_cycle() {
+        let looped = "ก็ได้ครับ".repeat(20);
+        assert!(
+            looks_like_repetition_loop(&looped),
+            "a phrase repeated 20× must read as a loop"
+        );
+    }
+
+    #[test]
+    fn repetition_detector_flags_repeated_lines() {
+        let looped = "เขาเดินเข้ามาในห้อง\n".repeat(8);
+        assert!(
+            looks_like_repetition_loop(&looped),
+            "the same line repeated 8× must read as a loop"
+        );
+    }
+
+    #[test]
+    fn repetition_detector_passes_normal_prose() {
+        let prose = "เช้าวันนั้นแสงแดดสาดส่องเข้ามาทางหน้าต่าง เธอลุกขึ้นจากเตียงอย่างเชื่องช้า \
+            แล้วเดินไปชงกาแฟสักแก้ว กลิ่นหอมอบอวลไปทั่วทั้งห้องครัวเล็ก ๆ ของเธอ \
+            เสียงนกร้องดังมาจากต้นไม้ใหญ่หน้าบ้าน วันใหม่ได้เริ่มต้นขึ้นอีกครั้ง";
+        assert!(
+            !looks_like_repetition_loop(prose),
+            "ordinary varied prose must not read as a loop"
+        );
+    }
+
+    #[test]
+    fn repetition_detector_ignores_short_text() {
+        assert!(
+            !looks_like_repetition_loop("สั้น"),
+            "too little text to judge must not trip"
+        );
+    }
+
+    #[tokio::test]
+    async fn disabled_watchdog_never_trips() {
+        // loop_stall_secs = 0 is the global off-switch: neither arm may fire.
+        let cfg = crate::model::AppConfig {
+            loop_stall_secs: 0,
+            ..crate::model::AppConfig::default()
+        };
+        let wd = Watchdog::new(&cfg);
+        for _ in 0..40 {
+            wd.feed_stream("ก็ได้ครับ");
+        }
+        assert!(
+            !wd.repetition.load(Ordering::Relaxed),
+            "repetition arm must stay off when the watchdog is disabled"
+        );
+        let ctl = RunControl::new();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), wd.watch(&ctl))
+                .await
+                .is_err(),
+            "a disabled watchdog must never trip"
+        );
+    }
+
+    /// A Translator whose every call hangs far longer than the watchdog's stall
+    /// window — used to exercise the stall arm + whole-chapter re-translate + abort.
+    struct HangingClient;
+
+    #[async_trait::async_trait]
+    impl crate::llm::client::LlmClient for HangingClient {
+        async fn chat(
+            &self,
+            _req: &crate::llm::ChatRequest,
+        ) -> crate::llm::client::Result<crate::llm::ChatResponse> {
+            // Far longer than the test's stall window; the watchdog cancels it.
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            Err(crate::llm::client::LlmError::EmptyChoices)
+        }
+    }
+
+    #[tokio::test]
+    async fn watchdog_retranslates_then_aborts_a_stuck_chapter() {
+        let (base, ws) = temp_ws("watchdog_abort");
+        translation::write_raw(&ws, 1, "# 第一章\n\nこれは短い章です。").unwrap();
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = PipelineCtx {
+            client: std::sync::Arc::new(HangingClient)
+                as std::sync::Arc<dyn crate::llm::client::LlmClient>,
+            ws: ws.clone(),
+            models: crate::model::ModelSet::default(),
+            cfg: crate::model::AppConfig {
+                // One whole-chapter re-translate, then abort.
+                max_chapter_retranslates: 1,
+                ..crate::model::AppConfig::default()
+            },
+            tx: crate::model::EventTx(tx),
+            ctl: RunControl::new(),
+        };
+        // A sub-second stall so the stall arm fires without a real multi-second wait.
+        let wd = Watchdog::with_stall(Some(Duration::from_millis(200)));
+        let mut acc = Acc::default();
+        let mut totals = Totals::default();
+
+        let halt = run_volume_chapters(&ctx, &[1], &wd, &mut acc, &mut totals).await;
+
+        assert!(
+            matches!(halt, Halt::Stopped),
+            "a chapter looping past the limit must halt the run"
+        );
+        assert_eq!(totals.failed, 1, "the aborted chapter counts as failed");
+        assert!(ctx.ctl.is_stopped(), "abort must stop the run control");
+
+        let mut looping = 0u32;
+        let mut saw_abort = false;
+        let mut saw_failed = false;
+        while let Ok(ev) = rx.try_recv() {
+            match ev {
+                AppEvent::ChapterLooping { attempt, max, .. } => {
+                    looping += 1;
+                    assert_eq!((attempt, max), (1, 1));
+                }
+                AppEvent::Error { msg, .. } if msg.contains("aborting run") => saw_abort = true,
+                AppEvent::ChapterFailed { .. } => saw_failed = true,
+                _ => {}
+            }
+        }
+        assert_eq!(
+            looping, 1,
+            "exactly one whole-chapter re-translate before abort"
+        );
+        assert!(saw_abort, "abort reason should be surfaced as an error");
+        assert!(saw_failed, "the chapter should be marked failed on abort");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn project_pipeline_runs_every_volume() {
+        let base = std::env::temp_dir().join(format!("honya_proj_run_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+
+        // Two volumes, one prose chapter each.
+        let ws1 = Workspace::new(base.clone(), 1);
+        let ws2 = Workspace::new(base.clone(), 2);
+        translation::write_raw(&ws1, 1, "# 第一章\n\n短い章です。").unwrap();
+        translation::write_raw(&ws2, 1, "# 第一章\n\n別の短い章です。").unwrap();
+
+        let client = std::sync::Arc::new(CountingClient::default());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = PipelineCtx {
+            client: client.clone() as std::sync::Arc<dyn crate::llm::client::LlmClient>,
+            ws: ws1.clone(),
+            models: crate::model::ModelSet::default(),
+            cfg: crate::model::AppConfig::default(),
+            tx: crate::model::EventTx(tx),
+            ctl: RunControl::new(),
+        };
+        let plan = vec![
+            VolumePlan {
+                vol: 1,
+                label: Some("一巻".to_string()),
+                chapters: vec![1],
+            },
+            VolumePlan {
+                vol: 2,
+                label: None,
+                chapters: vec![1],
+            },
+        ];
+
+        run_project_pipeline(ctx, plan).await.expect("project run");
+
+        let mut vols_started = Vec::new();
+        let mut finished = None;
+        while let Ok(ev) = rx.try_recv() {
+            match ev {
+                AppEvent::VolumeStarted { vol, .. } => vols_started.push(vol),
+                AppEvent::PipelineFinished {
+                    chapters_done,
+                    stopped,
+                    ..
+                } => finished = Some((chapters_done, stopped)),
+                _ => {}
+            }
+        }
+        assert_eq!(
+            vols_started,
+            vec![1, 2],
+            "each volume must announce its start"
+        );
+        assert_eq!(
+            finished,
+            Some((2, false)),
+            "both volumes' chapters complete under one PipelineFinished"
+        );
+        // Both volumes were actually written.
+        assert!(
+            translation::read_translated(&ws1, 1)
+                .await
+                .contains("ข้อความแปลต่อ")
+        );
+        assert!(
+            translation::read_translated(&ws2, 1)
+                .await
+                .contains("ข้อความแปลต่อ")
         );
 
         let _ = std::fs::remove_dir_all(&base);

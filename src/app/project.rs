@@ -228,6 +228,9 @@ impl ProjectScreen {
                     Action::StartTranslation { chapters }
                 }
             }
+            // Auto-translate the whole project: every not-yet-done chapter across
+            // all volumes, one click (App builds the queue + confirms).
+            KeyCode::Char('A') => Action::StartProjectTranslation,
             KeyCode::Char('e') => Action::Goto(Screen::Lexicon),
             // Re-open the synopsis editor for the active volume (raw → translate → reroll).
             KeyCode::Char('y') => {
@@ -705,6 +708,7 @@ impl ProjectScreen {
             ("↵", "read"),
             ("t", "marked/current"),
             ("T", "whole vol"),
+            ("A", "whole project"),
             ("V", "add vol"),
             ("x", "export"),
             ("Space", "mark"),
