@@ -41,7 +41,7 @@ use self::overlay::{JumpKind, JumpTarget, Overlay};
 use self::project::ProjectScreen;
 use self::reader::ReaderScreen;
 use self::shelf::ShelfScreen;
-use self::translate::TranslateScreen;
+use self::translate::{QueueRow, TranslateScreen};
 
 // ui::chrome imports `Screen`, so the variant names and ORDER are load-bearing.
 /// The five primary tabs (1-5).
@@ -154,6 +154,31 @@ pub enum Action {
     StartProjectTranslation,
     /// Confirmed: begin the whole-project auto-translate run.
     BeginProjectTranslation,
+    /// Add chapters of volume `vol` (the volume under the Project cursor) to the live
+    /// run's queue, or start a fresh run when idle. Carrying `vol` keeps the chapter
+    /// numbers bound to the volume the user actually selected them in.
+    EnqueueChapters {
+        vol: u32,
+        chapters: Vec<u32>,
+    },
+    /// Reorder a pending queue item up / down, addressed by `(vol, ch)` identity so a
+    /// concurrent pipeline pop can never make it hit the wrong chapter. No-op at the
+    /// bounds; the running head is never a pending item.
+    QueueMoveUp {
+        vol: u32,
+        ch: u32,
+    },
+    QueueMoveDown {
+        vol: u32,
+        ch: u32,
+    },
+    /// Sort the pending queue ascending by chapter number (never the running head).
+    SortQueue,
+    /// Drop a pending queue item, addressed by `(vol, ch)` identity.
+    DequeueChapter {
+        vol: u32,
+        ch: u32,
+    },
     PauseRun,
     StopRun,
     /// Resume the interrupted run recorded in the recovery checkpoint (reopen the
@@ -281,6 +306,10 @@ pub struct App {
     pub export_active: bool,
     /// Shared pause/stop control for the in-flight pipeline run (None when idle).
     pub run_ctl: Option<crate::agents::pipeline::RunControl>,
+    /// Shared live chapter queue for the in-flight run (None when idle). The UI
+    /// enqueues / reorders through this handle and the pipeline drains it; the
+    /// authoritative ordering lives here, the Translate panel only mirrors it.
+    pub run_queue: Option<crate::agents::pipeline::ChapterQueue>,
     /// Rolling activity log shown in the Log overlay.
     pub log: Vec<(LogLevel, String)>,
     /// Set when a newer release is detected at startup (drives a footer hint).
@@ -363,6 +392,7 @@ impl App {
             run_active: false,
             export_active: false,
             run_ctl: None,
+            run_queue: None,
             log: Vec::new(),
             update_available: None,
             update_installed: None,
@@ -449,9 +479,15 @@ impl App {
                 if let Some(title) = self.chapter_title(*chapter) {
                     self.translate.set_chapter_title(title);
                 }
+                // The pipeline popped this chapter to the queue's running head before
+                // emitting the event, so refresh now drops it from the pending panel.
+                self.refresh_queue_panel();
             }
             AppEvent::ChapterQueued { chapter } => {
                 self.set_chapter_status(*chapter, ChapterStatus::Pending);
+            }
+            AppEvent::QueueChanged => {
+                self.refresh_queue_panel();
             }
             AppEvent::VolumeStarted { vol, label } => {
                 // The project run advanced to a new volume: re-point the live
@@ -578,7 +614,9 @@ impl App {
             } => {
                 self.run_active = false;
                 self.run_ctl = None;
+                self.run_queue = None;
                 self.running_vol = None;
+                self.refresh_queue_panel();
                 // A chapter interrupted by Stop never reaches a terminal state event,
                 // so drop any half-built record rather than mis-recording it.
                 self.pending_chapter_run = None;
@@ -1325,6 +1363,45 @@ impl App {
             Action::StartTranslation { chapters } => {
                 self.request_translation(chapters);
             }
+            Action::EnqueueChapters { vol, chapters } => {
+                if self.is_live_run() {
+                    self.enqueue_live(vol, chapters);
+                } else {
+                    // Idle: start a fresh run (the continue/restart prompt applies).
+                    self.request_translation(chapters);
+                }
+            }
+            Action::QueueMoveUp { vol, ch } => {
+                if let Some(q) = self.run_queue.as_ref() {
+                    q.move_item_up(vol, ch);
+                    self.refresh_queue_panel();
+                    self.tx.send(AppEvent::QueueChanged);
+                }
+            }
+            Action::QueueMoveDown { vol, ch } => {
+                if let Some(q) = self.run_queue.as_ref() {
+                    q.move_item_down(vol, ch);
+                    self.refresh_queue_panel();
+                    self.tx.send(AppEvent::QueueChanged);
+                }
+            }
+            Action::SortQueue => {
+                if let Some(q) = self.run_queue.as_ref() {
+                    q.sort_by_number();
+                    self.refresh_queue_panel();
+                    self.tx.send(AppEvent::QueueChanged);
+                }
+            }
+            Action::DequeueChapter { vol, ch } => {
+                if let Some(q) = self.run_queue.as_ref() {
+                    if q.remove_item(vol, ch) {
+                        self.toast = Some(Toast::info(format!("removed ch {ch} from the queue")));
+                    }
+                    self.resync_run_checkpoint();
+                    self.refresh_queue_panel();
+                    self.tx.send(AppEvent::QueueChanged);
+                }
+            }
             Action::ContinueTranslation { chapters } => {
                 self.begin_translation(chapters, false);
             }
@@ -1660,9 +1737,151 @@ impl App {
         self.find_chapter(chapter).map(|c| c.title.clone())
     }
 
+    /// A run is live and accepting enqueues (not idle and not already stopping).
+    fn is_live_run(&self) -> bool {
+        self.run_active
+            && self.run_queue.is_some()
+            && !self
+                .run_ctl
+                .as_ref()
+                .map(|c| c.is_stopped())
+                .unwrap_or(false)
+    }
+
+    /// Append chapters of volume `vol` (the volume the user selected them in) to the
+    /// in-flight run's queue. A single-volume run is pinned to one volume's workspace,
+    /// so a cross-volume enqueue is rejected with a clear message; a project run
+    /// accepts any volume (the pipeline's tail-drain sweep guarantees it runs even if
+    /// its plan leg already passed). Filters to translatable prose, dedupes via the
+    /// queue, then resyncs the recovery checkpoint and refreshes the panel.
+    fn enqueue_live(&mut self, vol: u32, chapters: Vec<u32>) {
+        let Some(queue) = self.run_queue.clone() else {
+            return;
+        };
+        if chapters.is_empty() {
+            self.toast = Some(Toast::warn("nothing selected"));
+            return;
+        }
+        let whole_project = self
+            .active_run
+            .as_ref()
+            .map(|cp| cp.whole_project)
+            .unwrap_or(false);
+        if !whole_project {
+            // The run's pipeline reads only its own volume's raw files; a chapter from
+            // another volume would resolve against the wrong workspace, so refuse it.
+            let run_vol = self.active_run.as_ref().map(|cp| cp.vol);
+            if Some(vol) != run_vol {
+                self.toast = Some(Toast::warn(format!(
+                    "this run only translates Vol.{:02} — can't queue another volume",
+                    run_vol.unwrap_or(vol)
+                )));
+                return;
+            }
+        }
+        let mut added = 0u32;
+        let mut skipped = 0u32;
+        for ch in chapters {
+            let eligible = self
+                .chapter_in_vol(vol, ch)
+                .map(project::translatable)
+                .unwrap_or(false);
+            if eligible && queue.push_back(vol, ch) {
+                added += 1;
+            } else {
+                skipped += 1;
+            }
+        }
+        self.toast = Some(Toast::info(if skipped > 0 {
+            format!("queued {added} · skipped {skipped} (done / running / not prose)")
+        } else {
+            format!("queued {added} chapter(s)")
+        }));
+        if added > 0 {
+            self.push_log(LogLevel::Info, format!("enqueued {added} chapter(s)"));
+            self.resync_run_checkpoint();
+        }
+        self.refresh_queue_panel();
+        self.tx.send(AppEvent::QueueChanged);
+    }
+
+    /// The in-memory chapter record in a SPECIFIC volume (queue rows span volumes
+    /// during a project run, so this can't go through `event_vol`-scoped lookup).
+    fn chapter_in_vol(&self, vol: u32, chapter: u32) -> Option<&crate::model::Chapter> {
+        self.active
+            .as_ref()?
+            .project
+            .volumes
+            .iter()
+            .find(|v| v.number == vol)?
+            .chapters
+            .iter()
+            .find(|c| c.number == chapter)
+    }
+
+    /// Rebuild the Translate-tab queue panel from the authoritative `run_queue`,
+    /// resolving each `(vol, chapter)` to its live `Chapter` for the display
+    /// metadata. Clears the panel when no run is active.
+    fn refresh_queue_panel(&mut self) {
+        let Some(queue) = self.run_queue.clone() else {
+            self.translate.set_queue(Vec::new());
+            return;
+        };
+        let (running, pending) = queue.snapshot();
+        let mut rows = Vec::with_capacity(pending.len() + 1);
+        let mut pos = 1usize;
+        if let Some((vol, ch)) = running {
+            rows.push(self.queue_row(vol, ch, true, pos));
+            pos += 1;
+        }
+        for (vol, ch) in pending {
+            rows.push(self.queue_row(vol, ch, false, pos));
+            pos += 1;
+        }
+        self.translate.set_queue(rows);
+    }
+
+    fn queue_row(&self, vol: u32, chapter: u32, running: bool, est_pos: usize) -> QueueRow {
+        let ch = self.chapter_in_vol(vol, chapter);
+        QueueRow {
+            vol,
+            number: chapter,
+            title: ch.map(|c| c.title.clone()).unwrap_or_default(),
+            kind: ch
+                .map(|c| c.kind)
+                .unwrap_or(crate::model::ChapterKind::Prose),
+            status: ch.map(|c| c.status).unwrap_or(ChapterStatus::Pending),
+            source_segments: ch.map(|c| c.source_segments).unwrap_or(0),
+            running,
+            est_pos,
+        }
+    }
+
+    /// Rewrite the recovery checkpoint's chapter list from the live queue so a
+    /// crash-resume replays live-added (and skips removed) chapters. Order-only
+    /// changes (move / sort) don't alter the set, so callers skip this for those.
+    fn resync_run_checkpoint(&mut self) {
+        let Some(queue) = self.run_queue.as_ref() else {
+            return;
+        };
+        let (running, pending) = queue.snapshot();
+        let chapters: Vec<u32> = running.into_iter().chain(pending).map(|(_, c)| c).collect();
+        if let Some(cp) = self.active_run.as_mut() {
+            cp.chapters = chapters;
+            if let Err(e) = crate::workspace::session::save(cp) {
+                self.push_log(
+                    LogLevel::Warn,
+                    format!("could not update recovery checkpoint: {e}"),
+                );
+            }
+        }
+    }
+
     fn request_translation(&mut self, chapters: Vec<u32>) {
         if self.run_active {
-            self.toast = Some(Toast::warn("a run is already in progress"));
+            self.toast = Some(Toast::warn(
+                "a run is in progress — press i to add chapters to the queue",
+            ));
             return;
         }
         if self.active.is_none() {
@@ -1795,6 +2014,9 @@ impl App {
         }
 
         let ctl = crate::agents::pipeline::RunControl::new();
+        let queue = crate::agents::pipeline::ChapterQueue::new(
+            checkpoint.chapters.iter().map(|&c| (vol, c)).collect(),
+        );
         let ctx = crate::agents::pipeline::PipelineCtx {
             client,
             ws,
@@ -1802,11 +2024,14 @@ impl App {
             cfg: self.cfg.clone(),
             tx: self.tx.clone(),
             ctl: ctl.clone(),
+            queue: queue.clone(),
         };
         self.run_ctl = Some(ctl);
+        self.run_queue = Some(queue);
         self.active_run = Some(checkpoint.clone());
         // Single-volume run: per-chapter events scope through active_run.vol.
         self.running_vol = None;
+        self.refresh_queue_panel();
         let chapters_for_task = checkpoint.chapters.clone();
         let tx = self.tx.clone();
         tokio::spawn(async move {
@@ -1997,6 +2222,14 @@ impl App {
         }
 
         let ctl = crate::agents::pipeline::RunControl::new();
+        // Seed the shared queue with every (vol, chapter) pair across the plan so the
+        // panel shows the full cross-volume queue up front; `run_project_pipeline`
+        // re-seeds per volume (deduped), and a cross-volume enqueue lands here too.
+        let queue_seed: Vec<(u32, u32)> = plan
+            .iter()
+            .flat_map(|p| p.chapters.iter().map(|&c| (p.vol, c)))
+            .collect();
+        let queue = crate::agents::pipeline::ChapterQueue::new(queue_seed);
         let ctx = crate::agents::pipeline::PipelineCtx {
             client,
             ws,
@@ -2004,12 +2237,15 @@ impl App {
             cfg: self.cfg.clone(),
             tx: self.tx.clone(),
             ctl: ctl.clone(),
+            queue: queue.clone(),
         };
         self.run_ctl = Some(ctl);
+        self.run_queue = Some(queue);
         self.active_run = Some(checkpoint);
         // The first `VolumeStarted` (emitted before any chapter event of that
         // volume) sets the live volume; no per-chapter event can arrive before it.
         self.running_vol = None;
+        self.refresh_queue_panel();
         let vols = plan.len();
         let total: usize = plan.iter().map(|p| p.chapters.len()).sum();
         let tx = self.tx.clone();

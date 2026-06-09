@@ -10,6 +10,7 @@
 //!     discoveries land in CHARACTERS.md / GLOSSARY.md / VOLUME.md. On exhausting
 //!     retries the chunk is committed with a review-needed marker.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
@@ -67,6 +68,140 @@ impl Default for RunControl {
         Self::new()
     }
 }
+
+/// Shared, cheap-to-clone chapter queue the UI mutates (enqueue / reorder / sort /
+/// remove) and the pipeline drains between chapters — the same UI↔worker inversion
+/// as [`RunControl`]. Entries are `(vol, chapter)` so a cross-volume project run can
+/// disambiguate chapter numbers that repeat across volumes.
+///
+/// The head-lock ("you may not reorder the chapter that is currently translating")
+/// is enforced *structurally*: the running chapter lives in its own [`QueueInner::running`]
+/// field, separate from `pending`, and every reorder/sort/remove touches only `pending`.
+/// The run finishes the instant `pending` drains at a pop — a chapter enqueued while the
+/// current one is still translating lands in `pending` and is caught at the next pop, so
+/// "add while running" works without any keep-alive flag; a chapter added after the run
+/// has already drained simply starts a fresh run (the correct behavior).
+#[derive(Clone, Default)]
+pub struct ChapterQueue(Arc<Mutex<QueueInner>>);
+
+#[derive(Default)]
+struct QueueInner {
+    /// (vol, chapter) in display / execution order — never includes `running`.
+    pending: VecDeque<(u32, u32)>,
+    /// The chapter the pipeline is currently on (the locked head). Set by `next`/
+    /// `next_for` on a pop, cleared when a pop finds nothing.
+    running: Option<(u32, u32)>,
+}
+
+impl ChapterQueue {
+    /// A queue pre-seeded with `items`, nothing running yet.
+    pub fn new(items: Vec<(u32, u32)>) -> Self {
+        Self(Arc::new(Mutex::new(QueueInner {
+            pending: items.into_iter().collect(),
+            running: None,
+        })))
+    }
+
+    /// Append `items` to `pending`, skipping any already present (in `pending` or as
+    /// the `running` head). Used to seed each volume of a project run into the shared
+    /// queue without duplicating chapters a live enqueue already added.
+    pub fn seed(&self, items: Vec<(u32, u32)>) {
+        let mut g = self.0.lock().unwrap();
+        for it in items {
+            if g.running == Some(it) || g.pending.contains(&it) {
+                continue;
+            }
+            g.pending.push_back(it);
+        }
+    }
+
+    /// Pop the next chapter for a single-volume run: the front of `pending`, or `None`
+    /// when drained (which ends the run). Sets `running` accordingly.
+    pub fn next(&self) -> Option<(u32, u32)> {
+        let mut g = self.0.lock().unwrap();
+        g.running = g.pending.pop_front();
+        g.running
+    }
+
+    /// Pop the next chapter whose volume is `vol` (project run): the first matching
+    /// entry, preserving relative order. `None` once this volume is drained, so the
+    /// project loop advances to the next volume. Entries for other volumes (e.g. a
+    /// cross-volume live enqueue) stay queued for when that volume runs.
+    pub fn next_for(&self, vol: u32) -> Option<(u32, u32)> {
+        let mut g = self.0.lock().unwrap();
+        match g.pending.iter().position(|(v, _)| *v == vol) {
+            Some(pos) => {
+                let it = g.pending.remove(pos);
+                g.running = it;
+                it
+            }
+            None => {
+                g.running = None;
+                None
+            }
+        }
+    }
+
+    /// Enqueue `(vol, ch)` at the back, unless it is already running or pending.
+    /// Returns whether it was actually added.
+    pub fn push_back(&self, vol: u32, ch: u32) -> bool {
+        let mut g = self.0.lock().unwrap();
+        let it = (vol, ch);
+        if g.running == Some(it) || g.pending.contains(&it) {
+            return false;
+        }
+        g.pending.push_back(it);
+        true
+    }
+
+    /// Move the pending `(vol, ch)` one slot earlier (no-op if absent or already
+    /// first). Addressed by IDENTITY, not position, so a concurrent pipeline pop
+    /// (which shifts indices) can never make this hit the wrong chapter.
+    pub fn move_item_up(&self, vol: u32, ch: u32) {
+        let mut g = self.0.lock().unwrap();
+        if let Some(pos) = g.pending.iter().position(|&it| it == (vol, ch))
+            && pos > 0
+        {
+            g.pending.swap(pos, pos - 1);
+        }
+    }
+
+    /// Move the pending `(vol, ch)` one slot later (no-op if absent or already last).
+    pub fn move_item_down(&self, vol: u32, ch: u32) {
+        let mut g = self.0.lock().unwrap();
+        if let Some(pos) = g.pending.iter().position(|&it| it == (vol, ch))
+            && pos + 1 < g.pending.len()
+        {
+            g.pending.swap(pos, pos + 1);
+        }
+    }
+
+    /// Sort `pending` ascending by (vol, chapter). Never touches `running`.
+    pub fn sort_by_number(&self) {
+        let mut g = self.0.lock().unwrap();
+        g.pending.make_contiguous().sort_unstable();
+    }
+
+    /// Remove the pending `(vol, ch)` by identity. Returns whether it was present.
+    pub fn remove_item(&self, vol: u32, ch: u32) -> bool {
+        let mut g = self.0.lock().unwrap();
+        if let Some(pos) = g.pending.iter().position(|&it| it == (vol, ch)) {
+            g.pending.remove(pos);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// `(running, pending)` snapshot for the UI panel and checkpoint resync.
+    pub fn snapshot(&self) -> QueueSnapshot {
+        let g = self.0.lock().unwrap();
+        (g.running, g.pending.iter().copied().collect())
+    }
+}
+
+/// `(running head, pending list)` — what the queue exposes to the UI panel.
+pub type QueueSnapshot = (Option<(u32, u32)>, Vec<(u32, u32)>);
 
 /// Why the loop watchdog tripped on a chapter.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -326,6 +461,9 @@ pub struct PipelineCtx {
     pub cfg: AppConfig,
     pub tx: EventTx,
     pub ctl: RunControl,
+    /// The live chapter queue this run drains. Shared with the UI so chapters can be
+    /// enqueued / reordered while the run is in flight (see [`ChapterQueue`]).
+    pub queue: ChapterQueue,
 }
 
 impl PipelineCtx {
@@ -352,6 +490,7 @@ impl PipelineCtx {
             cfg: self.cfg.clone(),
             tx: self.tx.clone(),
             ctl: self.ctl.clone(),
+            queue: self.queue.clone(),
         }
     }
 }
@@ -364,7 +503,13 @@ pub async fn run_pipeline(ctx: PipelineCtx, chapters: Vec<u32>) -> anyhow::Resul
     let wd = Watchdog::new(&ctx.cfg);
     let mut acc = Acc::default();
     let mut totals = Totals::default();
-    let halt = run_volume_chapters(&ctx, &chapters, &wd, &mut acc, &mut totals).await;
+    // Seed the live queue with the requested chapters (the UI may already have
+    // pre-seeded the same handle; `seed` dedupes). A live enqueue appends to it and
+    // is drained in the same run.
+    let vol = ctx.vol_number();
+    ctx.queue
+        .seed(chapters.into_iter().map(|c| (vol, c)).collect());
+    let halt = run_volume_chapters(&ctx, None, &wd, &mut acc, &mut totals).await;
     ctx.tx.send(AppEvent::PipelineFinished {
         chapters_done: totals.done,
         chapters_failed: totals.failed,
@@ -392,6 +537,11 @@ pub async fn run_project_pipeline(ctx: PipelineCtx, plan: Vec<VolumePlan>) -> an
             break;
         }
         let vctx = ctx.with_volume(vp.vol);
+        // Seed this volume's chapters into the SHARED queue (deduped, so a live
+        // enqueue already sitting in `pending` for this volume isn't doubled). The
+        // queue spans volumes, so a cross-volume enqueue made earlier is waiting here.
+        vctx.queue
+            .seed(vp.chapters.iter().map(|&c| (vp.vol, c)).collect());
         vctx.tx.send(AppEvent::VolumeStarted {
             vol: vp.vol,
             label: vp.label.clone(),
@@ -404,7 +554,24 @@ pub async fn run_project_pipeline(ctx: PipelineCtx, plan: Vec<VolumePlan>) -> an
                 vp.chapters.len()
             ),
         });
-        let halt = run_volume_chapters(&vctx, &vp.chapters, &wd, &mut acc, &mut totals).await;
+        let halt = run_volume_chapters(&vctx, Some(vp.vol), &wd, &mut acc, &mut totals).await;
+        if matches!(halt, Halt::Stopped) {
+            stopped = true;
+            break;
+        }
+    }
+
+    // Drain anything live-enqueued into a volume the plan loop already passed, or one
+    // absent from the plan entirely, so a cross-volume add is never silently lost.
+    // Normal runs leave `pending` empty here, so this is a no-op for them.
+    while !stopped && !ctx.ctl.is_stopped() {
+        let (_, pending) = ctx.queue.snapshot();
+        let Some(&(vol, _)) = pending.first() else {
+            break;
+        };
+        let vctx = ctx.with_volume(vol);
+        vctx.tx.send(AppEvent::VolumeStarted { vol, label: None });
+        let halt = run_volume_chapters(&vctx, Some(vol), &wd, &mut acc, &mut totals).await;
         if matches!(halt, Halt::Stopped) {
             stopped = true;
             break;
@@ -428,12 +595,12 @@ pub async fn run_project_pipeline(ctx: PipelineCtx, plan: Vec<VolumePlan>) -> an
 /// a project run emits exactly one across all volumes.
 async fn run_volume_chapters(
     ctx: &PipelineCtx,
-    chapters: &[u32],
+    vol_scope: Option<u32>,
     wd: &Watchdog,
     acc: &mut Acc,
     totals: &mut Totals,
 ) -> Halt {
-    for &chapter in chapters {
+    loop {
         if ctx.ctl.is_stopped() {
             ctx.tx.send(AppEvent::Log {
                 level: LogLevel::Warn,
@@ -441,6 +608,20 @@ async fn run_volume_chapters(
             });
             return Halt::Stopped;
         }
+        // Pull the next chapter from the live queue. A single-volume run drains the
+        // whole queue (`next`); a project run takes only its own volume's chapters
+        // (`next_for`) and returns once they're exhausted so the caller advances to
+        // the next volume. Either way, `None` == this leg is done.
+        let chapter = match vol_scope {
+            Some(vol) => match ctx.queue.next_for(vol) {
+                Some((_, c)) => c,
+                None => return Halt::Completed,
+            },
+            None => match ctx.queue.next() {
+                Some((_, c)) => c,
+                None => return Halt::Completed,
+            },
+        };
         ctx.tx.send(AppEvent::ChapterStarted { chapter });
         ctx.tx.send(AppEvent::ChapterStateChanged {
             chapter,
@@ -535,7 +716,6 @@ async fn run_volume_chapters(
             }
         }
     }
-    Halt::Completed
 }
 
 /// Process a chapter under the loop watchdog. Runs [`process_chapter`] and a
@@ -1535,6 +1715,111 @@ async fn run_orchestrator_metadata_turn(
 }
 
 #[cfg(test)]
+mod queue_tests {
+    use super::ChapterQueue;
+
+    #[test]
+    fn drains_in_order_then_empties() {
+        let q = ChapterQueue::new(vec![(1, 1), (1, 2), (1, 3)]);
+        assert_eq!(q.next(), Some((1, 1)));
+        assert_eq!(q.next(), Some((1, 2)));
+        assert_eq!(q.next(), Some((1, 3)));
+        // Drained: a single-volume run ends here.
+        assert_eq!(q.next(), None);
+        let (running, pending) = q.snapshot();
+        assert_eq!(running, None);
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn enqueue_while_running_is_picked_up_at_next_pop() {
+        let q = ChapterQueue::new(vec![(1, 1)]);
+        assert_eq!(q.next(), Some((1, 1))); // ch1 now running, pending empty
+        // The user enqueues ch5 while ch1 is still translating.
+        assert!(q.push_back(1, 5));
+        // ch1 finishes → the next pop catches the live add (no early finish).
+        assert_eq!(q.next(), Some((1, 5)));
+        assert_eq!(q.next(), None);
+    }
+
+    #[test]
+    fn push_back_dedupes_against_running_and_pending() {
+        let q = ChapterQueue::new(vec![(1, 2)]);
+        assert_eq!(q.next(), Some((1, 2))); // (1,2) running
+        assert!(
+            !q.push_back(1, 2),
+            "re-adding the running chapter is a no-op"
+        );
+        assert!(q.push_back(1, 4));
+        assert!(!q.push_back(1, 4), "re-adding a pending chapter is a no-op");
+        let (_, pending) = q.snapshot();
+        assert_eq!(pending, vec![(1, 4)]);
+    }
+
+    #[test]
+    fn reorder_and_sort_touch_only_pending() {
+        let q = ChapterQueue::new(vec![(1, 5), (1, 3), (1, 4)]);
+        assert_eq!(q.next(), Some((1, 5))); // (1,5) is the locked head now
+        // pending = [(1,3),(1,4)]
+        q.move_item_down(1, 3); // [(1,4),(1,3)]
+        assert_eq!(q.snapshot().1, vec![(1, 4), (1, 3)]);
+        q.move_item_up(1, 3); // [(1,3),(1,4)]
+        assert_eq!(q.snapshot().1, vec![(1, 3), (1, 4)]);
+        q.push_back(1, 1); // [(1,3),(1,4),(1,1)]
+        q.sort_by_number(); // [(1,1),(1,3),(1,4)]
+        let (running, pending) = q.snapshot();
+        assert_eq!(running, Some((1, 5)), "the head is never reordered/sorted");
+        assert_eq!(pending, vec![(1, 1), (1, 3), (1, 4)]);
+    }
+
+    #[test]
+    fn move_and_remove_are_identity_addressed_and_safe() {
+        let q = ChapterQueue::new(vec![(1, 1), (1, 2)]);
+        q.move_item_up(1, 1); // no-op at the top
+        q.move_item_down(1, 2); // no-op at the bottom
+        q.move_item_up(9, 9); // absent → no-op
+        assert_eq!(q.snapshot().1, vec![(1, 1), (1, 2)]);
+        assert!(q.remove_item(1, 1));
+        assert!(!q.remove_item(1, 9), "removing an absent item is a no-op");
+        assert_eq!(q.snapshot().1, vec![(1, 2)]);
+    }
+
+    #[test]
+    fn reorder_targets_by_identity_across_a_concurrent_pop() {
+        // pending = [(1,3),(1,4),(1,5)] with (1,2) running.
+        let q = ChapterQueue::new(vec![(1, 2), (1, 3), (1, 4), (1, 5)]);
+        assert_eq!(q.next(), Some((1, 2)));
+        // The pipeline pops the front (1,3) — every positional index now shifts.
+        assert_eq!(q.next(), Some((1, 3)));
+        // A move issued against the (now stale) position 1 must still hit (1,5),
+        // not its old neighbour, because it is addressed by identity.
+        q.move_item_up(1, 5); // [(1,5),(1,4)]
+        assert_eq!(q.snapshot().1, vec![(1, 5), (1, 4)]);
+    }
+
+    #[test]
+    fn next_for_scopes_to_a_volume_and_advances_when_drained() {
+        // A project run: Vol.1 chapters interleaved with a cross-volume live add.
+        let q = ChapterQueue::new(vec![(1, 1), (2, 7), (1, 2)]);
+        // Vol.1 leg pops only its own chapters, in order.
+        assert_eq!(q.next_for(1), Some((1, 1)));
+        assert_eq!(q.next_for(1), Some((1, 2)));
+        // Vol.1 is drained even though a Vol.2 chapter is still queued → advance.
+        assert_eq!(q.next_for(1), None);
+        // The Vol.2 leg then picks up the cross-volume add.
+        assert_eq!(q.next_for(2), Some((2, 7)));
+        assert_eq!(q.next_for(2), None);
+    }
+
+    #[test]
+    fn seed_appends_without_duplicating() {
+        let q = ChapterQueue::new(vec![(1, 1)]);
+        q.seed(vec![(1, 1), (1, 2), (1, 3)]); // (1,1) already present → skipped
+        assert_eq!(q.snapshot().1, vec![(1, 1), (1, 2), (1, 3)]);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::model::{Character, GlossaryTerm};
@@ -1742,6 +2027,7 @@ mod tests {
             },
             tx: crate::model::EventTx(tx),
             ctl: RunControl::new(),
+            queue: ChapterQueue::new(vec![]),
         };
         let mut acc = Acc::default();
         let chunk = Chunk {
@@ -1823,6 +2109,7 @@ mod tests {
             cfg,
             tx: crate::model::EventTx(tx),
             ctl: RunControl::new(),
+            queue: ChapterQueue::new(vec![]),
         };
 
         run_pipeline(ctx, vec![1]).await.expect("run_pipeline");
@@ -2022,6 +2309,7 @@ mod tests {
             cfg,
             tx: crate::model::EventTx(tx),
             ctl: RunControl::new(),
+            queue: ChapterQueue::new(vec![]),
         };
         run_pipeline(ctx, vec![1]).await.expect("run_pipeline");
 
@@ -2192,13 +2480,14 @@ mod tests {
             },
             tx: crate::model::EventTx(tx),
             ctl: RunControl::new(),
+            queue: ChapterQueue::new(vec![(1, 1)]),
         };
         // A sub-second stall so the stall arm fires without a real multi-second wait.
         let wd = Watchdog::with_stall(Some(Duration::from_millis(200)));
         let mut acc = Acc::default();
         let mut totals = Totals::default();
 
-        let halt = run_volume_chapters(&ctx, &[1], &wd, &mut acc, &mut totals).await;
+        let halt = run_volume_chapters(&ctx, None, &wd, &mut acc, &mut totals).await;
 
         assert!(
             matches!(halt, Halt::Stopped),
@@ -2252,6 +2541,7 @@ mod tests {
             cfg: crate::model::AppConfig::default(),
             tx: crate::model::EventTx(tx),
             ctl: RunControl::new(),
+            queue: ChapterQueue::new(vec![]),
         };
         let plan = vec![
             VolumePlan {
@@ -2301,6 +2591,193 @@ mod tests {
             translation::read_translated(&ws2, 1)
                 .await
                 .contains("ข้อความแปลต่อ")
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A chapter enqueued into the shared queue while the run is in flight is drained
+    /// in the SAME run (one `PipelineFinished`), not deferred to a fresh run.
+    #[tokio::test]
+    async fn live_enqueue_is_drained_in_the_same_run() {
+        let base = std::env::temp_dir().join(format!("honya_liveadd_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let ws = Workspace::new(base.clone(), 1);
+        translation::write_raw(&ws, 1, "# 第一章\n\n短い章です。").unwrap();
+        translation::write_raw(&ws, 2, "# 第二章\n\n別の短い章です。").unwrap();
+
+        let client = std::sync::Arc::new(CountingClient::default());
+        // Simulate the UI enqueueing ch2 mid-run by pushing it onto the shared handle
+        // before the pipeline drains; run_pipeline seeds [1] (deduped) → queue [1, 2].
+        let queue = ChapterQueue::new(vec![]);
+        assert!(queue.push_back(1, 2));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = PipelineCtx {
+            client: client.clone() as std::sync::Arc<dyn crate::llm::client::LlmClient>,
+            ws: ws.clone(),
+            models: crate::model::ModelSet::default(),
+            cfg: crate::model::AppConfig::default(),
+            tx: crate::model::EventTx(tx),
+            ctl: RunControl::new(),
+            queue: queue.clone(),
+        };
+
+        run_pipeline(ctx, vec![1]).await.expect("run_pipeline");
+
+        let mut completed = Vec::new();
+        let mut finished = 0u32;
+        let mut done_count = None;
+        while let Ok(ev) = rx.try_recv() {
+            match ev {
+                AppEvent::ChapterCompleted { chapter } => completed.push(chapter),
+                AppEvent::PipelineFinished { chapters_done, .. } => {
+                    finished += 1;
+                    done_count = Some(chapters_done);
+                }
+                _ => {}
+            }
+        }
+        completed.sort_unstable();
+        assert_eq!(completed, vec![1, 2], "the live-added chapter must run too");
+        assert_eq!(
+            finished, 1,
+            "exactly one PipelineFinished for the whole run"
+        );
+        assert_eq!(done_count, Some(2));
+        assert!(
+            queue.snapshot().1.is_empty(),
+            "the queue drains fully by the end of the run"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A cross-volume enqueue made during a project run is held until its volume runs,
+    /// then drained there — never popped early by the current volume's leg.
+    #[tokio::test]
+    async fn cross_volume_enqueue_runs_in_its_own_volume() {
+        let base = std::env::temp_dir().join(format!("honya_xvol_add_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let ws1 = Workspace::new(base.clone(), 1);
+        let ws2 = Workspace::new(base.clone(), 2);
+        translation::write_raw(&ws1, 1, "# 第一章\n\n短い章です。").unwrap();
+        translation::write_raw(&ws2, 1, "# 第一章\n\n別の短い章です。").unwrap();
+        translation::write_raw(&ws2, 2, "# 第二章\n\nさらに別の章です。").unwrap();
+
+        let client = std::sync::Arc::new(CountingClient::default());
+        // Enqueue Vol.2 ch2 up front (it is NOT in the plan); it must wait for Vol.2.
+        let queue = ChapterQueue::new(vec![]);
+        assert!(queue.push_back(2, 2));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = PipelineCtx {
+            client: client.clone() as std::sync::Arc<dyn crate::llm::client::LlmClient>,
+            ws: ws1.clone(),
+            models: crate::model::ModelSet::default(),
+            cfg: crate::model::AppConfig::default(),
+            tx: crate::model::EventTx(tx),
+            ctl: RunControl::new(),
+            queue: queue.clone(),
+        };
+        let plan = vec![
+            VolumePlan {
+                vol: 1,
+                label: None,
+                chapters: vec![1],
+            },
+            VolumePlan {
+                vol: 2,
+                label: None,
+                chapters: vec![1],
+            },
+        ];
+
+        run_project_pipeline(ctx, plan).await.expect("project run");
+
+        let mut finished = None;
+        while let Ok(ev) = rx.try_recv() {
+            if let AppEvent::PipelineFinished { chapters_done, .. } = ev {
+                finished = Some(chapters_done);
+            }
+        }
+        assert_eq!(
+            finished,
+            Some(3),
+            "Vol.1 ch1 + Vol.2 ch1 + the live-added Vol.2 ch2 all complete in one run"
+        );
+        assert!(
+            translation::read_translated(&ws2, 2)
+                .await
+                .contains("ข้อความแปลต่อ"),
+            "the cross-volume add was translated under its own volume"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A chapter enqueued into a volume that the plan does NOT visit must still be
+    /// drained by the tail sweep — never silently orphaned (review finding).
+    #[tokio::test]
+    async fn enqueue_to_a_volume_absent_from_the_plan_is_swept() {
+        let base = std::env::temp_dir().join(format!("honya_sweep_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let ws1 = Workspace::new(base.clone(), 1);
+        let ws3 = Workspace::new(base.clone(), 3);
+        translation::write_raw(&ws1, 1, "# 第一章\n\n短い章です。").unwrap();
+        translation::write_raw(&ws3, 1, "# 第一章\n\n三巻の章です。").unwrap();
+
+        let client = std::sync::Arc::new(CountingClient::default());
+        // Vol.3 ch1 is enqueued but the plan only covers Vol.1.
+        let queue = ChapterQueue::new(vec![]);
+        assert!(queue.push_back(3, 1));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = PipelineCtx {
+            client: client.clone() as std::sync::Arc<dyn crate::llm::client::LlmClient>,
+            ws: ws1.clone(),
+            models: crate::model::ModelSet::default(),
+            cfg: crate::model::AppConfig::default(),
+            tx: crate::model::EventTx(tx),
+            ctl: RunControl::new(),
+            queue: queue.clone(),
+        };
+        let plan = vec![VolumePlan {
+            vol: 1,
+            label: None,
+            chapters: vec![1],
+        }];
+
+        run_project_pipeline(ctx, plan).await.expect("project run");
+
+        let mut vols_started = Vec::new();
+        let mut finished = None;
+        while let Ok(ev) = rx.try_recv() {
+            match ev {
+                AppEvent::VolumeStarted { vol, .. } => vols_started.push(vol),
+                AppEvent::PipelineFinished { chapters_done, .. } => finished = Some(chapters_done),
+                _ => {}
+            }
+        }
+        assert_eq!(
+            finished,
+            Some(2),
+            "both Vol.1 ch1 and the swept Vol.3 ch1 ran"
+        );
+        assert_eq!(
+            vols_started,
+            vec![1, 3],
+            "the sweep announces Vol.3 after the plan's Vol.1"
+        );
+        assert!(
+            translation::read_translated(&ws3, 1)
+                .await
+                .contains("ข้อความแปลต่อ"),
+            "the orphan was translated under Vol.3's workspace, not lost"
+        );
+        assert!(
+            queue.snapshot().1.is_empty(),
+            "nothing is left stranded in the queue"
         );
 
         let _ = std::fs::remove_dir_all(&base);

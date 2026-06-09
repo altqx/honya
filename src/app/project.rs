@@ -228,6 +228,25 @@ impl ProjectScreen {
                     Action::StartTranslation { chapters }
                 }
             }
+            // Enqueue the marked (or selected) chapters of the volume under the cursor:
+            // appended to a live run's queue, or start a fresh run when idle. Carrying
+            // the cursor's volume keeps the chapter numbers bound to the right volume
+            // (the running volume can differ from the cursor during a project run).
+            KeyCode::Char('i') => {
+                let marked = self.marked_chapters(active);
+                let chapters = if !marked.is_empty() {
+                    self.selected.clear();
+                    marked
+                } else if let Some(ch) = self.selected_chapter(active) {
+                    vec![ch]
+                } else {
+                    Vec::new()
+                };
+                match (chapters.is_empty(), self.selected_volume(active)) {
+                    (false, Some(vol)) => Action::EnqueueChapters { vol, chapters },
+                    _ => Action::None,
+                }
+            }
             // Auto-translate the whole project: every not-yet-done chapter across
             // all volumes, one click (App builds the queue + confirms).
             KeyCode::Char('A') => Action::StartProjectTranslation,
@@ -709,6 +728,7 @@ impl ProjectScreen {
             ("t", "marked/current"),
             ("T", "whole vol"),
             ("A", "whole project"),
+            ("i", "enqueue"),
             ("V", "add vol"),
             ("x", "export"),
             ("Space", "mark"),
@@ -892,7 +912,7 @@ fn usage_line(label: &str, u: &UsageStats, theme: &Theme) -> Line<'static> {
     ])
 }
 
-fn translatable(ch: &Chapter) -> bool {
+pub(crate) fn translatable(ch: &Chapter) -> bool {
     matches!(ch.kind, ChapterKind::Prose)
         && (!ch.status.is_terminal() || ch.status == ChapterStatus::Failed)
 }

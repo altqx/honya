@@ -1303,7 +1303,7 @@ fn build_sample_epub(path: &std::path::Path) {
 
 #[tokio::test]
 async fn end_to_end_import_and_mock_translate() {
-    use crate::agents::pipeline::{PipelineCtx, RunControl, run_pipeline};
+    use crate::agents::pipeline::{ChapterQueue, PipelineCtx, RunControl, run_pipeline};
     use crate::llm::mock::MockClient;
     use crate::workspace::Workspace;
 
@@ -1364,6 +1364,7 @@ async fn end_to_end_import_and_mock_translate() {
         cfg: AppConfig::default(),
         tx: EventTx(tx),
         ctl: RunControl::new(),
+        queue: ChapterQueue::new(vec![]),
     };
     run_pipeline(ctx, vec![1]).await.expect("run_pipeline");
 
@@ -1493,7 +1494,7 @@ async fn end_to_end_import_and_mock_translate() {
 /// run completes and a human can finish that one chunk — never `bail!` with nothing.
 #[tokio::test]
 async fn partial_translator_stream_is_salvaged_as_needs_review() {
-    use crate::agents::pipeline::{PipelineCtx, RunControl, run_pipeline};
+    use crate::agents::pipeline::{ChapterQueue, PipelineCtx, RunControl, run_pipeline};
     use crate::llm::client::{LlmClient, Result as LlmResult};
     use crate::llm::{ChatRequest, ChatResponse, Choice, ResponseFormat, ResponseMessage, Usage};
     use crate::model::AppEvent;
@@ -1571,6 +1572,7 @@ async fn partial_translator_stream_is_salvaged_as_needs_review() {
         cfg: AppConfig::default(),
         tx: EventTx(tx),
         ctl: RunControl::new(),
+        queue: ChapterQueue::new(vec![]),
     };
     // Must complete by salvaging, never bail the chapter on a cut-off stream.
     run_pipeline(ctx, vec![1])
