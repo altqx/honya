@@ -228,10 +228,7 @@ impl ProjectScreen {
                     Action::StartTranslation { chapters }
                 }
             }
-            // Enqueue the marked (or selected) chapters of the volume under the cursor:
-            // appended to a live run's queue, or start a fresh run when idle. Carrying
-            // the cursor's volume keeps the chapter numbers bound to the right volume
-            // (the running volume can differ from the cursor during a project run).
+            // Keep same-numbered chapters bound to the cursor's volume.
             KeyCode::Char('i') => {
                 let marked = self.marked_chapters(active);
                 let chapters = if !marked.is_empty() {
@@ -247,31 +244,22 @@ impl ProjectScreen {
                     _ => Action::None,
                 }
             }
-            // Auto-translate the whole project: every not-yet-done chapter across
-            // all volumes, one click (App builds the queue + confirms).
             KeyCode::Char('A') => Action::StartProjectTranslation,
             KeyCode::Char('e') => Action::Goto(Screen::Lexicon),
-            // Re-open the synopsis editor for the active volume (raw → translate → reroll).
             KeyCode::Char('y') => {
                 let data = crate::workspace::volume::load(&active.workspace);
                 Action::show_overlay(Overlay::synopsis_edit(data.synopsis_raw, data.synopsis_th))
             }
-            // Add a volume to this project (import wizard pre-targeted at it).
             KeyCode::Char('V') => Action::AddVolume,
-            // Export the volume under the cursor to deliverable formats.
             KeyCode::Char('x') => {
                 let vol = self.selected_volume(active).unwrap_or(active.vol);
                 Action::show_overlay(Overlay::export(vol))
             }
-            // Translation QA inbox (App rebuilds the report from the live project).
             KeyCode::Char('Q') => Action::show_overlay(Overlay::qa_placeholder()),
             _ => Action::None,
         };
 
-        // Auto-follow the cursor: when navigation lands in a different volume and no
-        // concrete action fired, switch the active volume to match — so Reader /
-        // Translate / synopsis / QA all operate on the volume under the cursor.
-        // Marks key off per-volume chapter numbers, so leaving a volume clears them.
+        // Auto-follow volume changes when navigation lands without another action.
         if matches!(action, Action::None)
             && let Some(v) = self.selected_volume(active)
             && v != active.vol

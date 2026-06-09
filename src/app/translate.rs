@@ -19,10 +19,6 @@ use crate::ui::widgets::render_line_gauge;
 
 use super::{Action, Screen};
 
-/// One row of the Translate-tab queue panel: a chapter waiting to be (or currently
-/// being) translated, with the display metadata the App resolved from the live
-/// project. Built App-side and pushed via [`TranslateScreen::set_queue`] — the
-/// panel never reaches into project state itself.
 #[derive(Clone)]
 pub struct QueueRow {
     pub vol: u32,
@@ -30,12 +26,8 @@ pub struct QueueRow {
     pub title: String,
     pub kind: ChapterKind,
     pub status: ChapterStatus,
-    /// Source segment count ("NNN 句"), the existing raw-size proxy.
     pub source_segments: u32,
-    /// True for the locked head — the chapter the pipeline is on right now. Not
-    /// selectable or movable.
     pub running: bool,
-    /// 1-based execution position (running = 1, then 2, 3, …).
     pub est_pos: usize,
 }
 
@@ -77,19 +69,10 @@ pub struct TranslateScreen {
     /// a line to focus that agent) and the streaming preview pane.
     agent_area: Rect,
     preview_area: Rect,
-    /// Live queue mirror (running head first, then pending), pushed by the App from
-    /// the authoritative `run_queue` on every mutation. Empty when no run is active.
     queue: Vec<QueueRow>,
-    /// Selected PENDING index (0-based, excludes the running head). Meaningful only
-    /// while `queue_focused`.
     queue_sel: usize,
-    /// When true, j/k navigate the queue and J/K/S/x act on it; otherwise j/k scroll
-    /// the preview.
     queue_focused: bool,
-    /// Queue panel hit-test rect (the inner area), refreshed every frame.
     queue_area: Rect,
-    /// First pending index rendered this frame (the scroll window start), so a click
-    /// maps to the right pending row even when the list is scrolled.
     queue_offset: usize,
 }
 
@@ -121,8 +104,6 @@ impl TranslateScreen {
         }
     }
 
-    /// Replace the queue mirror (App pushes this from `run_queue` on every change).
-    /// Clamps the selection into range and drops focus when the queue empties.
     pub fn set_queue(&mut self, rows: Vec<QueueRow>) {
         self.queue = rows;
         let pending = self.pending_count();
@@ -138,8 +119,6 @@ impl TranslateScreen {
         self.queue.iter().filter(|r| !r.running).count()
     }
 
-    /// `(vol, chapter)` identity of the pending row at index `i` (excludes the running
-    /// head), for building identity-addressed queue actions.
     fn pending_identity(&self, i: usize) -> Option<(u32, u32)> {
         self.queue
             .iter()
@@ -381,7 +360,6 @@ impl TranslateScreen {
                 self.active_agent = (self.active_agent + 1) % 3;
                 Action::None
             }
-            // Queue panel: `g` toggles focus, `J`/`K` reorder, `S` sorts, `x` removes.
             KeyCode::Char('g') => {
                 if self.pending_count() > 0 {
                     self.queue_focused = !self.queue_focused;
@@ -498,8 +476,7 @@ impl TranslateScreen {
                     self.queue_focused = true;
                     let running_present = self.queue.first().map(|r| r.running).unwrap_or(false);
                     let row_in_panel = (m.row - self.queue_area.y) as usize;
-                    // Map the clicked screen row to a pending index, accounting for the
-                    // pinned running head and the current scroll window.
+                    // Convert the clicked row into a pending index; running is pinned.
                     let visible = row_in_panel.saturating_sub(usize::from(running_present));
                     let pidx = visible + self.queue_offset;
                     let pc = self.pending_count();
@@ -549,9 +526,7 @@ impl TranslateScreen {
 
         self.render_pipeline(f, rows[0], frame, theme);
 
-        // Carve a queue panel out of the bottom region while a run has chapters
-        // queued — but only when there's room to keep the preview usable; on a
-        // narrow terminal the preview stays full-width and the queue hides.
+        // Hide the queue on narrow terminals so the preview stays usable.
         if !self.queue.is_empty() && rows[1].width >= 56 {
             let cols = Layout::default()
                 .direction(Direction::Horizontal)
@@ -609,7 +584,7 @@ impl TranslateScreen {
         let width = inner.width as usize;
 
         let mut y = inner.y;
-        // Pin the running head at the top so "now translating" never scrolls away.
+        // Keep the running head visible while pending rows scroll.
         if let Some(row) = self.queue.first().filter(|r| r.running) {
             let line_area = Rect {
                 x: inner.x,
@@ -625,7 +600,6 @@ impl TranslateScreen {
             y += 1;
         }
 
-        // Pending rows fill the rest, windowed so the selection stays visible.
         let avail = (inner.y + inner.height).saturating_sub(y) as usize;
         if avail == 0 {
             return;
@@ -659,8 +633,7 @@ impl TranslateScreen {
         }
     }
 
-    /// Build one queue row line: `‹caret›‹pos›‹glyph› [Vn] chNNN ‹title›  ‹size›`,
-    /// width-budgeted in display columns so CJK/Thai titles never overflow the cell.
+    /// Queue row, width-budgeted in display columns for CJK/Thai titles.
     fn queue_line<'a>(
         &self,
         row: &'a QueueRow,
@@ -692,10 +665,8 @@ impl TranslateScreen {
 
         let prefix_w = col_width(caret) + col_width(&pos) + 2 + col_width(&vol) + col_width(&chap);
         let mut size_w = col_width(&size);
-        // Title gets whatever's left after the prefix and the right-aligned size tag.
         let mut title_budget = width.saturating_sub(prefix_w + size_w + 1);
         if title_budget < 4 {
-            // Too tight for the size tag — drop it and give the room to the title.
             size_w = 0;
             title_budget = width.saturating_sub(prefix_w);
         }
@@ -1110,7 +1081,6 @@ mod queue_panel_tests {
     #[test]
     fn renders_panel_at_several_widths_without_panic() {
         let theme = crate::model::ThemeId::default().build();
-        // A multi-volume queue (vol prefix path) at wide, narrow, and tall sizes.
         for (w, h) in [(90u16, 24u16), (60, 16), (120, 40)] {
             let mut screen = TranslateScreen::new();
             screen.phase = RunPhase::Running;
@@ -1128,12 +1098,10 @@ mod queue_panel_tests {
         let mut screen = TranslateScreen::new();
         screen.set_queue(rows());
         assert_eq!(screen.pending_count(), 2, "running head is not pending");
-        // An out-of-range selection is clamped on the next push.
         screen.queue_focused = true;
         screen.queue_sel = 9;
         screen.set_queue(rows());
         assert_eq!(screen.queue_sel, 1);
-        // Emptying the queue drops focus and resets the cursor.
         screen.set_queue(Vec::new());
         assert!(!screen.queue_focused);
         assert_eq!(screen.queue_sel, 0);
@@ -1143,16 +1111,13 @@ mod queue_panel_tests {
     fn keys_focus_move_sort_and_remove_pending_only() {
         let mut screen = TranslateScreen::new();
         screen.set_queue(rows());
-        // g toggles focus onto the queue.
         assert!(matches!(screen.handle_key(key('g')), Action::None));
         assert!(screen.queue_focused);
-        // J moves the selected pending item (ch4) down by identity; cursor follows it.
         match screen.handle_key(key('J')) {
             Action::QueueMoveDown { vol, ch } => assert_eq!((vol, ch), (1, 4)),
             other => panic!("expected QueueMoveDown, got {other:?}"),
         }
         assert_eq!(screen.queue_sel, 1);
-        // K moves the now-selected pending item (ch7) back up.
         match screen.handle_key(key('K')) {
             Action::QueueMoveUp { vol, ch } => assert_eq!((vol, ch), (2, 7)),
             other => panic!("expected QueueMoveUp, got {other:?}"),
@@ -1178,7 +1143,6 @@ mod queue_panel_tests {
         assert!(!screen.queue_focused);
         assert!(matches!(screen.handle_key(key('j')), Action::None));
         assert!(matches!(screen.handle_key(key('k')), Action::None));
-        // Movement keys are inert (no queue mutation) while unfocused.
         assert!(!screen.queue_focused);
     }
 }

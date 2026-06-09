@@ -8,7 +8,7 @@ honya (本屋) is a Ratatui terminal app for AI-assisted **Japanese → Thai** l
 
 ```sh
 cargo run --release          # launch the TUI in the current working directory (= the "shelf")
-cargo test                   # full suite (~57 tests: cleanse rules, EPUB parse, UI render smoke, mock e2e)
+cargo test                   # full suite (cleanse rules, EPUB parse, UI render smoke, mock e2e)
 cargo test <name>            # single test, e.g. cargo test reference_ctx_scopes_to_chunk
 cargo clippy --all-targets --locked -- -D warnings   # CI lints with warnings-as-errors; match this locally
 ```
@@ -47,7 +47,7 @@ The hard rule: **background tasks never touch `App` state directly.** Long-runni
 1. `App::on_key` → `route_key` decides what a key *means* given overlay/screen/capture state and returns an **`Action`** (it generally must not mutate state itself). Overlays get first refusal; a focused text field (`screen_is_capturing`) swallows single-letter globals; then global keys (`1`-`5`, Tab, `?`, `:`, `` ` ``, `q`) and toast dismissal (`Esc`/`Backspace`); then the active screen. `l` opens the activity log except on the Project tab, where it is the screen-local expand/focus key.
 2. `apply(action)` is the **single mutation funnel** — every state change and every spawn of background work goes through here.
 
-Each screen module (`shelf.rs`, `project.rs`, `translate.rs`, `reader.rs`, `lexicon.rs`) owns its own sub-state, `handle_key` (returns an `Action`), `render`, and `hints`. `Screen` enum variant **order is load-bearing** (`ui::chrome` and digit routing depend on it). The `TranslateScreen` observes *every* `AppEvent` so its live panel stays current even when off-tab.
+Each screen module (`shelf.rs`, `project.rs`, `translate.rs`, `reader.rs`, `lexicon.rs`) owns its own sub-state, `handle_key` (returns an `Action`), `render`, and `hints`. `Screen` enum variant **order is load-bearing** (`ui::chrome` and digit routing depend on it). The `TranslateScreen` observes *every* `AppEvent` so its live panel stays current even when off-tab; its queue panel is only a mirror of `App.run_queue`.
 
 ### The pipeline (`src/agents/pipeline.rs`)
 
@@ -58,6 +58,8 @@ Two design rules that look surprising but are deliberate:
 - **Reference context is scoped per chunk.** `build_reference_ctx` injects only the glossary terms and characters whose JP form actually appears in the chunk text (capped at 80 / 40), re-read every chunk. This stops the injected context from ballooning with the whole accumulated roster as a volume progresses. Continuity = the previous chunk's last N Thai sentences, seeded from the previous *chapter's* tail at a chapter boundary.
 
 Image-only chapters skip the agents entirely. `RunControl` is a cloneable `AtomicU8` (0 run / 1 pause / 2 stop) the UI toggles and the pipeline polls **between chunks** (pause/stop take effect after the current chunk finishes).
+
+The live run queue is `ChapterQueue`, shared between the UI and pipeline like `RunControl`. It stores `(vol, chapter)` identities because chapter numbers repeat across volumes. The active chapter lives in a separate `running` slot, so UI mutations only touch pending items: enqueue, move up/down, sort, and remove. A single-volume run drains one workspace and rejects cross-volume enqueues; a whole-project run drains by volume and then sweeps any live-added volumes the original plan did not cover. Whenever the UI adds/removes chapters, `App` resyncs the recovery checkpoint so crash resume follows the live queue.
 
 The three agents (`translator.rs`, `reviewer.rs`, plus the Orchestrator metadata turn) have independently-configurable models (`ModelSet`); prompts live in `prompts.rs`.
 

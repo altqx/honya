@@ -833,9 +833,7 @@ pub enum AppEvent {
     ChapterQueued {
         chapter: u32,
     },
-    /// The live chapter queue was mutated UI-side (enqueue / reorder / sort /
-    /// remove). A coalesced, payload-free signal so the off-tab queue panel
-    /// re-renders from the authoritative `App.run_queue`; never emitted per item.
+    /// Coalesced signal that the live queue mirror should refresh.
     QueueChanged,
     ChapterStarted {
         chapter: u32,

@@ -69,32 +69,21 @@ impl Default for RunControl {
     }
 }
 
-/// Shared, cheap-to-clone chapter queue the UI mutates (enqueue / reorder / sort /
-/// remove) and the pipeline drains between chapters — the same UI↔worker inversion
-/// as [`RunControl`]. Entries are `(vol, chapter)` so a cross-volume project run can
-/// disambiguate chapter numbers that repeat across volumes.
+/// Queue shared by the UI and pipeline. Items are `(vol, chapter)` because chapter
+/// numbers repeat across volumes.
 ///
-/// The head-lock ("you may not reorder the chapter that is currently translating")
-/// is enforced *structurally*: the running chapter lives in its own [`QueueInner::running`]
-/// field, separate from `pending`, and every reorder/sort/remove touches only `pending`.
-/// The run finishes the instant `pending` drains at a pop — a chapter enqueued while the
-/// current one is still translating lands in `pending` and is caught at the next pop, so
-/// "add while running" works without any keep-alive flag; a chapter added after the run
-/// has already drained simply starts a fresh run (the correct behavior).
+/// `running` is kept out of `pending`; UI mutations only touch `pending`, so the
+/// active chapter cannot be reordered or removed.
 #[derive(Clone, Default)]
 pub struct ChapterQueue(Arc<Mutex<QueueInner>>);
 
 #[derive(Default)]
 struct QueueInner {
-    /// (vol, chapter) in display / execution order — never includes `running`.
     pending: VecDeque<(u32, u32)>,
-    /// The chapter the pipeline is currently on (the locked head). Set by `next`/
-    /// `next_for` on a pop, cleared when a pop finds nothing.
     running: Option<(u32, u32)>,
 }
 
 impl ChapterQueue {
-    /// A queue pre-seeded with `items`, nothing running yet.
     pub fn new(items: Vec<(u32, u32)>) -> Self {
         Self(Arc::new(Mutex::new(QueueInner {
             pending: items.into_iter().collect(),
@@ -102,9 +91,6 @@ impl ChapterQueue {
         })))
     }
 
-    /// Append `items` to `pending`, skipping any already present (in `pending` or as
-    /// the `running` head). Used to seed each volume of a project run into the shared
-    /// queue without duplicating chapters a live enqueue already added.
     pub fn seed(&self, items: Vec<(u32, u32)>) {
         let mut g = self.0.lock().unwrap();
         for it in items {
@@ -115,18 +101,13 @@ impl ChapterQueue {
         }
     }
 
-    /// Pop the next chapter for a single-volume run: the front of `pending`, or `None`
-    /// when drained (which ends the run). Sets `running` accordingly.
     pub fn next(&self) -> Option<(u32, u32)> {
         let mut g = self.0.lock().unwrap();
         g.running = g.pending.pop_front();
         g.running
     }
 
-    /// Pop the next chapter whose volume is `vol` (project run): the first matching
-    /// entry, preserving relative order. `None` once this volume is drained, so the
-    /// project loop advances to the next volume. Entries for other volumes (e.g. a
-    /// cross-volume live enqueue) stay queued for when that volume runs.
+    /// Pop the next item for `vol`, leaving other volumes queued.
     pub fn next_for(&self, vol: u32) -> Option<(u32, u32)> {
         let mut g = self.0.lock().unwrap();
         match g.pending.iter().position(|(v, _)| *v == vol) {
@@ -142,8 +123,6 @@ impl ChapterQueue {
         }
     }
 
-    /// Enqueue `(vol, ch)` at the back, unless it is already running or pending.
-    /// Returns whether it was actually added.
     pub fn push_back(&self, vol: u32, ch: u32) -> bool {
         let mut g = self.0.lock().unwrap();
         let it = (vol, ch);
@@ -154,9 +133,7 @@ impl ChapterQueue {
         true
     }
 
-    /// Move the pending `(vol, ch)` one slot earlier (no-op if absent or already
-    /// first). Addressed by IDENTITY, not position, so a concurrent pipeline pop
-    /// (which shifts indices) can never make this hit the wrong chapter.
+    /// Move a pending item by identity, never by UI position.
     pub fn move_item_up(&self, vol: u32, ch: u32) {
         let mut g = self.0.lock().unwrap();
         if let Some(pos) = g.pending.iter().position(|&it| it == (vol, ch))
@@ -166,7 +143,6 @@ impl ChapterQueue {
         }
     }
 
-    /// Move the pending `(vol, ch)` one slot later (no-op if absent or already last).
     pub fn move_item_down(&self, vol: u32, ch: u32) {
         let mut g = self.0.lock().unwrap();
         if let Some(pos) = g.pending.iter().position(|&it| it == (vol, ch))
@@ -176,13 +152,11 @@ impl ChapterQueue {
         }
     }
 
-    /// Sort `pending` ascending by (vol, chapter). Never touches `running`.
     pub fn sort_by_number(&self) {
         let mut g = self.0.lock().unwrap();
         g.pending.make_contiguous().sort_unstable();
     }
 
-    /// Remove the pending `(vol, ch)` by identity. Returns whether it was present.
     pub fn remove_item(&self, vol: u32, ch: u32) -> bool {
         let mut g = self.0.lock().unwrap();
         if let Some(pos) = g.pending.iter().position(|&it| it == (vol, ch)) {
@@ -193,14 +167,12 @@ impl ChapterQueue {
         }
     }
 
-    /// `(running, pending)` snapshot for the UI panel and checkpoint resync.
     pub fn snapshot(&self) -> QueueSnapshot {
         let g = self.0.lock().unwrap();
         (g.running, g.pending.iter().copied().collect())
     }
 }
 
-/// `(running head, pending list)` — what the queue exposes to the UI panel.
 pub type QueueSnapshot = (Option<(u32, u32)>, Vec<(u32, u32)>);
 
 /// Why the loop watchdog tripped on a chapter.
@@ -503,9 +475,6 @@ pub async fn run_pipeline(ctx: PipelineCtx, chapters: Vec<u32>) -> anyhow::Resul
     let wd = Watchdog::new(&ctx.cfg);
     let mut acc = Acc::default();
     let mut totals = Totals::default();
-    // Seed the live queue with the requested chapters (the UI may already have
-    // pre-seeded the same handle; `seed` dedupes). A live enqueue appends to it and
-    // is drained in the same run.
     let vol = ctx.vol_number();
     ctx.queue
         .seed(chapters.into_iter().map(|c| (vol, c)).collect());
@@ -537,9 +506,6 @@ pub async fn run_project_pipeline(ctx: PipelineCtx, plan: Vec<VolumePlan>) -> an
             break;
         }
         let vctx = ctx.with_volume(vp.vol);
-        // Seed this volume's chapters into the SHARED queue (deduped, so a live
-        // enqueue already sitting in `pending` for this volume isn't doubled). The
-        // queue spans volumes, so a cross-volume enqueue made earlier is waiting here.
         vctx.queue
             .seed(vp.chapters.iter().map(|&c| (vp.vol, c)).collect());
         vctx.tx.send(AppEvent::VolumeStarted {
@@ -561,9 +527,7 @@ pub async fn run_project_pipeline(ctx: PipelineCtx, plan: Vec<VolumePlan>) -> an
         }
     }
 
-    // Drain anything live-enqueued into a volume the plan loop already passed, or one
-    // absent from the plan entirely, so a cross-volume add is never silently lost.
-    // Normal runs leave `pending` empty here, so this is a no-op for them.
+    // Catch live-added chapters in volumes the plan already passed or never listed.
     while !stopped && !ctx.ctl.is_stopped() {
         let (_, pending) = ctx.queue.snapshot();
         let Some(&(vol, _)) = pending.first() else {
@@ -608,10 +572,6 @@ async fn run_volume_chapters(
             });
             return Halt::Stopped;
         }
-        // Pull the next chapter from the live queue. A single-volume run drains the
-        // whole queue (`next`); a project run takes only its own volume's chapters
-        // (`next_for`) and returns once they're exhausted so the caller advances to
-        // the next volume. Either way, `None` == this leg is done.
         let chapter = match vol_scope {
             Some(vol) => match ctx.queue.next_for(vol) {
                 Some((_, c)) => c,
@@ -1724,7 +1684,6 @@ mod queue_tests {
         assert_eq!(q.next(), Some((1, 1)));
         assert_eq!(q.next(), Some((1, 2)));
         assert_eq!(q.next(), Some((1, 3)));
-        // Drained: a single-volume run ends here.
         assert_eq!(q.next(), None);
         let (running, pending) = q.snapshot();
         assert_eq!(running, None);
@@ -1734,10 +1693,8 @@ mod queue_tests {
     #[test]
     fn enqueue_while_running_is_picked_up_at_next_pop() {
         let q = ChapterQueue::new(vec![(1, 1)]);
-        assert_eq!(q.next(), Some((1, 1))); // ch1 now running, pending empty
-        // The user enqueues ch5 while ch1 is still translating.
+        assert_eq!(q.next(), Some((1, 1)));
         assert!(q.push_back(1, 5));
-        // ch1 finishes → the next pop catches the live add (no early finish).
         assert_eq!(q.next(), Some((1, 5)));
         assert_eq!(q.next(), None);
     }
@@ -1745,7 +1702,7 @@ mod queue_tests {
     #[test]
     fn push_back_dedupes_against_running_and_pending() {
         let q = ChapterQueue::new(vec![(1, 2)]);
-        assert_eq!(q.next(), Some((1, 2))); // (1,2) running
+        assert_eq!(q.next(), Some((1, 2)));
         assert!(
             !q.push_back(1, 2),
             "re-adding the running chapter is a no-op"
@@ -1759,14 +1716,13 @@ mod queue_tests {
     #[test]
     fn reorder_and_sort_touch_only_pending() {
         let q = ChapterQueue::new(vec![(1, 5), (1, 3), (1, 4)]);
-        assert_eq!(q.next(), Some((1, 5))); // (1,5) is the locked head now
-        // pending = [(1,3),(1,4)]
-        q.move_item_down(1, 3); // [(1,4),(1,3)]
+        assert_eq!(q.next(), Some((1, 5)));
+        q.move_item_down(1, 3);
         assert_eq!(q.snapshot().1, vec![(1, 4), (1, 3)]);
-        q.move_item_up(1, 3); // [(1,3),(1,4)]
+        q.move_item_up(1, 3);
         assert_eq!(q.snapshot().1, vec![(1, 3), (1, 4)]);
-        q.push_back(1, 1); // [(1,3),(1,4),(1,1)]
-        q.sort_by_number(); // [(1,1),(1,3),(1,4)]
+        q.push_back(1, 1);
+        q.sort_by_number();
         let (running, pending) = q.snapshot();
         assert_eq!(running, Some((1, 5)), "the head is never reordered/sorted");
         assert_eq!(pending, vec![(1, 1), (1, 3), (1, 4)]);
@@ -1775,9 +1731,9 @@ mod queue_tests {
     #[test]
     fn move_and_remove_are_identity_addressed_and_safe() {
         let q = ChapterQueue::new(vec![(1, 1), (1, 2)]);
-        q.move_item_up(1, 1); // no-op at the top
-        q.move_item_down(1, 2); // no-op at the bottom
-        q.move_item_up(9, 9); // absent → no-op
+        q.move_item_up(1, 1);
+        q.move_item_down(1, 2);
+        q.move_item_up(9, 9);
         assert_eq!(q.snapshot().1, vec![(1, 1), (1, 2)]);
         assert!(q.remove_item(1, 1));
         assert!(!q.remove_item(1, 9), "removing an absent item is a no-op");
@@ -1786,27 +1742,19 @@ mod queue_tests {
 
     #[test]
     fn reorder_targets_by_identity_across_a_concurrent_pop() {
-        // pending = [(1,3),(1,4),(1,5)] with (1,2) running.
         let q = ChapterQueue::new(vec![(1, 2), (1, 3), (1, 4), (1, 5)]);
         assert_eq!(q.next(), Some((1, 2)));
-        // The pipeline pops the front (1,3) — every positional index now shifts.
         assert_eq!(q.next(), Some((1, 3)));
-        // A move issued against the (now stale) position 1 must still hit (1,5),
-        // not its old neighbour, because it is addressed by identity.
-        q.move_item_up(1, 5); // [(1,5),(1,4)]
+        q.move_item_up(1, 5);
         assert_eq!(q.snapshot().1, vec![(1, 5), (1, 4)]);
     }
 
     #[test]
     fn next_for_scopes_to_a_volume_and_advances_when_drained() {
-        // A project run: Vol.1 chapters interleaved with a cross-volume live add.
         let q = ChapterQueue::new(vec![(1, 1), (2, 7), (1, 2)]);
-        // Vol.1 leg pops only its own chapters, in order.
         assert_eq!(q.next_for(1), Some((1, 1)));
         assert_eq!(q.next_for(1), Some((1, 2)));
-        // Vol.1 is drained even though a Vol.2 chapter is still queued → advance.
         assert_eq!(q.next_for(1), None);
-        // The Vol.2 leg then picks up the cross-volume add.
         assert_eq!(q.next_for(2), Some((2, 7)));
         assert_eq!(q.next_for(2), None);
     }
@@ -1814,7 +1762,7 @@ mod queue_tests {
     #[test]
     fn seed_appends_without_duplicating() {
         let q = ChapterQueue::new(vec![(1, 1)]);
-        q.seed(vec![(1, 1), (1, 2), (1, 3)]); // (1,1) already present → skipped
+        q.seed(vec![(1, 1), (1, 2), (1, 3)]);
         assert_eq!(q.snapshot().1, vec![(1, 1), (1, 2), (1, 3)]);
     }
 }
@@ -2596,8 +2544,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// A chapter enqueued into the shared queue while the run is in flight is drained
-    /// in the SAME run (one `PipelineFinished`), not deferred to a fresh run.
     #[tokio::test]
     async fn live_enqueue_is_drained_in_the_same_run() {
         let base = std::env::temp_dir().join(format!("honya_liveadd_{}", std::process::id()));
@@ -2608,8 +2554,6 @@ mod tests {
         translation::write_raw(&ws, 2, "# 第二章\n\n別の短い章です。").unwrap();
 
         let client = std::sync::Arc::new(CountingClient::default());
-        // Simulate the UI enqueueing ch2 mid-run by pushing it onto the shared handle
-        // before the pipeline drains; run_pipeline seeds [1] (deduped) → queue [1, 2].
         let queue = ChapterQueue::new(vec![]);
         assert!(queue.push_back(1, 2));
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -2653,8 +2597,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// A cross-volume enqueue made during a project run is held until its volume runs,
-    /// then drained there — never popped early by the current volume's leg.
     #[tokio::test]
     async fn cross_volume_enqueue_runs_in_its_own_volume() {
         let base = std::env::temp_dir().join(format!("honya_xvol_add_{}", std::process::id()));
@@ -2667,7 +2609,6 @@ mod tests {
         translation::write_raw(&ws2, 2, "# 第二章\n\nさらに別の章です。").unwrap();
 
         let client = std::sync::Arc::new(CountingClient::default());
-        // Enqueue Vol.2 ch2 up front (it is NOT in the plan); it must wait for Vol.2.
         let queue = ChapterQueue::new(vec![]);
         assert!(queue.push_back(2, 2));
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -2716,8 +2657,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// A chapter enqueued into a volume that the plan does NOT visit must still be
-    /// drained by the tail sweep — never silently orphaned (review finding).
     #[tokio::test]
     async fn enqueue_to_a_volume_absent_from_the_plan_is_swept() {
         let base = std::env::temp_dir().join(format!("honya_sweep_{}", std::process::id()));
@@ -2729,7 +2668,6 @@ mod tests {
         translation::write_raw(&ws3, 1, "# 第一章\n\n三巻の章です。").unwrap();
 
         let client = std::sync::Arc::new(CountingClient::default());
-        // Vol.3 ch1 is enqueued but the plan only covers Vol.1.
         let queue = ChapterQueue::new(vec![]);
         assert!(queue.push_back(3, 1));
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();

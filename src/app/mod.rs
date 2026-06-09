@@ -154,16 +154,11 @@ pub enum Action {
     StartProjectTranslation,
     /// Confirmed: begin the whole-project auto-translate run.
     BeginProjectTranslation,
-    /// Add chapters of volume `vol` (the volume under the Project cursor) to the live
-    /// run's queue, or start a fresh run when idle. Carrying `vol` keeps the chapter
-    /// numbers bound to the volume the user actually selected them in.
     EnqueueChapters {
         vol: u32,
         chapters: Vec<u32>,
     },
-    /// Reorder a pending queue item up / down, addressed by `(vol, ch)` identity so a
-    /// concurrent pipeline pop can never make it hit the wrong chapter. No-op at the
-    /// bounds; the running head is never a pending item.
+    /// Reorder by `(vol, ch)` identity; the running head is not pending.
     QueueMoveUp {
         vol: u32,
         ch: u32,
@@ -172,9 +167,7 @@ pub enum Action {
         vol: u32,
         ch: u32,
     },
-    /// Sort the pending queue ascending by chapter number (never the running head).
     SortQueue,
-    /// Drop a pending queue item, addressed by `(vol, ch)` identity.
     DequeueChapter {
         vol: u32,
         ch: u32,
@@ -306,9 +299,6 @@ pub struct App {
     pub export_active: bool,
     /// Shared pause/stop control for the in-flight pipeline run (None when idle).
     pub run_ctl: Option<crate::agents::pipeline::RunControl>,
-    /// Shared live chapter queue for the in-flight run (None when idle). The UI
-    /// enqueues / reorders through this handle and the pipeline drains it; the
-    /// authoritative ordering lives here, the Translate panel only mirrors it.
     pub run_queue: Option<crate::agents::pipeline::ChapterQueue>,
     /// Rolling activity log shown in the Log overlay.
     pub log: Vec<(LogLevel, String)>,
@@ -1748,12 +1738,6 @@ impl App {
                 .unwrap_or(false)
     }
 
-    /// Append chapters of volume `vol` (the volume the user selected them in) to the
-    /// in-flight run's queue. A single-volume run is pinned to one volume's workspace,
-    /// so a cross-volume enqueue is rejected with a clear message; a project run
-    /// accepts any volume (the pipeline's tail-drain sweep guarantees it runs even if
-    /// its plan leg already passed). Filters to translatable prose, dedupes via the
-    /// queue, then resyncs the recovery checkpoint and refreshes the panel.
     fn enqueue_live(&mut self, vol: u32, chapters: Vec<u32>) {
         let Some(queue) = self.run_queue.clone() else {
             return;
@@ -1768,8 +1752,7 @@ impl App {
             .map(|cp| cp.whole_project)
             .unwrap_or(false);
         if !whole_project {
-            // The run's pipeline reads only its own volume's raw files; a chapter from
-            // another volume would resolve against the wrong workspace, so refuse it.
+            // Single-volume runs resolve raw files through one workspace.
             let run_vol = self.active_run.as_ref().map(|cp| cp.vol);
             if Some(vol) != run_vol {
                 self.toast = Some(Toast::warn(format!(
@@ -1805,8 +1788,6 @@ impl App {
         self.tx.send(AppEvent::QueueChanged);
     }
 
-    /// The in-memory chapter record in a SPECIFIC volume (queue rows span volumes
-    /// during a project run, so this can't go through `event_vol`-scoped lookup).
     fn chapter_in_vol(&self, vol: u32, chapter: u32) -> Option<&crate::model::Chapter> {
         self.active
             .as_ref()?
@@ -1819,9 +1800,6 @@ impl App {
             .find(|c| c.number == chapter)
     }
 
-    /// Rebuild the Translate-tab queue panel from the authoritative `run_queue`,
-    /// resolving each `(vol, chapter)` to its live `Chapter` for the display
-    /// metadata. Clears the panel when no run is active.
     fn refresh_queue_panel(&mut self) {
         let Some(queue) = self.run_queue.clone() else {
             self.translate.set_queue(Vec::new());
@@ -1857,9 +1835,6 @@ impl App {
         }
     }
 
-    /// Rewrite the recovery checkpoint's chapter list from the live queue so a
-    /// crash-resume replays live-added (and skips removed) chapters. Order-only
-    /// changes (move / sort) don't alter the set, so callers skip this for those.
     fn resync_run_checkpoint(&mut self) {
         let Some(queue) = self.run_queue.as_ref() else {
             return;
@@ -2073,11 +2048,7 @@ impl App {
                         if !matches!(c.kind, crate::model::ChapterKind::Prose) {
                             return false;
                         }
-                        // Obviously outstanding (Pending / active / Paused / Failed),
-                        // OR it scans terminal-clean/flagged but is actually missing
-                        // chunks on disk (an interrupted chapter the snapshot can't
-                        // tell from a finished one). The pipeline's chunk-level resume
-                        // then re-spends only on the missing chunks.
+                        // A non-empty translated file can still be missing chunks.
                         !c.status.is_terminal()
                             || c.status == ChapterStatus::Failed
                             || !chapter_complete_on_disk(&ws, c.number, &self.cfg)
@@ -2177,10 +2148,7 @@ impl App {
             return;
         };
 
-        // The run-history row keys to the stable `history_vol` (the live volume
-        // tracks via `running_vol`, not the checkpoint). `cp.chapters` records the
-        // full cross-volume queue so the checkpoint stays resumable and the history
-        // row reflects the project-wide scope.
+        // Store project-run history on a stable volume even when the live volume moves.
         let ws = Workspace::new(project_dir.clone(), history_vol);
         let all_chapters: Vec<u32> = plan.iter().flat_map(|p| p.chapters.clone()).collect();
 
@@ -2208,9 +2176,6 @@ impl App {
         } else {
             checkpoint.honya_version.clone()
         };
-        // The run-history row lives in `history_vol`'s VOLUME.md, keyed by run_id;
-        // record_run_started updates-or-inserts, so a resume re-uses the same row.
-        // Accurate cross-volume done/failed counts are filled in at finish.
         let history = RunHistoryEntry::started(
             checkpoint.run_id.clone(),
             checkpoint.started_at,
@@ -2222,9 +2187,6 @@ impl App {
         }
 
         let ctl = crate::agents::pipeline::RunControl::new();
-        // Seed the shared queue with every (vol, chapter) pair across the plan so the
-        // panel shows the full cross-volume queue up front; `run_project_pipeline`
-        // re-seeds per volume (deduped), and a cross-volume enqueue lands here too.
         let queue_seed: Vec<(u32, u32)> = plan
             .iter()
             .flat_map(|p| p.chapters.iter().map(|&c| (p.vol, c)))
@@ -2242,8 +2204,6 @@ impl App {
         self.run_ctl = Some(ctl);
         self.run_queue = Some(queue);
         self.active_run = Some(checkpoint);
-        // The first `VolumeStarted` (emitted before any chapter event of that
-        // volume) sets the live volume; no per-chapter event can arrive before it.
         self.running_vol = None;
         self.refresh_queue_panel();
         let vols = plan.len();
