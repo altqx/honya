@@ -2,6 +2,8 @@
 //! files. Tab cycles Glossary ↔ Characters ↔ Style. Entries can be added / edited /
 //! deleted inline, persisting via workspace::{glossary,characters}::upsert.
 
+use std::hash::{Hash, Hasher};
+
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -176,6 +178,9 @@ pub struct LexiconScreen {
     tab_rects: Vec<(Rect, u8)>,
     table_area: Rect,
     screen_area: Rect,
+    /// Memoized Markdown render of STYLE.md, so the Style tab is not re-parsed on
+    /// every 100 ms tick. Keyed on the file body + width + theme.
+    style_cache: crate::ui::markdown::RenderCache,
 }
 
 impl LexiconScreen {
@@ -192,6 +197,7 @@ impl LexiconScreen {
             tab_rects: Vec::new(),
             table_area: Rect::default(),
             screen_area: Rect::default(),
+            style_cache: crate::ui::markdown::RenderCache::default(),
         }
     }
 
@@ -836,17 +842,24 @@ impl LexiconScreen {
         );
     }
 
-    fn render_style(&self, f: &mut Frame, area: Rect, ws: &Workspace, theme: &Theme) {
+    fn render_style(&mut self, f: &mut Frame, area: Rect, ws: &Workspace, theme: &Theme) {
         let body = std::fs::read_to_string(ws.style_md())
             .unwrap_or_else(|_| "STYLE.md not found.".to_string());
         // Render STYLE.md as Markdown (headings, emphasis, lists) instead of raw
-        // syntax; wrap so long guidance lines stay readable.
-        let lines = crate::ui::markdown::render(
-            &body,
-            theme.ink_soft,
-            theme,
-            area.width.saturating_sub(2) as usize,
-        );
+        // syntax; wrap so long guidance lines stay readable. Memoize the parse so a
+        // static file is not re-rendered on every animation tick.
+        let width = area.width.saturating_sub(2) as usize;
+        let fg = theme.ink_soft;
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        body.hash(&mut h);
+        width.hash(&mut h);
+        fg.hash(&mut h);
+        crate::ui::markdown::theme_fingerprint(theme).hash(&mut h);
+        let key = h.finish();
+        let lines = self
+            .style_cache
+            .lines(key, || crate::ui::markdown::render(&body, fg, theme, width))
+            .to_vec();
         f.render_widget(
             Paragraph::new(lines)
                 .wrap(Wrap { trim: false })

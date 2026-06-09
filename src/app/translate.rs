@@ -4,6 +4,8 @@
 //! (role badge, spinner on the active one) + a token/retry meter. Bottom panel: the
 //! streaming Thai preview side-by-side with the JA source and an indigo caret.
 
+use std::hash::{Hash, Hasher};
+
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -74,6 +76,10 @@ pub struct TranslateScreen {
     queue_focused: bool,
     queue_area: Rect,
     queue_offset: usize,
+    /// Memoized Markdown render of the streaming preview, so a static (paused/idle)
+    /// preview is not re-parsed on every 100 ms tick. Keyed on the preview's length +
+    /// tail, so each streamed append rebuilds but a steady pane reuses the lines.
+    preview_cache: crate::ui::markdown::RenderCache,
 }
 
 impl TranslateScreen {
@@ -101,6 +107,7 @@ impl TranslateScreen {
             queue_focused: false,
             queue_area: Rect::default(),
             queue_offset: 0,
+            preview_cache: crate::ui::markdown::RenderCache::default(),
         }
     }
 
@@ -917,7 +924,9 @@ impl TranslateScreen {
 
         // Compose the preview lines: a faint placeholder when there's nothing yet,
         // otherwise the streaming Thai rendered as Markdown. A trailing indigo
-        // caret marks the live tail.
+        // caret marks the live tail. The Markdown render is memoized so a paused /
+        // idle pane is not re-parsed on every 100 ms tick; each streamed append
+        // changes the preview's length + tail and so rebuilds.
         let mut lines: Vec<Line> = if self.preview.is_empty() {
             let msg = match self.phase {
                 RunPhase::Idle => {
@@ -931,7 +940,19 @@ impl TranslateScreen {
                 Style::default().fg(theme.ink_faint),
             ))]
         } else {
-            crate::ui::markdown::render(&self.preview, theme.th_text, theme, inner.width as usize)
+            let preview = &self.preview;
+            let width = inner.width as usize;
+            let fg = theme.th_text;
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            preview.len().hash(&mut h);
+            preview_tail(preview).hash(&mut h);
+            width.hash(&mut h);
+            fg.hash(&mut h);
+            crate::ui::markdown::theme_fingerprint(theme).hash(&mut h);
+            let key = h.finish();
+            self.preview_cache
+                .lines(key, || crate::ui::markdown::render(preview, fg, theme, width))
+                .to_vec()
         };
 
         let caret = Span::styled("▏", Style::default().fg(theme.stream_cursor));
@@ -1030,6 +1051,17 @@ fn human_tok(n: u32) -> String {
     } else {
         n.to_string()
     }
+}
+
+/// The last ~96 bytes of `s`, snapped to a UTF-8 boundary. Combined with the full
+/// length, this distinguishes the append-only growth of the streaming preview cheaply
+/// — enough to key its render cache without hashing the whole (growing) buffer.
+fn preview_tail(s: &str) -> &str {
+    let lower = s.len().saturating_sub(96);
+    let start = (lower..=s.len())
+        .find(|&i| s.is_char_boundary(i))
+        .unwrap_or(s.len());
+    &s[start..]
 }
 
 #[cfg(test)]

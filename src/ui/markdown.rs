@@ -13,6 +13,8 @@
 //! for full-width thematic rules.  Every emitted text run passes through
 //! [`thai_display_safe`] so Thai SARA AM never smears across cells.
 
+use std::hash::{Hash, Hasher};
+
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use termimad::{
@@ -63,6 +65,52 @@ pub fn render(md: &str, base: Color, theme: &Theme, width: usize) -> Vec<Line<'s
         out.push(Line::raw(""));
     }
     out
+}
+
+/// Memoizes the lines produced by [`render`] (plus any post-styling the caller adds
+/// in `build`, e.g. [`highlight`]) so the Markdown parse — the expensive part, run
+/// over the *whole* document — happens only when an input changes, not on every
+/// 100 ms animation tick. The caller passes a `key` that must capture every input
+/// affecting the output (content, width, foreground, theme, highlight/search state …);
+/// an unchanged key returns the cached lines untouched. Scrolling is *not* an input —
+/// it is applied by the consuming `Paragraph`, so it never invalidates the cache.
+#[derive(Default)]
+pub struct RenderCache {
+    key: Option<u64>,
+    lines: Vec<Line<'static>>,
+}
+
+impl RenderCache {
+    /// The cached lines for `key`, rebuilding via `build` only when the key changed.
+    pub fn lines(
+        &mut self,
+        key: u64,
+        build: impl FnOnce() -> Vec<Line<'static>>,
+    ) -> &[Line<'static>] {
+        if self.key != Some(key) {
+            self.lines = build();
+            self.key = Some(key);
+        }
+        &self.lines
+    }
+}
+
+/// A cheap fingerprint of the theme colors the Markdown renderer bakes into spans, so
+/// a [`RenderCache`] key changes when the active theme does — without comparing whole
+/// `Theme`s. Covers exactly the palette fields `render`'s span styling reads.
+pub fn theme_fingerprint(theme: &Theme) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for c in [
+        theme.accent,
+        theme.accent_soft,
+        theme.ink_soft,
+        theme.bg_inset,
+        theme.status_image,
+        theme.rule,
+    ] {
+        c.hash(&mut h);
+    }
+    h.finish()
 }
 
 /// Tint every occurrence of any string in `needles` across already-rendered
@@ -1256,5 +1304,45 @@ mod tests {
         let lines = render_one("");
         assert_eq!(lines.len(), 1);
         assert_eq!(line_text(&lines[0]), "");
+    }
+
+    #[test]
+    fn render_cache_rebuilds_only_on_key_change() {
+        let mut cache = RenderCache::default();
+        let builds = std::cell::Cell::new(0u32);
+        let mut build = |key: u64, text: &'static str| {
+            cache
+                .lines(key, || {
+                    builds.set(builds.get() + 1);
+                    vec![Line::raw(text)]
+                })
+                .to_vec()
+        };
+
+        assert_eq!(line_text(&build(1, "alpha")[0]), "alpha");
+        assert_eq!(builds.get(), 1);
+
+        // Same key: the closure must NOT run again (this is the per-frame fast path).
+        assert_eq!(
+            line_text(&build(1, "ignored")[0]),
+            "alpha",
+            "an unchanged key reuses the cached lines"
+        );
+        assert_eq!(builds.get(), 1);
+
+        // New key: rebuild.
+        assert_eq!(line_text(&build(2, "beta")[0]), "beta");
+        assert_eq!(builds.get(), 2);
+    }
+
+    #[test]
+    fn theme_fingerprint_differs_across_themes_and_is_stable() {
+        let washi = theme_fingerprint(&Theme::washi());
+        assert_eq!(washi, theme_fingerprint(&Theme::washi()), "stable per theme");
+        assert_ne!(
+            washi,
+            theme_fingerprint(&Theme::sumi()),
+            "a different palette must change the key"
+        );
     }
 }

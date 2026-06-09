@@ -4,6 +4,9 @@
 //! shared scroll position drives both panes; `z` decouples; `[`/`]` move between
 //! chapters; `o` cycles split / JA-only / TH-only; `w` toggles wrap.
 
+use std::cell::RefCell;
+use std::hash::{Hash, Hasher};
+
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -92,6 +95,15 @@ pub struct ReaderScreen {
     /// the pointer is over when the two are decoupled. Empty when a pane is hidden.
     ja_area: Rect,
     th_area: Rect,
+    /// Bumped whenever the rendered *content* of a pane changes (chapter load, note
+    /// edits). Folds into the per-pane cache key so the expensive Markdown parse is
+    /// skipped on the 100 ms ticker / pipeline events while reading a static chapter.
+    content_rev: u64,
+    /// Memoized rendered lines for the JA / TH panes, rebuilt only when their cache
+    /// key (content_rev, width, theme, highlight/search state …) changes — never on a
+    /// bare scroll or animation tick.
+    ja_cache: RefCell<crate::ui::markdown::RenderCache>,
+    th_cache: RefCell<crate::ui::markdown::RenderCache>,
 }
 
 impl ReaderScreen {
@@ -118,6 +130,9 @@ impl ReaderScreen {
             chunk_cfg: (DEFAULT_CHUNK_TARGET, DEFAULT_CHUNK_HARD_CAP),
             ja_area: Rect::default(),
             th_area: Rect::default(),
+            content_rev: 0,
+            ja_cache: RefCell::new(crate::ui::markdown::RenderCache::default()),
+            th_cache: RefCell::new(crate::ui::markdown::RenderCache::default()),
         }
     }
 
@@ -144,6 +159,7 @@ impl ReaderScreen {
         // desyncs the terminal and smears ำ across the screen on the next redraw.
         self.th = crate::ui::text::thai_display_safe(&th);
         self.search = None;
+        self.content_rev = self.content_rev.wrapping_add(1);
         self.reload_annotations(ws);
         self.reload_highlight_terms(ws);
         self.reload_bookmarks(ws);
@@ -296,6 +312,8 @@ impl ReaderScreen {
         } else {
             crate::workspace::volume::reader_annotations(ws, self.chapter)
         };
+        // Notes are interleaved into the TH pane, so a note edit changes its render.
+        self.content_rev = self.content_rev.wrapping_add(1);
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Action {
@@ -747,53 +765,74 @@ impl ReaderScreen {
         let inner = block.inner(area);
         f.render_widget(block, area);
 
-        // Hide the machine-only chunk / review markers from the TH pane (they would
-        // otherwise show as literal `<!-- honya:chunk N -->` lines) while preserving
-        // the line count, so note/bookmark/review anchors keep their file-line basis.
-        let cleaned;
-        let base: &str = if is_thai {
-            cleaned = hide_markers(content);
-            cleaned.as_str()
-        } else {
-            content
-        };
+        // Re-parsing the whole chapter's Markdown every frame is what makes a large
+        // chapter lag (the loop redraws on each 100 ms tick and pipeline event). The
+        // parse output depends only on the inputs folded into `key` below — never on
+        // the scroll offset — so memoize it and let the `Paragraph` re-scroll cheaply.
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.content_rev.hash(&mut h);
+        is_thai.hash(&mut h);
+        inner.width.hash(&mut h);
+        self.highlight.hash(&mut h);
+        self.show_annotations.hash(&mut h);
+        fg.hash(&mut h);
+        crate::ui::markdown::theme_fingerprint(theme).hash(&mut h);
+        self.search.as_ref().map(|s| &s.query).hash(&mut h);
+        let key = h.finish();
 
-        // Render the chapter Markdown as styled prose (bold/italic, headings,
-        // image chips, …) rather than leaking raw `**`/`![]()` syntax.
-        let annotated;
-        let render_content = if is_thai && self.show_annotations {
-            if let Some(annotations) = annotations.filter(|notes| !notes.is_empty()) {
-                annotated = annotate_markdown(base, annotations);
-                annotated.as_str()
+        let cache = if is_thai { &self.th_cache } else { &self.ja_cache };
+        let mut cache = cache.borrow_mut();
+        let lines = cache.lines(key, || {
+            // Hide the machine-only chunk / review markers from the TH pane (they
+            // would otherwise show as literal `<!-- honya:chunk N -->` lines) while
+            // preserving the line count, so note/bookmark/review anchors keep their
+            // file-line basis.
+            let cleaned;
+            let base: &str = if is_thai {
+                cleaned = hide_markers(content);
+                cleaned.as_str()
+            } else {
+                content
+            };
+
+            // Render the chapter Markdown as styled prose (bold/italic, headings,
+            // image chips, …) rather than leaking raw `**`/`![]()` syntax.
+            let annotated;
+            let render_content = if is_thai && self.show_annotations {
+                if let Some(annotations) = annotations.filter(|notes| !notes.is_empty()) {
+                    annotated = annotate_markdown(base, annotations);
+                    annotated.as_str()
+                } else {
+                    base
+                }
             } else {
                 base
-            }
-        } else {
-            base
-        };
-        let mut lines =
-            crate::ui::markdown::render(render_content, fg, theme, inner.width as usize);
-
-        // Glossary terms first (subtle tint), then search matches on top (standout),
-        // so an active query always wins the cell where the two overlap.
-        if self.highlight {
-            let needles = if is_thai { &self.hl_th } else { &self.hl_ja };
-            crate::ui::markdown::highlight(&mut lines, needles, glossary_style(theme));
-        }
-        if let Some(search) = self.search.as_ref() {
-            let needle = if is_thai {
-                &search.th_query
-            } else {
-                &search.query
             };
-            crate::ui::markdown::highlight(
-                &mut lines,
-                std::slice::from_ref(needle),
-                search_style(theme),
-            );
-        }
+            let mut lines =
+                crate::ui::markdown::render(render_content, fg, theme, inner.width as usize);
 
-        let mut para = Paragraph::new(lines)
+            // Glossary terms first (subtle tint), then search matches on top
+            // (standout), so an active query always wins the cell where they overlap.
+            if self.highlight {
+                let needles = if is_thai { &self.hl_th } else { &self.hl_ja };
+                crate::ui::markdown::highlight(&mut lines, needles, glossary_style(theme));
+            }
+            if let Some(search) = self.search.as_ref() {
+                let needle = if is_thai {
+                    &search.th_query
+                } else {
+                    &search.query
+                };
+                crate::ui::markdown::highlight(
+                    &mut lines,
+                    std::slice::from_ref(needle),
+                    search_style(theme),
+                );
+            }
+            lines
+        });
+
+        let mut para = Paragraph::new(lines.to_vec())
             .scroll((scroll, 0))
             .style(Style::default().bg(theme.bg_panel));
         if self.wrap {
