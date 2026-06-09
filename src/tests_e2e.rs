@@ -362,6 +362,7 @@ fn settings_api_key_field_edits_and_respects_env_override() {
         loop_stall_secs: "180".into(),
         max_chapter_retranslates: "2".into(),
         field: 4,
+        cursor: 0,
     });
     for c in "sk-or-1".chars() {
         ov.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::empty()));
@@ -384,6 +385,7 @@ fn settings_api_key_field_edits_and_respects_env_override() {
         loop_stall_secs: "180".into(),
         max_chapter_retranslates: "2".into(),
         field: 4,
+        cursor: 0,
     });
     ov.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::empty()));
     ov.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::empty()));
@@ -422,6 +424,7 @@ fn settings_ctrl_u_toggles_update_mode_and_saves_it() {
         loop_stall_secs: "180".into(),
         max_chapter_retranslates: "2".into(),
         field: 0,
+        cursor: 0,
     });
 
     // Ctrl-U flips Auto → Notify without typing into the focused field.
@@ -464,6 +467,7 @@ fn settings_retries_field_is_digit_only_and_clamped() {
             loop_stall_secs: String::new(),
             max_chapter_retranslates: String::new(),
             field: 5,
+            cursor: 0,
         })
     };
 
@@ -495,6 +499,71 @@ fn settings_retries_field_is_digit_only_and_clamped() {
     match big.handle_key(enter) {
         Action::SaveSettings { max_attempts, .. } => assert_eq!(max_attempts, 20, "capped at 20"),
         other => panic!("expected SaveSettings, got {other:?}"),
+    }
+}
+
+/// Arrow keys move the caret inside a text box so edits land mid-string, not just
+/// at the end — exercised through the real overlay key router (ReaderSearch).
+#[test]
+fn text_box_cursor_moves_and_edits_mid_string() {
+    let key = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::empty());
+    let code = |c| KeyEvent::new(c, KeyModifiers::empty());
+
+    let mut ov = Overlay::reader_search();
+    for c in "abd".chars() {
+        ov.handle_key(key(c));
+    }
+    // Move the caret left of 'd' and insert 'c' → "abcd".
+    ov.handle_key(code(KeyCode::Left));
+    ov.handle_key(key('c'));
+    match &ov {
+        Overlay::ReaderSearch(st) => assert_eq!(st.query, "abcd"),
+        _ => panic!("reader search overlay"),
+    }
+
+    // Home, then forward-Delete removes the leading 'a'.
+    ov.handle_key(code(KeyCode::Home));
+    ov.handle_key(code(KeyCode::Delete));
+    match &ov {
+        Overlay::ReaderSearch(st) => assert_eq!(st.query, "bcd"),
+        _ => panic!("reader search overlay"),
+    }
+
+    // End, then Backspace removes the trailing 'd'.
+    ov.handle_key(code(KeyCode::End));
+    ov.handle_key(code(KeyCode::Backspace));
+    match &ov {
+        Overlay::ReaderSearch(st) => assert_eq!(st.query, "bc"),
+        _ => panic!("reader search overlay"),
+    }
+}
+
+/// Settings text fields are cursor-aware too: arrow-left then typing inserts inside
+/// the focused field rather than appending.
+#[test]
+fn settings_field_caret_inserts_mid_value() {
+    use crate::app::overlay::SettingsState;
+
+    let mut ov = Overlay::Settings(SettingsState {
+        base_url: "htp".into(),
+        orchestrator: "o".into(),
+        translator: "t".into(),
+        reviewer: "r".into(),
+        api_key: String::new(),
+        api_key_env: false,
+        update_mode: crate::model::UpdateMode::Auto,
+        max_attempts: "3".into(),
+        loop_stall_secs: "180".into(),
+        max_chapter_retranslates: "2".into(),
+        field: 0,
+        cursor: 3, // end of "htp"
+    });
+    // Caret after 't', insert the missing 't' → "http".
+    ov.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::empty()));
+    ov.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::empty()));
+    match &ov {
+        Overlay::Settings(st) => assert_eq!(st.base_url, "http"),
+        _ => panic!("settings overlay"),
     }
 }
 

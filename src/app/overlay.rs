@@ -15,6 +15,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use crate::export::ExportFormat;
 use crate::model::{AppConfig, LogLevel, ThemeId, UpdateMode};
 use crate::theme::{self, ALL_THEMES, Theme};
+use crate::ui::input::{self, EditOpts, Edited};
 use crate::ui::layout::{centered_modal, centered_pct};
 use crate::ui::mouse::{MouseGesture, MouseInput, hit};
 use crate::ui::text::{col_width, pad_to_cols, thai_display_safe, truncate_cols};
@@ -42,6 +43,8 @@ pub enum SynPhase {
 pub struct SynopsisState {
     /// Raw, untranslated source synopsis (multi-line allowed).
     pub raw: String,
+    /// Caret byte-offset into `raw`.
+    pub cursor: usize,
     /// Latest Thai translation (empty until a roll lands).
     pub th: String,
     pub phase: SynPhase,
@@ -59,6 +62,7 @@ impl SynopsisState {
             SynPhase::Done
         };
         Self {
+            cursor: raw.len(),
             raw,
             th,
             phase,
@@ -92,30 +96,31 @@ fn handle_synopsis_keys(st: &mut SynopsisState, key: KeyEvent) -> SynKey {
             }
             _ => SynKey::None,
         },
-        SynPhase::Editing => match key.code {
-            KeyCode::Esc => SynKey::Back,
-            KeyCode::Tab => {
-                if st.raw.trim().is_empty() {
-                    SynKey::Skip
-                } else {
-                    st.phase = SynPhase::Translating;
-                    SynKey::Translate
+        SynPhase::Editing => {
+            let opts = EditOpts {
+                numeric_only: false,
+                multiline: true,
+            };
+            if input::handle(&mut st.raw, &mut st.cursor, key, opts) != Edited::Ignored {
+                return SynKey::None;
+            }
+            match key.code {
+                KeyCode::Esc => SynKey::Back,
+                KeyCode::Tab => {
+                    if st.raw.trim().is_empty() {
+                        SynKey::Skip
+                    } else {
+                        st.phase = SynPhase::Translating;
+                        SynKey::Translate
+                    }
                 }
+                KeyCode::Enter => {
+                    input::insert_char(&mut st.raw, &mut st.cursor, '\n');
+                    SynKey::None
+                }
+                _ => SynKey::None,
             }
-            KeyCode::Enter => {
-                st.raw.push('\n');
-                SynKey::None
-            }
-            KeyCode::Backspace => {
-                st.raw.pop();
-                SynKey::None
-            }
-            KeyCode::Char(c) => {
-                st.raw.push(c);
-                SynKey::None
-            }
-            _ => SynKey::None,
-        },
+        }
         SynPhase::Done | SynPhase::Failed => match key.code {
             KeyCode::Char('r') | KeyCode::Char('R') => {
                 st.attempt += 1;
@@ -147,6 +152,8 @@ pub struct ImportState {
     pub epubs: Vec<PathBuf>,
     pub sel: usize,
     pub name: String,
+    /// Caret byte-offset into `name` (the wizard's name step).
+    pub name_cursor: usize,
     pub vol: u32,
     /// True for the "add volume" flow: the name is the open project's and locked,
     /// so the wizard skips the name step (pick → volume → synopsis).
@@ -170,6 +177,7 @@ impl ImportState {
             step: 0,
             epubs,
             sel: 0,
+            name_cursor: name.len(),
             name,
             vol: 1,
             lock_name: false,
@@ -186,6 +194,7 @@ impl ImportState {
             step: 0,
             epubs,
             sel: 0,
+            name_cursor: title.len(),
             name: title,
             vol: vol.max(1),
             lock_name: true,
@@ -260,11 +269,14 @@ pub struct SettingsState {
     pub max_chapter_retranslates: String,
     /// Which field is focused (0..=7).
     pub field: u8,
+    /// Caret byte-offset into the focused (non-secret) field. The API-key field
+    /// is masked, so it edits at the end and ignores this.
+    pub cursor: usize,
 }
 
 impl SettingsState {
     fn from_cfg_focus(cfg: &AppConfig, field: u8) -> Self {
-        Self {
+        let mut st = Self {
             base_url: cfg.base_url.clone(),
             orchestrator: cfg.models.orchestrator.clone(),
             translator: cfg.models.translator.clone(),
@@ -275,8 +287,25 @@ impl SettingsState {
             max_attempts: cfg.max_attempts.to_string(),
             loop_stall_secs: cfg.loop_stall_secs.to_string(),
             max_chapter_retranslates: cfg.max_chapter_retranslates.to_string(),
-            field: field.min(SETTINGS_FIELDS - 1),
-        }
+            field: 0,
+            cursor: 0,
+        };
+        st.focus(field.min(SETTINGS_FIELDS - 1));
+        st
+    }
+
+    /// Focus a field and drop the caret at its end.
+    fn focus(&mut self, field: u8) {
+        self.field = field % SETTINGS_FIELDS;
+        self.cursor = self.field_mut().len();
+    }
+
+    fn next_field(&mut self) {
+        self.focus(self.field + 1);
+    }
+
+    fn prev_field(&mut self) {
+        self.focus(self.field + SETTINGS_FIELDS - 1);
     }
 
     fn field_mut(&mut self) -> &mut String {
@@ -351,6 +380,8 @@ impl ThemePickerState {
 #[derive(Debug, Clone)]
 pub struct PaletteState {
     pub query: String,
+    /// Caret byte-offset into `query`.
+    pub cursor: usize,
     pub items: Vec<PaletteItem>,
     pub sel: usize,
 }
@@ -419,6 +450,7 @@ impl PaletteState {
         ];
         Self {
             query: String::new(),
+            cursor: 0,
             items,
             sel: 0,
         }
@@ -476,6 +508,8 @@ pub struct ReaderNoteState {
     pub chapter: u32,
     pub line: u32,
     pub text: String,
+    /// Caret byte-offset into `text`.
+    pub cursor: usize,
 }
 
 /// Reader global-search input: a single text field. On commit the App hands the
@@ -483,6 +517,8 @@ pub struct ReaderNoteState {
 #[derive(Debug, Clone)]
 pub struct ReaderSearchState {
     pub query: String,
+    /// Caret byte-offset into `query`.
+    pub cursor: usize,
 }
 
 /// What a [`JumpTarget`] points at — decides its glyph in the picker.
@@ -512,6 +548,8 @@ pub struct JumpTarget {
 pub struct ReaderJumpState {
     pub title: String,
     pub query: String,
+    /// Caret byte-offset into `query`.
+    pub cursor: usize,
     pub items: Vec<JumpTarget>,
     pub sel: usize,
 }
@@ -671,12 +709,14 @@ impl Overlay {
             chapter,
             line: line.max(1),
             text: String::new(),
+            cursor: 0,
         })
     }
 
     pub fn reader_search() -> Self {
         Overlay::ReaderSearch(ReaderSearchState {
             query: String::new(),
+            cursor: 0,
         })
     }
 
@@ -685,6 +725,7 @@ impl Overlay {
         Overlay::ReaderJump(ReaderJumpState {
             title,
             query: String::new(),
+            cursor: 0,
             items,
             sel: 0,
         })
@@ -696,6 +737,7 @@ impl Overlay {
         Overlay::ReaderJump(ReaderJumpState {
             title: String::new(),
             query: String::new(),
+            cursor: 0,
             items: Vec::new(),
             sel: 0,
         })
@@ -769,6 +811,7 @@ impl Overlay {
             loop_stall_secs: String::new(),
             max_chapter_retranslates: String::new(),
             field: field.min(SETTINGS_FIELDS - 1),
+            cursor: 0,
         })
     }
 
@@ -1163,6 +1206,7 @@ impl Overlay {
                         {
                             st.name = prettify_stem(stem);
                         }
+                        st.name_cursor = st.name.len();
                         st.step = if st.lock_name { 2 } else { 1 };
                         Action::None
                     }
@@ -1170,29 +1214,28 @@ impl Overlay {
                 _ => Action::None,
             },
             // Step 1: name.
-            1 => match key.code {
-                KeyCode::Esc => {
-                    st.step = 0;
-                    Action::None
+            1 => {
+                if input::handle(&mut st.name, &mut st.name_cursor, key, EditOpts::default())
+                    != Edited::Ignored
+                {
+                    return Action::None;
                 }
-                KeyCode::Enter | KeyCode::Tab => {
-                    if st.name.trim().is_empty() {
-                        Action::None
-                    } else {
-                        st.step = 2;
+                match key.code {
+                    KeyCode::Esc => {
+                        st.step = 0;
                         Action::None
                     }
+                    KeyCode::Enter | KeyCode::Tab => {
+                        if st.name.trim().is_empty() {
+                            Action::None
+                        } else {
+                            st.step = 2;
+                            Action::None
+                        }
+                    }
+                    _ => Action::None,
                 }
-                KeyCode::Backspace => {
-                    st.name.pop();
-                    Action::None
-                }
-                KeyCode::Char(c) => {
-                    st.name.push(c);
-                    Action::None
-                }
-                _ => Action::None,
-            },
+            }
             // Step 2: volume.
             2 => match key.code {
                 KeyCode::Esc => {
@@ -1307,30 +1350,43 @@ impl Overlay {
                 max_chapter_retranslates: st.max_chapter_retranslates_value(),
             },
             KeyCode::Tab | KeyCode::Down => {
-                st.field = (st.field + 1) % SETTINGS_FIELDS;
+                st.next_field();
                 Action::None
             }
             KeyCode::Up | KeyCode::BackTab => {
-                st.field = (st.field + SETTINGS_FIELDS - 1) % SETTINGS_FIELDS;
+                st.prev_field();
                 Action::None
             }
-            // Env-supplied API key is read-only.
-            KeyCode::Backspace if !(st.field == SETTINGS_KEY_FIELD && st.api_key_env) => {
-                st.field_mut().pop();
-                Action::None
-            }
-            // The retries / loop-watchdog fields are numeric: digits only.
-            KeyCode::Char(c) if settings_numeric_field(st.field) => {
-                if c.is_ascii_digit() {
-                    st.field_mut().push(c);
+            _ => {
+                // The API-key field is masked, so it edits at the end only
+                // (a positioned caret would be meaningless under masking).
+                if st.field == SETTINGS_KEY_FIELD {
+                    if st.api_key_env {
+                        return Action::None; // env key is read-only
+                    }
+                    match key.code {
+                        KeyCode::Backspace => {
+                            st.api_key.pop();
+                        }
+                        KeyCode::Char(c)
+                            if !key.modifiers.contains(KeyModifiers::CONTROL)
+                                && !key.modifiers.contains(KeyModifiers::ALT) =>
+                        {
+                            st.api_key.push(c);
+                        }
+                        _ => {}
+                    }
+                    return Action::None;
                 }
+                let opts = EditOpts {
+                    numeric_only: settings_numeric_field(st.field),
+                    multiline: false,
+                };
+                let mut cursor = st.cursor;
+                input::handle(st.field_mut(), &mut cursor, key, opts);
+                st.cursor = cursor;
                 Action::None
             }
-            KeyCode::Char(c) if !(st.field == SETTINGS_KEY_FIELD && st.api_key_env) => {
-                st.field_mut().push(c);
-                Action::None
-            }
-            _ => Action::None,
         }
     }
 
@@ -1359,6 +1415,14 @@ impl Overlay {
         let Overlay::Palette(st) = self else {
             return Action::None;
         };
+        match input::handle(&mut st.query, &mut st.cursor, key, EditOpts::default()) {
+            Edited::Changed => {
+                st.sel = 0;
+                return Action::None;
+            }
+            Edited::Moved => return Action::None,
+            Edited::Ignored => {}
+        }
         match key.code {
             KeyCode::Esc => Action::CloseOverlay,
             KeyCode::Up => {
@@ -1374,11 +1438,6 @@ impl Overlay {
                 }
                 Action::None
             }
-            KeyCode::Backspace => {
-                st.query.pop();
-                st.sel = 0;
-                Action::None
-            }
             KeyCode::Enter => {
                 let matches = st.matches();
                 if let Some(&idx) = matches.get(st.sel) {
@@ -1386,11 +1445,6 @@ impl Overlay {
                 } else {
                     Action::CloseOverlay
                 }
-            }
-            KeyCode::Char(c) => {
-                st.query.push(c);
-                st.sel = 0;
-                Action::None
             }
             _ => Action::None,
         }
@@ -1471,6 +1525,9 @@ impl Overlay {
         let Overlay::ReaderNote(st) = self else {
             return Action::None;
         };
+        if input::handle(&mut st.text, &mut st.cursor, key, EditOpts::default()) != Edited::Ignored {
+            return Action::None;
+        }
         match key.code {
             KeyCode::Esc => Action::CloseOverlay,
             KeyCode::Enter => Action::SaveReaderNote {
@@ -1478,16 +1535,9 @@ impl Overlay {
                 line: st.line,
                 note: st.text.clone(),
             },
-            KeyCode::Backspace => {
-                st.text.pop();
-                Action::None
-            }
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 st.text.clear();
-                Action::None
-            }
-            KeyCode::Char(c) => {
-                st.text.push(c);
+                st.cursor = 0;
                 Action::None
             }
             _ => Action::None,
@@ -1498,6 +1548,10 @@ impl Overlay {
         let Overlay::ReaderSearch(st) = self else {
             return Action::None;
         };
+        if input::handle(&mut st.query, &mut st.cursor, key, EditOpts::default()) != Edited::Ignored
+        {
+            return Action::None;
+        }
         match key.code {
             KeyCode::Esc => Action::CloseOverlay,
             KeyCode::Enter => {
@@ -1509,16 +1563,9 @@ impl Overlay {
                     }
                 }
             }
-            KeyCode::Backspace => {
-                st.query.pop();
-                Action::None
-            }
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 st.query.clear();
-                Action::None
-            }
-            KeyCode::Char(c) => {
-                st.query.push(c);
+                st.cursor = 0;
                 Action::None
             }
             _ => Action::None,
@@ -1529,6 +1576,14 @@ impl Overlay {
         let Overlay::ReaderJump(st) = self else {
             return Action::None;
         };
+        match input::handle(&mut st.query, &mut st.cursor, key, EditOpts::default()) {
+            Edited::Changed => {
+                st.sel = 0;
+                return Action::None;
+            }
+            Edited::Moved => return Action::None,
+            Edited::Ignored => {}
+        }
         match key.code {
             KeyCode::Esc => Action::CloseOverlay,
             KeyCode::Up => {
@@ -1556,18 +1611,9 @@ impl Overlay {
                     None => Action::CloseOverlay,
                 }
             }
-            KeyCode::Backspace => {
-                st.query.pop();
-                st.sel = 0;
-                Action::None
-            }
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 st.query.clear();
-                st.sel = 0;
-                Action::None
-            }
-            KeyCode::Char(c) => {
-                st.query.push(c);
+                st.cursor = 0;
                 st.sel = 0;
                 Action::None
             }
@@ -1867,15 +1913,12 @@ impl Overlay {
                 Span::styled("▏", Style::default().fg(theme.stream_cursor)),
             ])
         } else {
+            let (before, after) =
+                input::caret_halves(&st.text, st.cursor, rows[2].width.saturating_sub(6) as usize);
             Line::from(vec![
-                Span::styled(
-                    truncate_cols(
-                        &thai_display_safe(&st.text),
-                        rows[2].width.saturating_sub(6) as usize,
-                    ),
-                    Style::default().fg(theme.ink),
-                ),
+                Span::styled(before, Style::default().fg(theme.ink)),
                 Span::styled("▏", Style::default().fg(theme.stream_cursor)),
+                Span::styled(after, Style::default().fg(theme.ink)),
             ])
         };
         f.render_widget(Paragraph::new(input).block(input_block), indent(rows[2], 2));
@@ -1953,15 +1996,12 @@ impl Overlay {
                 Span::styled("▏", Style::default().fg(theme.stream_cursor)),
             ])
         } else {
+            let (before, after) =
+                input::caret_halves(&st.query, st.cursor, rows[1].width.saturating_sub(6) as usize);
             Line::from(vec![
-                Span::styled(
-                    truncate_cols(
-                        &thai_display_safe(&st.query),
-                        rows[1].width.saturating_sub(6) as usize,
-                    ),
-                    Style::default().fg(theme.ink),
-                ),
+                Span::styled(before, Style::default().fg(theme.ink)),
                 Span::styled("▏", Style::default().fg(theme.stream_cursor)),
+                Span::styled(after, Style::default().fg(theme.ink)),
             ])
         };
         f.render_widget(Paragraph::new(input).block(input_block), indent(rows[1], 2));
@@ -1993,11 +2033,14 @@ impl Overlay {
             .constraints([Constraint::Length(2), Constraint::Min(0)])
             .split(inner);
 
+        let (before, after) =
+            input::caret_halves(&st.query, st.cursor, rows[0].width.saturating_sub(5) as usize);
         f.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled("  / ", Style::default().fg(theme.accent)),
-                Span::styled(thai_display_safe(&st.query), Style::default().fg(theme.ink)),
+                Span::styled(before, Style::default().fg(theme.ink)),
                 Span::styled("▏", Style::default().fg(theme.stream_cursor)),
+                Span::styled(after, Style::default().fg(theme.ink)),
             ]))
             .style(Style::default().bg(theme.bg_panel)),
             rows[0],
@@ -2406,23 +2449,35 @@ impl Overlay {
         f.render_widget(block, modal);
 
         let val_w = area.width.saturating_sub(26) as usize;
-        let field_line = |label: &str, value: String, focused: bool| -> Line<'static> {
+        // `caret` positions the bar inside the value (None → caret at the end,
+        // used for the masked API-key field where mid-string position is moot).
+        let field_line = |label: &str, value: String, focused: bool, caret: Option<usize>| -> Line<'static> {
             let marker = if focused { theme::SELECT_BAR } else { ' ' };
             let value_style = if focused {
                 Style::default().fg(theme.ink).bg(theme.accent_bg)
             } else {
                 Style::default().fg(theme.ink_soft)
             };
-            Line::from(vec![
+            let mut spans = vec![
                 Span::styled(format!(" {marker} "), Style::default().fg(theme.accent)),
                 Span::styled(format!("{label:<20}"), Style::default().fg(theme.ink_faint)),
-                Span::styled(truncate_cols(&value, val_w), value_style),
-                if focused {
-                    Span::styled("▏", Style::default().fg(theme.stream_cursor))
-                } else {
-                    Span::raw("")
-                },
-            ])
+            ];
+            match (focused, caret) {
+                (true, Some(cursor)) => {
+                    let (before, after) = input::caret_halves(&value, cursor, val_w);
+                    spans.push(Span::styled(before, value_style));
+                    spans.push(Span::styled("▏", Style::default().fg(theme.stream_cursor)));
+                    spans.push(Span::styled(after, value_style));
+                }
+                (true, None) => {
+                    spans.push(Span::styled(truncate_cols(&value, val_w), value_style));
+                    spans.push(Span::styled("▏", Style::default().fg(theme.stream_cursor)));
+                }
+                (false, _) => {
+                    spans.push(Span::styled(truncate_cols(&value, val_w), value_style));
+                }
+            }
+            Line::from(spans)
         };
 
         let fields = [
@@ -2433,7 +2488,7 @@ impl Overlay {
         ];
         let mut lines = vec![Line::raw("")];
         for (label, value, idx) in fields {
-            lines.push(field_line(label, value.to_string(), st.field == idx));
+            lines.push(field_line(label, value.to_string(), st.field == idx, Some(st.cursor)));
         }
 
         let focused_key = st.field == SETTINGS_KEY_FIELD;
@@ -2453,13 +2508,14 @@ impl Overlay {
             } else {
                 mask_secret(&st.api_key)
             };
-            lines.push(field_line("API key", shown, focused_key));
+            lines.push(field_line("API key", shown, focused_key, None));
         }
 
         lines.push(field_line(
             "Retry attempts",
             st.max_attempts.clone(),
             st.field == SETTINGS_RETRIES_FIELD,
+            Some(st.cursor),
         ));
         lines.push(Line::from(Span::styled(
             "      ↳ Translator↔Reviewer loop per chunk (1–20)",
@@ -2470,6 +2526,7 @@ impl Overlay {
             "Loop watchdog (s)",
             st.loop_stall_secs.clone(),
             st.field == SETTINGS_STALL_FIELD,
+            Some(st.cursor),
         ));
         lines.push(Line::from(Span::styled(
             "      ↳ stuck/looping chapter re-translated after N s (0 = off)",
@@ -2479,6 +2536,7 @@ impl Overlay {
             "Loop re-translates",
             st.max_chapter_retranslates.clone(),
             st.field == SETTINGS_RETRANSLATE_FIELD,
+            Some(st.cursor),
         ));
         lines.push(Line::from(Span::styled(
             "      ↳ whole-chapter re-translates before the run aborts (0–10)",
@@ -2595,11 +2653,14 @@ impl Overlay {
             .constraints([Constraint::Length(2), Constraint::Min(0)])
             .split(inner);
 
+        let (before, after) =
+            input::caret_halves(&st.query, st.cursor, rows[0].width.saturating_sub(5) as usize);
         f.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled("  : ", Style::default().fg(theme.accent)),
-                Span::styled(thai_display_safe(&st.query), Style::default().fg(theme.ink)),
+                Span::styled(before, Style::default().fg(theme.ink)),
                 Span::styled("▏", Style::default().fg(theme.stream_cursor)),
+                Span::styled(after, Style::default().fg(theme.ink)),
             ]))
             .style(Style::default().bg(theme.bg_panel)),
             rows[0],
@@ -3174,17 +3235,33 @@ fn render_synopsis_body(f: &mut Frame, area: Rect, theme: &Theme, st: &SynopsisS
             },
         ]));
     } else {
-        let parts: Vec<&str> = st.raw.split('\n').collect();
-        let last = parts.len().saturating_sub(1);
-        for (i, part) in parts.iter().enumerate() {
-            let mut spans = vec![Span::styled(
-                thai_display_safe(part),
-                Style::default().fg(theme.ink),
-            )];
-            if editing && i == last {
+        let cursor = input::clamp_cursor(&st.raw, st.cursor);
+        let mut line_start = 0usize;
+        for part in st.raw.split('\n') {
+            let line_end = line_start + part.len();
+            // The caret sits on this line when the (clamped) cursor falls within
+            // it; at a '\n' boundary it belongs to the earlier line's tail.
+            let on_line = editing && cursor >= line_start && cursor <= line_end;
+            let mut spans: Vec<Span> = Vec::new();
+            if on_line {
+                let off = cursor - line_start;
+                spans.push(Span::styled(
+                    thai_display_safe(&part[..off]),
+                    Style::default().fg(theme.ink),
+                ));
                 spans.push(Span::styled("▏", Style::default().fg(theme.stream_cursor)));
+                spans.push(Span::styled(
+                    thai_display_safe(&part[off..]),
+                    Style::default().fg(theme.ink),
+                ));
+            } else {
+                spans.push(Span::styled(
+                    thai_display_safe(part),
+                    Style::default().fg(theme.ink),
+                ));
             }
             text_lines.push(Line::from(spans));
+            line_start = line_end + 1; // skip the '\n'
         }
     }
     f.render_widget(

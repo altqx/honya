@@ -3,6 +3,7 @@
 
 pub mod chrome;
 pub mod diff;
+pub mod input;
 pub mod layout;
 pub mod markdown;
 pub mod mouse;

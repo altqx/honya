@@ -11,6 +11,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wra
 
 use crate::model::{Character, GlossaryTerm, TermPolicy};
 use crate::theme::{self, Theme};
+use crate::ui::input::{self, EditOpts, Edited};
 use crate::ui::mouse::{MouseGesture, MouseInput};
 use crate::ui::text::{col_width, pad_to_cols, thai_display_safe, truncate_cols};
 use crate::workspace::Workspace;
@@ -30,6 +31,8 @@ pub struct EditForm {
     /// Field labels + current values, in tab order.
     fields: Vec<(&'static str, String)>,
     field: usize,
+    /// Caret byte-offset into the focused field's value.
+    cursor: usize,
     /// True for a brand-new entry (vs editing an existing one).
     is_new: bool,
 }
@@ -50,18 +53,20 @@ impl EditForm {
             first_seen_chapter: None,
         });
         let policy = policy_field(crate::workspace::glossary::effective_policy(&g));
+        let fields = vec![
+            ("JP term", g.jp_term),
+            ("Thai term", g.thai_term),
+            ("Category", g.category.unwrap_or_default()),
+            ("Policy", policy),
+            ("Do not trans", bool_field(g.do_not_translate)),
+            ("Forbidden", g.forbidden_thai.join(", ")),
+            ("Context rule", g.context_rule.unwrap_or_default()),
+            ("Gloss", g.gloss.unwrap_or_default()),
+        ];
         Self {
             kind: SUB_GLOSSARY,
-            fields: vec![
-                ("JP term", g.jp_term),
-                ("Thai term", g.thai_term),
-                ("Category", g.category.unwrap_or_default()),
-                ("Policy", policy),
-                ("Do not trans", bool_field(g.do_not_translate)),
-                ("Forbidden", g.forbidden_thai.join(", ")),
-                ("Context rule", g.context_rule.unwrap_or_default()),
-                ("Gloss", g.gloss.unwrap_or_default()),
-            ],
+            cursor: fields[0].1.len(),
+            fields,
             field: 0,
             is_new: seed.is_none(),
         }
@@ -69,28 +74,30 @@ impl EditForm {
 
     fn new_character(seed: Option<&Character>) -> Self {
         let c = seed.cloned();
+        let fields = vec![
+            (
+                "JP name",
+                c.as_ref().map(|x| x.jp_name.clone()).unwrap_or_default(),
+            ),
+            (
+                "Thai name",
+                c.as_ref().map(|x| x.thai_name.clone()).unwrap_or_default(),
+            ),
+            (
+                "Gender",
+                c.as_ref()
+                    .and_then(|x| x.gender.clone())
+                    .unwrap_or_default(),
+            ),
+            (
+                "Notes",
+                c.as_ref().and_then(|x| x.notes.clone()).unwrap_or_default(),
+            ),
+        ];
         Self {
             kind: SUB_CHARACTERS,
-            fields: vec![
-                (
-                    "JP name",
-                    c.as_ref().map(|x| x.jp_name.clone()).unwrap_or_default(),
-                ),
-                (
-                    "Thai name",
-                    c.as_ref().map(|x| x.thai_name.clone()).unwrap_or_default(),
-                ),
-                (
-                    "Gender",
-                    c.as_ref()
-                        .and_then(|x| x.gender.clone())
-                        .unwrap_or_default(),
-                ),
-                (
-                    "Notes",
-                    c.as_ref().and_then(|x| x.notes.clone()).unwrap_or_default(),
-                ),
-            ],
+            cursor: fields[0].1.len(),
+            fields,
             field: 0,
             is_new: seed.is_none(),
         }
@@ -100,12 +107,18 @@ impl EditForm {
         &mut self.fields[self.field].1
     }
 
+    /// Focus a field and drop the caret at its end.
+    fn focus_field(&mut self, field: usize) {
+        self.field = field.min(self.fields.len().saturating_sub(1));
+        self.cursor = self.fields[self.field].1.len();
+    }
+
     fn next_field(&mut self) {
-        self.field = (self.field + 1) % self.fields.len();
+        self.focus_field((self.field + 1) % self.fields.len());
     }
 
     fn prev_field(&mut self) {
-        self.field = (self.field + self.fields.len() - 1) % self.fields.len();
+        self.focus_field((self.field + self.fields.len() - 1) % self.fields.len());
     }
 
     fn to_glossary(&self) -> GlossaryTerm {
@@ -154,6 +167,8 @@ pub struct LexiconScreen {
     list: ListState,
     editing: Option<EditForm>,
     filter: String,
+    /// Caret byte-offset into `filter` (the `/` search field).
+    filter_cursor: usize,
     /// True while the `/` search field is capturing input.
     searching: bool,
     /// Mouse hit-test rects, refreshed every frame: the section tabs, the table
@@ -172,6 +187,7 @@ impl LexiconScreen {
             list,
             editing: None,
             filter: String::new(),
+            filter_cursor: 0,
             searching: false,
             tab_rects: Vec::new(),
             table_area: Rect::default(),
@@ -183,6 +199,7 @@ impl LexiconScreen {
         self.editing = None;
         self.searching = false;
         self.filter.clear();
+        self.filter_cursor = 0;
         self.list.select(Some(0));
     }
 
@@ -244,16 +261,18 @@ impl LexiconScreen {
 
         // ---- search field owns text input ----
         if self.searching {
+            if input::handle(&mut self.filter, &mut self.filter_cursor, key, EditOpts::default())
+                != Edited::Ignored
+            {
+                return Action::None;
+            }
             match key.code {
                 KeyCode::Esc => {
                     self.searching = false;
                     self.filter.clear();
+                    self.filter_cursor = 0;
                 }
                 KeyCode::Enter => self.searching = false,
-                KeyCode::Backspace => {
-                    self.filter.pop();
-                }
-                KeyCode::Char(c) => self.filter.push(c),
                 _ => {}
             }
             return Action::None;
@@ -281,6 +300,7 @@ impl LexiconScreen {
             KeyCode::Char('/') => {
                 self.searching = true;
                 self.filter.clear();
+                self.filter_cursor = 0;
                 Action::None
             }
             KeyCode::Char('n') => {
@@ -291,6 +311,7 @@ impl LexiconScreen {
                             kind: SUB_STYLE,
                             fields: vec![("Style note", String::new())],
                             field: 0,
+                            cursor: 0,
                             is_new: true,
                         },
                         _ => EditForm::new_glossary(None),
@@ -376,7 +397,7 @@ impl LexiconScreen {
                 let inner_y = modal.y + 1;
                 for i in 0..form.fields.len() {
                     if m.row == inner_y + 1 + (i as u16) * 2 {
-                        form.field = i;
+                        form.focus_field(i);
                         break;
                     }
                 }
@@ -399,6 +420,21 @@ impl LexiconScreen {
         let Some(form) = self.editing.as_mut() else {
             return Action::None;
         };
+        // Up/Down/Tab move between fields, so the editor is single-line per field.
+        let is_nav = matches!(
+            key.code,
+            KeyCode::Up | KeyCode::Down | KeyCode::Tab | KeyCode::BackTab | KeyCode::Enter
+        );
+        if !is_nav {
+            let mut cursor = form.cursor;
+            let consumed =
+                input::handle(form.current_mut(), &mut cursor, key, EditOpts::default())
+                    != Edited::Ignored;
+            form.cursor = cursor;
+            if consumed {
+                return Action::None;
+            }
+        }
         match key.code {
             KeyCode::Esc => {
                 self.editing = None;
@@ -412,10 +448,6 @@ impl LexiconScreen {
                 form.prev_field();
                 Action::None
             }
-            KeyCode::Backspace => {
-                form.current_mut().pop();
-                Action::None
-            }
             KeyCode::Enter => {
                 // Commit on Enter from the last field, else advance.
                 if form.field + 1 < form.fields.len() {
@@ -424,10 +456,6 @@ impl LexiconScreen {
                 } else {
                     self.commit_edit(ws)
                 }
-            }
-            KeyCode::Char(c) => {
-                form.current_mut().push(c);
-                Action::None
             }
             _ => Action::None,
         }
@@ -474,6 +502,7 @@ impl LexiconScreen {
                     kind: SUB_STYLE,
                     fields: vec![("Style note", String::new())],
                     field: 0,
+                    cursor: 0,
                     is_new: true,
                 });
             }
@@ -590,27 +619,35 @@ impl LexiconScreen {
             (Some(ws), SUB_CHARACTERS) => format!("{} characters", self.characters(ws).len()),
             _ => "—".to_string(),
         };
-        let filter_str = if self.searching || !self.filter.is_empty() {
-            let filter = thai_display_safe(&self.filter);
-            format!(
-                "/ filter: {}{}   ",
-                filter,
-                if self.searching { "▏" } else { "" }
-            )
-        } else {
-            String::new()
-        };
+        let faint = Style::default().fg(theme.ink_faint);
+        let mut right_spans: Vec<Span> = Vec::new();
+        if self.searching || !self.filter.is_empty() {
+            right_spans.push(Span::styled("/ filter: ", faint));
+            if self.searching {
+                let (before, after) =
+                    input::caret_halves(&self.filter, self.filter_cursor, usize::MAX);
+                right_spans.push(Span::styled(before, faint));
+                right_spans.push(Span::styled("▏", Style::default().fg(theme.stream_cursor)));
+                right_spans.push(Span::styled(after, faint));
+            } else {
+                right_spans.push(Span::styled(thai_display_safe(&self.filter), faint));
+            }
+            right_spans.push(Span::styled("   ", faint));
+        }
+        right_spans.push(Span::styled(format!("({count})"), faint));
+
         let left = Line::from(spans);
         f.render_widget(
             Paragraph::new(left).style(Style::default().bg(theme.bg)),
             area,
         );
-        let right = format!("{filter_str}({count})");
-        let rw = crate::ui::text::col_width(&right) as u16;
+        let rw: u16 = right_spans
+            .iter()
+            .map(|s| col_width(s.content.as_ref()))
+            .sum::<usize>() as u16;
         if area.width > rw + 2 {
             f.render_widget(
-                Paragraph::new(Span::styled(right, Style::default().fg(theme.ink_faint)))
-                    .style(Style::default().bg(theme.bg)),
+                Paragraph::new(Line::from(right_spans)).style(Style::default().bg(theme.bg)),
                 Rect {
                     x: area.x + area.width - rw - 1,
                     y: area.y,
@@ -852,22 +889,23 @@ impl LexiconScreen {
             } else {
                 Style::default().fg(theme.ink_soft)
             };
-            lines.push(Line::from(vec![
+            let val_w = inner.width.saturating_sub(18) as usize;
+            let mut spans = vec![
                 Span::styled(format!(" {marker} "), Style::default().fg(theme.accent)),
                 Span::styled(pad_to_cols(label, 12), Style::default().fg(theme.ink_faint)),
-                Span::styled(
-                    truncate_cols(
-                        &thai_display_safe(value),
-                        inner.width.saturating_sub(18) as usize,
-                    ),
+            ];
+            if focused {
+                let (before, after) = input::caret_halves(value, form.cursor, val_w);
+                spans.push(Span::styled(before, val_style));
+                spans.push(Span::styled("▏", Style::default().fg(theme.stream_cursor)));
+                spans.push(Span::styled(after, val_style));
+            } else {
+                spans.push(Span::styled(
+                    truncate_cols(&thai_display_safe(value), val_w),
                     val_style,
-                ),
-                if focused {
-                    Span::styled("▏", Style::default().fg(theme.stream_cursor))
-                } else {
-                    Span::raw("")
-                },
-            ]));
+                ));
+            }
+            lines.push(Line::from(spans));
             lines.push(Line::raw(""));
         }
         lines.push(Line::from(Span::styled(
