@@ -135,6 +135,12 @@ pub fn audit_translation_with_terms(
         );
     }
 
+    if let Some(garbage) = glyphs_absent_from_source(source, translated, is_non_cjk_alien) {
+        findings.push(format!(
+            "translated_text contains corrupted non-Thai glyphs ({garbage}) that are not in the source; these are decoding artifacts — re-translate the chunk into clean Thai without them"
+        ));
+    }
+
     audit_terminology(&mut findings, source, translated, terms);
 
     findings
@@ -181,6 +187,16 @@ pub fn advisory_findings(source_jp: &str, thai: &str) -> Vec<String> {
     if jp >= 80 && th * 2 < jp {
         findings.push(format!(
             "translation looks much shorter than the source ({th} Thai chars vs {jp} Japanese chars); verify no sentences or details were omitted"
+        ));
+    }
+
+    // Stray Han/CJK glyphs absent from the source: ADVISORY only, not a hard gate.
+    // Kanji is Japanese, so these may be a legitimately-retained proper name or
+    // term carried over from earlier context — only the Reviewer, with the full
+    // source, can tell that apart from a corrupted single-character artifact.
+    if let Some(glyphs) = glyphs_absent_from_source(source, translated, is_cjk_ideograph) {
+        findings.push(format!(
+            "translated_text contains Han/CJK characters ({glyphs}) not present in this source chunk; if they are a deliberately retained name/term keep them, otherwise they are stray corruption — verify against the source and re-render in Thai"
         ));
     }
 
@@ -396,6 +412,75 @@ fn thai_char_count(text: &str) -> usize {
     text.chars()
         .filter(|ch| matches!(*ch as u32, 0x0E00..=0x0E7F))
         .count()
+}
+
+/// Non-CJK scripts that never legitimately appear in Thai prose translated from
+/// Japanese: Hangul, Cyrillic, and Vietnamese-marked Latin. If the Japanese
+/// source genuinely contained any of these, the characters would be present in
+/// the source itself (caught by the absent-from-source filter), so seeing one in
+/// the output that is *not* in the source is a decoding artifact with near
+/// certainty — safe to gate on. CJK is deliberately excluded here: kanji is
+/// Japanese, so a stray ideograph might be a retained name (handled as an
+/// advisory instead).
+///
+/// Vietnamese is restricted to its high-signal markers — the precomposed vowels
+/// in Latin Extended Additional and the đ/ơ/ư letters — and deliberately omits
+/// the Latin-1 accents (à é ê ô …) shared with romanized names and European
+/// loanwords, which would false-positive.
+fn is_non_cjk_alien(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x0400..=0x052F          // Cyrillic + Cyrillic Supplement
+            | 0x0110..=0x0111    // Đ đ (Vietnamese)
+            | 0x01A0..=0x01B0    // Ơ ơ Ư ư (Vietnamese)
+            | 0x1100..=0x11FF    // Hangul Jamo
+            | 0x1EA0..=0x1EFF    // Latin Extended Additional (Vietnamese vowels)
+            | 0x3130..=0x318F    // Hangul Compatibility Jamo
+            | 0xA960..=0xA97F    // Hangul Jamo Extended-A
+            | 0xAC00..=0xD7A3    // Hangul Syllables
+            | 0xD7B0..=0xD7FF    // Hangul Jamo Extended-B
+    )
+}
+
+fn is_cjk_ideograph(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x3400..=0x4DBF          // CJK Extension A
+            | 0x4E00..=0x9FFF    // CJK Unified Ideographs
+            | 0xF900..=0xFAFF    // CJK Compatibility Ideographs
+    )
+}
+
+/// Collect distinct glyphs matching `pred` that appear in the Thai output but are
+/// absent from the source. The absent-from-source filter is what keeps this from
+/// flagging deliberately-retained Japanese — a name kept verbatim from the source
+/// appears in the source, so it passes; a hallucinated token never does. Returns
+/// a short, quoted sample of the offending glyphs, or `None` if there are none.
+fn glyphs_absent_from_source(
+    source: &str,
+    translated: &str,
+    pred: fn(char) -> bool,
+) -> Option<String> {
+    use std::collections::HashSet;
+    let source_chars: HashSet<char> = source.chars().collect();
+    let mut seen: HashSet<char> = HashSet::new();
+    let mut sample: Vec<char> = Vec::new();
+    for ch in translated.chars() {
+        if pred(ch) && !source_chars.contains(&ch) && seen.insert(ch) {
+            sample.push(ch);
+        }
+    }
+    if sample.is_empty() {
+        return None;
+    }
+    let shown: String = sample
+        .iter()
+        .take(8)
+        .map(|c| format!("`{c}`"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let suffix = if sample.len() > 8 { ", …" } else { "" };
+    Some(format!("{shown}{suffix}"))
 }
 
 fn japanese_char_count(text: &str) -> usize {
@@ -620,6 +705,87 @@ mod tests {
         assert!(
             findings.is_empty(),
             "ordinary translation should produce no advisory findings: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn audit_flags_corrupted_korean_and_cyrillic_glyphs() {
+        // A handful of stray Hangul/Cyrillic glyphs bleeding into otherwise-clean
+        // Thai — below the mass-untranslated-Japanese threshold, so only the
+        // corruption gate catches them.
+        let source = "彼女は黙って立ち上がった。";
+        let thai = "เธอเงียบงันแล้วลุกขึ้นยืน 그리고 อย่างช้า ๆ และเดินจากไป";
+        let findings = audit_translation_with_terms(source, thai, &[], &[]);
+        assert!(
+            findings.iter().any(|f| f.contains("corrupted non-Thai glyphs")),
+            "Korean corruption flagged: {findings:?}"
+        );
+
+        let thai_cyr = "เธอเงียบงันแล้วลุกขึ้นยืนและเดินจากไปเดอระวกอย่างเงียบงัน";
+        let thai_cyr = format!("{thai_cyr} привет");
+        let findings = audit_translation_with_terms(source, &thai_cyr, &[], &[]);
+        assert!(
+            findings.iter().any(|f| f.contains("corrupted non-Thai glyphs")),
+            "Cyrillic corruption flagged: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn stray_hanzi_is_advisory_not_a_hard_gate() {
+        // A CJK glyph absent from the source is surfaced to the Reviewer as an
+        // advisory (kanji may be a retained name) — never as a hard gate that
+        // force-rejects, since that risks killing a legitimate translation.
+        let source = "彼女は笑った。";
+        let thai = "เธอหัวเราะ东";
+
+        let hard = audit_translation_with_terms(source, thai, &[], &[]);
+        assert!(
+            !hard.iter().any(|f| f.contains("corrupted non-Thai glyphs")),
+            "stray CJK must not be a hard gate: {hard:?}"
+        );
+
+        let advisory = advisory_findings(source, thai);
+        assert!(
+            advisory.iter().any(|f| f.contains("Han/CJK characters")),
+            "stray CJK surfaced as advisory: {advisory:?}"
+        );
+    }
+
+    #[test]
+    fn audit_flags_stray_vietnamese_but_not_plain_latin() {
+        // Vietnamese-accented vowels bleeding into Thai are flagged...
+        let source = "彼女は静かに頷いた。";
+        let thai = "เธอพยักหน้าอย่างเงียบ ๆ rồi bước đi";
+        let findings = audit_translation_with_terms(source, thai, &[], &[]);
+        assert!(
+            findings.iter().any(|f| f.contains("corrupted non-Thai glyphs")),
+            "Vietnamese corruption flagged: {findings:?}"
+        );
+
+        // ...but a plain-ASCII romanized name is not.
+        let thai_ok = "Akira หันกลับมามองเธอ";
+        let findings = audit_translation_with_terms(source, thai_ok, &[], &[]);
+        assert!(
+            !findings.iter().any(|f| f.contains("corrupted non-Thai glyphs")),
+            "plain Latin name must not be flagged: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn audit_allows_retained_kanji_present_in_source() {
+        // A do-not-translate name kept verbatim from the source must trip neither
+        // the hard gate nor the advisory — the same kanji appear in the source.
+        let source = "田中は剣を抜いた。";
+        let thai = "田中ชักดาบออกมา";
+        let hard = audit_translation_with_terms(source, thai, &[], &[]);
+        assert!(
+            !hard.iter().any(|f| f.contains("corrupted non-Thai glyphs")),
+            "retained source kanji must not be a hard gate: {hard:?}"
+        );
+        let advisory = advisory_findings(source, thai);
+        assert!(
+            !advisory.iter().any(|f| f.contains("Han/CJK characters")),
+            "retained source kanji must not be an advisory: {advisory:?}"
         );
     }
 
