@@ -6,15 +6,15 @@
 
 use std::hash::{Hash, Hasher};
 
-use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::Frame;
 
 use crate::model::{AgentRole, AppEvent, ChapterKind, ChapterStatus, ReviewVerdict, UsageStats};
-use crate::theme::{self, Theme, agent_badge, agent_spinner_frame, spinner_frame, status_glyph};
+use crate::theme::{self, agent_badge, agent_spinner_frame, spinner_frame, status_glyph, Theme};
 use crate::ui::mouse::{MouseGesture, MouseInput};
 use crate::ui::text::{col_width, pad_to_cols, truncate_cols};
 use crate::ui::widgets::render_line_gauge;
@@ -951,7 +951,9 @@ impl TranslateScreen {
             crate::ui::markdown::theme_fingerprint(theme).hash(&mut h);
             let key = h.finish();
             self.preview_cache
-                .lines(key, || crate::ui::markdown::render(preview, fg, theme, width))
+                .lines(key, || {
+                    crate::ui::markdown::render(preview, fg, theme, width)
+                })
                 .to_vec()
         };
 
@@ -1067,9 +1069,9 @@ fn preview_tail(s: &str) -> &str {
 #[cfg(test)]
 mod queue_panel_tests {
     use super::*;
-    use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::Terminal;
 
     fn key(c: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::empty())

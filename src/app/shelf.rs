@@ -2,20 +2,20 @@
 
 use std::path::PathBuf;
 
-use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
+use ratatui::Frame;
 
 use crate::model::{ChapterKind, ChapterStatus, Project};
-use crate::theme::{self, Theme, status_glyph};
+use crate::theme::{self, status_glyph, Theme};
 use crate::ui::mouse::{MouseGesture, MouseInput};
 use crate::ui::text::{col_width, pad_to_cols, thai_display_safe, truncate_cols};
 
-use super::Action;
 use super::overlay::Overlay;
+use super::Action;
 
 /// Selection covers `projects.len()` project rows plus the trailing import row.
 pub struct ShelfScreen {
@@ -36,9 +36,9 @@ impl ShelfScreen {
         }
     }
 
-    /// Re-discover unimported epubs in the working root.
+    /// Re-discover importable source files in the working root.
     pub fn rescan(&mut self, root: &std::path::Path) {
-        self.unimported = crate::workspace::scan::find_unimported_epubs(root);
+        self.unimported = crate::workspace::scan::find_importable_files(root);
     }
 
     pub fn select_first(&mut self) {
@@ -54,7 +54,7 @@ impl ShelfScreen {
         projects.len()
     }
 
-    fn epub_paths(&self) -> Vec<PathBuf> {
+    fn import_paths(&self) -> Vec<PathBuf> {
         self.unimported.iter().map(|(p, _)| p.clone()).collect()
     }
 
@@ -90,14 +90,14 @@ impl ShelfScreen {
             }
             KeyCode::Enter => {
                 if sel == self.import_row_index(projects) {
-                    Action::show_overlay(Overlay::import(self.epub_paths()))
+                    Action::show_overlay(Overlay::import(self.import_paths()))
                 } else if let Some(p) = projects.get(sel) {
                     Action::OpenProject(p.id.clone())
                 } else {
                     Action::None
                 }
             }
-            KeyCode::Char('i') => Action::show_overlay(Overlay::import(self.epub_paths())),
+            KeyCode::Char('i') => Action::show_overlay(Overlay::import(self.import_paths())),
             KeyCode::Char('d') => {
                 if let Some(p) = projects.get(sel) {
                     Action::show_overlay(Overlay::confirm(
@@ -124,7 +124,7 @@ impl ShelfScreen {
                 }
             }
             KeyCode::Char('r') => {
-                // Project rescan is the App's job; here we only rescan local epubs.
+                // Project rescan is the App's job; here we only rescan local source files.
                 self.rescan(&working_root());
                 Action::None
             }
@@ -156,7 +156,7 @@ impl ShelfScreen {
                 self.list.select(Some(target));
                 if double || already {
                     if target == import_idx {
-                        return Action::show_overlay(Overlay::import(self.epub_paths()));
+                        return Action::show_overlay(Overlay::import(self.import_paths()));
                     }
                     if let Some(p) = projects.get(target) {
                         return Action::OpenProject(p.id.clone());
@@ -224,7 +224,7 @@ impl ShelfScreen {
             Span::styled("— your shelf", Style::default().fg(theme.ink_soft)),
         ]);
         let count = format!(
-            "./  ({} project{} · {} epub{})",
+            "./  ({} project{} · {} source file{})",
             projects.len(),
             plural(projects.len()),
             self.unimported.len(),
@@ -293,18 +293,23 @@ impl ShelfScreen {
         } else {
             Style::default().fg(theme.accent)
         };
-        let epub_note = format!("{} unimported .epub in this folder", self.unimported.len());
+        let source_note = format!(
+            "{} importable file{} in this folder",
+            self.unimported.len(),
+            plural(self.unimported.len())
+        );
+        let import_label = "＋ Import file …";
         let mut import_line = vec![
             Span::styled(format!(" {import_bar} "), Style::default().fg(theme.accent)),
-            Span::styled("＋ Import EPUB …", import_style),
+            Span::styled(import_label, import_style),
         ];
-        let used = col_width("  ＋ Import EPUB …") + 2;
-        let note_w = col_width(&epub_note);
+        let used = col_width(&format!("  {import_label}")) + 2;
+        let note_w = col_width(&source_note);
         if (list_area.width as usize) > used + note_w + 4 {
             let gap = list_area.width as usize - used - note_w - 2;
             import_line.push(Span::raw(" ".repeat(gap)));
             import_line.push(Span::styled(
-                epub_note,
+                source_note,
                 Style::default().fg(theme.ink_faint),
             ));
         }
@@ -481,7 +486,11 @@ fn touched_label(p: &Project) -> String {
 }
 
 fn plural(n: usize) -> &'static str {
-    if n == 1 { "" } else { "s" }
+    if n == 1 {
+        ""
+    } else {
+        "s"
+    }
 }
 
 fn human_size(bytes: u64) -> String {
@@ -503,8 +512,8 @@ mod tests {
     use super::*;
     use crate::model::ThemeId;
     use crate::ui::mouse::{MouseGesture, MouseInput};
-    use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
 
     fn proj(id: &str) -> Project {
         Project {

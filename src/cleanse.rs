@@ -26,8 +26,8 @@ use std::sync::OnceLock;
 
 use ego_tree::NodeRef;
 use regex::Regex;
-use scraper::Html;
 use scraper::node::Node;
+use scraper::Html;
 
 /// The fixed chapter-relative prefix for relocated images (hard spec).
 const IMAGE_PREFIX: &str = "../../images/";
@@ -81,6 +81,12 @@ pub fn xhtml_to_markdown(html: &str, image_map: &HashMap<String, String>) -> Str
     walk(doc.tree.root(), image_map, &mut out);
 
     post_process(&out)
+}
+
+/// Apply honya's quote, external-glyph, and whitespace cleanup to Markdown that
+/// came from another converter such as MarkItDown.
+pub fn clean_markdown(markdown: &str) -> String {
+    post_process(&sanitize_external_chars(markdown))
 }
 
 /// Recursively render a node and its subtree into `out`.

@@ -4,12 +4,12 @@
 
 use std::hash::{Hash, Hasher};
 
-use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::Frame;
 
 use crate::model::{Character, GlossaryTerm, TermPolicy};
 use crate::theme::{self, Theme};
@@ -18,8 +18,8 @@ use crate::ui::mouse::{MouseGesture, MouseInput};
 use crate::ui::text::{col_width, pad_to_cols, thai_display_safe, truncate_cols};
 use crate::workspace::Workspace;
 
-use super::Action;
 use super::overlay::Overlay;
+use super::Action;
 
 const SUB_GLOSSARY: u8 = 0;
 const SUB_CHARACTERS: u8 = 1;
@@ -267,8 +267,12 @@ impl LexiconScreen {
 
         // ---- search field owns text input ----
         if self.searching {
-            if input::handle(&mut self.filter, &mut self.filter_cursor, key, EditOpts::default())
-                != Edited::Ignored
+            if input::handle(
+                &mut self.filter,
+                &mut self.filter_cursor,
+                key,
+                EditOpts::default(),
+            ) != Edited::Ignored
             {
                 return Action::None;
             }
@@ -433,9 +437,8 @@ impl LexiconScreen {
         );
         if !is_nav {
             let mut cursor = form.cursor;
-            let consumed =
-                input::handle(form.current_mut(), &mut cursor, key, EditOpts::default())
-                    != Edited::Ignored;
+            let consumed = input::handle(form.current_mut(), &mut cursor, key, EditOpts::default())
+                != Edited::Ignored;
             form.cursor = cursor;
             if consumed {
                 return Action::None;

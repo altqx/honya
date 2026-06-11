@@ -74,8 +74,8 @@ pub enum Action {
     None,
     Quit,
     Goto(Screen),
-    ImportEpub {
-        epub: PathBuf,
+    ImportFile {
+        source: PathBuf,
         title: String,
         vol: u32,
         synopsis_raw: String,
@@ -206,7 +206,7 @@ pub enum Action {
     },
     /// Create the bundled sample project (if absent) and open it.
     CreateSample,
-    /// Open the EPUB import wizard from the Welcome overlay (App supplies the list).
+    /// Open the import wizard from the Welcome overlay (App supplies the list).
     OpenImport,
     /// Dismiss the Welcome overlay and persist that onboarding is complete.
     DismissWelcome,
@@ -643,6 +643,9 @@ impl App {
                 );
             }
             AppEvent::Error { context, msg } => {
+                if context == "import" {
+                    self.run_active = false;
+                }
                 // An export failure clears its guard and dismisses the export overlay
                 // so the error toast is visible.
                 if self.export_active {
@@ -1330,14 +1333,14 @@ impl App {
             } => {
                 self.toggle_reader_bookmark(chapter, line, label);
             }
-            Action::ImportEpub {
-                epub,
+            Action::ImportFile {
+                source,
                 title,
                 vol,
                 synopsis_raw,
                 synopsis_th,
             } => {
-                self.start_import(epub, title, vol, synopsis_raw, synopsis_th);
+                self.start_import(source, title, vol, synopsis_raw, synopsis_th);
             }
             Action::TranslateSynopsis { raw, attempt } => {
                 self.translate_synopsis(raw, attempt);
@@ -1478,11 +1481,11 @@ impl App {
                 self.create_sample_project();
             }
             Action::OpenImport => {
-                let epubs = crate::workspace::scan::find_unimported_epubs(&working_root())
+                let files = crate::workspace::scan::find_importable_files(&working_root())
                     .into_iter()
                     .map(|(p, _)| p)
                     .collect();
-                self.overlay = Overlay::import(epubs);
+                self.overlay = Overlay::import(files);
             }
             Action::DismissWelcome => {
                 self.mark_onboarded();
@@ -1566,11 +1569,11 @@ impl App {
             .max()
             .unwrap_or(0)
             + 1;
-        let epubs: Vec<PathBuf> = crate::workspace::scan::find_unimported_epubs(&working_root())
+        let files: Vec<PathBuf> = crate::workspace::scan::find_importable_files(&working_root())
             .into_iter()
             .map(|(p, _)| p)
             .collect();
-        self.overlay = Overlay::import_into(epubs, title, next);
+        self.overlay = Overlay::import_into(files, title, next);
     }
 
     /// Permanently delete a project directory from disk (the only way to remove it
@@ -2275,7 +2278,7 @@ impl App {
 
     fn start_import(
         &mut self,
-        epub: PathBuf,
+        source: PathBuf,
         title: String,
         vol: u32,
         synopsis_raw: String,
@@ -2293,7 +2296,7 @@ impl App {
         self.toast = Some(Toast::info(format!("importing {slug} …")));
         tokio::spawn(async move {
             match run_import(
-                epub,
+                source,
                 dest,
                 title,
                 vol,
@@ -3063,7 +3066,7 @@ fn chapter_list_preview(chapters: &[u32]) -> String {
     }
 }
 
-/// The working root we scan for projects / unimported epubs. Falls back to `.`.
+/// The working root we scan for projects / importable source files. Falls back to `.`.
 fn working_root() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
@@ -3136,11 +3139,11 @@ pub fn slugify(title: &str) -> String {
     }
 }
 
-/// Import driver: scaffold the tree, extract+relocate media, cleanse each spine doc to
-/// markdown, write raw/ (+ translated/ for image-only), emit ImportProgress. Returns the slug.
+/// Import driver: scaffold the tree, convert the selected source to Markdown,
+/// write raw/ (+ translated/ for image-only), emit ImportProgress. Returns the slug.
 #[allow(clippy::too_many_arguments)]
 async fn run_import(
-    epub: PathBuf,
+    source: PathBuf,
     dest: PathBuf,
     title: String,
     vol: u32,
@@ -3149,8 +3152,9 @@ async fn run_import(
     synopsis_th: String,
     tx: &EventTx,
 ) -> anyhow::Result<String> {
-    use crate::epub::import::import_with_media;
-    use crate::epub::paths::{dir_of, resolve_href};
+    if !crate::document_import::is_supported_import_path(&source) {
+        anyhow::bail!("unsupported import source: {}", source.display());
+    }
 
     let slug = dest
         .file_name()
@@ -3174,6 +3178,24 @@ async fn run_import(
         })
         .await??;
     }
+
+    if crate::document_import::is_epub_path(&source) {
+        run_epub_import(source, dest.clone(), vol, tx).await?;
+    } else {
+        run_markitdown_import(source, dest.clone(), title, vol, tx).await?;
+    }
+
+    Ok(slug)
+}
+
+async fn run_epub_import(
+    epub: PathBuf,
+    dest: PathBuf,
+    vol: u32,
+    tx: &EventTx,
+) -> anyhow::Result<()> {
+    use crate::epub::import::import_with_media;
+    use crate::epub::paths::{dir_of, resolve_href};
 
     tx.send(AppEvent::ImportProgress {
         done: 0,
@@ -3268,15 +3290,11 @@ async fn run_import(
     }
 
     let chapters = crate::epub::segment::segment(&docs);
-
-    let mut ch_number: u32 = 0;
-    for lc in &chapters {
-        ch_number += 1;
+    for (idx, lc) in chapters.iter().enumerate() {
+        let ch_number = (idx + 1) as u32;
         match lc.kind {
             crate::epub::segment::LogicalKind::ImageOnly => {
-                // Seed raw/ for discovery AND translated/ so it reads as Done.
-                let _ = crate::workspace::translation::write_raw(&ws, ch_number, &lc.body);
-                let _ = crate::workspace::translation::write_image_only(&ws, ch_number, &lc.body);
+                write_import_chapter(&ws, ch_number, &lc.body, true)?;
             }
             crate::epub::segment::LogicalKind::Prose => {
                 // Title heading goes ABOVE the leading m### image so scan.rs's
@@ -3285,12 +3303,81 @@ async fn run_import(
                     Some(t) => format!("# {t}\n\n{}", lc.body),
                     None => lc.body.clone(),
                 };
-                let _ = crate::workspace::translation::write_raw(&ws, ch_number, &titled);
+                write_import_chapter(&ws, ch_number, &titled, false)?;
             }
         }
     }
 
-    Ok(slug)
+    Ok(())
+}
+
+async fn run_markitdown_import(
+    source: PathBuf,
+    dest: PathBuf,
+    title: String,
+    vol: u32,
+    tx: &EventTx,
+) -> anyhow::Result<()> {
+    let source_name = source
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("source")
+        .to_string();
+    tx.send(AppEvent::ImportProgress {
+        done: 0,
+        total: 0,
+        label: format!("converting {source_name}"),
+    });
+
+    let progress_tx = tx.clone();
+    let converted = tokio::task::spawn_blocking(move || {
+        crate::document_import::convert_markitdown_path(&source, &title, move |progress| {
+            progress_tx.send(AppEvent::ImportProgress {
+                done: 0,
+                total: 0,
+                label: format!("markitdown · {progress}"),
+            });
+        })
+    })
+    .await??;
+
+    if converted.degraded {
+        tx.send(AppEvent::Log {
+            level: LogLevel::Warn,
+            msg: format!("{source_name}: MarkItDown reported a degraded conversion"),
+        });
+    }
+
+    let ws = Workspace::new(dest, vol);
+    let total = converted.chapters.len();
+    if total == 0 {
+        anyhow::bail!("MarkItDown produced no chapters");
+    }
+    for (idx, chapter) in converted.chapters.iter().enumerate() {
+        let ch_number = (idx + 1) as u32;
+        write_import_chapter(&ws, ch_number, &chapter.body, chapter.image_only)?;
+        tx.send(AppEvent::ImportProgress {
+            done: idx + 1,
+            total,
+            label: format!("writing chapter {}/{}", idx + 1, total),
+        });
+        tokio::task::yield_now().await;
+    }
+
+    Ok(())
+}
+
+fn write_import_chapter(
+    ws: &Workspace,
+    chapter: u32,
+    body: &str,
+    image_only: bool,
+) -> std::io::Result<()> {
+    crate::workspace::translation::write_raw(ws, chapter, body)?;
+    if image_only {
+        crate::workspace::translation::write_image_only(ws, chapter, body)?;
+    }
+    Ok(())
 }
 
 /// Count `<a href="…​.xhtml…">` links in raw HTML — the in-spine TOC/nav signal.

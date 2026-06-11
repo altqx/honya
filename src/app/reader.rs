@@ -7,12 +7,12 @@
 use std::cell::RefCell;
 use std::hash::{Hash, Hasher};
 
-use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::Frame;
 
 use chrono::{DateTime, Utc};
 
@@ -21,8 +21,8 @@ use crate::theme::{self, Theme};
 use crate::ui::mouse::{MouseGesture, MouseInput};
 use crate::workspace::Workspace;
 
-use super::Action;
 use super::overlay::Overlay;
+use super::Action;
 
 /// Layout modes for `o`.
 const MODE_SPLIT: u8 = 0;
@@ -780,7 +780,11 @@ impl ReaderScreen {
         self.search.as_ref().map(|s| &s.query).hash(&mut h);
         let key = h.finish();
 
-        let cache = if is_thai { &self.th_cache } else { &self.ja_cache };
+        let cache = if is_thai {
+            &self.th_cache
+        } else {
+            &self.ja_cache
+        };
         let mut cache = cache.borrow_mut();
         let lines = cache.lines(key, || {
             // Hide the machine-only chunk / review markers from the TH pane (they
@@ -1390,7 +1394,11 @@ fn short_dt(dt: DateTime<Utc>) -> String {
 }
 
 fn yesno(b: bool) -> &'static str {
-    if b { "y" } else { "n" }
+    if b {
+        "y"
+    } else {
+        "n"
+    }
 }
 
 impl Default for ReaderScreen {

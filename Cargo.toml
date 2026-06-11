@@ -50,7 +50,12 @@ roxmltree = "0.21" # namespace-aware OPF/NCX/nav parsing
 scraper = "0.27" # html5ever 0.39 XHTML->markdown walk
 ego-tree = "0.11" # MUST be direct: scraper does not re-export it; needed for NodeRef recursion
 
-# --- text processing ---
+# --- document import / text processing ---
+pdf-extract = "0.10" # MarkItDown's pure-Rust PDF text extractor
+htmd = "0.5"         # MarkItDown-style HTML -> Markdown for non-EPUB HTML imports
+csv = "1.4"          # Text-based MarkItDown import format
+chardetng = "1"
+encoding_rs = "0.8"
 regex = "1.12"
 once_cell = "1.21.4" # Lazy statics for compiled regexes + response_format payloads
 

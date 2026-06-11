@@ -142,7 +142,7 @@ fn handle_synopsis_keys(st: &mut SynopsisState, key: KeyEvent) -> SynKey {
     }
 }
 
-/// The import wizard: pick epub → name → volume → synopsis → importing. When
+/// The import wizard: pick source file → name → volume → synopsis → importing. When
 /// `lock_name` is set (the "add volume to this project" flow), the name step is
 /// skipped and the title is fixed to the open project's.
 #[derive(Debug, Clone)]
@@ -166,7 +166,7 @@ pub struct ImportState {
 
 impl ImportState {
     fn new(epubs: Vec<PathBuf>) -> Self {
-        // Seed the name field from the first epub's stem for a friendly default.
+        // Seed the name field from the first source file's stem for a friendly default.
         let name = epubs
             .first()
             .and_then(|p| p.file_stem())
@@ -1181,7 +1181,7 @@ impl Overlay {
             return Action::None;
         };
         match st.step {
-            // Step 0: pick EPUB.
+            // Step 0: pick source file.
             0 => match key.code {
                 KeyCode::Esc => Action::CloseOverlay,
                 KeyCode::Up | KeyCode::Char('k') => {
@@ -1283,15 +1283,15 @@ impl Overlay {
                         Action::None
                     }
                     SynKey::Accept => {
-                        let epub = st.selected_epub().cloned().unwrap_or_default();
+                        let source = st.selected_epub().cloned().unwrap_or_default();
                         let title = st.name.trim().to_string();
                         let vol = st.vol.max(1);
                         let synopsis_raw = st.syn.raw.trim().to_string();
                         let synopsis_th = st.syn.th.trim().to_string();
                         st.step = 4;
                         st.progress = Some((0, 0, "starting".to_string()));
-                        Action::ImportEpub {
-                            epub,
+                        Action::ImportFile {
+                            source,
                             title,
                             vol,
                             synopsis_raw,
@@ -1299,13 +1299,13 @@ impl Overlay {
                         }
                     }
                     SynKey::Skip => {
-                        let epub = st.selected_epub().cloned().unwrap_or_default();
+                        let source = st.selected_epub().cloned().unwrap_or_default();
                         let title = st.name.trim().to_string();
                         let vol = st.vol.max(1);
                         st.step = 4;
                         st.progress = Some((0, 0, "starting".to_string()));
-                        Action::ImportEpub {
-                            epub,
+                        Action::ImportFile {
+                            source,
                             title,
                             vol,
                             synopsis_raw: String::new(),
@@ -1769,7 +1769,7 @@ impl Overlay {
             Line::from(Span::styled("  The five screens (1–5 / Tab):", dim)),
         ];
         let screens = [
-            ("1", "書架 Shelf", "import EPUBs · pick a project"),
+            ("1", "書架 Shelf", "import files · pick a project"),
             ("2", "棚 Project", "chapters · queue · run translation"),
             ("3", "訳 Translate", "watch the live 3-agent pipeline"),
             ("4", "読 Reader", "read JA ↔ TH side by side"),
@@ -1799,7 +1799,7 @@ impl Overlay {
                 sample_label,
                 vec![Span::styled(" — explore offline, no API key needed", dim)],
             ),
-            ("Import an EPUB".to_string(), vec![]),
+            ("Import a file".to_string(), vec![]),
             (
                 "Set OpenRouter API key".to_string(),
                 vec![
@@ -1844,7 +1844,7 @@ impl Overlay {
         let verb = if st.lock_name {
             "Add volume"
         } else {
-            "Import EPUB"
+            "Import file"
         };
         let title = match st.step {
             4 => format!("{verb} — importing"),
@@ -2112,12 +2112,20 @@ impl Overlay {
             let p = Paragraph::new(vec![
                 Line::raw(""),
                 Line::from(Span::styled(
-                    "  No .epub files found in this folder.",
+                    "  No importable files found in this folder.",
                     Style::default().fg(theme.ink_soft),
                 )),
                 Line::raw(""),
                 Line::from(Span::styled(
-                    "  Drop an .epub here and press r on the Shelf to rescan.",
+                    "  Drop a supported file here and press r on the Shelf to rescan.",
+                    Style::default().fg(theme.ink_faint),
+                )),
+                Line::raw(""),
+                Line::from(Span::styled(
+                    format!(
+                        "  Supported: {}",
+                        crate::document_import::supported_import_summary()
+                    ),
                     Style::default().fg(theme.ink_faint),
                 )),
             ])
@@ -2145,7 +2153,7 @@ impl Overlay {
             lines.push(Line::raw(""));
         }
         lines.push(Line::from(Span::styled(
-            "  Choose a source EPUB:",
+            "  Choose a source file:",
             Style::default().fg(theme.ink_soft),
         )));
         lines.push(Line::raw(""));
@@ -2796,7 +2804,7 @@ impl Overlay {
                 "Shelf 書架",
                 &[
                     ("↵", "open project"),
-                    ("i", "import epub"),
+                    ("i", "import file"),
                     ("d / R / r", "delete · rename · rescan"),
                 ],
             ),

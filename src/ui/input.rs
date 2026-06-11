@@ -210,7 +210,10 @@ pub fn move_word_left(value: &str, cursor: &mut usize) {
 /// Move to the start of the next word (skipping the current word + space).
 pub fn move_word_right(value: &str, cursor: &mut usize) {
     let c = clamp_cursor(value, *cursor);
-    let chars: Vec<(usize, char)> = value[c..].char_indices().map(|(b, ch)| (b + c, ch)).collect();
+    let chars: Vec<(usize, char)> = value[c..]
+        .char_indices()
+        .map(|(b, ch)| (b + c, ch))
+        .collect();
     let mut idx = 0;
     while idx < chars.len() && !chars[idx].1.is_whitespace() {
         idx += 1;
@@ -355,7 +358,15 @@ mod tests {
     fn ctrl_w_deletes_previous_word() {
         let mut v = "foo bar".to_string();
         let mut c = v.len();
-        assert_eq!(handle(&mut v, &mut c, ctrl(KeyCode::Char('w')), EditOpts::default()), Edited::Changed);
+        assert_eq!(
+            handle(
+                &mut v,
+                &mut c,
+                ctrl(KeyCode::Char('w')),
+                EditOpts::default()
+            ),
+            Edited::Changed
+        );
         assert_eq!(v, "foo ");
         assert_eq!(c, 4);
     }
@@ -374,10 +385,19 @@ mod tests {
     fn numeric_field_rejects_letters_but_allows_digits() {
         let mut v = String::new();
         let mut c = 0;
-        let opts = EditOpts { numeric_only: true, multiline: false };
-        assert_eq!(handle(&mut v, &mut c, key(KeyCode::Char('a')), opts), Edited::Moved);
+        let opts = EditOpts {
+            numeric_only: true,
+            multiline: false,
+        };
+        assert_eq!(
+            handle(&mut v, &mut c, key(KeyCode::Char('a')), opts),
+            Edited::Moved
+        );
         assert_eq!(v, "");
-        assert_eq!(handle(&mut v, &mut c, key(KeyCode::Char('7')), opts), Edited::Changed);
+        assert_eq!(
+            handle(&mut v, &mut c, key(KeyCode::Char('7')), opts),
+            Edited::Changed
+        );
         assert_eq!(v, "7");
     }
 

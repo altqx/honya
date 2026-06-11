@@ -14,7 +14,9 @@
 
 ---
 
-Drop an EPUB into a folder and honya turns it into a finished Thai translation. It reads the book
+Drop an EPUB, PDF, DOCX, HTML, or text-based file into a folder and honya turns it into a finished Thai translation. EPUBs keep true spine order; other formats are converted through MarkItDown-style Rust converters into tidy Markdown before the same pipeline runs.
+
+For EPUBs, honya reads the book
 in true spine order, relocates the illustrations, cleanses the XHTML into tidy Markdown, then runs
 a three-agent LLM pipeline — **Orchestrator · Translator · Reviewer** — over an OpenRouter-compatible
 API. The agents keep your character roster, glossary, and volume notes current **through tool calls**,
@@ -29,7 +31,7 @@ telemetry — just a quiet workspace in your terminal.
 
 ## Highlights
 
-- **EPUB in, Thai out** — spine-ordered import, illustration relocation, and HTML→Markdown cleanse, all automatic.
+- **Many sources in, Thai out** — EPUB, PDF, Word (`.docx`), HTML, Markdown/Text, CSV, JSON, and XML imports; EPUBs keep spine-ordered illustration relocation and honya's light-novel cleanse rules.
 - **Three specialized agents** — Translator and Reviewer iterate per chunk; the Orchestrator persists new terms and characters.
 - **Continuity that holds** — per-chunk glossary/character context, protected terminology locks, and the previous chunk's tail keep voice and terms consistent across a whole volume.
 - **Cost transparency** — live token + USD meter during a run, rolled up per chapter, volume, and project.
@@ -123,8 +125,8 @@ honya          # launch the TUI in the current directory
 ```
 
 honya treats the **current working directory** as your *shelf*: each translation project is a
-subdirectory, and any loose `*.epub` files are offered as one-press imports. From the **書架 Shelf**
-tab, press `i` to import an EPUB into a new project, then `t` / `T` on the **棚 Project** tab to
+subdirectory, and any loose supported source files (`*.epub`, `*.pdf`, `*.docx`, `*.html`, `*.txt`, `*.md`, `*.csv`, `*.json`, `*.xml`, …) are offered as one-press imports. From the **書架 Shelf**
+tab, press `i` to import a file into a new project, then `t` / `T` on the **棚 Project** tab to
 translate a chapter or a whole volume.
 
 On first run, honya prompts for your OpenRouter key and saves it — see [API key & models](#api-key--models).
@@ -133,7 +135,7 @@ On first run, honya prompts for your OpenRouter key and saves it — see [API ke
 
 | Tab | | Purpose |
 |----|----|---------|
-| `1` | **書架 Shelf** | Pick a project or import a new EPUB (`i`). |
+| `1` | **書架 Shelf** | Pick a project or import a new source file (`i`). |
 | `2` | **棚 Project** | Volume/chapter tree with waxing-moon status (`○ ◐ ◑ ●`), context files, and a detail card with per-chapter token/cost roll-up. `t` translate chapter · `T` whole volume. |
 | `3` | **訳 Translate** | The live run: chunk gauge, three agent lines, token + USD meter, streaming Thai preview. `p` pause · `s` stop · `f` follow. |
 | `4` | **読 Reader** | Synced side-by-side JA ↔ TH proofreading with inline notes. `[ ]` chapters · `z` sync · `o` layout · `n` note. |
@@ -199,7 +201,8 @@ caution, and red reserved **only** for failure — so status always reads the sa
 
 ### Pre-processing (Rust, at import)
 
-- **Spine-ordered** chapters from `content.opf` — true reading order, not filename order.
+- **MarkItDown-style file conversion** for PDF, Word (`.docx`), HTML, Markdown/Text, CSV, JSON, and XML; obvious `#` sections become raw chapters.
+- **Spine-ordered EPUB chapters** from `content.opf` — true reading order, not filename order.
 - **Media relocation** — every PNG/JPG/SVG illustration is copied into `images/` (dedup-safe).
 - **Image-only detection** — illustration pages render their image link straight to `translated/`, skipping the agents entirely.
 - **Image segmentation** — stray illustration pages fold into the surrounding chapter, and `m###`-style title plates are detected as chapter heads.

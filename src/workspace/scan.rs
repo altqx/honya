@@ -6,7 +6,6 @@
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
-use walkdir::WalkDir;
 
 use crate::cleanse;
 use crate::model::{Chapter, ChapterKind, ChapterStatus, Project, Volume, VolumeData};
@@ -184,36 +183,18 @@ fn first_md_heading(md: &str) -> Option<String> {
     None
 }
 
-/// Find `*.epub` files one level under `root` (with byte size) for the Shelf
+/// Find importable files one level under `root` (with byte size) for the Shelf
 /// import list; depth 1 so we don't descend into existing project dirs.
+pub fn find_importable_files(root: &Path) -> Vec<(PathBuf, u64)> {
+    crate::document_import::importable_files(root)
+}
+
+#[allow(dead_code)]
 pub fn find_unimported_epubs(root: &Path) -> Vec<(PathBuf, u64)> {
-    let mut out = Vec::new();
-
-    for entry in WalkDir::new(root)
-        .min_depth(1)
-        .max_depth(1)
+    find_importable_files(root)
         .into_iter()
-        .filter_map(|e| e.ok())
-    {
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        let is_epub = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(|e| e.eq_ignore_ascii_case("epub"))
-            .unwrap_or(false);
-        if !is_epub {
-            continue;
-        }
-
-        let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
-        out.push((path.to_path_buf(), size));
-    }
-
-    out.sort_by(|a, b| a.0.cmp(&b.0));
-    out
+        .filter(|(path, _)| crate::document_import::is_epub_path(path))
+        .collect()
 }
 
 /// Resting lifecycle status from disk: `Done` when translated/ is non-empty (or,

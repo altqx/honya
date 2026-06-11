@@ -9,6 +9,7 @@ mod agents;
 mod app;
 mod cleanse;
 mod config;
+mod document_import;
 mod epub;
 mod error;
 mod export;
