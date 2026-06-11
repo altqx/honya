@@ -547,15 +547,26 @@ impl App {
                 chunk,
                 attempts,
                 reason,
+                salvaged,
             } => {
+                if !*salvaged
+                    && let Some(ch) = self.chapter_in_event_vol_mut(*chapter)
+                {
+                    ch.skipped_chunks = ch.skipped_chunks.saturating_add(1);
+                }
+                let verb = if *salvaged {
+                    "committed unreviewed"
+                } else {
+                    "skipped (no translation)"
+                };
                 self.toast = Some(Toast::warn(format!(
-                    "ch {chapter} chunk {} committed unreviewed · needs manual review",
+                    "ch {chapter} chunk {} {verb} · needs manual review",
                     chunk + 1
                 )));
                 self.push_log(
                     LogLevel::Warn,
                     format!(
-                        "ch {chapter} chunk {} committed unreviewed after {attempts} attempt(s): {reason}",
+                        "ch {chapter} chunk {} {verb} after {attempts} attempt(s): {reason}",
                         chunk + 1
                     ),
                 );
@@ -792,6 +803,9 @@ impl App {
             } else if total > 0 {
                 ch.committed_chunks = ch.committed_chunks.min(total);
             }
+            // A run re-attempts every flagged chunk, re-emitting ChunkNeedsReview
+            // for any still skipped — so rebuild the count from zero each run.
+            ch.skipped_chunks = 0;
         }
     }
 
@@ -2327,6 +2341,7 @@ impl App {
                     ch.status = ChapterStatus::Pending;
                     ch.total_chunks = 0;
                     ch.committed_chunks = 0;
+                    ch.skipped_chunks = 0;
                     ch.last_run = None;
                 }
             }

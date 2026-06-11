@@ -135,6 +135,27 @@ pub fn review_needed_details_in(text: &str) -> Vec<(u32, String)> {
     out
 }
 
+/// Return the indices of review-needed chunks that were *skipped*: committed with
+/// the flag but no usable Thai (only the marker + `[REVIEW NEEDED]` banner). A
+/// chapter with any of these is partially translated, not merely unreviewed. We
+/// reuse [`export_prose`], which strips the markers and the banner, and treat an
+/// empty remainder as "no translation landed".
+pub fn skipped_chunk_indices_in(text: &str) -> BTreeSet<u32> {
+    let mut out = BTreeSet::new();
+    for (idx, start, end) in chunk_block_ranges(text) {
+        let block = &text[start..end];
+        if block.contains(REVIEW_NEEDED_MARKER) && export_prose(block).trim().is_empty() {
+            out.insert(idx);
+        }
+    }
+    out
+}
+
+/// Count of skipped (empty) review-needed chunks — see [`skipped_chunk_indices_in`].
+pub fn skipped_chunk_count_in(text: &str) -> u32 {
+    skipped_chunk_indices_in(text).len() as u32
+}
+
 /// Strip the machine-only markers (`<!-- honya:chunk N -->` and the review-needed
 /// marker) from a translated chapter, leaving just the readable prose. Used by the
 /// Reader diff view so a rerun comparison shows text changes, not marker churn. The
@@ -481,6 +502,43 @@ mod tests {
         assert!(cleaned.contains("คำแปลที่ผ่านแล้ว"));
         assert_eq!(committed_chunk_indices_in(&cleaned), BTreeSet::from([8]));
         assert!(review_needed_chunk_indices_in(&cleaned).is_empty());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A review-needed chunk committed with no usable Thai counts as *skipped*
+    /// (the chapter is partially translated); one committed with a salvaged best
+    /// attempt does not. Clean (approved) chunks never count.
+    #[tokio::test]
+    async fn skipped_chunks_are_empty_review_commits() {
+        let (base, ws) = temp_ws("skipped");
+
+        // Chunk 0: clean approved translation.
+        append_chunk(&ws, 1, 0, "บทแปลที่ผ่าน").await.unwrap();
+        // Chunk 1: flagged but salvaged (best attempt has content) → not skipped.
+        append_chunk_needs_review(&ws, 1, 1, "บทแปลร่าง", 3, "drift")
+            .await
+            .unwrap();
+        // Chunk 2: flagged with NO usable Thai → skipped (only marker + banner).
+        append_chunk_needs_review(&ws, 1, 2, "", 3, "only refusals")
+            .await
+            .unwrap();
+
+        let body = read_translated(&ws, 1).await;
+        assert_eq!(
+            skipped_chunk_indices_in(&body),
+            BTreeSet::from([2]),
+            "only the empty review commit is a skip"
+        );
+        assert_eq!(skipped_chunk_count_in(&body), 1);
+
+        // A later approved retranslation of the skipped chunk clears the skip.
+        append_chunk(&ws, 1, 2, "เติมเต็มแล้ว").await.unwrap();
+        let fixed = read_translated(&ws, 1).await;
+        assert!(
+            skipped_chunk_indices_in(&fixed).is_empty(),
+            "fixing the empty chunk removes the skip"
+        );
 
         let _ = std::fs::remove_dir_all(&base);
     }

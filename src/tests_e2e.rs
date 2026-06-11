@@ -45,6 +45,7 @@ fn reader_note_overlay_saves_line_annotation() {
         source_segments: 2,
         total_chunks: 0,
         committed_chunks: 0,
+        skipped_chunks: 0,
         last_run: None,
         usage: UsageStats::default(),
     };
@@ -163,6 +164,7 @@ fn project_l_key_is_not_shadowed_by_activity_log() {
         source_segments: 1,
         total_chunks: 0,
         committed_chunks: 0,
+        skipped_chunks: 0,
         last_run: None,
         usage,
     };
@@ -979,6 +981,7 @@ fn all_done_checkpoint_is_cleared_without_prompting() {
         source_segments: 1,
         total_chunks: 1,
         committed_chunks: 1,
+        skipped_chunks: 0,
         last_run: None,
         usage: Default::default(),
     };
@@ -1116,6 +1119,7 @@ async fn qa_overlay_gathers_and_navigates() {
         source_segments: 1,
         total_chunks: 0,
         committed_chunks: 0,
+        skipped_chunks: 0,
         last_run: None,
         usage: UsageStats::default(),
     };
@@ -1227,6 +1231,7 @@ fn qa_collect_continuity_and_key_edges() {
         source_segments: 1,
         total_chunks: 0,
         committed_chunks: 0,
+        skipped_chunks: 0,
         last_run: None,
         usage: UsageStats::default(),
     };
@@ -1720,6 +1725,7 @@ fn pipeline_events_route_to_the_running_volume() {
         source_segments: 1,
         total_chunks: 0,
         committed_chunks: 0,
+        skipped_chunks: 0,
         last_run: None,
         usage: UsageStats::default(),
     };
@@ -1838,6 +1844,7 @@ fn whole_volume_translate_requeues_legacy_partial_chapter() {
         source_segments: 6,
         total_chunks: 0,
         committed_chunks: 1,
+        skipped_chunks: 0,
         last_run: None,
         usage: UsageStats::default(),
     };

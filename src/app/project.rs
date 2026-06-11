@@ -621,14 +621,28 @@ impl ProjectScreen {
         let mut lines = Vec::new();
         if let Some(c) = chapter {
             let (glyph, color) = status_glyph(c.kind, c.status, theme);
-            lines.push(Line::from(vec![
+            let mut status_spans = vec![
                 Span::styled(" status  ", Style::default().fg(theme.ink_faint)),
                 Span::styled(glyph.to_string(), Style::default().fg(color)),
                 Span::raw(" "),
                 Span::styled(status_word(c.status), Style::default().fg(color)),
-            ]));
+            ];
+            if c.is_partial_review() {
+                status_spans.push(Span::styled(
+                    " · partial",
+                    Style::default().fg(theme.status_warn),
+                ));
+            }
+            lines.push(Line::from(status_spans));
             let chunk_progress = if c.total_chunks == 0 {
                 format!("{} done", c.committed_chunks)
+            } else if c.skipped_chunks > 0 {
+                format!(
+                    "{} / {} translated · {} skipped",
+                    c.translated_chunks().min(c.total_chunks),
+                    c.total_chunks,
+                    c.skipped_chunks
+                )
             } else {
                 format!(
                     "{} / {} done",
@@ -770,7 +784,11 @@ fn chapter_row(
         &truncate_cols(&thai_display_safe(&ch.title), name_w),
         name_w,
     );
-    let status = status_word(ch.status);
+    let status = if ch.is_partial_review() {
+        "partial"
+    } else {
+        status_word(ch.status)
+    };
     let time = ch
         .last_run
         .map(|t| t.format("%H:%M").to_string())
@@ -946,6 +964,7 @@ mod tests {
             source_segments: 1,
             total_chunks: 0,
             committed_chunks: 0,
+            skipped_chunks: 0,
             last_run: None,
             usage: UsageStats::default(),
         }

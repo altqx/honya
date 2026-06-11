@@ -66,6 +66,13 @@ pub struct Chapter {
     /// Chunks fully committed to translated/ch_NNN.md.
     #[serde(default)]
     pub committed_chunks: u32,
+    /// Chunks committed flagged-for-review with *no* usable translation — the
+    /// Translator never produced acceptable Thai, so the chunk was skipped after
+    /// max attempts and only its marker/banner landed. A `NeedsReview` chapter
+    /// with `skipped_chunks > 0` is partially translated (content is missing),
+    /// not merely unreviewed.
+    #[serde(default)]
+    pub skipped_chunks: u32,
     /// Last time this chapter's status changed.
     #[serde(default)]
     pub last_run: Option<DateTime<Utc>>,
@@ -73,6 +80,20 @@ pub struct Chapter {
     /// chapter across every run. Loaded from VOLUME.md's data block on scan.
     #[serde(default)]
     pub usage: UsageStats,
+}
+
+impl Chapter {
+    /// A flagged chapter that is also missing translated content: it reached
+    /// `NeedsReview` because one or more chunks were skipped (committed empty)
+    /// rather than merely committed unreviewed. Drives the "partial" indicator.
+    pub fn is_partial_review(&self) -> bool {
+        self.status == ChapterStatus::NeedsReview && self.skipped_chunks > 0
+    }
+
+    /// Chunks that carry real Thai (committed total minus skipped-empty chunks).
+    pub fn translated_chunks(&self) -> u32 {
+        self.committed_chunks.saturating_sub(self.skipped_chunks)
+    }
 }
 
 impl Volume {
@@ -1055,11 +1076,14 @@ pub enum AppEvent {
     /// A chunk exhausted its review attempts but was committed anyway (the last
     /// attempt's Thai, flagged in-file with a `[REVIEW NEEDED]` banner) so the
     /// chapter can still complete. `reason` is the reviewer's final objection.
+    /// `salvaged` is false when no usable Thai existed and an empty chunk was
+    /// committed — the chunk is skipped, leaving the chapter partially translated.
     ChunkNeedsReview {
         chapter: u32,
         chunk: usize,
         attempts: u32,
         reason: String,
+        salvaged: bool,
     },
 
     ToolInvoked {
@@ -1194,6 +1218,7 @@ mod progress_tests {
             source_segments: 0,
             total_chunks: 0,
             committed_chunks: 0,
+            skipped_chunks: 0,
             last_run: None,
             usage: UsageStats::default(),
         }

@@ -156,6 +156,7 @@ pub fn scan_chapters(vol_dir: &Path, vol_data: &VolumeData) -> Vec<Chapter> {
                 source_segments: count_segments(&raw_md),
                 total_chunks: recorded_total_chunks(vol_dir, number),
                 committed_chunks: count_committed_chunks(vol_dir, number),
+                skipped_chunks: count_skipped_chunks(vol_dir, number),
                 last_run,
                 usage: vol_data
                     .chapter_usage
@@ -252,6 +253,17 @@ fn count_committed_chunks(vol_dir: &Path, chapter: u32) -> u32 {
         .join(format!("ch_{:03}.md", chapter));
     match std::fs::read_to_string(path) {
         Ok(text) => count_chunk_markers(&text) as u32,
+        Err(_) => 0,
+    }
+}
+
+/// Count chunks committed flagged-for-review with no usable translation (skipped).
+fn count_skipped_chunks(vol_dir: &Path, chapter: u32) -> u32 {
+    let path = vol_dir
+        .join("translated")
+        .join(format!("ch_{:03}.md", chapter));
+    match std::fs::read_to_string(path) {
+        Ok(text) => super::translation::skipped_chunk_count_in(&text),
         Err(_) => 0,
     }
 }

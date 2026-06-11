@@ -1784,6 +1784,7 @@ async fn commit_chunk_needs_review(
         chunk: chunk.index,
         attempts,
         reason,
+        salvaged: !thai.trim().is_empty(),
     });
 
     Ok(ChunkOutcome::NeedsReview)

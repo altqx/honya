@@ -135,6 +135,7 @@ mod tests {
             source_segments: 0,
             total_chunks: 0,
             committed_chunks: 0,
+            skipped_chunks: 0,
             last_run: None,
             usage: UsageStats::default(),
         }
