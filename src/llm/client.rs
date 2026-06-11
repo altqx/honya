@@ -2,6 +2,7 @@
 //!
 //! The `Result<T>` alias here shadows `std::result::Result` within `crate::llm::*`.
 
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -75,6 +76,18 @@ impl LlmError {
         ]
         .iter()
         .any(|needle| m.contains(needle))
+    }
+
+    /// True for a **transient** error injected into the SSE stream — e.g.
+    /// OpenRouter's "JSON error injected into SSE stream" or a mid-stream
+    /// `finish_reason=error` from a flaky upstream provider. These carry the
+    /// synthetic `status 0` (a real HTTP fault has a non-zero status) and clear on
+    /// a verbatim replay, so [`OpenRouterClient::chat_stream`] retries them once
+    /// before the failure reaches the pipeline. A content-policy block also has
+    /// `status 0` but is explicitly excluded — it needs the pipeline's
+    /// de-escalation retry, not a verbatim replay.
+    pub fn is_transient_stream_error(&self) -> bool {
+        matches!(self, LlmError::Api { status: 0, .. }) && !self.is_content_policy_block()
     }
 }
 
@@ -291,10 +304,24 @@ impl LlmClient for OpenRouterClient {
         req: &ChatRequest,
         on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
     ) -> Result<ChatResponse> {
-        match self.send_stream_once(req, on_delta).await {
+        // Track whether any delta reached the caller: a stream error after partial
+        // output can't be replayed here without double-feeding the field-stream
+        // parser, so that case is left to the pipeline (the partial-stream path).
+        let emitted = std::sync::atomic::AtomicBool::new(false);
+        let mut tracked = |delta: &str| {
+            emitted.store(true, Ordering::Relaxed);
+            on_delta(delta);
+        };
+        match self.send_stream_once(req, &mut tracked).await {
+            // One automatic retry on a polite (<=30s) rate-limit hint.
             Err(LlmError::RateLimited { retry_after, .. }) if retry_after <= 30 => {
                 tokio::time::sleep(Duration::from_secs(retry_after)).await;
-                self.send_stream_once(req, on_delta).await
+                self.send_stream_once(req, &mut tracked).await
+            }
+            // One automatic retry on a transient SSE-injected error, but only if the
+            // stream hadn't emitted anything yet (otherwise we'd replay partial text).
+            Err(e) if e.is_transient_stream_error() && !emitted.load(Ordering::Relaxed) => {
+                self.send_stream_once(req, &mut tracked).await
             }
             other => other,
         }
@@ -541,6 +568,37 @@ mod tests {
             };
             assert!(err.is_content_policy_block(), "should flag: {msg}");
         }
+    }
+
+    #[test]
+    fn injected_sse_error_is_transient_but_not_a_policy_block() {
+        let err = LlmError::Api {
+            status: 0,
+            message: "JSON error injected into SSE stream".to_string(),
+        };
+        assert!(err.is_transient_stream_error());
+        assert!(!err.is_content_policy_block());
+    }
+
+    #[test]
+    fn policy_block_and_real_http_errors_are_not_transient() {
+        // A content-policy block carries status 0 too, but must NOT be replayed
+        // verbatim — it routes to the pipeline's de-escalation retry instead.
+        assert!(
+            !LlmError::Api {
+                status: 0,
+                message: "PROHIBITED_CONTENT".into(),
+            }
+            .is_transient_stream_error()
+        );
+        // A real HTTP fault has a non-zero status.
+        assert!(
+            !LlmError::Api {
+                status: 503,
+                message: "service unavailable".into(),
+            }
+            .is_transient_stream_error()
+        );
     }
 
     #[test]
