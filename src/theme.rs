@@ -84,21 +84,25 @@ impl Theme {
     }
 
     /// Terminal — adaptive: `Reset` fg/bg inherit the host scheme and accents use
-    /// the 16 ANSI slots, so honya matches the terminal's own colors (dark-tuned).
+    /// the 16 ANSI slots, so honya matches the terminal's own colors on *both*
+    /// light and dark backgrounds. Two rules make it readable everywhere, since a
+    /// fixed palette can't know the host's background: (1) secondary text uses
+    /// bright-black (8), the one gray that stays legible on white *and* black —
+    /// never white (7), which vanishes on a light terminal; (2) no solid fill sits
+    /// behind `Reset`/gray text — selection is the `▌` bar + bold every list draws,
+    /// not a colored band that would bury the gray columns sitting on it.
     pub fn terminal() -> Self {
         Self {
             bg: Color::Reset,
             bg_panel: Color::Reset,
-            bg_inset: Color::Indexed(8), // bright black: gauge track
+            bg_inset: Color::Reset, // no fill: gauge fill + code text carry on their fg
             ink: Color::Reset,
-            ink_soft: Color::Indexed(7),
+            ink_soft: Color::Indexed(8),
             ink_faint: Color::Indexed(8),
             rule: Color::Indexed(8),
             accent: Color::Indexed(4),
             accent_soft: Color::Indexed(12),
-            // Blue band (a non-gray slot) keeps the gray status glyphs/hairlines
-            // visible on a selected row; only accent's decorative bar blends in.
-            accent_bg: Color::Indexed(4),
+            accent_bg: Color::Reset, // selection = the ▌ bar + bold, never a band
             status_pending: Color::Indexed(8),
             status_working: Color::Indexed(4),
             status_done: Color::Indexed(2),
