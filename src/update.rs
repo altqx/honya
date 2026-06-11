@@ -588,7 +588,7 @@ fn replace_executable(new_bin: &Path, current_exe: &Path) -> Result<()> {
             anyhow!(
                 "could not replace {}: {e}\n\
                  If honya is installed system-wide, re-run with sudo, or reinstall:\n  \
-                 curl https://honya.altqx.com/install.sh | bash",
+                 curl -fsSL https://honya.altqx.com/install.sh | bash",
                 current_exe.display(),
             )
         })?;

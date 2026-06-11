@@ -1,3 +1,4 @@
 /target
 /.blueprint
 .gstack/
+/web/node_modules

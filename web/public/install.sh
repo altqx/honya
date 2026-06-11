@@ -2,7 +2,7 @@
 #
 # honya 本屋 — installer
 #
-#   curl https://honya.altqx.com/install.sh | bash
+#   curl -fsSL https://honya.altqx.com/install.sh | bash
 #
 # Downloads the latest prebuilt honya binary for your platform from the
 # altqx/honya GitHub releases, verifies its SHA-256 checksum, and installs it
@@ -82,8 +82,8 @@ usage() {
 honya installer
 
 Usage:
-  curl https://honya.altqx.com/install.sh | bash
-  curl https://honya.altqx.com/install.sh | bash -s -- [options]
+  curl -fsSL https://honya.altqx.com/install.sh | bash
+  curl -fsSL https://honya.altqx.com/install.sh | bash -s -- [options]
 
 Options:
   --version <tag>   Install a specific release tag (e.g. v0.1.0).
@@ -355,7 +355,7 @@ main() {
     die "Unsupported platform: ${PLATFORM_DESC}.
     Prebuilt binaries cover: x86_64/aarch64 Linux (gnu) and macOS.
     Install Rust (https://rustup.rs) and re-run with --source to build from source:
-      curl https://honya.altqx.com/install.sh | bash -s -- --source"
+      curl -fsSL https://honya.altqx.com/install.sh | bash -s -- --source"
   fi
 
   info "Platform: ${PLATFORM_DESC} → ${TARGET}"

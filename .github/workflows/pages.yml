@@ -1,7 +1,8 @@
 name: pages
 
-# Deploy the honya homepage (which serves install.sh) to Cloudflare Pages.
-# Deploy root is web/public.
+# Build the honya homepage (TanStack Start, prerendered to static) and deploy
+# it to Cloudflare Pages. The prerendered output (web/.output/public) also
+# carries install.sh / install.ps1 / _headers / _redirects from web/public.
 
 on:
   push:
@@ -21,11 +22,25 @@ concurrency:
 
 jobs:
   deploy:
-    name: Deploy to Cloudflare Pages
+    name: Build & deploy to Cloudflare Pages
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build (prerender to .output/public)
+        run: bun run build
 
       - name: Ensure Pages project exists
         continue-on-error: true
@@ -33,6 +48,7 @@ jobs:
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: web
           command: pages project create honya --production-branch main
 
       - name: Publish to Cloudflare Pages
@@ -40,4 +56,5 @@ jobs:
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: pages deploy web/public --project-name=honya --branch=main
+          workingDirectory: web
+          command: pages deploy .output/public --project-name=honya --branch=main

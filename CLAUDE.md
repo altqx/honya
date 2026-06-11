@@ -23,14 +23,16 @@ Prefer self-explanatory code (clear names, small functions) over comments. **Def
 
 ## Changelog — only on an explicit version bump
 
-**Do not** touch the web changelog (`web/public/changelog.html`) for ordinary feature/fix work. Update it **only** when I explicitly tell you to bump the version — never edit a version block that has already been released. The changelog page is the user-facing history shown at `https://honya.altqx.com/changelog`.
+**Do not** touch the web changelog (`web/src/data/changelog.ts`) for ordinary feature/fix work. Update it **only** when I explicitly tell you to bump the version — never edit a release entry that has already shipped. The changelog page (`web/src/routes/changelog.tsx`) renders that data, newest-first, at `https://honya.altqx.com/changelog`.
 
 When I ask you to bump the version:
 - Bump `version` in `Cargo.toml` (the single source of truth; CI auto-tags on the change).
-- Add a **new** `<article class="release">` at the top of the timeline for the new version (entries are newest-first), and move the `rel-badge` "ล่าสุด" marker there (drop it from the previous latest). Never add entries to the already-released topmost block — the new work goes in the new version.
-- Add one `<li class="change">` per user-noticeable change, using the right tag: `add` (เพิ่ม) for features, `chg` (ปรับปรุง) for changes/improvements, `fix` (แก้ไข) for bug fixes.
-- Write entries in **Thai** to match the Thai-localized site, but keep code identifiers, key names, file formats, agent names, and commands as-is in `<code>` (same translate-vs-keep rules as the rest of `web/public/`). Keep them concise and user-facing — describe the behavior, not the implementation.
-- Also update the "เวอร์ชันล่าสุด" pill near the top of the page to the new version.
+- Prepend a **new** release object to the top of the `RELEASES` array in `web/src/data/changelog.ts` for the new version (entries are newest-first), and move the `badge: 'latest'` marker there (drop it from the previous latest). Never add changes to an already-released entry — the new work goes in the new version.
+- Add one `{ tag, html }` per user-noticeable change, using the right tag: `'add'` (เพิ่ม) for features, `'chg'` (ปรับปรุง) for changes/improvements, `'fix'` (แก้ไข) for bug fixes. The `html` string may contain inline `<code>` / `<b>` (rendered verbatim).
+- Write entries in **Thai** to match the Thai-localized site, but keep code identifiers, key names, file formats, agent names, and commands as-is in `<code>` (same translate-vs-keep rules as the rest of `web/`). Keep them concise and user-facing — describe the behavior, not the implementation.
+- Also bump `VERSION` in `web/src/data/site.ts` — it feeds the "เวอร์ชันล่าสุด" pill at the top of the changelog page.
+
+The homepage (`web/`) is a **TanStack Start** app (React 19 + Tailwind v4) prerendered to static HTML for Cloudflare Pages; see `web/README.md`. `web/public/` now holds only `install.sh` / `install.ps1` / `_headers` / `_redirects` (copied into the build output verbatim).
 
 ## Architecture
 
