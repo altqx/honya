@@ -2727,7 +2727,7 @@ impl App {
         // Overlay last, over a Clear, so it always wins.
         if !matches!(self.overlay, Overlay::None) {
             self.overlay
-                .render(f, area, &self.theme, &self.cfg, &self.log);
+                .render(f, area, &self.theme, &self.cfg, &self.log, self.frame);
         }
     }
 

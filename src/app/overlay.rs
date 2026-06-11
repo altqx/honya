@@ -508,6 +508,10 @@ impl PaletteState {
                 action: Action::show_overlay(Overlay::Help(0)),
             },
             PaletteItem {
+                label: "About 本屋",
+                action: Action::show_overlay(Overlay::About),
+            },
+            PaletteItem {
                 label: "QA review レビュー",
                 action: Action::show_overlay(Overlay::qa_placeholder()),
             },
@@ -708,6 +712,8 @@ pub enum Overlay {
     Log(u16),
     /// Keybinding reference; the `u16` is the vertical scroll offset.
     Help(u16),
+    /// About card — version, credits, and a frame-driven moon/translation motif.
+    About,
     Palette(PaletteState),
     Modal(Dialog),
     /// Standalone volume-synopsis editor (re-opened from the Project screen).
@@ -996,6 +1002,13 @@ impl Overlay {
                 }
                 _ => Action::None,
             },
+            // The About card is read-only: any dismiss-ish key closes it.
+            Overlay::About => match key.code {
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') | KeyCode::Backspace => {
+                    Action::CloseOverlay
+                }
+                _ => Action::None,
+            },
             Overlay::Help(off) => match key.code {
                 KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q') => Action::CloseOverlay,
                 KeyCode::Char('j') | KeyCode::Down => {
@@ -1054,6 +1067,7 @@ impl Overlay {
             Overlay::Palette(_) => centered_modal(60, 16, area),
             Overlay::Log(_) => centered_pct(80, 80, area),
             Overlay::Help(_) => centered_modal(72, 24, area),
+            Overlay::About => centered_modal(64, 20, area),
             Overlay::Modal(dlg) => {
                 centered_modal(64, if dlg.alternate.is_some() { 11 } else { 9 }, area)
             }
@@ -1802,6 +1816,7 @@ impl Overlay {
             ],
             Overlay::Log(_) => &[("jk", "scroll"), ("Esc/l", "close")],
             Overlay::Help(_) => &[("jk", "scroll"), ("Esc/?", "close")],
+            Overlay::About => &[("Esc/↵", "close")],
             Overlay::Qa(_) => &[("jk", "move"), ("↵", "jump to chapter"), ("Esc", "close")],
             Overlay::ReaderNote(_) => &[("type", "note"), ("↵", "save"), ("Esc", "cancel")],
             Overlay::ReaderSearch(_) => &[("type", "query"), ("↵", "search"), ("Esc", "cancel")],
@@ -1845,6 +1860,7 @@ impl Overlay {
         theme: &Theme,
         cfg: &AppConfig,
         log: &[(LogLevel, String)],
+        frame: u64,
     ) {
         match self {
             Overlay::None => {}
@@ -1855,6 +1871,7 @@ impl Overlay {
             Overlay::Palette(st) => self.render_palette(f, area, theme, st),
             Overlay::Log(off) => self.render_log(f, area, theme, log, *off),
             Overlay::Help(off) => self.render_help(f, area, theme, *off),
+            Overlay::About => self.render_about(f, area, theme, frame),
             Overlay::Modal(dlg) => self.render_modal(f, area, theme, dlg),
             Overlay::Synopsis(st) => self.render_synopsis(f, area, theme, st),
             Overlay::Qa(st) => self.render_qa(f, area, theme, st),
@@ -3120,6 +3137,139 @@ impl Overlay {
         );
     }
 
+    /// The About card, animated off the app's 100ms ticker: a moon that waxes
+    /// through the chapter-status phases, a looping JA→TH typing demo, the
+    /// three-agent pipeline pulsing, and a phase-shifted moon wave divider.
+    fn render_about(&self, f: &mut Frame, area: Rect, theme: &Theme, frame: u64) {
+        use ratatui::layout::Alignment;
+        use unicode_segmentation::UnicodeSegmentation;
+
+        let modal = centered_modal(64, 20, area);
+        f.render_widget(Clear, modal);
+        let title = thai_display_safe("About · เกี่ยวกับ");
+        let block = self.modal_block(&title, theme);
+        let inner = block.inner(modal);
+        f.render_widget(block, modal);
+
+        // The waxing-moon chapter-status metaphor, here as a slow cycle.
+        const PHASES: [char; 5] = ['○', '◔', '◐', '◑', '●'];
+        let moon = PHASES[(frame / 4) as usize % PHASES.len()];
+
+        // Looping typing demo: type one grapheme per tick, hold the finished
+        // line, then start over. Graphemes keep Thai clusters intact mid-type.
+        let jp = "「月が綺麗ですね。」";
+        let th_full = thai_display_safe("— พระจันทร์คืนนี้สวยเหลือเกินนะ");
+        let graphemes: Vec<&str> = th_full.graphemes(true).collect();
+        const HOLD: usize = 22;
+        let pos = (frame as usize) % (graphemes.len() + HOLD);
+        let shown = pos.min(graphemes.len());
+        let typed: String = graphemes[..shown].concat();
+        let caret_on = shown < graphemes.len() || frame % 10 < 5;
+
+        // The three-agent pipeline, pulsing left to right.
+        let active = ((frame / 6) % 3) as usize;
+        let mut pipeline: Vec<Span> = Vec::new();
+        for (i, (name, color)) in [
+            ("Orchestrator", theme.accent),
+            ("Translator", theme.status_working),
+            ("Reviewer", theme.accent_soft),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if i > 0 {
+                pipeline.push(Span::styled(" ─── ", Style::default().fg(theme.rule)));
+            }
+            if i == active {
+                pipeline.push(Span::styled(
+                    format!("{} {name}", theme::spinner_frame(frame)),
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                ));
+            } else {
+                pipeline.push(Span::styled(
+                    format!("◇ {name}"),
+                    Style::default().fg(theme.ink_faint),
+                ));
+            }
+        }
+
+        // A moon wave: each column sits a phase behind its neighbour, so the
+        // waxing/waning cycle ripples across the divider.
+        let wave_cols = (inner.width.saturating_sub(8) / 2).min(22) as usize;
+        let mut wave: Vec<Span> = Vec::new();
+        for i in 0..wave_cols {
+            // Ping-pong through the phases: ○◔◐◑●◑◐◔ …
+            let idx = ((frame / 2) as usize + i) % (PHASES.len() * 2 - 2);
+            let phase = if idx < PHASES.len() {
+                idx
+            } else {
+                PHASES.len() * 2 - 2 - idx
+            };
+            let color = if phase == PHASES.len() - 1 {
+                theme.accent_soft
+            } else {
+                theme.ink_faint
+            };
+            wave.push(Span::styled(
+                format!("{} ", PHASES[phase]),
+                Style::default().fg(color),
+            ));
+        }
+
+        let lines = vec![
+            Line::raw(""),
+            Line::from(vec![
+                Span::styled(format!("{moon} "), Style::default().fg(theme.accent)),
+                Span::styled(
+                    "本屋 honya",
+                    Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
+                ),
+            ]),
+            Line::from(Span::styled(
+                concat!("v", env!("CARGO_PKG_VERSION"), " · Rust + Ratatui · Apache-2.0"),
+                Style::default().fg(theme.ink_faint),
+            )),
+            Line::raw(""),
+            Line::from(Span::styled(
+                "AI-assisted Japanese → Thai light-novel translation TUI",
+                Style::default().fg(theme.ink_soft),
+            )),
+            Line::from(Span::styled(
+                thai_display_safe("แอปเทอร์มินัลช่วยแปลไลต์โนเวลญี่ปุ่นเป็นไทยด้วย AI"),
+                Style::default().fg(theme.ink_soft),
+            )),
+            Line::raw(""),
+            Line::from(Span::styled(jp, Style::default().fg(theme.ink_faint))),
+            Line::from(vec![
+                Span::styled(typed, Style::default().fg(theme.ink)),
+                if caret_on {
+                    Span::styled("▏", Style::default().fg(theme.stream_cursor))
+                } else {
+                    Span::raw(" ")
+                },
+            ]),
+            Line::raw(""),
+            Line::from(pipeline),
+            Line::raw(""),
+            Line::from(wave),
+            Line::raw(""),
+            Line::from(Span::styled(
+                "github.com/altqx/honya",
+                Style::default().fg(theme.accent_soft),
+            )),
+            Line::from(Span::styled(
+                "honya.altqx.com",
+                Style::default().fg(theme.accent_soft),
+            )),
+        ];
+        f.render_widget(
+            Paragraph::new(lines)
+                .alignment(Alignment::Center)
+                .style(Style::default().bg(theme.bg_panel)),
+            inner,
+        );
+    }
+
     /// Render the QA inbox: a chapter-level summary header over a navigable list of
     /// findings grouped by chapter (each group headed by its issue count). The list
     /// windows so the selected finding stays visible; one line per finding keeps the
@@ -3907,6 +4057,36 @@ mod tests {
                 "raw SARA AM leaked into wizard step {step}"
             );
         }
+    }
+
+    /// The About card animates off the frame ticker: every animation phase must
+    /// render without panicking and without leaking raw SARA AM, and the typing
+    /// loop must reach the full Thai line.
+    #[test]
+    fn about_card_renders_across_animation_frames() {
+        let theme = Theme::washi();
+        let mut saw_full_line = false;
+        for frame in 0..80u64 {
+            let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+            term.draw(|f| Overlay::About.render_about(f, f.area(), &theme, frame))
+                .unwrap();
+            let glyphs: String = term
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            assert!(
+                !glyphs.contains('\u{0E33}'),
+                "raw SARA AM leaked into the About card at frame {frame}"
+            );
+            assert!(glyphs.contains("honya"), "brand line missing at frame {frame}");
+            if glyphs.contains("เหลือเกินนะ") {
+                saw_full_line = true;
+            }
+        }
+        assert!(saw_full_line, "typing demo never completed its line");
     }
 
     /// SARA AM (`ำ`, U+0E33) must never reach the terminal: every Thai label is
