@@ -434,6 +434,86 @@ pub fn reviewer_schema() -> serde_json::Value {
     })
 }
 
+/// Strict `prepass_result` schema → `agents::prepass::PrepassOut`.
+pub fn prepass_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["characters", "terms", "style_examples"],
+        "properties": {
+            "characters": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["jp_name", "thai_name", "romaji", "gender", "aliases", "honorific", "speech_style", "notes"],
+                    "properties": {
+                        "jp_name": { "type": "string" },
+                        "thai_name": { "type": "string" },
+                        "romaji": { "type": "string" },
+                        "gender": { "type": "string" },
+                        "aliases": { "type": "array", "items": { "type": "string" } },
+                        "honorific": { "type": "string" },
+                        "speech_style": { "type": "string" },
+                        "notes": { "type": "string" }
+                    }
+                }
+            },
+            "terms": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["jp_term", "thai_term", "romaji", "category", "gloss"],
+                    "properties": {
+                        "jp_term": { "type": "string" },
+                        "thai_term": { "type": "string" },
+                        "romaji": { "type": "string" },
+                        "category": { "type": "string" },
+                        "gloss": { "type": "string" }
+                    }
+                }
+            },
+            "style_examples": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["jp", "th", "note"],
+                    "properties": {
+                        "jp": { "type": "string" },
+                        "th": { "type": "string" },
+                        "note": { "type": "string" }
+                    }
+                }
+            }
+        }
+    })
+}
+
+/// Strict `coherence_result` schema → `agents::coherence::CoherenceOut`.
+pub fn coherence_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["issues"],
+        "properties": {
+            "issues": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["severity", "note"],
+                    "properties": {
+                        "severity": { "type": "string", "enum": ["info", "warning", "conflict"] },
+                        "note": { "type": "string" }
+                    }
+                }
+            }
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{JsonStringFieldStream, chat_structured};

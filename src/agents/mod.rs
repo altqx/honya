@@ -6,8 +6,10 @@
 
 pub mod audit;
 pub mod chunk;
+pub mod coherence;
 pub mod continuity;
 pub mod pipeline;
+pub mod prepass;
 pub mod prompts;
 pub mod reviewer;
 pub mod synopsis;

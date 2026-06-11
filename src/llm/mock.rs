@@ -94,6 +94,20 @@ impl LlmClient for MockClient {
                 });
                 payload.to_string()
             }
+            Some("prepass_result") => {
+                // Shape must match agents::prepass::PrepassOut; seeds nothing.
+                let payload = serde_json::json!({
+                    "characters": [],
+                    "terms": [],
+                    "style_examples": []
+                });
+                payload.to_string()
+            }
+            Some("coherence_result") => {
+                // Shape must match agents::coherence::CoherenceOut; finds nothing.
+                let payload = serde_json::json!({ "issues": [] });
+                payload.to_string()
+            }
             // Any other call: no tool calls, so the tool loop terminates after one round.
             _ => "(mock orchestrator: nothing to record)".to_string(),
         };

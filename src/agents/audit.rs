@@ -140,6 +140,81 @@ pub fn audit_translation_with_terms(
     findings
 }
 
+/// Heuristic, *advisory* checks surfaced to the Reviewer as soft signals — NOT
+/// part of the hard mechanical gate (`audit_translation_with_terms`), because a
+/// false positive must never force-reject a good translation. The Reviewer is told
+/// these may be wrong and to verify against the source before acting.
+///
+/// Covers two classes of silent error the structural audit misses: dropped
+/// multi-digit numbers (ages, years, room/quantity figures) and gross length
+/// shortfalls that suggest summarization/truncation.
+pub fn advisory_findings(source_jp: &str, thai: &str) -> Vec<String> {
+    let source = source_jp.trim();
+    let translated = thai.trim();
+    let mut findings = Vec::new();
+    if translated.is_empty() {
+        return findings;
+    }
+
+    // Numeral fidelity: every multi-digit number written with digits in the source
+    // should survive into the translation. Single digits are skipped — Thai often
+    // spells small counts out (3人 → สามคน), which would be a false positive.
+    let translated_numbers = digit_runs(translated);
+    let mut reported: Vec<String> = Vec::new();
+    for num in digit_runs(source) {
+        if num.chars().count() < 2 {
+            continue;
+        }
+        if !translated_numbers.contains(&num) && !reported.contains(&num) {
+            findings.push(format!(
+                "source number `{num}` does not appear in the translation; confirm it was not dropped or altered (it may be spelled out in Thai)"
+            ));
+            reported.push(num);
+        }
+    }
+
+    // Length-shortfall: Thai prose normally runs LONGER than the Japanese source, so
+    // a translation far shorter than the source is a strong omission smell. Bounded
+    // to substantial chunks to avoid noise on short dialogue beats.
+    let jp = japanese_char_count(source);
+    let th = thai_char_count(translated);
+    if jp >= 80 && th * 2 < jp {
+        findings.push(format!(
+            "translation looks much shorter than the source ({th} Thai chars vs {jp} Japanese chars); verify no sentences or details were omitted"
+        ));
+    }
+
+    findings
+}
+
+/// Distinct numeric tokens written with ASCII or fullwidth digits, normalized to
+/// ASCII so `２０２４` and `2024` compare equal.
+fn digit_runs(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let flush = |current: &mut String, out: &mut Vec<String>| {
+        if !current.is_empty() {
+            if !out.contains(current) {
+                out.push(current.clone());
+            }
+            current.clear();
+        }
+    };
+    for ch in text.chars() {
+        let ascii = match ch {
+            '0'..='9' => Some(ch),
+            '０'..='９' => char::from_u32(ch as u32 - '０' as u32 + '0' as u32),
+            _ => None,
+        };
+        match ascii {
+            Some(d) => current.push(d),
+            None => flush(&mut current, &mut out),
+        }
+    }
+    flush(&mut current, &mut out);
+    out
+}
+
 fn audit_terminology(
     findings: &mut Vec<String>,
     source: &str,
@@ -497,6 +572,55 @@ mod tests {
         let findings = audit_translation_with_terms("彼女は笑った。", "คำแปล: เธอหัวเราะ", &[], &[]);
 
         assert!(findings.iter().any(|f| f.contains("translation labels")));
+    }
+
+    #[test]
+    fn advisory_flags_dropped_multidigit_number_but_not_single_digit() {
+        // 2024 vanishes → flagged; the single digit 3 spelled out as สาม → not flagged.
+        let source = "2024年、3人の少女がいた。";
+        let thai = "ในปีนั้น มีเด็กสาวสามคน";
+        let findings = advisory_findings(source, thai);
+        assert!(
+            findings.iter().any(|f| f.contains("2024")),
+            "multi-digit number drop flagged: {findings:?}"
+        );
+        assert!(
+            !findings.iter().any(|f| f.contains('3') && f.contains("`3`")),
+            "single digit must not be flagged: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn advisory_accepts_preserved_fullwidth_number() {
+        // Fullwidth ２０２４ in source, ASCII 2024 in translation — normalized equal.
+        let findings = advisory_findings("２０２４年。", "ปี 2024");
+        assert!(
+            findings.is_empty(),
+            "normalized number match should not flag: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn advisory_flags_severe_length_shortfall() {
+        let source = "あ".repeat(100);
+        let thai = "สั้น";
+        assert!(
+            advisory_findings(&source, thai)
+                .iter()
+                .any(|f| f.contains("shorter")),
+            "a translation far shorter than the source is flagged"
+        );
+    }
+
+    #[test]
+    fn advisory_does_not_flag_normal_length() {
+        let source = "彼女は静かに笑って、窓の外を見つめていた。".to_string();
+        let thai = "เธอยิ้มอย่างเงียบ ๆ แล้วมองออกไปนอกหน้าต่างอย่างเหม่อลอย".to_string();
+        let findings = advisory_findings(&source, &thai);
+        assert!(
+            findings.is_empty(),
+            "ordinary translation should produce no advisory findings: {findings:?}"
+        );
     }
 
     #[test]

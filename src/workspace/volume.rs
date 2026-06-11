@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 
 use crate::model::{
     ChapterRun, ContinuityNote, ReaderAnnotation, ReaderBookmark, RunHistoryEntry,
-    RunHistoryStatus, UsageStats, VolumeData,
+    RunHistoryStatus, StyleExample, UsageStats, VolumeData,
 };
 use crate::workspace::Workspace;
 use crate::workspace::data_block;
@@ -35,6 +35,37 @@ pub fn set_source_metadata(
     }
     let mut data = load(ws);
     data.source_metadata = metadata;
+    write(ws, &data)
+}
+
+/// Mark the pre-extraction pass as done (or not) for this volume and persist.
+pub fn set_prepass_done(ws: &Workspace, done: bool) -> std::io::Result<()> {
+    let mut data = load(ws);
+    data.prepass_done = done;
+    write(ws, &data)
+}
+
+/// Merge freshly-extracted style exemplars into the volume's set (de-duplicated on
+/// the JP side, capped) and persist. Hand-edited entries are preserved.
+pub fn add_style_examples(ws: &Workspace, examples: Vec<StyleExample>) -> std::io::Result<()> {
+    const MAX_STYLE_EXAMPLES: usize = 6;
+    let mut data = load(ws);
+    for ex in examples {
+        let jp = ex.jp.trim();
+        let th = ex.th.trim();
+        if jp.is_empty() || th.is_empty() {
+            continue;
+        }
+        if data.style_examples.iter().any(|e| e.jp.trim() == jp) {
+            continue;
+        }
+        data.style_examples.push(StyleExample {
+            jp: jp.to_string(),
+            th: th.to_string(),
+            note: ex.note.filter(|n| !n.trim().is_empty()),
+        });
+    }
+    data.style_examples.truncate(MAX_STYLE_EXAMPLES);
     write(ws, &data)
 }
 
@@ -366,6 +397,21 @@ pub fn render_body(data: &VolumeData) -> String {
         }
     }
     s.push('\n');
+
+    if !data.style_examples.is_empty() {
+        s.push_str("## ตัวอย่างสำนวน / Style Examples\n\n");
+        s.push_str("| 日本語 | ไทย | หมายเหตุ |\n");
+        s.push_str("|--------|-----|----------|\n");
+        for ex in &data.style_examples {
+            s.push_str(&format!(
+                "| {} | {} | {} |\n",
+                cell(&ex.jp),
+                cell(&ex.th),
+                ex.note.as_deref().map(cell).unwrap_or_else(|| "—".to_string()),
+            ));
+        }
+        s.push('\n');
+    }
 
     if !data.source_metadata.is_empty() {
         s.push_str("## ข้อมูลต้นฉบับ / Source Metadata\n\n");

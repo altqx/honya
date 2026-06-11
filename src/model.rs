@@ -439,6 +439,21 @@ pub struct AppConfig {
     /// slower, `priority` = faster). `None` omits the field — the provider default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_tier: Option<ServiceTier>,
+    /// Run a one-time terminology/character pre-extraction pass over a volume's raw
+    /// chapters before translating chunk 1, seeding CHARACTERS.md / GLOSSARY.md and a
+    /// few style exemplars so early chapters get the same context as late ones.
+    #[serde(default = "default_true")]
+    pub prepass_extract: bool,
+    /// After a chapter's chunks are all written, run a whole-chapter coherence sweep
+    /// (pronoun / term / name consistency across chunks) and record findings as
+    /// continuity notes for the QA inbox.
+    #[serde(default = "default_true")]
+    pub coherence_check: bool,
+}
+
+/// Serde default for opt-in-by-default booleans (so older configs enable them).
+fn default_true() -> bool {
+    true
 }
 
 /// Default loop-watchdog stall window (seconds). Sits above the 120 s per-request
@@ -473,6 +488,8 @@ impl Default for AppConfig {
             update_mode: UpdateMode::default(),
             release_channel: ReleaseChannel::default(),
             service_tier: None,
+            prepass_extract: true,
+            coherence_check: true,
         }
     }
 }
@@ -645,6 +662,15 @@ pub struct VolumeData {
     pub synopsis_th: String,
     #[serde(default)]
     pub running_recap: String,
+    /// True once the pre-extraction pass has seeded the roster/glossary for this
+    /// volume, so a re-run or resume does not repeat it.
+    #[serde(default)]
+    pub prepass_done: bool,
+    /// A few short JP→TH exemplar pairs demonstrating the target register, injected
+    /// into every Translator call as few-shot style anchors. Seeded by the
+    /// pre-extraction pass and editable by hand in VOLUME.md.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub style_examples: Vec<StyleExample>,
     /// Source-file metadata discovered at import time (title, author, language, etc.).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub source_metadata: BTreeMap<String, String>,
@@ -672,6 +698,20 @@ pub struct VolumeData {
     /// User navigation bookmarks anchored to Reader lines.
     #[serde(default)]
     pub bookmarks: Vec<ReaderBookmark>,
+}
+
+/// One short JP→TH exemplar pair anchoring the target translation register. A
+/// handful of these injected into the Translator prompt steer voice/tone far more
+/// concretely than abstract STYLE.md prose.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StyleExample {
+    /// Source Japanese sentence/snippet.
+    pub jp: String,
+    /// Its target-register Thai rendering.
+    pub th: String,
+    /// Optional one-line note on what the pair demonstrates (register, pronoun, …).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

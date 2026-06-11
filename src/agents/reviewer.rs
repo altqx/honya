@@ -9,6 +9,7 @@ use crate::model::ReviewerOut;
 
 /// Review one translated chunk against its source. `reference_ctx` matches the
 /// Translator context so glossary/pronoun/style checks are enforceable.
+#[allow(clippy::too_many_arguments)]
 pub async fn review_chunk(
     client: &dyn LlmClient,
     model: &str,
@@ -16,9 +17,17 @@ pub async fn review_chunk(
     thai: &str,
     reference_ctx: &str,
     audit_findings: &[String],
+    advisory_findings: &[String],
     prev_thai: &[String],
 ) -> Result<(ReviewerOut, Usage)> {
-    let user = build_reviewer_user(source_jp, thai, reference_ctx, audit_findings, prev_thai);
+    let user = build_reviewer_user(
+        source_jp,
+        thai,
+        reference_ctx,
+        audit_findings,
+        advisory_findings,
+        prev_thai,
+    );
 
     let req = ChatRequest {
         model: model.to_string(),

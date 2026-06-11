@@ -16,9 +16,11 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
-use crate::agents::audit::{audit_translation_with_terms, strip_copied_continuity};
+use crate::agents::audit::{advisory_findings, audit_translation_with_terms, strip_copied_continuity};
 use crate::agents::chunk::{Chunk, chunk_chapter};
+use crate::agents::coherence;
 use crate::agents::continuity;
+use crate::agents::prepass;
 use crate::agents::prompts::{ORCHESTRATOR_SYSTEM, build_orchestrator_metadata_msg};
 use crate::agents::reviewer::review_chunk;
 use crate::agents::tools::{WorkspaceTools, orchestrator_tools};
@@ -28,8 +30,9 @@ use crate::llm::client::LlmClient;
 use crate::llm::tool_loop::run_tool_loop;
 use crate::llm::{ChatRequest, Message, Tool, Usage};
 use crate::model::{
-    AgentRole, AppConfig, AppEvent, ChapterStatus, ChunkState, EventTx, GlossaryTerm, LogLevel,
-    ModelSet, ReviewVerdict, ReviewerOut, ServiceTier, TokenUsage, TranslatorOut, UsageStats,
+    AgentRole, AppConfig, AppEvent, ChapterStatus, ChunkState, ContinuityNote, EventTx,
+    GlossaryTerm, LogLevel, ModelSet, ReviewVerdict, ReviewerOut, ServiceTier, TokenUsage,
+    TranslatorOut, UsageStats,
 };
 use crate::workspace::{Workspace, characters, data_block, glossary, translation, volume};
 
@@ -478,6 +481,7 @@ pub async fn run_pipeline(ctx: PipelineCtx, chapters: Vec<u32>) -> anyhow::Resul
     let vol = ctx.vol_number();
     ctx.queue
         .seed(chapters.into_iter().map(|c| (vol, c)).collect());
+    maybe_run_prepass(&ctx, &mut acc).await;
     let halt = run_volume_chapters(&ctx, None, &wd, &mut acc, &mut totals).await;
     ctx.tx.send(AppEvent::PipelineFinished {
         chapters_done: totals.done,
@@ -520,6 +524,7 @@ pub async fn run_project_pipeline(ctx: PipelineCtx, plan: Vec<VolumePlan>) -> an
                 vp.chapters.len()
             ),
         });
+        maybe_run_prepass(&vctx, &mut acc).await;
         let halt = run_volume_chapters(&vctx, Some(vp.vol), &wd, &mut acc, &mut totals).await;
         if matches!(halt, Halt::Stopped) {
             stopped = true;
@@ -535,6 +540,7 @@ pub async fn run_project_pipeline(ctx: PipelineCtx, plan: Vec<VolumePlan>) -> an
         };
         let vctx = ctx.with_volume(vol);
         vctx.tx.send(AppEvent::VolumeStarted { vol, label: None });
+        maybe_run_prepass(&vctx, &mut acc).await;
         let halt = run_volume_chapters(&vctx, Some(vol), &wd, &mut acc, &mut totals).await;
         if matches!(halt, Halt::Stopped) {
             stopped = true;
@@ -550,6 +556,50 @@ pub async fn run_project_pipeline(ctx: PipelineCtx, plan: Vec<VolumePlan>) -> an
         run: acc.run,
     });
     Ok(())
+}
+
+/// Run the per-volume pre-extraction pass once, seeding CHARACTERS.md / GLOSSARY.md
+/// and a few style exemplars before chunk 1 so early chapters get the same context
+/// depth as late ones. Idempotent via `VolumeData.prepass_done`; best-effort (a
+/// failure logs and the run proceeds). Its spend folds into the run total only — it
+/// is not a chapter's cost.
+async fn maybe_run_prepass(ctx: &PipelineCtx, acc: &mut Acc) {
+    if !ctx.cfg.prepass_extract || ctx.ctl.is_stopped() {
+        return;
+    }
+    if volume::load(&ctx.ws).prepass_done {
+        return;
+    }
+    ctx.tx.send(AppEvent::Log {
+        level: LogLevel::Info,
+        msg: "pre-scan: extracting characters & terms before translating".to_string(),
+    });
+    match prepass::run_prepass(ctx.client.as_ref(), &ctx.models.translator, &ctx.ws).await {
+        Ok(Some(seeded)) => {
+            acc.run.add(&stats_from_usage(&seeded.usage));
+            note_served_tier(ctx, acc, &ctx.models.translator, &seeded.usage);
+            ctx.tx.send(AppEvent::UsageUpdate {
+                run: acc.run,
+                chapter: acc.chapter,
+            });
+            let _ = volume::set_prepass_done(&ctx.ws, true);
+            ctx.tx.send(AppEvent::Log {
+                level: LogLevel::Info,
+                msg: format!(
+                    "pre-scan: seeded {} character(s), {} term(s), {} style example(s)",
+                    seeded.characters, seeded.terms, seeded.examples
+                ),
+            });
+        }
+        // No raw to sample (empty volume): leave prepass_done false, nothing to do.
+        Ok(None) => {}
+        Err(e) => {
+            ctx.tx.send(AppEvent::Log {
+                level: LogLevel::Warn,
+                msg: format!("pre-scan skipped: {e}"),
+            });
+        }
+    }
 }
 
 /// Drive one volume's chapter queue, folding tallies into `totals` and cost into
@@ -842,8 +892,12 @@ async fn process_chapter(
     // First-person narrator carried chunk-to-chunk within this chapter so a POV
     // section that spans a chunk boundary keeps the right "I". Reset per chapter.
     let mut pov_carry: Option<String> = None;
+    // The previous chunk's source, in reading order, so a character referred to only
+    // by pronoun in this chunk stays in the injected roster (see build_reference_ctx).
+    let mut prev_chunk_text: Option<&str> = None;
     for chunk in &chunks {
         if clean_committed.contains(&(chunk.index as u32)) {
+            prev_chunk_text = Some(chunk.text.as_str());
             continue;
         }
 
@@ -871,9 +925,17 @@ async fn process_chapter(
         // Fresh repetition state per chunk so one chunk's tail can't trip on the
         // next chunk's start.
         wd.reset_chunk();
-        match process_chunk(ctx, chapter, chunk, acc, wd, &mut pov_carry).await? {
+        match process_chunk(ctx, chapter, chunk, acc, wd, &mut pov_carry, prev_chunk_text).await? {
             ChunkOutcome::Committed | ChunkOutcome::NeedsReview => {}
         }
+        prev_chunk_text = Some(chunk.text.as_str());
+    }
+
+    // Whole-chapter coherence sweep: catch cross-chunk drift the per-chunk reviewer
+    // can't see. Findings land as continuity notes (surfaced in the QA inbox), never
+    // auto-applied. Best-effort — never fails the chapter.
+    if ctx.cfg.coherence_check {
+        run_coherence_sweep(ctx, chapter, &raw, acc, wd).await;
     }
 
     let any_needs_review = translation::read_translated(&ctx.ws, chapter)
@@ -934,10 +996,13 @@ fn glossary_terms_for_chunk(ws: &Workspace, chunk_text: &str, max: usize) -> Vec
 }
 
 /// Assemble the reference context bundled into every Translator/Reviewer call:
-/// the scoped terminology policies, the character roster (pronouns/register), and the
-/// PROJECT/STYLE prose — each in its own clearly-delimited section. Re-read per
-/// chunk so mid-chapter glossary/character additions take effect immediately.
-fn build_reference_ctx(ws: &Workspace, chunk_text: &str) -> String {
+/// the scoped terminology policies, the character roster (pronouns/register), the
+/// few-shot style exemplars, and the PROJECT/STYLE prose — each in its own clearly-
+/// delimited section. Re-read per chunk so mid-chapter glossary/character additions
+/// take effect immediately. `prev_chunk_text` (the previous chunk's source) keeps a
+/// character in scope across a chunk boundary even when this chunk refers to them
+/// only by pronoun — the case the POV/pronoun handling most needs.
+fn build_reference_ctx(ws: &Workspace, chunk_text: &str, prev_chunk_text: Option<&str>) -> String {
     fn section(out: &mut String, open: &str, body: &str, close: &str) {
         let b = body.trim();
         if !b.is_empty() {
@@ -967,16 +1032,17 @@ fn build_reference_ctx(ws: &Workspace, chunk_text: &str) -> String {
         "<<END_GLOSSARY>>",
     );
     let mut chars = characters::load(ws);
-    chars.retain(|c| {
+    let mentions = |c: &crate::model::Character, text: &str| {
         let jp = c.jp_name.trim();
-        let by_name = !jp.is_empty() && chunk_text.contains(jp);
         // Match alias forms too, so a chunk using a bare given name still pulls in
         // the one canonical entry instead of looking like an unknown character.
-        let by_alias = c
-            .aliases
-            .iter()
-            .any(|a| !a.trim().is_empty() && chunk_text.contains(a.trim()));
-        by_name || by_alias
+        (!jp.is_empty() && text.contains(jp))
+            || c.aliases
+                .iter()
+                .any(|a| !a.trim().is_empty() && text.contains(a.trim()))
+    };
+    chars.retain(|c| {
+        mentions(c, chunk_text) || prev_chunk_text.is_some_and(|prev| mentions(c, prev))
     });
     chars.truncate(MAX_CHARACTERS_IN_CTX);
     section(
@@ -984,6 +1050,12 @@ fn build_reference_ctx(ws: &Workspace, chunk_text: &str) -> String {
         "<<CHARACTERS: สรรพนาม/น้ำเสียงที่กำหนด>>",
         &characters::render_context_blurb(&chars),
         "<<END_CHARACTERS>>",
+    );
+    section(
+        &mut s,
+        "<<STYLE_EXAMPLES: ตัวอย่างคู่ ญี่ปุ่น→ไทย ใช้เป็นแนวสำนวน/น้ำเสียงที่ต้องการ ห้ามคัดลอกลงคำแปล>>",
+        &render_style_examples(&volume::load(ws).style_examples),
+        "<<END_STYLE_EXAMPLES>>",
     );
     section(
         &mut s,
@@ -1003,6 +1075,27 @@ fn build_reference_ctx(ws: &Workspace, chunk_text: &str) -> String {
         &excerpt(data_block::read_body(&ws.style_md()), 1400),
         "<<END_STYLE>>",
     );
+    s
+}
+
+/// Render the few-shot style exemplars as `JP → TH` bullets for the prompt.
+fn render_style_examples(examples: &[crate::model::StyleExample]) -> String {
+    let mut s = String::new();
+    for ex in examples {
+        let jp = ex.jp.trim();
+        let th = ex.th.trim();
+        if jp.is_empty() || th.is_empty() {
+            continue;
+        }
+        s.push_str("- JP: ");
+        s.push_str(jp);
+        s.push_str("\n  TH: ");
+        s.push_str(th);
+        if let Some(note) = ex.note.as_deref().filter(|n| !n.trim().is_empty()) {
+            s.push_str(&format!("  ({})", note.trim()));
+        }
+        s.push('\n');
+    }
     s
 }
 
@@ -1170,6 +1263,7 @@ fn note_served_tier(ctx: &PipelineCtx, acc: &mut Acc, model: &str, usage: &Usage
 /// same way — retried while attempts remain, then, if a translation already
 /// exists, committed flagged `NeedsReview` rather than failing the whole chapter.
 /// Only a Translator that never produces *any* translation bails.
+#[allow(clippy::too_many_arguments)]
 async fn process_chunk(
     ctx: &PipelineCtx,
     chapter: u32,
@@ -1177,6 +1271,7 @@ async fn process_chunk(
     acc: &mut Acc,
     wd: &Watchdog,
     pov: &mut Option<String>,
+    prev_chunk_text: Option<&str>,
 ) -> anyhow::Result<ChunkOutcome> {
     // Each step below counts as progress for the stall arm of the watchdog.
     wd.ping();
@@ -1188,7 +1283,7 @@ async fn process_chunk(
 
     // Reference context (glossary + characters + project + style) and the
     // continuity tail are stable across this chunk's attempts.
-    let reference_ctx = build_reference_ctx(&ctx.ws, &chunk.text);
+    let reference_ctx = build_reference_ctx(&ctx.ws, &chunk.text, prev_chunk_text);
     let mut prev_thai =
         continuity::last_thai_sentences(&ctx.ws, chapter, ctx.cfg.continuity_sentences).await;
     // Seed chunk 0 from the previous chapter's tail when this chapter has no
@@ -1432,6 +1527,9 @@ async fn process_chunk(
         let audit_terms = glossary_terms_for_chunk(&ctx.ws, &chunk.text, MAX_GLOSSARY_IN_CTX);
         let audit_findings =
             audit_translation_with_terms(&chunk.text, &thai, &prev_thai, &audit_terms);
+        // Heuristic, non-gating signals (dropped numbers / length shortfall) handed
+        // to the Reviewer to verify — never folded into the approval gate.
+        let advisory = advisory_findings(&chunk.text, &thai);
         ctx.tx.send(AppEvent::ChunkStateChanged {
             chapter,
             chunk: chunk.index,
@@ -1460,6 +1558,7 @@ async fn process_chunk(
                     &thai,
                     &reference_ctx,
                     &audit_findings,
+                    &advisory,
                     &prev_thai,
                 )
                 .await
@@ -1757,6 +1856,120 @@ async fn run_orchestrator_metadata_turn(
         .map_err(|e| anyhow::anyhow!("orchestrator tool loop failed: {e}"))?;
 
     Ok((outcome.usage, outcome.tool_calls))
+}
+
+/// Run the whole-chapter coherence sweep over the assembled Thai and persist any
+/// warning/conflict findings as continuity notes (surfaced in the QA inbox).
+/// Best-effort: a failed sweep logs and returns without affecting the outcome. A
+/// keep-alive pings the watchdog so this non-streaming call can't read as a stall.
+async fn run_coherence_sweep(
+    ctx: &PipelineCtx,
+    chapter: u32,
+    raw: &str,
+    acc: &mut Acc,
+    wd: &Watchdog,
+) {
+    let assembled = translation::read_translated(&ctx.ws, chapter).await;
+    let thai = strip_translation_markers(&assembled);
+    if thai.trim().is_empty() {
+        return;
+    }
+    // Scope the reference bundle to the whole chapter source so every character and
+    // term the chapter uses is available to the auditor.
+    let reference_ctx = build_reference_ctx(&ctx.ws, raw, None);
+
+    wd.ping();
+    let result = {
+        let fut =
+            coherence::coherence_sweep(ctx.client.as_ref(), &ctx.models.reviewer, &thai, &reference_ctx);
+        tokio::pin!(fut);
+        loop {
+            tokio::select! {
+                biased;
+                r = &mut fut => break r,
+                _ = tokio::time::sleep(Duration::from_millis(500)) => wd.ping(),
+            }
+        }
+    };
+    wd.ping();
+
+    let (out, usage, truncated) = match result {
+        Ok(v) => v,
+        Err(e) => {
+            ctx.tx.send(AppEvent::Log {
+                level: LogLevel::Warn,
+                msg: format!("coherence sweep failed for chapter {chapter}: {e}"),
+            });
+            return;
+        }
+    };
+    acc.fold(&usage);
+    note_served_tier(ctx, acc, &ctx.models.reviewer, &usage);
+    ctx.tx.send(AppEvent::UsageUpdate {
+        run: acc.run,
+        chapter: acc.chapter,
+    });
+    if truncated {
+        ctx.tx.send(AppEvent::Log {
+            level: LogLevel::Info,
+            msg: format!(
+                "coherence sweep for chapter {chapter} examined the first {} chars (chapter exceeds the cap)",
+                coherence::MAX_CHAPTER_CHARS
+            ),
+        });
+    }
+
+    let mut recorded = 0usize;
+    for issue in &out.issues {
+        // info-level notes are intentionally not persisted (the QA inbox skips them);
+        // surface only actionable drift.
+        let severity = issue.severity.trim().to_lowercase();
+        if severity != "warning" && severity != "conflict" {
+            continue;
+        }
+        let note_text = issue.note.trim();
+        if note_text.is_empty() {
+            continue;
+        }
+        let _ = volume::add_note(
+            &ctx.ws,
+            ContinuityNote {
+                chapter: Some(chapter),
+                severity: severity.clone(),
+                kind: Some("coherence".to_string()),
+                note: note_text.to_string(),
+            },
+        );
+        ctx.tx.send(AppEvent::ContinuityFlag {
+            chapter,
+            severity,
+            kind: "coherence".to_string(),
+            note: note_text.to_string(),
+        });
+        recorded += 1;
+    }
+    if recorded > 0 {
+        ctx.tx.send(AppEvent::Log {
+            level: LogLevel::Warn,
+            msg: format!(
+                "coherence sweep: chapter {chapter} flagged {recorded} cross-chunk issue(s) for review"
+            ),
+        });
+    }
+}
+
+/// Strip honya bookkeeping (chunk-index comments, the review-needed marker/banner)
+/// from an assembled translated file so the coherence auditor sees only prose.
+fn strip_translation_markers(text: &str) -> String {
+    text.lines()
+        .filter(|line| {
+            let t = line.trim_start();
+            !t.starts_with("<!-- honya:")
+                && !t.contains("[REVIEW NEEDED]")
+                && !t.starts_with("> เหตุผลจากผู้ตรวจ")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[cfg(test)]
@@ -2074,7 +2287,7 @@ mod tests {
         };
 
         let wd = Watchdog::new(&ctx.cfg);
-        match process_chunk(&ctx, 1, &chunk, &mut acc, &wd, &mut None)
+        match process_chunk(&ctx, 1, &chunk, &mut acc, &wd, &mut None, None)
             .await
             .expect("process_chunk")
         {
@@ -2312,7 +2525,7 @@ mod tests {
         .unwrap();
 
         // The chunk references 聖剣 and スバル, but never 王都.
-        let ctx = build_reference_ctx(&ws, "スバルは聖剣を抜いた。");
+        let ctx = build_reference_ctx(&ws, "スバルは聖剣を抜いた。", None);
         assert!(
             ctx.contains("聖剣"),
             "in-chunk term must be injected:\n{ctx}"
@@ -2351,11 +2564,72 @@ mod tests {
         characters::upsert(&ws, yuu).unwrap();
 
         // The chunk only ever says 勇, never the full 有月勇.
-        let ctx = build_reference_ctx(&ws, "勇は立ち上がった。");
+        let ctx = build_reference_ctx(&ws, "勇は立ち上がった。", None);
         assert!(
             ctx.contains("อาริทสึกิ ยู"),
             "alias match must inject the canonical character:\n{ctx}"
         );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Carry-forward: a character present only in the PREVIOUS chunk (referred to in
+    /// this chunk by pronoun only) must stay in the injected roster, so POV/pronoun
+    /// guidance doesn't silently drop across a chunk boundary.
+    #[test]
+    fn reference_ctx_carries_previous_chunk_character() {
+        let (base, ws) = temp_ws("ref_carry");
+        characters::upsert(
+            &ws,
+            Character {
+                id: "hikari".into(),
+                jp_name: "ひかり".into(),
+                thai_name: "ฮิคาริ".into(),
+                romaji: None,
+                gender: None,
+                honorific: None,
+                speech_style: Some("สรรพนามตัวเอง: ฉัน".into()),
+                relationships: Vec::new(),
+                aliases: Vec::new(),
+                notes: None,
+                first_seen_chapter: None,
+            },
+        )
+        .unwrap();
+
+        // The current chunk never names ひかり; only the previous chunk did.
+        let without = build_reference_ctx(&ws, "そして彼女は歩き出した。", None);
+        assert!(!without.contains("ฮิคาริ"), "no carry → not injected:\n{without}");
+
+        let with = build_reference_ctx(&ws, "そして彼女は歩き出した。", Some("ひかりは振り返った。"));
+        assert!(
+            with.contains("ฮิคาริ"),
+            "previous-chunk character carried into scope:\n{with}"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Volume style exemplars are injected as a few-shot block into every chunk's
+    /// reference context.
+    #[test]
+    fn reference_ctx_injects_style_examples() {
+        use crate::model::StyleExample;
+        let (base, ws) = temp_ws("ref_style");
+        std::fs::create_dir_all(&ws.vol_dir).unwrap();
+        volume::add_style_examples(
+            &ws,
+            vec![StyleExample {
+                jp: "彼は笑った。".into(),
+                th: "เขาหัวเราะออกมา".into(),
+                note: Some("น้ำเสียงสบาย ๆ".into()),
+            }],
+        )
+        .unwrap();
+
+        let ctx = build_reference_ctx(&ws, "無関係なテキスト", None);
+        assert!(ctx.contains("STYLE_EXAMPLES"), "exemplar section present:\n{ctx}");
+        assert!(ctx.contains("เขาหัวเราะออกมา"), "exemplar Thai injected:\n{ctx}");
 
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -2509,7 +2783,7 @@ mod tests {
         assert_eq!(loaded.synopsis_th, "เรื่องย่อสำหรับบริบท");
 
         // The Thai synopsis is injected into every chunk's reference context.
-        let ctx = build_reference_ctx(&ws, "無関係なテキスト");
+        let ctx = build_reference_ctx(&ws, "無関係なテキスト", None);
         assert!(
             ctx.contains("VOLUME_SYNOPSIS") && ctx.contains("เรื่องย่อสำหรับบริบท"),
             "synopsis must be injected as context:\n{ctx}"
