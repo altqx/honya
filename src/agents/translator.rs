@@ -27,11 +27,13 @@ impl TranslatorStreamError {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn translate_chunk_streaming<F>(
     client: &dyn LlmClient,
     model: &str,
     reference_ctx: &str,
     prev_thai: &[String],
+    current_pov: Option<&str>,
     raw_chunk: &str,
     feedback: Option<&str>,
     on_delta: F,
@@ -39,7 +41,14 @@ pub async fn translate_chunk_streaming<F>(
 where
     F: for<'a> FnMut(&'a str) + Send,
 {
-    let req = translator_request(model, reference_ctx, prev_thai, raw_chunk, feedback);
+    let req = translator_request(
+        model,
+        reference_ctx,
+        prev_thai,
+        current_pov,
+        raw_chunk,
+        feedback,
+    );
     let mut partial_translated_text = String::new();
     let mut on_delta = on_delta;
     let mut relay_delta = |delta: &str| {
@@ -69,6 +78,7 @@ fn translator_request(
     model: &str,
     reference_ctx: &str,
     prev_thai: &[String],
+    current_pov: Option<&str>,
     raw_chunk: &str,
     feedback: Option<&str>,
 ) -> ChatRequest {
@@ -89,7 +99,11 @@ fn translator_request(
         }
     }
 
-    user.push_str(&build_translator_user_msg(prev_thai, raw_chunk));
+    user.push_str(&build_translator_user_msg(
+        prev_thai,
+        current_pov,
+        raw_chunk,
+    ));
 
     ChatRequest {
         model: model.to_string(),

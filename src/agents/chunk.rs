@@ -62,17 +62,47 @@ pub fn chunk_chapter(md: &str, target: usize, hard_cap: usize) -> Vec<Chunk> {
     let mut chunks: Vec<Chunk> = Vec::new();
     let mut current = String::new();
     let mut current_tokens = 0usize;
+    // Whether `current` holds any real prose yet, or only structural-break markers.
+    // A break boundary only splits once prose has accumulated, so a run of breaks
+    // (e.g. `---` / `＊` / `---`) collapses into one boundary at the head of the
+    // next chunk instead of each marker forming its own marker-only chunk.
+    let mut has_prose = false;
+
+    let append = |current: &mut String, current_tokens: &mut usize, unit: &str, t: usize| {
+        if current.is_empty() {
+            current.push_str(unit);
+        } else {
+            current.push_str("\n\n");
+            current.push_str(unit);
+        }
+        *current_tokens += t;
+    };
 
     for unit in units {
         let unit_tokens = estimate_tokens(&unit);
 
-        if current.is_empty() {
-            current = unit;
-            current_tokens = unit_tokens;
-            // A lone unit already over target stands as its own chunk.
+        // Scene dividers (`---`, `＊`, symbol lines) and standalone illustrations mark
+        // a section/POV boundary: break here so a new perspective never shares a chunk
+        // with the previous one. The marker(s) ride at the head of the next chunk.
+        if is_structural_break(&unit) {
+            if has_prose {
+                push_chunk(&mut chunks, std::mem::take(&mut current));
+                current_tokens = 0;
+                has_prose = false;
+            }
+            append(&mut current, &mut current_tokens, &unit, unit_tokens);
+            continue;
+        }
+
+        // Prose. While `current` is empty or only break markers, glue this prose on
+        // (the markers belong with the scene they introduce) and mark it prose.
+        if !has_prose {
+            append(&mut current, &mut current_tokens, &unit, unit_tokens);
+            has_prose = true;
             if current_tokens >= target {
                 push_chunk(&mut chunks, std::mem::take(&mut current));
                 current_tokens = 0;
+                has_prose = false;
             }
             continue;
         }
@@ -81,22 +111,72 @@ pub fn chunk_chapter(md: &str, target: usize, hard_cap: usize) -> Vec<Chunk> {
             push_chunk(&mut chunks, std::mem::take(&mut current));
             current = unit;
             current_tokens = unit_tokens;
+            has_prose = true;
             if current_tokens >= target {
                 push_chunk(&mut chunks, std::mem::take(&mut current));
                 current_tokens = 0;
+                has_prose = false;
             }
         } else {
-            current.push_str("\n\n");
-            current.push_str(&unit);
-            current_tokens += unit_tokens;
+            append(&mut current, &mut current_tokens, &unit, unit_tokens);
         }
     }
 
-    if !current.trim().is_empty() {
-        push_chunk(&mut chunks, current);
+    if has_prose {
+        push_chunk(&mut chunks, std::mem::take(&mut current));
+    } else if !current.trim().is_empty() {
+        // Trailing break-only markers (a chapter ending on `---`): attach to the last
+        // chunk to keep their position instead of emitting a prose-less chunk.
+        match chunks.last_mut() {
+            Some(last) => {
+                last.text.push_str("\n\n");
+                last.text.push_str(current.trim());
+                last.est_tokens = estimate_tokens(&last.text);
+            }
+            None => push_chunk(&mut chunks, current),
+        }
     }
 
     chunks
+}
+
+/// A structural break that should start a fresh chunk: a text scene divider or a
+/// standalone illustration. Light novels place an inserted illustration at a
+/// scene/section boundary, and some books use an ornament *image* as the divider
+/// itself — both align with the POV/perspective boundaries we chunk on.
+fn is_structural_break(unit: &str) -> bool {
+    is_scene_divider(unit) || is_standalone_image(unit)
+}
+
+/// True when the whole unit is a single Markdown image and nothing else (the cleanse
+/// emits illustration lines as `![ภาพประกอบ](…)`).
+fn is_standalone_image(unit: &str) -> bool {
+    IMAGE_ONLY_LINE.is_match(unit.trim())
+}
+
+static IMAGE_ONLY_LINE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^!\[[^\]]*\]\([^)]*\)$").expect("image-only regex is valid"));
+
+/// A scene-divider unit: a line built only of divider glyphs. Matches the cleanse
+/// output `---`, plus asterisk/symbol dividers (`＊`, `* * *`, `◇◇◇`) that pass
+/// through from source. A lone ASCII `-`/`*`/`_` is ignored (likely stray markup);
+/// a fullwidth/symbol glyph or a run of 3+ ASCII marks qualifies.
+fn is_scene_divider(unit: &str) -> bool {
+    let glyphs: String = unit.trim().chars().filter(|c| !c.is_whitespace()).collect();
+    if glyphs.is_empty() {
+        return false;
+    }
+    let is_div_glyph = |c: char| {
+        matches!(
+            c,
+            '-' | '*' | '_' | '—' | '―' | '─' | '＊' | '※' | '◇' | '◆' | '☆' | '★' | '・'
+        )
+    };
+    if !glyphs.chars().all(is_div_glyph) {
+        return false;
+    }
+    let has_symbol = glyphs.chars().any(|c| !matches!(c, '-' | '*' | '_'));
+    has_symbol || glyphs.chars().count() >= 3
 }
 
 fn push_chunk(chunks: &mut Vec<Chunk>, text: String) {
@@ -579,6 +659,67 @@ mod tests {
         }
         let rejoined: String = chunks.iter().map(|c| c.text.replace('\n', "")).collect();
         assert_eq!(rejoined, para);
+    }
+
+    /// A scene divider opens a fresh chunk so a POV switch never shares a chunk with
+    /// the previous perspective, even when both halves would fit under `target`.
+    #[test]
+    fn scene_divider_starts_a_new_chunk() {
+        let md = "ひかりの場面。\n\n---\n\nゆずきの場面。";
+        let chunks = chunk_chapter(md, 1000, 2000);
+        assert_eq!(chunks.len(), 2, "divider must split into two chunks");
+        assert!(!chunks[0].text.contains("---"));
+        assert!(chunks[1].text.starts_with("---"));
+        assert!(chunks[1].text.contains("ゆずき"));
+    }
+
+    #[test]
+    fn divider_glyph_detection() {
+        assert!(is_scene_divider("---"));
+        assert!(is_scene_divider("＊"));
+        assert!(is_scene_divider("* * *"));
+        assert!(is_scene_divider("◇◇◇"));
+        assert!(!is_scene_divider("*"), "lone asterisk is not a divider");
+        assert!(!is_scene_divider("ひかり"));
+    }
+
+    /// The real-corpus scene break — a `＊` flanked by `---` spacers — is ONE
+    /// boundary: the markers ride at the head of the next chunk, never forming
+    /// their own marker-only chunks.
+    #[test]
+    fn run_of_dividers_is_a_single_boundary() {
+        let md = "前の場面。\n\n---\n\n＊\n\n---\n\n次の場面。";
+        let chunks = chunk_chapter(md, 1000, 2000);
+        assert_eq!(chunks.len(), 2, "the divider run yields exactly one split");
+        assert_eq!(chunks[0].text, "前の場面。");
+        // All three markers lead the second chunk, ahead of its prose.
+        assert!(chunks[1].text.starts_with("---\n\n＊\n\n---"));
+        assert!(chunks[1].text.contains("次の場面。"));
+    }
+
+    /// A standalone illustration is a section boundary too — and isn't emitted as a
+    /// prose-less chunk of its own.
+    #[test]
+    fn standalone_image_starts_a_new_chunk() {
+        let md = "前の場面。\n\n![ภาพประกอบ](../../images/i-021.jpg)\n\n次の場面。";
+        let chunks = chunk_chapter(md, 1000, 2000);
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].text, "前の場面。");
+        assert!(chunks[1].text.starts_with("![ภาพประกอบ]"));
+        assert!(chunks[1].text.contains("次の場面。"));
+        assert!(is_standalone_image("![x](a.jpg)"));
+        assert!(!is_standalone_image("text ![x](a.jpg) more"));
+    }
+
+    /// A chapter ending on a divider keeps the marker (attached to the last chunk),
+    /// never a trailing prose-less chunk.
+    #[test]
+    fn trailing_divider_attaches_to_last_chunk() {
+        let md = "最後の場面。\n\n---";
+        let chunks = chunk_chapter(md, 1000, 2000);
+        assert_eq!(chunks.len(), 1);
+        assert!(chunks[0].text.contains("最後の場面。"));
+        assert!(chunks[0].text.trim_end().ends_with("---"));
     }
 
     /// Normal punctuated prose chunks on sentence boundaries and stays within the cap.

@@ -366,7 +366,7 @@ pub fn translator_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
         "additionalProperties": false,
-        "required": ["thought_process", "translated_text", "new_characters", "new_terms", "continuity_notes"],
+        "required": ["thought_process", "translated_text", "pov", "new_characters", "new_terms", "continuity_notes"],
         "properties": {
             "thought_process": {
                 "type": "object",
@@ -378,6 +378,10 @@ pub fn translator_schema() -> serde_json::Value {
                 }
             },
             "translated_text": { "type": "string" },
+            "pov": {
+                "type": "string",
+                "description": "Narrator at the END of this chunk: first-person POV character + their Thai self-pronoun (e.g. 'ฮิคาริ (บุรุษที่ 1, สรรพนามตัวเอง=ฉัน)'), or 'บุรุษที่ 3' for third-person. Empty if unknown."
+            },
             "new_characters": {
                 "type": "array",
                 "items": {

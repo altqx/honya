@@ -483,6 +483,12 @@ impl Default for AppConfig {
 pub struct TranslatorOut {
     pub thought_process: ThoughtProcess,
     pub translated_text: String,
+    /// Who is narrating at the END of this chunk — the first-person POV character
+    /// and their Thai self-pronoun, or third-person. Carried into the next chunk so
+    /// a POV section that spans a chunk boundary keeps the right "I". Empty when
+    /// unknown/unchanged.
+    #[serde(default)]
+    pub pov: String,
     #[serde(default)]
     pub new_characters: Vec<NewCharacter>,
     #[serde(default)]

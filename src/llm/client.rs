@@ -190,6 +190,16 @@ impl OpenRouterClient {
         }
 
         let raw = resp.text().await?;
+
+        // OpenRouter can answer HTTP 200 with an error envelope ({"error": {…}})
+        // rather than a completion — typically an upstream provider failure. Detect
+        // that shape so it surfaces as a real `Api` error (and is classified for the
+        // content-policy / transient retry paths) instead of an opaque "missing
+        // field `choices`" parse failure. Mirrors the SSE path's `chunk.error`.
+        if let Some(err) = parse_error_envelope(&raw) {
+            return Err(err);
+        }
+
         let mut parsed: ChatResponse =
             serde_json::from_str(&raw).map_err(|source| LlmError::Parse {
                 target: "ChatResponse",
@@ -471,6 +481,44 @@ fn handle_sse_line(
     Ok(())
 }
 
+/// Detect an OpenRouter error envelope (`{"error": {"message", "code", …}}`)
+/// returned with an HTTP-success status. Returns `None` for a normal completion
+/// (no top-level `error`), so a valid response never false-positives. The `code`
+/// becomes the `Api` status when it's a plausible HTTP code, else `0` (treated as
+/// a transient stream-style fault, matching the SSE path).
+fn parse_error_envelope(raw: &str) -> Option<LlmError> {
+    #[derive(Deserialize)]
+    struct Envelope {
+        error: ErrBody,
+    }
+    #[derive(Deserialize)]
+    struct ErrBody {
+        #[serde(default)]
+        message: Option<String>,
+        #[serde(default)]
+        code: Option<serde_json::Value>,
+    }
+
+    let env: Envelope = serde_json::from_str(raw).ok()?;
+    let status = env
+        .error
+        .code
+        .as_ref()
+        .and_then(|c| match c {
+            serde_json::Value::Number(n) => n.as_u64().and_then(|v| u16::try_from(v).ok()),
+            serde_json::Value::String(s) => s.trim().parse::<u16>().ok(),
+            _ => None,
+        })
+        .filter(|s| (100..=599).contains(s))
+        .unwrap_or(0);
+    let message = env
+        .error
+        .message
+        .filter(|m| !m.trim().is_empty())
+        .unwrap_or_else(|| raw.trim().to_string());
+    Some(LlmError::Api { status, message })
+}
+
 /// Read the `Retry-After` header as whole seconds, defaulting to 1.
 fn parse_retry_after(resp: &reqwest::Response) -> u64 {
     resp.headers()
@@ -599,6 +647,48 @@ mod tests {
             }
             .is_transient_stream_error()
         );
+    }
+
+    #[test]
+    fn error_envelope_on_http_200_becomes_api_error() {
+        // OpenRouter answers 200 with an error envelope on an upstream failure;
+        // the numeric `code` carries through as the Api status.
+        let err =
+            parse_error_envelope(r#"{"error":{"message":"Provider returned error","code":502}}"#)
+                .expect("envelope should be detected");
+        match err {
+            LlmError::Api { status, message } => {
+                assert_eq!(status, 502);
+                assert_eq!(message, "Provider returned error");
+            }
+            other => panic!("expected Api, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn error_envelope_carries_content_policy_classification() {
+        let err = parse_error_envelope(r#"{"error":{"message":"PROHIBITED_CONTENT"}}"#)
+            .expect("envelope should be detected");
+        assert!(err.is_content_policy_block());
+    }
+
+    #[test]
+    fn error_envelope_without_usable_code_is_transient_status_zero() {
+        let err = parse_error_envelope(r#"{"error":{"message":"upstream hiccup","code":"foo"}}"#)
+            .expect("envelope should be detected");
+        assert!(err.is_transient_stream_error());
+    }
+
+    #[test]
+    fn normal_completion_is_not_an_error_envelope() {
+        assert!(
+            parse_error_envelope(
+                r#"{"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}"#,
+            )
+            .is_none()
+        );
+        // A literal `error: null` is not an envelope either.
+        assert!(parse_error_envelope(r#"{"error":null,"choices":[]}"#).is_none());
     }
 
     #[test]

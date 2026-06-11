@@ -839,6 +839,9 @@ async fn process_chapter(
         });
     }
 
+    // First-person narrator carried chunk-to-chunk within this chapter so a POV
+    // section that spans a chunk boundary keeps the right "I". Reset per chapter.
+    let mut pov_carry: Option<String> = None;
     for chunk in &chunks {
         if clean_committed.contains(&(chunk.index as u32)) {
             continue;
@@ -868,7 +871,7 @@ async fn process_chapter(
         // Fresh repetition state per chunk so one chunk's tail can't trip on the
         // next chunk's start.
         wd.reset_chunk();
-        match process_chunk(ctx, chapter, chunk, acc, wd).await? {
+        match process_chunk(ctx, chapter, chunk, acc, wd, &mut pov_carry).await? {
             ChunkOutcome::Committed | ChunkOutcome::NeedsReview => {}
         }
     }
@@ -1173,6 +1176,7 @@ async fn process_chunk(
     chunk: &Chunk,
     acc: &mut Acc,
     wd: &Watchdog,
+    pov: &mut Option<String>,
 ) -> anyhow::Result<ChunkOutcome> {
     // Each step below counts as progress for the stall arm of the watchdog.
     wd.ping();
@@ -1227,6 +1231,7 @@ async fn process_chunk(
                 &ctx.models.translator,
                 &reference_ctx,
                 &prev_thai,
+                pov.as_deref(),
                 &chunk.text,
                 feedback.as_deref(),
                 move |delta| {
@@ -1541,6 +1546,13 @@ async fn process_chunk(
                 chunk: chunk.index,
                 state: ChunkState::Committed,
             });
+
+            // Carry this chunk's ending narrator into the next chunk so a POV
+            // section that spans the boundary keeps the right first-person voice.
+            // Only update from an approved chunk; a blank report leaves the carry.
+            if !out.pov.trim().is_empty() {
+                *pov = Some(out.pov.trim().to_string());
+            }
 
             // ---- Orchestrator metadata turn (everything-uses-tools) ----
             // This post-commit, best-effort turn is up to 8 *serial* non-streaming
@@ -2062,7 +2074,7 @@ mod tests {
         };
 
         let wd = Watchdog::new(&ctx.cfg);
-        match process_chunk(&ctx, 1, &chunk, &mut acc, &wd)
+        match process_chunk(&ctx, 1, &chunk, &mut acc, &wd, &mut None)
             .await
             .expect("process_chunk")
         {

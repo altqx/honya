@@ -97,8 +97,20 @@ fn push_trimmed(current: &mut String, out: &mut Vec<String>) {
 
 /// Assemble the Translator user message: optional continuity block, a scoped
 /// task reminder, then the source delimited by `<<SOURCE_JP>> … <<END_SOURCE_JP>>`.
-pub fn build_translator_user_msg(prev_thai: &[String], raw_chunk: &str) -> String {
+pub fn build_translator_user_msg(
+    prev_thai: &[String],
+    current_pov: Option<&str>,
+    raw_chunk: &str,
+) -> String {
     let mut s = String::new();
+
+    if let Some(pov) = current_pov.map(str::trim).filter(|p| !p.is_empty()) {
+        s.push_str(
+            "<<CURRENT_POV: ผู้เล่า (มุมมองบุรุษที่ 1) ที่ไหลมาจากชังก์ก่อนหน้า ใช้เป็นจุดตั้งต้น แต่ถ้าในชังก์นี้มีตัวแบ่งฉากที่สลับผู้เล่า ให้ยึดตามเนื้อความ>>\n",
+        );
+        s.push_str(pov);
+        s.push_str("\n<<END_CURRENT_POV>>\n\n");
+    }
 
     if !prev_thai.is_empty() {
         s.push_str(&format!(
@@ -117,6 +129,7 @@ pub fn build_translator_user_msg(prev_thai: &[String], raw_chunk: &str) -> Strin
          - ใช้ CONTINUITY/REFERENCE/REVIEWER_FEEDBACK เป็นบริบท ห้ามคัดลอกลง translated_text\n\
          - translated_text ต้องเป็น Markdown ภาษาไทยฉบับสุดท้าย ไม่มีหัวข้อ \"คำแปล:\" ไม่มีคำเกริ่น และไม่มีคำอธิบายงาน\n\
          - รักษาย่อหน้าและจังหวะของต้นฉบับเท่าที่ทำได้ โดยเรียบเรียงให้เป็นภาษาไทยธรรมชาติ\n\
+         - ระบุผู้เล่า (POV) ของแต่ละช่วง เลือกสรรพนามบุรุษที่ 1 ให้ตรงผู้เล่า และสลับเมื่อข้ามตัวแบ่งฉากที่เปลี่ยนมุมมอง แล้วบันทึกผู้เล่าท้ายชังก์ลงฟิลด์ pov\n\
          <<END_TASK>>\n\n",
     );
 
