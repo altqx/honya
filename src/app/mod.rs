@@ -77,6 +77,8 @@ pub enum Action {
     ImportFile {
         source: PathBuf,
         title: String,
+        /// Thai title from the wizard's translate step (empty = none).
+        title_th: String,
         vol: u32,
         synopsis_raw: String,
         synopsis_th: String,
@@ -1371,11 +1373,12 @@ impl App {
             Action::ImportFile {
                 source,
                 title,
+                title_th,
                 vol,
                 synopsis_raw,
                 synopsis_th,
             } => {
-                self.start_import(source, title, vol, synopsis_raw, synopsis_th);
+                self.start_import(source, title, title_th, vol, synopsis_raw, synopsis_th);
             }
             Action::TranslateSynopsis { raw, attempt } => {
                 self.translate_synopsis(raw, attempt);
@@ -2348,10 +2351,12 @@ impl App {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn start_import(
         &mut self,
         source: PathBuf,
         title: String,
+        title_th: String,
         vol: u32,
         synopsis_raw: String,
         synopsis_th: String,
@@ -2371,6 +2376,7 @@ impl App {
                 source,
                 dest,
                 title,
+                title_th,
                 vol,
                 models,
                 synopsis_raw,
@@ -3303,6 +3309,7 @@ async fn run_import(
     source: PathBuf,
     dest: PathBuf,
     title: String,
+    title_th: String,
     vol: u32,
     models: ModelSet,
     synopsis_raw: String,
@@ -3326,9 +3333,13 @@ async fn run_import(
         let models = models.clone();
         tokio::task::spawn_blocking(move || {
             crate::workspace::scaffold::create_project(&dest, &title, &models, vol)?;
-            // Persist the volume synopsis (if any) onto the freshly-scaffolded volume.
+            let ws = Workspace::new(dest.clone(), vol);
+            // Persist the wizard's Thai title / volume synopsis (if any); empty
+            // means skipped, and never clobbers an existing merge target's title.
+            if !title_th.trim().is_empty() {
+                crate::workspace::scaffold::set_title(&ws, &title, &title_th)?;
+            }
             if !synopsis_raw.trim().is_empty() || !synopsis_th.trim().is_empty() {
-                let ws = Workspace::new(dest.clone(), vol);
                 crate::workspace::volume::set_synopsis(&ws, &synopsis_raw, &synopsis_th)?;
             }
             Ok::<(), std::io::Error>(())

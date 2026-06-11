@@ -201,12 +201,13 @@ impl ProjectRef {
     }
 }
 
-/// The import wizard: pick source file → name → volume → synopsis → importing. When
-/// `lock_name` is set (the "add volume to this project" flow), the name step is
-/// skipped and the title is fixed to the open project's.
+/// The import wizard: pick source file → name → Thai title → volume → synopsis →
+/// importing. When `lock_name` is set (the "add volume to this project" flow),
+/// the name and Thai-title steps are skipped and the title is fixed to the open
+/// project's.
 #[derive(Debug, Clone)]
 pub struct ImportState {
-    /// 0 = pick, 1 = name, 2 = volume, 3 = synopsis, 4 = importing (gauge).
+    /// 0 = pick, 1 = name, 2 = Thai title, 3 = volume, 4 = synopsis, 5 = importing.
     pub step: u8,
     /// Importable source files (path, byte size) found in the working root.
     pub files: Vec<(PathBuf, u64)>,
@@ -226,7 +227,9 @@ pub struct ImportState {
     pub projects: Vec<ProjectRef>,
     /// Transient validation note (name step); cleared on the next edit.
     pub note: Option<&'static str>,
-    /// Synopsis input + translate/reroll loop (wizard step 3).
+    /// Thai-title translate/reroll loop (wizard step 2); `raw` mirrors `name`.
+    pub title_syn: SynopsisState,
+    /// Synopsis input + translate/reroll loop (wizard step 4).
     pub syn: SynopsisState,
     /// Live preprocessing progress (done, total, label) once the import starts.
     pub progress: Option<(usize, usize, String)>,
@@ -253,6 +256,7 @@ impl ImportState {
             lock_name: false,
             projects,
             note: None,
+            title_syn: SynopsisState::new_single_line(String::new(), String::new()),
             syn: SynopsisState::new(String::new(), String::new()),
             progress: None,
         }
@@ -280,6 +284,7 @@ impl ImportState {
             lock_name: true,
             projects,
             note: None,
+            title_syn: SynopsisState::new_single_line(String::new(), String::new()),
             syn: SynopsisState::new(String::new(), String::new()),
             progress: None,
         }
@@ -955,7 +960,7 @@ impl Overlay {
 
     pub fn set_import_progress(&mut self, done: usize, total: usize, label: &str) {
         if let Overlay::Import(st) = self {
-            st.step = 4;
+            st.step = 5;
             st.progress = Some((done, total, label.to_string()));
         }
     }
@@ -976,7 +981,8 @@ impl Overlay {
     /// is still awaiting it.
     pub fn set_synopsis_result(&mut self, result: std::result::Result<String, String>) {
         let st = match self {
-            Overlay::Import(s) if s.step == 3 => &mut s.syn,
+            Overlay::Import(s) if s.step == 2 => &mut s.title_syn,
+            Overlay::Import(s) if s.step == 4 => &mut s.syn,
             Overlay::Synopsis(s) => &mut s.syn,
             Overlay::ProjectTitle(s) => &mut s.syn,
             _ => return,
@@ -1002,7 +1008,7 @@ impl Overlay {
     pub fn is_input_capturing(&self) -> bool {
         match self {
             Overlay::Import(st) => {
-                st.step == 1 || (st.step == 3 && st.syn.phase == SynPhase::Editing)
+                st.step == 1 || (st.step == 4 && st.syn.phase == SynPhase::Editing)
             }
             Overlay::Synopsis(st) => st.syn.phase == SynPhase::Editing,
             Overlay::ProjectTitle(st) => st.syn.phase == SynPhase::Editing,
@@ -1380,7 +1386,7 @@ impl Overlay {
                         }
                         st.name_cursor = st.name.len();
                         if st.lock_name {
-                            st.step = 2;
+                            st.step = 3;
                         } else {
                             st.step = 1;
                         }
@@ -1408,17 +1414,84 @@ impl Overlay {
                             st.note = Some("ใส่ชื่อโปรเจกต์ก่อน · a project name is required");
                         } else {
                             st.note = None;
+                            // A changed name invalidates any earlier translation.
+                            let raw = st.name.trim().to_string();
+                            if st.title_syn.raw != raw {
+                                st.title_syn = SynopsisState::new_single_line(raw, String::new());
+                            }
                             st.step = 2;
-                            st.suggest_volume();
                         }
                         Action::None
                     }
                     _ => Action::None,
                 }
             }
-            2 => match key.code {
+            2 => match st.title_syn.phase {
+                SynPhase::Translating => match key.code {
+                    KeyCode::Esc => {
+                        st.title_syn.phase = SynPhase::Editing;
+                        Action::None
+                    }
+                    _ => Action::None,
+                },
+                SynPhase::Done => match key.code {
+                    KeyCode::Enter => {
+                        st.step = 3;
+                        st.suggest_volume();
+                        Action::None
+                    }
+                    KeyCode::Char('r') | KeyCode::Char('R') => {
+                        st.title_syn.attempt += 1;
+                        st.title_syn.phase = SynPhase::Translating;
+                        Action::TranslateProjectTitle {
+                            raw: st.title_syn.raw.clone(),
+                            attempt: st.title_syn.attempt,
+                        }
+                    }
+                    KeyCode::Char('s') | KeyCode::Char('S') => {
+                        st.title_syn.th.clear();
+                        st.title_syn.phase = SynPhase::Editing;
+                        st.step = 3;
+                        st.suggest_volume();
+                        Action::None
+                    }
+                    KeyCode::Esc | KeyCode::Char('e') | KeyCode::Char('E') => {
+                        st.step = 1;
+                        st.name_cursor = st.name.len();
+                        Action::None
+                    }
+                    _ => Action::None,
+                },
+                // Editing doubles as "not translated yet" — the step never
+                // captures text (the name was typed in the previous step).
+                SynPhase::Editing | SynPhase::Failed => match key.code {
+                    KeyCode::Enter | KeyCode::Tab | KeyCode::Char('r') | KeyCode::Char('R') => {
+                        if st.title_syn.phase == SynPhase::Failed {
+                            st.title_syn.attempt += 1;
+                        }
+                        st.title_syn.phase = SynPhase::Translating;
+                        Action::TranslateProjectTitle {
+                            raw: st.title_syn.raw.clone(),
+                            attempt: st.title_syn.attempt,
+                        }
+                    }
+                    KeyCode::Char('s') | KeyCode::Char('S') => {
+                        st.title_syn.phase = SynPhase::Editing;
+                        st.step = 3;
+                        st.suggest_volume();
+                        Action::None
+                    }
+                    KeyCode::Esc => {
+                        st.step = 1;
+                        st.name_cursor = st.name.len();
+                        Action::None
+                    }
+                    _ => Action::None,
+                },
+            },
+            3 => match key.code {
                 KeyCode::Esc => {
-                    st.step = if st.lock_name { 0 } else { 1 };
+                    st.step = if st.lock_name { 0 } else { 2 };
                     Action::None
                 }
                 KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('+') | KeyCode::Right => {
@@ -1443,12 +1516,12 @@ impl Overlay {
                     Action::None
                 }
                 KeyCode::Enter => {
-                    st.step = 3;
+                    st.step = 4;
                     Action::None
                 }
                 _ => Action::None,
             },
-            3 => {
+            4 => {
                 let intent = handle_synopsis_keys(&mut st.syn, key);
                 match intent {
                     SynKey::None => Action::None,
@@ -1457,20 +1530,22 @@ impl Overlay {
                         attempt: st.syn.attempt,
                     },
                     SynKey::Back => {
-                        st.step = 2;
+                        st.step = 3;
                         Action::None
                     }
                     SynKey::Accept => {
                         let source = st.selected_file().cloned().unwrap_or_default();
                         let title = st.name.trim().to_string();
+                        let title_th = st.title_syn.th.trim().to_string();
                         let vol = st.vol.max(1);
                         let synopsis_raw = st.syn.raw.trim().to_string();
                         let synopsis_th = st.syn.th.trim().to_string();
-                        st.step = 4;
+                        st.step = 5;
                         st.progress = Some((0, 0, "starting".to_string()));
                         Action::ImportFile {
                             source,
                             title,
+                            title_th,
                             vol,
                             synopsis_raw,
                             synopsis_th,
@@ -1479,12 +1554,14 @@ impl Overlay {
                     SynKey::Skip => {
                         let source = st.selected_file().cloned().unwrap_or_default();
                         let title = st.name.trim().to_string();
+                        let title_th = st.title_syn.th.trim().to_string();
                         let vol = st.vol.max(1);
-                        st.step = 4;
+                        st.step = 5;
                         st.progress = Some((0, 0, "starting".to_string()));
                         Action::ImportFile {
                             source,
                             title,
+                            title_th,
                             vol,
                             synopsis_raw: String::new(),
                             synopsis_th: String::new(),
@@ -1863,8 +1940,9 @@ impl Overlay {
                     ("Esc", "cancel"),
                 ],
                 1 => &[("type", "name"), ("↵/Tab", "next"), ("Esc", "back")],
-                2 => &[("↑↓/type", "volume"), ("↵", "next"), ("Esc", "back")],
-                3 => synopsis_hints(&st.syn, true),
+                2 => import_title_hints(&st.title_syn),
+                3 => &[("↑↓/type", "volume"), ("↵", "next"), ("Esc", "back")],
+                4 => synopsis_hints(&st.syn, true),
                 _ => &[("Esc", "close")],
             },
             Overlay::Synopsis(st) => synopsis_hints(&st.syn, false),
@@ -2083,8 +2161,9 @@ impl Overlay {
         match st.step {
             0 => self.render_import_pick(f, rows[3], theme, st),
             1 => self.render_import_name(f, rows[3], theme, st),
-            2 => self.render_import_volume(f, rows[3], theme, st),
-            3 => render_synopsis_body(f, rows[3], theme, &st.syn, "เริ่มนำเข้า"),
+            2 => self.render_import_title(f, rows[3], theme, st),
+            3 => self.render_import_volume(f, rows[3], theme, st),
+            4 => render_synopsis_body(f, rows[3], theme, &st.syn, "เริ่มนำเข้า"),
             _ => self.render_import_progress(f, rows[3], theme, st),
         }
     }
@@ -2545,6 +2624,73 @@ impl Overlay {
                 .wrap(Wrap { trim: false })
                 .style(Style::default().bg(theme.bg_panel)),
             rows[4],
+        );
+    }
+
+    fn render_import_title(&self, f: &mut Frame, area: Rect, theme: &Theme, st: &ImportState) {
+        let syn = &st.title_syn;
+        let faint = Style::default().fg(theme.ink_faint);
+        let mut lines = vec![
+            Line::from(Span::styled(
+                thai_display_safe("  ตั้งชื่อภาษาไทยให้นิยาย (ไม่บังคับ) — ใช้ตอน export และหน้า Shelf"),
+                Style::default().fg(theme.ink_soft),
+            )),
+            Line::raw(""),
+            Line::from(vec![
+                Span::styled("  Original  ", faint),
+                Span::styled(
+                    thai_display_safe(syn.raw.trim()),
+                    Style::default().fg(theme.ink),
+                ),
+            ]),
+            Line::raw(""),
+            Line::from(vec![
+                Span::styled("  Thai      ", faint),
+                if syn.th.trim().is_empty() {
+                    Span::styled(thai_display_safe("(ยังไม่มีชื่อไทย)"), faint)
+                } else {
+                    Span::styled(
+                        thai_display_safe(syn.th.trim()),
+                        Style::default()
+                            .fg(theme.accent)
+                            .add_modifier(Modifier::BOLD),
+                    )
+                },
+            ]),
+            Line::raw(""),
+        ];
+        match syn.phase {
+            SynPhase::Translating => lines.push(Line::from(Span::styled(
+                thai_display_safe("  ◐ กำลังแปลด้วย Translator agent … (Esc ยกเลิก)"),
+                Style::default().fg(theme.status_working),
+            ))),
+            SynPhase::Done => lines.push(Line::from(Span::styled(
+                thai_display_safe(&format!(
+                    "  ✓ แปลแล้ว (รอบ {}) — Enter ใช้ชื่อนี้ · r แปลใหม่ · s ไม่ใช้ · Esc กลับ",
+                    syn.attempt + 1
+                )),
+                Style::default().fg(theme.status_done),
+            ))),
+            SynPhase::Failed => {
+                lines.push(Line::from(Span::styled(
+                    thai_display_safe("  ✗ แปลไม่สำเร็จ — r ลองใหม่ · s ข้าม · Esc กลับ"),
+                    Style::default().fg(theme.status_failed),
+                )));
+                lines.push(Line::from(Span::styled(
+                    thai_display_safe(&format!("    {}", syn.error)),
+                    Style::default().fg(theme.status_failed),
+                )));
+            }
+            SynPhase::Editing => lines.push(Line::from(Span::styled(
+                thai_display_safe("  Tab/Enter แปลชื่อเรื่องเป็นไทย · s ข้าม · Esc กลับ"),
+                faint,
+            ))),
+        }
+        f.render_widget(
+            Paragraph::new(lines)
+                .wrap(Wrap { trim: false })
+                .style(Style::default().bg(theme.bg_panel)),
+            area,
         );
     }
 
@@ -3707,9 +3853,15 @@ const IMPORT_PICK_LIST_OFFSET: u16 = 2;
 /// highlighted, future steps are dimmed. The add-volume flow hides "Name".
 fn step_rail(st: &ImportState, theme: &Theme) -> Line<'static> {
     let steps: &[(u8, &str)] = if st.lock_name {
-        &[(0, "File"), (2, "Volume"), (3, "Synopsis")]
+        &[(0, "File"), (3, "Volume"), (4, "Synopsis")]
     } else {
-        &[(0, "File"), (1, "Name"), (2, "Volume"), (3, "Synopsis")]
+        &[
+            (0, "File"),
+            (1, "Name"),
+            (2, "Thai title"),
+            (3, "Volume"),
+            (4, "Synopsis"),
+        ]
     };
     let mut spans = vec![Span::raw(" ")];
     for (i, &(id, label)) in steps.iter().enumerate() {
@@ -3762,7 +3914,7 @@ fn import_context_line(st: &ImportState, theme: &Theme) -> Line<'static> {
             confirmed,
         ));
     }
-    if st.lock_name || st.step > 2 {
+    if st.lock_name || st.step > 3 {
         spans.push(sep);
         spans.push(Span::styled(
             format!("Vol.{:02}", st.vol),
@@ -3802,6 +3954,22 @@ fn synopsis_hints(st: &SynopsisState, wizard: bool) -> &'static [(&'static str, 
         ],
         SynPhase::Done => &[("↵", "save"), ("r", "reroll"), ("e", "edit"), ("s", "skip")],
         SynPhase::Failed => &[("r", "retry"), ("e", "edit"), ("s", "skip")],
+    }
+}
+
+/// Footer hints for the wizard's Thai-title step (Editing = not translated yet;
+/// the step never captures text, so plain letters are free for skip/reroll).
+fn import_title_hints(st: &SynopsisState) -> &'static [(&'static str, &'static str)] {
+    match st.phase {
+        SynPhase::Editing => &[("Tab/↵", "translate"), ("s", "skip"), ("Esc", "back")],
+        SynPhase::Translating => &[("Esc", "cancel"), ("…", "translating")],
+        SynPhase::Done => &[
+            ("↵", "next"),
+            ("r", "reroll"),
+            ("s", "skip"),
+            ("Esc", "back"),
+        ],
+        SynPhase::Failed => &[("r", "retry"), ("s", "skip"), ("Esc", "back")],
     }
 }
 
@@ -4197,12 +4365,13 @@ mod tests {
             st.name = "Cursed Blade".to_string();
             st.name_cursor = st.name.len();
         }
-        ov.handle_key(key(KeyCode::Enter));
+        ov.handle_key(key(KeyCode::Enter)); // → Thai-title step
+        ov.handle_key(key(KeyCode::Char('s'))); // skip → volume step
         let Overlay::Import(st) = &ov else {
             panic!("overlay changed variant")
         };
         assert!(st.target_project().is_some());
-        assert_eq!(st.step, 2);
+        assert_eq!(st.step, 3);
         assert_eq!(st.vol, 3, "should pre-pick one past the highest volume");
     }
 
@@ -4220,14 +4389,82 @@ mod tests {
             st.name = "Cursed Blade".to_string();
             st.name_cursor = st.name.len();
         }
-        ov.handle_key(key(KeyCode::Enter)); // → volume step, suggested 2
+        ov.handle_key(key(KeyCode::Enter)); // → Thai-title step
+        ov.handle_key(key(KeyCode::Char('s'))); // → volume step, suggested 2
         ov.handle_key(key(KeyCode::Up)); // user picks 3
+        ov.handle_key(key(KeyCode::Esc)); // back to Thai title
         ov.handle_key(key(KeyCode::Esc)); // back to name
         ov.handle_key(key(KeyCode::Enter)); // forward again
+        ov.handle_key(key(KeyCode::Char('s')));
         let Overlay::Import(st) = &ov else {
             panic!("overlay changed variant")
         };
         assert_eq!(st.vol, 3, "manual pick must not be re-suggested away");
+    }
+
+    /// The Thai-title step translates the typed project name via the title agent
+    /// and threads the accepted Thai title into the import action; skipping it
+    /// leaves the title empty.
+    #[test]
+    fn wizard_title_step_threads_thai_title_into_import() {
+        let mut ov = wizard(vec![]);
+        if let Overlay::Import(st) = &mut ov {
+            st.step = 1;
+            st.name = "夜の影".to_string();
+            st.name_cursor = st.name.len();
+        }
+        ov.handle_key(key(KeyCode::Enter)); // name → Thai title
+        match ov.handle_key(key(KeyCode::Tab)) {
+            Action::TranslateProjectTitle { raw, attempt } => {
+                assert_eq!(raw, "夜の影");
+                assert_eq!(attempt, 0);
+            }
+            other => panic!("expected TranslateProjectTitle, got {other:?}"),
+        }
+        ov.set_synopsis_result(Ok("เงาแห่งราตรี".into()));
+        ov.handle_key(key(KeyCode::Enter)); // accept → volume
+        ov.handle_key(key(KeyCode::Enter)); // volume → synopsis
+        match ov.handle_key(key(KeyCode::Tab)) {
+            // Empty synopsis + Tab skips it and starts the import.
+            Action::ImportFile {
+                title, title_th, ..
+            } => {
+                assert_eq!(title, "夜の影");
+                assert_eq!(title_th, "เงาแห่งราตรี");
+            }
+            other => panic!("expected ImportFile, got {other:?}"),
+        }
+    }
+
+    /// Going back and re-entering the title step with the same name keeps the
+    /// translation; changing the name resets it.
+    #[test]
+    fn wizard_title_translation_survives_back_unless_name_changes() {
+        let mut ov = wizard(vec![]);
+        if let Overlay::Import(st) = &mut ov {
+            st.step = 1;
+            st.name = "夜の影".to_string();
+            st.name_cursor = st.name.len();
+        }
+        ov.handle_key(key(KeyCode::Enter));
+        ov.handle_key(key(KeyCode::Tab));
+        ov.set_synopsis_result(Ok("เงาแห่งราตรี".into()));
+        ov.handle_key(key(KeyCode::Esc)); // back to name (same name)
+        ov.handle_key(key(KeyCode::Enter)); // re-enter title step
+        if let Overlay::Import(st) = &ov {
+            assert_eq!(st.title_syn.th, "เงาแห่งราตรี", "same name keeps the roll");
+            assert_eq!(st.title_syn.phase, SynPhase::Done);
+        }
+        ov.handle_key(key(KeyCode::Esc));
+        ov.handle_key(key(KeyCode::Char('x'))); // edit the name
+        ov.handle_key(key(KeyCode::Enter));
+        let Overlay::Import(st) = &ov else {
+            panic!("overlay changed variant")
+        };
+        assert!(
+            st.title_syn.th.is_empty(),
+            "a changed name must reset the stale translation"
+        );
     }
 
     /// Every wizard step must render without leaking raw SARA AM, including the
@@ -4246,8 +4483,9 @@ mod tests {
         );
         st.name = "ดาบคำสาป".to_string();
         st.name_cursor = st.name.len();
+        st.title_syn = SynopsisState::new_single_line("ดาบคำสาป".to_string(), "คำสาปดาบ".to_string());
         st.syn.raw = "คำสาปแห่งดาบ".to_string();
-        for step in 0..=4u8 {
+        for step in 0..=5u8 {
             st.step = step;
             let mut term = Terminal::new(TestBackend::new(80, 26)).unwrap();
             term.draw(|f| Overlay::None.render_import(f, f.area(), &theme, &st))
