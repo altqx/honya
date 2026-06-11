@@ -13,7 +13,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
 use crate::export::ExportFormat;
-use crate::model::{AppConfig, LogLevel, ServiceTier, ThemeId, UpdateMode};
+use crate::model::{AppConfig, LogLevel, ReleaseChannel, ServiceTier, ThemeId, UpdateMode};
 use crate::theme::{self, ALL_THEMES, Theme};
 use crate::ui::input::{self, EditOpts, Edited};
 use crate::ui::layout::{centered_modal, centered_pct};
@@ -326,6 +326,9 @@ pub struct SettingsState {
     pub api_key_env: bool,
     /// Startup update behavior; toggled with Ctrl-U (not a text field).
     pub update_mode: UpdateMode,
+    /// Update channel (stable releases vs latest git built from source);
+    /// toggled with Ctrl-G (not a text field).
+    pub release_channel: ReleaseChannel,
     /// OpenRouter request tier; cycled with Ctrl-Y (not a text field).
     pub service_tier: Option<ServiceTier>,
     /// Max Translator↔Reviewer retry attempts per chunk, as typed (digits only).
@@ -355,6 +358,7 @@ impl SettingsState {
             api_key: cfg.api_key.clone().unwrap_or_default(),
             api_key_env: crate::config::api_key_from_env().is_some(),
             update_mode: cfg.update_mode,
+            release_channel: cfg.release_channel,
             service_tier: cfg.service_tier,
             max_attempts: cfg.max_attempts.to_string(),
             loop_stall_secs: cfg.loop_stall_secs.to_string(),
@@ -897,6 +901,7 @@ impl Overlay {
             api_key: String::new(),
             api_key_env: false,
             update_mode: UpdateMode::default(),
+            release_channel: ReleaseChannel::default(),
             service_tier: None,
             max_attempts: String::new(),
             loop_stall_secs: String::new(),
@@ -1477,6 +1482,11 @@ impl Overlay {
                 st.update_mode = st.update_mode.toggled();
                 Action::None
             }
+            // Ctrl-G toggles the update channel (stable releases ↔ latest git).
+            KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                st.release_channel = st.release_channel.toggled();
+                Action::None
+            }
             // Ctrl-Y cycles the OpenRouter service tier (Off → Flex → Priority).
             KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 st.service_tier = ServiceTier::cycled(st.service_tier);
@@ -1494,6 +1504,7 @@ impl Overlay {
                     Some(st.api_key.clone())
                 },
                 update_mode: st.update_mode,
+                release_channel: st.release_channel,
                 service_tier: st.service_tier,
                 max_attempts: st.max_attempts_value(),
                 loop_stall_secs: st.loop_stall_secs_value(),
@@ -2846,6 +2857,17 @@ impl Overlay {
         ]));
         lines.push(Line::from(vec![
             Span::styled(
+                "   Update channel      ",
+                Style::default().fg(theme.ink_faint),
+            ),
+            Span::styled(
+                st.release_channel.label(),
+                Style::default().fg(theme.accent),
+            ),
+            Span::styled("   Ctrl-G to toggle", Style::default().fg(theme.ink_faint)),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled(
                 "   Service tier         ",
                 Style::default().fg(theme.ink_faint),
             ),
@@ -3245,7 +3267,7 @@ impl Overlay {
                 ),
             ]),
             Line::from(Span::styled(
-                concat!("v", env!("CARGO_PKG_VERSION")),
+                format!("v{}", crate::update::version_string()),
                 Style::default().fg(theme.ink_faint),
             )),
             Line::raw(""),

@@ -198,6 +198,8 @@ pub enum Action {
         api_key: Option<String>,
         /// Startup update behavior (auto-install vs. notify only).
         update_mode: crate::model::UpdateMode,
+        /// Update channel: stable releases vs latest git built from source.
+        release_channel: crate::model::ReleaseChannel,
         /// OpenRouter `service_tier` for every request (`None` = provider default).
         service_tier: Option<crate::model::ServiceTier>,
         /// Max Translator↔Reviewer retry attempts per chunk (already clamped 1..=20).
@@ -1473,6 +1475,7 @@ impl App {
                 reviewer,
                 api_key,
                 update_mode,
+                release_channel,
                 service_tier,
                 max_attempts,
                 loop_stall_secs,
@@ -1485,6 +1488,7 @@ impl App {
                     reviewer,
                     api_key,
                     update_mode,
+                    release_channel,
                     service_tier,
                     max_attempts,
                     loop_stall_secs,
@@ -2435,6 +2439,7 @@ impl App {
         reviewer: String,
         api_key: Option<String>,
         update_mode: crate::model::UpdateMode,
+        release_channel: crate::model::ReleaseChannel,
         service_tier: Option<crate::model::ServiceTier>,
         max_attempts: u32,
         loop_stall_secs: u64,
@@ -2445,6 +2450,8 @@ impl App {
         self.cfg.models.translator = translator;
         self.cfg.models.reviewer = reviewer;
         self.cfg.update_mode = update_mode;
+        let channel_changed = self.cfg.release_channel != release_channel;
+        self.cfg.release_channel = release_channel;
         let tier_changed = self.cfg.service_tier != service_tier;
         self.cfg.service_tier = service_tier;
         self.cfg.max_attempts = max_attempts;
@@ -2467,6 +2474,22 @@ impl App {
         match crate::config::save(&self.cfg) {
             Ok(()) => self.toast = Some(Toast::info("settings saved")),
             Err(e) => self.toast = Some(Toast::error(format!("save failed: {e}"))),
+        }
+        // A channel switch should take effect now, not at the next launch: kick
+        // off the same background update pass that runs at startup.
+        if channel_changed {
+            self.push_log(
+                LogLevel::Info,
+                format!(
+                    "update channel → {}; checking for an update",
+                    self.cfg.release_channel.label()
+                ),
+            );
+            crate::update::spawn_background_update(
+                self.tx.clone(),
+                self.cfg.update_mode,
+                self.cfg.release_channel,
+            );
         }
         self.overlay = Overlay::None;
     }

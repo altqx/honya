@@ -5,17 +5,46 @@
 //!
 //! Unix can rename over the running executable. Windows cannot replace a mapped
 //! image, so updates rename `honya.exe` aside and reap the `.old` sidecar at startup.
+//!
+//! Two release channels: `Stable` installs prebuilt release binaries; `Dev`
+//! tracks the latest `main` commit and builds it from source on this machine
+//! (requires a local Rust toolchain). Dev builds bake their source commit in via
+//! the `HONYA_BUILD_COMMIT` env var, which is how a binary knows whether it is a
+//! dev build and which commit it was built from.
 
 use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 
+use crate::model::{AppEvent, EventTx, LogLevel, ReleaseChannel, UpdateMode};
+
 const REPO: &str = "altqx/honya";
 
 /// This build's version, baked in from Cargo.toml at compile time.
 pub fn current_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
+}
+
+/// The `main` commit this binary was built from, when it is a dev-channel build
+/// (the updater bakes it in via `HONYA_BUILD_COMMIT` at `cargo build` time).
+/// `None` for release binaries and ordinary local builds.
+pub fn built_commit() -> Option<&'static str> {
+    option_env!("HONYA_BUILD_COMMIT")
+}
+
+/// Human version string: `0.2.2` for stable builds, `0.2.2 (dev abc1234)` for
+/// dev-channel builds.
+pub fn version_string() -> String {
+    match built_commit() {
+        Some(sha) => format!("{} (dev {})", current_version(), short_sha(sha)),
+        None => current_version().to_string(),
+    }
+}
+
+/// First 7 hex chars of a commit sha (what `git log --oneline` shows).
+fn short_sha(sha: &str) -> &str {
+    sha.get(..7).unwrap_or(sha)
 }
 
 fn user_agent() -> String {
@@ -87,19 +116,69 @@ async fn latest_release_tag() -> Result<Option<String>> {
         .map(str::to_string))
 }
 
-/// Best-effort startup check. Returns the newer version (without a leading `v`)
-/// when an update is available, else `None`. Never errors — a failed/blocked
-/// network, an unknown platform, or `HONYA_NO_UPDATE_CHECK` all yield `None`.
-pub async fn check_for_update() -> Option<String> {
+/// Query the GitHub API for the sha of the latest commit on `main`.
+async fn latest_main_commit() -> Result<Option<String>> {
+    let url = format!("https://api.github.com/repos/{REPO}/commits/main");
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(8))
+        .build()?;
+    let resp = client
+        .get(url)
+        .header("User-Agent", user_agent())
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await?;
+    let status = resp.status();
+    if status == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    if !status.is_success() {
+        bail!("GitHub API returned {status} for {REPO} (you may be rate-limited — retry shortly)");
+    }
+    let json: serde_json::Value = resp.json().await?;
+    Ok(json
+        .get("sha")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string))
+}
+
+/// The `main` commit a dev-channel update should move to, or `None` when this
+/// binary was already built from the tip of `main` (or the check failed). A
+/// stable binary on the dev channel always has an "update" (the first dev build).
+async fn dev_update_commit() -> Option<String> {
+    let sha = latest_main_commit().await.ok().flatten()?;
+    if built_commit() == Some(sha.as_str()) {
+        None
+    } else {
+        Some(sha)
+    }
+}
+
+/// True when an update should install even though the version is not strictly
+/// newer: a dev build sitting on the stable channel switches back to the latest
+/// release regardless of its version.
+fn stable_wants(tag: &str) -> bool {
+    is_newer(tag, current_version()) || built_commit().is_some()
+}
+
+/// Best-effort startup check. Returns a display version (`0.2.3` or
+/// `dev abc1234`) when an update is available, else `None`. Never errors — a
+/// failed/blocked network, an unknown platform, or `HONYA_NO_UPDATE_CHECK` all
+/// yield `None`.
+pub async fn check_for_update(channel: ReleaseChannel) -> Option<String> {
     if std::env::var_os("HONYA_NO_UPDATE_CHECK").is_some() {
         return None;
     }
-    target_triple()?; // we only ship binaries for known platforms
-    let tag = latest_release_tag().await.ok().flatten()?;
-    if is_newer(&tag, current_version()) {
-        Some(tag.trim_start_matches('v').to_string())
-    } else {
-        None
+    match channel {
+        ReleaseChannel::Stable => {
+            target_triple()?; // we only ship binaries for known platforms
+            let tag = latest_release_tag().await.ok().flatten()?;
+            stable_wants(&tag).then(|| tag.trim_start_matches('v').to_string())
+        }
+        ReleaseChannel::Dev => {
+            let sha = dev_update_commit().await?;
+            Some(format!("dev {}", short_sha(&sha)))
+        }
     }
 }
 
@@ -121,17 +200,14 @@ pub enum AutoUpdate {
 /// release and, when one exists, install it in the background. Never panics and
 /// never writes to stdout (safe to call from inside the TUI). On any install
 /// failure it degrades to [`AutoUpdate::Available`] rather than erroring out.
-pub async fn auto_update() -> AutoUpdate {
-    if std::env::var_os("HONYA_NO_UPDATE_CHECK").is_some() {
-        return AutoUpdate::UpToDate;
-    }
+async fn auto_update_stable() -> AutoUpdate {
     let Some(target) = target_triple() else {
         return AutoUpdate::UpToDate; // no prebuilt binary for this platform
     };
     let Some(tag) = latest_release_tag().await.ok().flatten() else {
         return AutoUpdate::UpToDate; // unreachable / no published release
     };
-    if !is_newer(&tag, current_version()) {
+    if !stable_wants(&tag) {
         return AutoUpdate::UpToDate;
     }
     let version = tag.trim_start_matches('v').to_string();
@@ -141,12 +217,69 @@ pub async fn auto_update() -> AutoUpdate {
     }
 }
 
-/// `honya update`: download the latest release for this platform, verify its
-/// checksum, and replace the running executable in place. Prints progress to
-/// stdout; returns an error with actionable guidance on failure.
-pub async fn run_self_update() -> Result<()> {
+/// Spawn the best-effort background update task: the startup check/auto-install
+/// and the re-check after the Settings channel toggle both funnel through here.
+/// Reports back over `tx` only; never blocks the UI and never errors.
+pub fn spawn_background_update(tx: EventTx, mode: UpdateMode, channel: ReleaseChannel) {
+    tokio::spawn(async move {
+        if std::env::var_os("HONYA_NO_UPDATE_CHECK").is_some() {
+            return;
+        }
+        match (channel, mode) {
+            (ReleaseChannel::Stable, UpdateMode::Auto) => match auto_update_stable().await {
+                AutoUpdate::Installed(version) => {
+                    tx.send(AppEvent::UpdateInstalled { version });
+                }
+                // Found but couldn't install (e.g. read-only install dir);
+                // fall back to notifying so `honya update` is still offered.
+                AutoUpdate::Available(version) => {
+                    tx.send(AppEvent::UpdateAvailable { version });
+                }
+                AutoUpdate::UpToDate => {}
+            },
+            (ReleaseChannel::Dev, UpdateMode::Auto) => {
+                let Some(sha) = dev_update_commit().await else {
+                    return;
+                };
+                let version = format!("dev {}", short_sha(&sha));
+                tx.send(AppEvent::Log {
+                    level: LogLevel::Info,
+                    msg: format!("building honya {version} from source in the background…"),
+                });
+                match install_dev_build(&sha).await {
+                    Ok(()) => tx.send(AppEvent::UpdateInstalled { version }),
+                    Err(e) => {
+                        tx.send(AppEvent::Log {
+                            level: LogLevel::Warn,
+                            msg: format!("dev build failed: {e:#}"),
+                        });
+                        tx.send(AppEvent::UpdateAvailable { version });
+                    }
+                }
+            }
+            (_, UpdateMode::Notify) => {
+                if let Some(version) = check_for_update(channel).await {
+                    tx.send(AppEvent::UpdateAvailable { version });
+                }
+            }
+        }
+    });
+}
+
+/// `honya update`: bring this install up to date on `channel` — download the
+/// latest release (stable) or build the latest `main` commit from source (dev) —
+/// and replace the running executable in place. Prints progress to stdout;
+/// returns an error with actionable guidance on failure.
+pub async fn run_self_update(channel: ReleaseChannel) -> Result<()> {
+    match channel {
+        ReleaseChannel::Stable => run_self_update_stable().await,
+        ReleaseChannel::Dev => run_self_update_dev().await,
+    }
+}
+
+async fn run_self_update_stable() -> Result<()> {
     let current = current_version();
-    println!("honya {current} — checking for updates…");
+    println!("honya {} — checking for updates…", version_string());
 
     let target = target_triple().ok_or_else(|| {
         anyhow!(
@@ -162,16 +295,124 @@ pub async fn run_self_update() -> Result<()> {
         .context("could not reach the GitHub releases API")?
         .ok_or_else(|| anyhow!("no published release found for {REPO}"))?;
 
-    if !is_newer(&tag, current) {
+    if !stable_wants(&tag) {
         println!("Already up to date (honya {current}).");
         return Ok(());
     }
-    println!("Updating honya {current} → {tag} …");
+    println!("Updating honya {} → {tag} …", version_string());
 
     install_release(&tag, target).await?;
 
     println!("✓ honya is now {tag}. Restart it to use the new version.");
     Ok(())
+}
+
+async fn run_self_update_dev() -> Result<()> {
+    println!(
+        "honya {} (dev channel) — checking the latest git commit…",
+        version_string()
+    );
+
+    let sha = latest_main_commit()
+        .await
+        .context("could not reach the GitHub API")?
+        .ok_or_else(|| anyhow!("could not resolve the main branch of {REPO}"))?;
+
+    if built_commit() == Some(sha.as_str()) {
+        println!("Already up to date (dev {}).", short_sha(&sha));
+        return Ok(());
+    }
+    println!(
+        "Building honya dev {} from source — this can take a few minutes…",
+        short_sha(&sha)
+    );
+
+    install_dev_build(&sha).await?;
+
+    println!(
+        "✓ honya is now dev {}. Restart it to use the new version.",
+        short_sha(&sha)
+    );
+    Ok(())
+}
+
+/// Download the source of `main` at `sha`, build it with the local Rust
+/// toolchain, and replace the running executable with the result. Writes nothing
+/// to stdout (safe inside the TUI); cargo output is captured, not inherited.
+async fn install_dev_build(sha: &str) -> Result<()> {
+    let cargo_ok = tokio::process::Command::new("cargo")
+        .arg("--version")
+        .output()
+        .await
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !cargo_ok {
+        bail!(
+            "building from source needs the Rust toolchain (cargo not found) — \
+             install it from https://rustup.rs or switch back to the stable channel"
+        );
+    }
+
+    let tmp = private_staging_dir(short_sha(sha))?;
+    let guard = TempDir(tmp.clone());
+
+    // codeload serves the repo snapshot at the exact commit; same archive kind
+    // as releases per platform so `extract_archive` is reused as-is.
+    let kind = if cfg!(windows) { "zip" } else { "tar.gz" };
+    let archive_path = tmp.join(format!("src{}", archive_ext()));
+    download_to_file(
+        &format!("https://codeload.github.com/{REPO}/{kind}/{sha}"),
+        &archive_path,
+    )
+    .await
+    .context("downloading the source archive")?;
+    extract_archive(&archive_path, &tmp)?;
+
+    // The snapshot extracts to a single `honya-<sha>/` root.
+    let src_root = find_cargo_root(&tmp)
+        .ok_or_else(|| anyhow!("the source archive did not contain a Cargo.toml"))?;
+
+    let out = tokio::process::Command::new("cargo")
+        .args(["build", "--release", "--locked"])
+        .env("HONYA_BUILD_COMMIT", sha)
+        .current_dir(&src_root)
+        .output()
+        .await
+        .context("running `cargo build`")?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let tail: Vec<&str> = stderr.lines().rev().take(12).collect();
+        let tail: Vec<&str> = tail.into_iter().rev().collect();
+        bail!("`cargo build --release` failed:\n{}", tail.join("\n"));
+    }
+
+    let new_bin = src_root
+        .join("target")
+        .join("release")
+        .join(format!("honya{}", std::env::consts::EXE_SUFFIX));
+    if !new_bin.is_file() {
+        bail!("the build succeeded but produced no honya binary");
+    }
+
+    let current_exe = std::env::current_exe().context("resolving the current executable path")?;
+    replace_executable(&new_bin, &current_exe)?;
+    drop(guard);
+    Ok(())
+}
+
+/// Locate the directory holding the extracted source's Cargo.toml (one level of
+/// nesting, matching codeload's `<repo>-<sha>/` layout).
+fn find_cargo_root(root: &Path) -> Option<std::path::PathBuf> {
+    if root.join("Cargo.toml").is_file() {
+        return Some(root.to_path_buf());
+    }
+    for entry in std::fs::read_dir(root).ok()?.flatten() {
+        let path = entry.path();
+        if path.is_dir() && path.join("Cargo.toml").is_file() {
+            return Some(path);
+        }
+    }
+    None
 }
 
 /// Download the release for `target` at `tag`, verify its checksum, and replace

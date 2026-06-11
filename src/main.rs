@@ -44,9 +44,11 @@ async fn main() -> anyhow::Result<()> {
 
     // Subcommands run before the TUI: update/version/help must not require an API key.
     match std::env::args().nth(1).as_deref() {
-        Some("update" | "self-update" | "upgrade") => return update::run_self_update().await,
+        Some("update" | "self-update" | "upgrade") => {
+            return update::run_self_update(config::load().release_channel).await;
+        }
         Some("--version" | "-V" | "version") => {
-            println!("honya {}", update::current_version());
+            println!("honya {}", update::version_string());
             return Ok(());
         }
         Some("--help" | "-h" | "help") => {
@@ -70,34 +72,11 @@ async fn main() -> anyhow::Result<()> {
     app.init_onboarding();
 
     // Best-effort background update handling; never blocks startup. Auto mode
-    // (the default) downloads + installs the latest release in place and flags a
-    // restart; Notify mode only surfaces the "honya update" hint. Both honor
-    // HONYA_NO_UPDATE_CHECK (it makes the check a no-op).
-    {
-        let tx = app.tx.clone();
-        let mode = app.cfg.update_mode;
-        tokio::spawn(async move {
-            use crate::model::UpdateMode;
-            match mode {
-                UpdateMode::Auto => match update::auto_update().await {
-                    update::AutoUpdate::Installed(version) => {
-                        tx.send(AppEvent::UpdateInstalled { version });
-                    }
-                    // Found but couldn't install (e.g. read-only install dir);
-                    // fall back to notifying so `honya update` is still offered.
-                    update::AutoUpdate::Available(version) => {
-                        tx.send(AppEvent::UpdateAvailable { version });
-                    }
-                    update::AutoUpdate::UpToDate => {}
-                },
-                UpdateMode::Notify => {
-                    if let Some(version) = update::check_for_update().await {
-                        tx.send(AppEvent::UpdateAvailable { version });
-                    }
-                }
-            }
-        });
-    }
+    // (the default) installs the newest build for the configured channel in
+    // place — a release binary on stable, a local source build on dev — and
+    // flags a restart; Notify mode only surfaces the "honya update" hint. Both
+    // honor HONYA_NO_UPDATE_CHECK (it makes the check a no-op).
+    update::spawn_background_update(app.tx.clone(), app.cfg.update_mode, app.cfg.release_channel);
 
     // Restore the terminal before panic output; normal teardown does not run on panic.
     let prev_hook = std::panic::take_hook();
@@ -176,6 +155,9 @@ fn print_help() {
     println!("    honya             Launch the TUI in the current directory");
     println!(
         "    honya update      Update honya to the latest release (aliases: self-update, upgrade)"
+    );
+    println!(
+        "                      On the dev channel (Settings), builds the latest git commit from source"
     );
     println!("    honya --version   Print the version");
     println!("    honya --help      Show this help\n");

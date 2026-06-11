@@ -311,6 +311,36 @@ impl UpdateMode {
     }
 }
 
+/// Which line of builds the self-updater tracks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReleaseChannel {
+    /// Prebuilt binaries from GitHub Releases (the default).
+    #[default]
+    Stable,
+    /// Latest `main` commit, built from source on this machine with the local
+    /// Rust toolchain. Updates arrive per-commit, same auto/notify behavior.
+    Dev,
+}
+
+impl ReleaseChannel {
+    /// Short label for the Settings line.
+    pub fn label(self) -> &'static str {
+        match self {
+            ReleaseChannel::Stable => "Stable",
+            ReleaseChannel::Dev => "Dev (latest git)",
+        }
+    }
+
+    /// The other channel (for the Settings toggle).
+    pub fn toggled(self) -> Self {
+        match self {
+            ReleaseChannel::Stable => ReleaseChannel::Dev,
+            ReleaseChannel::Dev => ReleaseChannel::Stable,
+        }
+    }
+}
+
 /// OpenRouter/OpenAI `service_tier` request parameter, trading latency for cost.
 /// Stored as `Option` in [`AppConfig`]: `None` omits the field entirely so the
 /// provider applies its own default; `Some(_)` sends the chosen tier.
@@ -388,6 +418,10 @@ pub struct AppConfig {
     /// pre-update-mode configs loading, and defaults them to auto-install).
     #[serde(default)]
     pub update_mode: UpdateMode,
+    /// Which builds the self-updater tracks: stable releases or latest git
+    /// (built from source on this machine).
+    #[serde(default)]
+    pub release_channel: ReleaseChannel,
     /// OpenRouter `service_tier` sent on every chat request (`flex` = cheaper and
     /// slower, `priority` = faster). `None` omits the field — the provider default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -424,6 +458,7 @@ impl Default for AppConfig {
             theme: ThemeId::default(),
             onboarded: false,
             update_mode: UpdateMode::default(),
+            release_channel: ReleaseChannel::default(),
             service_tier: None,
         }
     }

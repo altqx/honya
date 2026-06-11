@@ -358,6 +358,7 @@ fn settings_api_key_field_edits_and_respects_env_override() {
         api_key: String::new(),
         api_key_env: false,
         update_mode: crate::model::UpdateMode::Auto,
+        release_channel: crate::model::ReleaseChannel::Stable,
         service_tier: None,
         max_attempts: "3".into(),
         loop_stall_secs: "180".into(),
@@ -382,6 +383,7 @@ fn settings_api_key_field_edits_and_respects_env_override() {
         api_key: "saved".into(),
         api_key_env: true,
         update_mode: crate::model::UpdateMode::Auto,
+        release_channel: crate::model::ReleaseChannel::Stable,
         service_tier: None,
         max_attempts: "3".into(),
         loop_stall_secs: "180".into(),
@@ -422,6 +424,7 @@ fn settings_ctrl_u_toggles_update_mode_and_saves_it() {
         api_key: String::new(),
         api_key_env: false,
         update_mode: UpdateMode::Auto,
+        release_channel: crate::model::ReleaseChannel::Stable,
         service_tier: None,
         max_attempts: "3".into(),
         loop_stall_secs: "180".into(),
@@ -447,6 +450,48 @@ fn settings_ctrl_u_toggles_update_mode_and_saves_it() {
     }
 }
 
+/// Ctrl-G in Settings toggles the update channel (stable ↔ dev) in place, and
+/// Enter saves the toggled value through `SaveSettings`.
+#[test]
+fn settings_ctrl_g_toggles_release_channel_and_saves_it() {
+    use crate::app::Action;
+    use crate::app::overlay::SettingsState;
+    use crate::model::ReleaseChannel;
+
+    let mut ov = Overlay::Settings(SettingsState {
+        base_url: "u".into(),
+        orchestrator: "o".into(),
+        translator: "t".into(),
+        reviewer: "r".into(),
+        api_key: String::new(),
+        api_key_env: false,
+        update_mode: crate::model::UpdateMode::Auto,
+        release_channel: ReleaseChannel::Stable,
+        service_tier: None,
+        max_attempts: "3".into(),
+        loop_stall_secs: "180".into(),
+        max_chapter_retranslates: "2".into(),
+        field: 0,
+        cursor: 0,
+    });
+
+    ov.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL));
+    match &ov {
+        Overlay::Settings(st) => {
+            assert_eq!(st.release_channel, ReleaseChannel::Dev);
+            assert_eq!(st.base_url, "u", "Ctrl-G must not type into the field");
+        }
+        _ => panic!("settings overlay"),
+    }
+
+    match ov.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty())) {
+        Action::SaveSettings {
+            release_channel, ..
+        } => assert_eq!(release_channel, ReleaseChannel::Dev),
+        other => panic!("expected SaveSettings, got {other:?}"),
+    }
+}
+
 /// The retries field accepts digits only, and Enter carries the parsed (clamped)
 /// attempt count out through `SaveSettings`.
 #[test]
@@ -465,6 +510,7 @@ fn settings_retries_field_is_digit_only_and_clamped() {
             api_key: String::new(),
             api_key_env: false,
             update_mode: crate::model::UpdateMode::Auto,
+            release_channel: crate::model::ReleaseChannel::Stable,
             service_tier: None,
             // Focus the retries field (index 5).
             max_attempts: String::new(),
@@ -556,6 +602,7 @@ fn settings_field_caret_inserts_mid_value() {
         api_key: String::new(),
         api_key_env: false,
         update_mode: crate::model::UpdateMode::Auto,
+        release_channel: crate::model::ReleaseChannel::Stable,
         service_tier: None,
         max_attempts: "3".into(),
         loop_stall_secs: "180".into(),
