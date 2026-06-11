@@ -14,8 +14,80 @@ use crate::workspace::Workspace;
 const CHUNK_MARKER_PREFIX: &str = "<!-- honya:chunk ";
 const CHUNK_MARKER_SUFFIX: &str = " -->";
 
+const TOTAL_MARKER_PREFIX: &str = "<!-- honya:chunks-total ";
+const TOTAL_MARKER_SUFFIX: &str = " -->";
+
 fn chunk_marker(n: u32) -> String {
     format!("{CHUNK_MARKER_PREFIX}{n}{CHUNK_MARKER_SUFFIX}")
+}
+
+fn total_marker(n: u32) -> String {
+    format!("{TOTAL_MARKER_PREFIX}{n}{TOTAL_MARKER_SUFFIX}")
+}
+
+/// Parse a `<!-- honya:chunks-total N -->` line.
+pub fn parse_total_marker(line: &str) -> Option<u32> {
+    line.trim()
+        .strip_prefix(TOTAL_MARKER_PREFIX)?
+        .strip_suffix(TOTAL_MARKER_SUFFIX)?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// The expected chunk count recorded by the pipeline at chunking time, if any.
+/// Lets `scan::derive_status` tell a finished chapter from one whose run stopped
+/// or failed partway (the last marker wins if the file somehow has several).
+pub fn total_chunks_in(text: &str) -> Option<u32> {
+    text.lines().filter_map(parse_total_marker).next_back()
+}
+
+/// Record the chapter's expected chunk count in its translated file so that,
+/// after a stop or crash, the resting status can be derived as partial rather
+/// than done. Idempotent; if a previous run recorded a different total (chunk
+/// config changed), the old marker is replaced.
+pub async fn record_total_chunks(
+    ws: &Workspace,
+    chapter: u32,
+    total: u32,
+) -> std::io::Result<()> {
+    let path = ws.translated(chapter);
+    let existing = tokio::fs::read_to_string(&path).await.unwrap_or_default();
+    match total_chunks_in(&existing) {
+        Some(n) if n == total => Ok(()),
+        Some(_) => {
+            let marker = total_marker(total);
+            let mut out = String::with_capacity(existing.len());
+            for (i, line) in existing.lines().enumerate() {
+                if i > 0 {
+                    out.push('\n');
+                }
+                if parse_total_marker(line).is_some() {
+                    out.push_str(&marker);
+                } else {
+                    out.push_str(line);
+                }
+            }
+            if existing.ends_with('\n') {
+                out.push('\n');
+            }
+            tokio::fs::write(&path, out).await
+        }
+        None => {
+            if let Some(parent) = path.parent() {
+                tokio::fs::create_dir_all(parent).await?;
+            }
+            let mut file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .await?;
+            let mut block = total_marker(total);
+            block.push_str("\n\n");
+            file.write_all(block.as_bytes()).await?;
+            file.flush().await
+        }
+    }
 }
 
 /// Parse a `<!-- honya:chunk N -->` line, returning its 0-based chunk index. Public
@@ -77,7 +149,10 @@ pub fn prose_only(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut blank_run = 0u32;
     for line in text.lines() {
-        if parse_chunk_marker(line).is_some() || line.trim() == REVIEW_NEEDED_MARKER {
+        if parse_chunk_marker(line).is_some()
+            || parse_total_marker(line).is_some()
+            || line.trim() == REVIEW_NEEDED_MARKER
+        {
             continue;
         }
         if line.trim().is_empty() {
@@ -410,6 +485,39 @@ mod tests {
         assert!(cleaned.contains("คำแปลที่ผ่านแล้ว"));
         assert_eq!(committed_chunk_indices_in(&cleaned), BTreeSet::from([8]));
         assert!(review_needed_chunk_indices_in(&cleaned).is_empty());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The chunks-total marker is recorded once, updated in place when the
+    /// chunking changed, never displayed, and read back for status derivation.
+    #[tokio::test]
+    async fn total_chunks_marker_roundtrip() {
+        let (base, ws) = temp_ws("total_marker");
+
+        record_total_chunks(&ws, 1, 5).await.unwrap();
+        let body = read_translated(&ws, 1).await;
+        assert_eq!(total_chunks_in(&body), Some(5));
+
+        // Same total again is a no-op (no duplicate markers).
+        record_total_chunks(&ws, 1, 5).await.unwrap();
+        let body = read_translated(&ws, 1).await;
+        assert_eq!(
+            body.matches("honya:chunks-total").count(),
+            1,
+            "marker must not duplicate"
+        );
+
+        // Chunks append after the marker; a changed total replaces it in place.
+        append_chunk(&ws, 1, 0, "หนึ่ง").await.unwrap();
+        record_total_chunks(&ws, 1, 7).await.unwrap();
+        let body = read_translated(&ws, 1).await;
+        assert_eq!(total_chunks_in(&body), Some(7));
+        assert_eq!(body.matches("honya:chunks-total").count(), 1);
+        assert!(body.contains("หนึ่ง"), "existing chunks survive the update");
+
+        // The marker is machine-only: prose_only must strip it.
+        assert!(!prose_only(&body).contains("honya:chunks-total"));
 
         let _ = std::fs::remove_dir_all(&base);
     }

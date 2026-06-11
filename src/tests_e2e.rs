@@ -1791,3 +1791,98 @@ fn pipeline_events_route_to_the_running_volume() {
         "the other volume's same-numbered chapter is untouched"
     );
 }
+
+/// Shift-T must re-queue a chapter whose translated file is missing chunks even
+/// when its status scans as Done — the legacy shape: chunk markers but no
+/// chunks-total marker, from a run interrupted before that marker existed.
+#[test]
+fn whole_volume_translate_requeues_legacy_partial_chapter() {
+    use crate::app::Action;
+    use crate::model::{Chapter, ChapterKind, ChapterStatus, Project, UsageStats, Volume};
+    use crate::workspace::Workspace;
+
+    let dir = std::env::temp_dir().join(format!("honya_vol_partial_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let ws = Workspace::new(dir.clone(), 1);
+
+    let cfg = AppConfig {
+        chunk_target_tokens: 4,
+        chunk_hard_cap_tokens: 8,
+        ..AppConfig::default()
+    };
+    let raw = "# 第一章\n\n一文目。\n\n二文目。\n\n三文目。\n\n四文目。\n\n五文目。\n\n六文目。";
+    crate::workspace::translation::write_raw(&ws, 1, raw).unwrap();
+    let n_chunks =
+        crate::agents::chunk::chunk_chapter(raw, cfg.chunk_target_tokens, cfg.chunk_hard_cap_tokens)
+            .len();
+    assert!(n_chunks >= 2, "fixture must chunk into several pieces");
+
+    // Legacy partial: only chunk 0 committed, no chunks-total marker → a scan
+    // derives Done for this file.
+    std::fs::create_dir_all(ws.translated(1).parent().unwrap()).unwrap();
+    std::fs::write(ws.translated(1), "<!-- honya:chunk 0 -->\nประโยคแรก\n\n").unwrap();
+    assert_eq!(
+        crate::workspace::scan::derive_status(&dir.join("Vol_01"), 1, ChapterKind::Prose),
+        ChapterStatus::Done,
+        "legacy partial files scan as Done — exactly why Shift-T must check disk"
+    );
+
+    let chapter = Chapter {
+        number: 1,
+        title: "第一章".to_string(),
+        kind: ChapterKind::Prose,
+        status: ChapterStatus::Done,
+        source_segments: 6,
+        total_chunks: 0,
+        committed_chunks: 1,
+        last_run: None,
+        usage: UsageStats::default(),
+    };
+    let active = ActiveProject {
+        project: Project {
+            id: "novel".to_string(),
+            dir: dir.clone(),
+            title: "Novel".to_string(),
+            title_th: String::new(),
+            created: None,
+            touched: None,
+            volumes: vec![Volume {
+                number: 1,
+                dir: dir.join("Vol_01"),
+                label: None,
+                chapters: vec![chapter],
+            }],
+            models: None,
+        },
+        workspace: ws.clone(),
+        client: Some(Arc::new(crate::llm::mock::MockClient::default())
+            as Arc<dyn crate::llm::client::LlmClient>),
+        models: ModelSet::default(),
+        vol: 1,
+    };
+
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = App::new(EventTx(tx), cfg);
+    app.active = Some(active);
+    app.screen = Screen::Project;
+
+    // Shift-T on the volume row: the Done-scanning chapter is still incomplete on
+    // disk, so the confirm must offer to queue it (not "already fully translated").
+    app.on_key(KeyEvent::new(KeyCode::Char('T'), KeyModifiers::SHIFT));
+    match &app.overlay {
+        Overlay::Modal(d) => {
+            assert!(
+                d.body.contains("Queue 1 chapter(s)"),
+                "partial chapter must be queued: {}",
+                d.body
+            );
+            match &d.confirm {
+                Action::StartTranslation { chapters } => assert_eq!(chapters, &vec![1]),
+                other => panic!("expected StartTranslation, got {other:?}"),
+            }
+        }
+        other => panic!("expected confirm modal, got {other:?}"),
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

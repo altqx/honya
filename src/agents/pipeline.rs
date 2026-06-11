@@ -799,6 +799,15 @@ async fn process_chapter(
 
     let total = chunks.len();
 
+    // Record the expected total up front so a stop/crash mid-chapter leaves a
+    // file `scan::derive_status` can recognize as Partial instead of Done.
+    if let Err(e) = translation::record_total_chunks(&ctx.ws, chapter, total as u32).await {
+        ctx.tx.send(AppEvent::Log {
+            level: LogLevel::Warn,
+            msg: format!("chapter {chapter}: could not record chunk total: {e}"),
+        });
+    }
+
     // Resume support: translated files are append-only, chunk-marked logs. If a
     // previous run failed after committing chunk N, a re-run should start at the
     // next missing marker instead of re-spending tokens on chunks already on disk.
@@ -837,6 +846,16 @@ async fn process_chapter(
 
         // Honor pause/stop between chunks ("current chunk finishes, then halts").
         if !gate(ctx, chapter).await {
+            // Leave the interrupted chapter showing its true resting state — a
+            // stop mid-chapter must not linger as Translating/Paused (or read
+            // back as Done on the next scan).
+            let on_disk = translation::read_translated(&ctx.ws, chapter).await;
+            let state = if translation::committed_chunk_indices_in(&on_disk).is_empty() {
+                ChapterStatus::Pending
+            } else {
+                ChapterStatus::Partial
+            };
+            ctx.tx.send(AppEvent::ChapterStateChanged { chapter, state });
             return Ok(Outcome::Stopped);
         }
         ctx.tx.send(AppEvent::ChunkStarted {

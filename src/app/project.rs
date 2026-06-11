@@ -204,31 +204,11 @@ impl ProjectScreen {
                 }
             }
             KeyCode::Char('T') => {
-                if let Some(vol) = self.selected_volume(active) {
-                    let chapters: Vec<u32> = active
-                        .project
-                        .volumes
-                        .iter()
-                        .find(|v| v.number == vol)
-                        .map(|v| {
-                            v.chapters
-                                .iter()
-                                .filter(|c| translatable(c))
-                                .map(|c| c.number)
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    if chapters.is_empty() {
-                        Action::None
-                    } else {
-                        Action::show_overlay(Overlay::confirm(
-                            "Translate whole volume?",
-                            format!("Queue {} chapter(s) in Vol.{:02}.", chapters.len(), vol),
-                            Action::StartTranslation { chapters },
-                        ))
-                    }
-                } else {
-                    Action::None
+                // Chapter selection (incl. the disk-completeness check that catches
+                // partial files scanning as Done) happens in apply, which has cfg.
+                match self.selected_volume(active) {
+                    Some(vol) => Action::StartVolumeTranslation { vol },
+                    None => Action::None,
                 }
             }
             KeyCode::Char('a') => {
@@ -981,6 +961,7 @@ fn status_word(s: ChapterStatus) -> &'static str {
         ChapterStatus::NeedsReview => "needs review",
         ChapterStatus::Failed => "failed",
         ChapterStatus::Paused => "paused",
+        ChapterStatus::Partial => "partial",
     }
 }
 

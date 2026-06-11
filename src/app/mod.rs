@@ -162,6 +162,11 @@ pub enum Action {
     RestartTranslation {
         chapters: Vec<u32>,
     },
+    /// Translate a whole volume: every not-yet-done chapter, checked against
+    /// disk chunk markers (a partial file can scan as done). Raises a confirm.
+    StartVolumeTranslation {
+        vol: u32,
+    },
     /// One-click auto-translate the whole project: every not-yet-done chapter
     /// across every volume, resume-aware. Raises a confirm first.
     StartProjectTranslation,
@@ -1425,6 +1430,9 @@ impl App {
             Action::RestartTranslation { chapters } => {
                 self.begin_translation(chapters, true);
             }
+            Action::StartVolumeTranslation { vol } => {
+                self.request_volume_translation(vol);
+            }
             Action::StartProjectTranslation => {
                 self.request_project_translation();
             }
@@ -2072,6 +2080,50 @@ impl App {
                 })
             })
             .collect()
+    }
+
+    /// Whole-volume translate (Shift-T): queue the volume's not-yet-done prose
+    /// chapters using the same disk-aware rule as the project plan, so a chapter
+    /// whose translated file is partial (even one predating the chunks-total
+    /// marker, which scans as Done) is re-queued and resumes at its first gap.
+    fn request_volume_translation(&mut self, vol: u32) {
+        if self.run_active {
+            self.toast = Some(Toast::warn(
+                "a run is in progress — press i to add chapters to the queue",
+            ));
+            return;
+        }
+        let Some(active) = self.active.as_ref() else {
+            self.toast = Some(Toast::warn("no project open"));
+            return;
+        };
+        let ws = Workspace::new(active.project.dir.clone(), vol);
+        let chapters: Vec<u32> = active
+            .project
+            .volumes
+            .iter()
+            .find(|v| v.number == vol)
+            .map(|v| {
+                v.chapters
+                    .iter()
+                    .filter(|c| {
+                        project::translatable(c)
+                            || (matches!(c.kind, crate::model::ChapterKind::Prose)
+                                && !chapter_complete_on_disk(&ws, c.number, &self.cfg))
+                    })
+                    .map(|c| c.number)
+                    .collect()
+            })
+            .unwrap_or_default();
+        if chapters.is_empty() {
+            self.toast = Some(Toast::info(format!("Vol.{vol:02} already fully translated")));
+            return;
+        }
+        self.overlay = Overlay::confirm(
+            "Translate whole volume?",
+            format!("Queue {} chapter(s) in Vol.{:02}.", chapters.len(), vol),
+            Action::StartTranslation { chapters },
+        );
     }
 
     /// Entry point for the one-click whole-project translate: validate, then raise
@@ -3180,6 +3232,7 @@ fn status_tag(status: ChapterStatus) -> &'static str {
         ChapterStatus::NeedsReview => "review",
         ChapterStatus::Failed => "failed",
         ChapterStatus::Paused => "paused",
+        ChapterStatus::Partial => "partial",
     }
 }
 

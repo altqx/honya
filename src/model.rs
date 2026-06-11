@@ -159,6 +159,7 @@ pub enum ChapterStatus {
     NeedsReview, // completed, but ≥1 chunk was committed without passing review
     Failed,      // a chunk hit max retries / hard error
     Paused,      // run paused with this chapter mid-flight
+    Partial,     // some chunks on disk but not all — run stopped/failed mid-chapter
 }
 
 impl ChapterStatus {

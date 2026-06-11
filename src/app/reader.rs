@@ -1164,6 +1164,7 @@ fn hide_markers(th: &str) -> String {
     th.split('\n')
         .map(|line| {
             if crate::workspace::translation::parse_chunk_marker(line).is_some()
+                || crate::workspace::translation::parse_total_marker(line).is_some()
                 || line.trim() == crate::workspace::translation::REVIEW_NEEDED_MARKER
             {
                 ""
@@ -1248,7 +1249,11 @@ fn th_chunk_at_line(th: &str, line: usize) -> Option<u32> {
 fn first_nonempty_line(text: &str) -> Option<&str> {
     text.lines()
         .map(str::trim)
-        .find(|l| !l.is_empty() && crate::workspace::translation::parse_chunk_marker(l).is_none())
+        .find(|l| {
+            !l.is_empty()
+                && crate::workspace::translation::parse_chunk_marker(l).is_none()
+                && crate::workspace::translation::parse_total_marker(l).is_none()
+        })
 }
 
 /// 0-based line in `hay` whose trimmed content equals (else contains) `needle`. Used

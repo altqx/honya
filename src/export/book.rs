@@ -80,6 +80,9 @@ pub async fn gather(
             ChapterStatus::NeedsReview => warnings.push(format!("{label} — still NeedsReview")),
             ChapterStatus::Failed => warnings.push(format!("{label} — failed run (partial)")),
             ChapterStatus::Pending => warnings.push(format!("{label} — still Pending (partial)")),
+            ChapterStatus::Partial => {
+                warnings.push(format!("{label} — translation incomplete (partial)"))
+            }
             _ => {}
         }
 

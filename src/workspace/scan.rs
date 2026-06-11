@@ -154,7 +154,7 @@ pub fn scan_chapters(vol_dir: &Path, vol_data: &VolumeData) -> Vec<Chapter> {
                 kind,
                 status,
                 source_segments: count_segments(&raw_md),
-                total_chunks: 0,
+                total_chunks: recorded_total_chunks(vol_dir, number),
                 committed_chunks: count_committed_chunks(vol_dir, number),
                 last_run,
                 usage: vol_data
@@ -200,8 +200,11 @@ pub fn find_unimported_epubs(root: &Path) -> Vec<(PathBuf, u64)> {
 }
 
 /// Resting lifecycle status from disk: `Done` when translated/ is non-empty (or,
-/// for `ImageOnly`, merely present), else `Pending`. Disk can't tell "mid-run"
-/// from "finished", so the live pipeline overrides this via `AppEvent`.
+/// for `ImageOnly`, merely present), else `Pending`. When the pipeline recorded
+/// the expected chunk total (`<!-- honya:chunks-total N -->`), a file missing
+/// chunks is `Partial` (run stopped or failed mid-chapter) instead of `Done`.
+/// Files without that marker predate it; for them disk can't tell "mid-run"
+/// from "finished", so non-empty still reads as `Done`.
 pub fn derive_status(vol_dir: &Path, chapter: u32, kind: ChapterKind) -> ChapterStatus {
     let translated = vol_dir
         .join("translated")
@@ -217,8 +220,20 @@ pub fn derive_status(vol_dir: &Path, chapter: u32, kind: ChapterKind) -> Chapter
 
     let content = std::fs::read_to_string(&translated).unwrap_or_default();
     if content.trim().is_empty() {
-        ChapterStatus::Pending
-    } else if content.contains(super::translation::REVIEW_NEEDED_MARKER) {
+        return ChapterStatus::Pending;
+    }
+    if let Some(total) = super::translation::total_chunks_in(&content) {
+        let committed = super::translation::committed_chunk_indices_in(&content);
+        if !(0..total).all(|i| committed.contains(&i)) {
+            return if committed.is_empty() {
+                // Only the header marker landed before the run halted.
+                ChapterStatus::Pending
+            } else {
+                ChapterStatus::Partial
+            };
+        }
+    }
+    if content.contains(super::translation::REVIEW_NEEDED_MARKER) {
         // A chunk was committed unreviewed: keep the chapter flagged across reopens.
         ChapterStatus::NeedsReview
     } else {
@@ -239,6 +254,17 @@ fn count_committed_chunks(vol_dir: &Path, chapter: u32) -> u32 {
         Ok(text) => count_chunk_markers(&text) as u32,
         Err(_) => 0,
     }
+}
+
+/// The expected chunk total the pipeline recorded at chunking time (0 when absent).
+fn recorded_total_chunks(vol_dir: &Path, chapter: u32) -> u32 {
+    let path = vol_dir
+        .join("translated")
+        .join(format!("ch_{:03}.md", chapter));
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| super::translation::total_chunks_in(&text))
+        .unwrap_or(0)
 }
 
 /// Best-effort source-segment count: non-empty lines of the raw markdown.
@@ -345,6 +371,64 @@ mod tests {
             derive_status(&base, 3, ChapterKind::Prose),
             ChapterStatus::Pending
         );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A chapter whose run stopped or failed mid-way must not read back as Done:
+    /// the recorded chunk total exposes the missing chunks as `Partial`.
+    #[test]
+    fn derive_status_detects_partial_translation() {
+        let base = std::env::temp_dir().join(format!("honya_scan_partial_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let tdir = base.join("translated");
+        std::fs::create_dir_all(&tdir).unwrap();
+
+        // 2 of 4 chunks committed → Partial (the old behavior wrongly said Done).
+        std::fs::write(
+            tdir.join("ch_001.md"),
+            "<!-- honya:chunks-total 4 -->\n\n<!-- honya:chunk 0 -->\nหนึ่ง\n\n<!-- honya:chunk 1 -->\nสอง\n",
+        )
+        .unwrap();
+        assert_eq!(
+            derive_status(&base, 1, ChapterKind::Prose),
+            ChapterStatus::Partial
+        );
+
+        // All chunks committed → Done.
+        std::fs::write(
+            tdir.join("ch_002.md"),
+            "<!-- honya:chunks-total 2 -->\n\n<!-- honya:chunk 0 -->\nหนึ่ง\n\n<!-- honya:chunk 1 -->\nสอง\n",
+        )
+        .unwrap();
+        assert_eq!(
+            derive_status(&base, 2, ChapterKind::Prose),
+            ChapterStatus::Done
+        );
+
+        // Complete but carrying a review-needed chunk → NeedsReview still wins.
+        std::fs::write(
+            tdir.join("ch_003.md"),
+            format!(
+                "<!-- honya:chunks-total 1 -->\n\n<!-- honya:chunk 0 -->\n{REVIEW_NEEDED_MARKER}\nเนื้อหา\n"
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            derive_status(&base, 3, ChapterKind::Prose),
+            ChapterStatus::NeedsReview
+        );
+
+        // Only the header marker landed (stopped before the first commit) → Pending.
+        std::fs::write(tdir.join("ch_004.md"), "<!-- honya:chunks-total 3 -->\n").unwrap();
+        assert_eq!(
+            derive_status(&base, 4, ChapterKind::Prose),
+            ChapterStatus::Pending
+        );
+
+        // The recorded total also surfaces as the chapter's resting chunk progress.
+        assert_eq!(recorded_total_chunks(&base, 1), 4);
+        assert_eq!(recorded_total_chunks(&base, 99), 0);
 
         let _ = std::fs::remove_dir_all(&base);
     }
