@@ -328,7 +328,7 @@
         หน้านี้สรุปสิ่งที่เปลี่ยนในแต่ละเวอร์ชัน เรียงจากใหม่ไปเก่า
         เลขเวอร์ชันอ้างอิงจาก <code>Cargo.toml</code>
       </p>
-      <span class="latest-pill"><span class="dot" aria-hidden="true"></span>เวอร์ชันล่าสุด <b>v0.2.2</b></span>
+      <span class="latest-pill"><span class="dot" aria-hidden="true"></span>เวอร์ชันล่าสุด <b>v0.2.3</b></span>
     </div>
   </section>
 
@@ -338,12 +338,28 @@
   <section class="log" aria-label="รายการเวอร์ชัน">
     <div class="wrap">
 
+      <!-- 0.2.3 -->
+      <article class="release">
+        <div class="rel-meta">
+          <span class="ver"><span class="v-pre">v</span>0.2.3</span>
+          <div class="rel-date">11 มิ.ย. 2026</div>
+          <span class="rel-badge">ล่าสุด</span>
+        </div>
+        <ul class="changes">
+          <li class="change"><span class="tag add">เพิ่ม</span><span class="txt">นำเข้าต้นฉบับได้หลายรูปแบบแล้ว ไม่จำกัดแค่ <code>EPUB</code>: รองรับ <code>PDF</code>, <code>DOCX</code>, <code>HTML</code>, <code>CSV</code>, <code>XML</code> และไฟล์ข้อความ/<code>Markdown</code>/<code>JSON</code> โดยระบบจะแปลงเป็น Markdown แล้วทำความสะอาดและแบ่งตอนตามขั้นตอนเดิม พร้อมทำเครื่องหมายตอนที่เป็นรูปภาพล้วนหรือสกัดเนื้อหาได้ไม่สมบูรณ์</span></li>
+          <li class="change"><span class="tag add">เพิ่ม</span><span class="txt">เพิ่มการ์ด About (เกี่ยวกับ) แสดงเวอร์ชันและเครดิต พร้อมภาพเคลื่อนไหวประจำตัวของ honya</span></li>
+          <li class="change"><span class="tag add">เพิ่ม</span><span class="txt">เลือกช่องอัปเดต (release channel) ได้แล้วในหน้า Settings ด้วย <code>Ctrl-G</code> สลับระหว่างรุ่นเสถียร (stable) กับรุ่นล่าสุดจาก git เพื่อทดลองฟีเจอร์ใหม่ก่อนใคร</span></li>
+          <li class="change"><span class="tag add">เพิ่ม</span><span class="txt">ตั้งระดับบริการของ OpenRouter (service tier) ได้ในหน้า Settings ด้วย <code>Ctrl-Y</code> หมุนเลือก Off → Flex → Priority เพื่อปรับสมดุลระหว่างราคาและความเร็วในการเรียกโมเดล</span></li>
+          <li class="change"><span class="tag chg">ปรับปรุง</span><span class="txt">ออกแบบตัวช่วยนำเข้า (import wizard) ใหม่: มีแถบขั้นตอนคงที่สำหรับสร้างโปรเจกต์ใหม่/เพิ่มเล่ม/ใส่เรื่องย่อ ตรวจจับการรวมไฟล์ แสดงตัวอย่างโฟลเดอร์และจำนวนอักขระ และสแกนไฟล์ซ้ำได้ในตัวช่วยโดยไม่ต้องเริ่มใหม่ พร้อมเก็บข้อมูลต้นฉบับ (ผู้แต่ง/สำนักพิมพ์/วันที่/รหัส) จาก <code>EPUB</code> ลงใน <code>VOLUME.md</code></span></li>
+          <li class="change"><span class="tag chg">ปรับปรุง</span><span class="txt">แคชผลการเรนเดอร์ Markdown ของแผงต่าง ๆ (Reader/Translate/Lexicon) เพื่อลดการประมวลผลซ้ำขณะเลื่อนหน้าจอหรือรอ ทำให้ UI ลื่นไหลขึ้น</span></li>
+        </ul>
+      </article>
+
       <!-- 0.2.2 -->
       <article class="release">
         <div class="rel-meta">
           <span class="ver"><span class="v-pre">v</span>0.2.2</span>
           <div class="rel-date">9 มิ.ย. 2026</div>
-          <span class="rel-badge">ล่าสุด</span>
         </div>
         <ul class="changes">
           <li class="change"><span class="tag chg">ปรับปรุง</span><span class="txt">ปรับกฎการแปลคำลงท้ายเรียกขานแบบญี่ปุ่นให้สม่ำเสมอ: <code>-san</code> (さん) แปลเป็น “คุณ” และ <code>-senpai</code> (先輩) แปลเป็น “รุ่นพี่” ทั้งฝั่งตัวแปลและตัวตรวจ (Reviewer) โดยจะยึดตาม <code>GLOSSARY.md</code> ก่อนเสมอหากกำหนดคำแปลของชื่อหรือคำลงท้ายนั้นไว้เป็นอย่างอื่น</span></li>

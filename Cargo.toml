@@ -1,6 +1,6 @@
 [package]
 name = "honya"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2024"
 description = "A terminal app for AI-assisted Japanese→Thai light-novel translation (EPUB import + a three-agent LLM pipeline over an OpenRouter-compatible API)."
 license = "Apache-2.0"
