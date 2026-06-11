@@ -54,8 +54,8 @@ impl ShelfScreen {
         projects.len()
     }
 
-    fn import_paths(&self) -> Vec<PathBuf> {
-        self.unimported.iter().map(|(p, _)| p.clone()).collect()
+    fn import_files(&self) -> Vec<(PathBuf, u64)> {
+        self.unimported.clone()
     }
 
     pub fn handle_key(&mut self, key: KeyEvent, projects: &[Project]) -> Action {
@@ -90,14 +90,16 @@ impl ShelfScreen {
             }
             KeyCode::Enter => {
                 if sel == self.import_row_index(projects) {
-                    Action::show_overlay(Overlay::import(self.import_paths()))
+                    Action::show_overlay(Overlay::import(self.import_files(), projects))
                 } else if let Some(p) = projects.get(sel) {
                     Action::OpenProject(p.id.clone())
                 } else {
                     Action::None
                 }
             }
-            KeyCode::Char('i') => Action::show_overlay(Overlay::import(self.import_paths())),
+            KeyCode::Char('i') => {
+                Action::show_overlay(Overlay::import(self.import_files(), projects))
+            }
             KeyCode::Char('d') => {
                 if let Some(p) = projects.get(sel) {
                     Action::show_overlay(Overlay::confirm(
@@ -156,7 +158,7 @@ impl ShelfScreen {
                 self.list.select(Some(target));
                 if double || already {
                     if target == import_idx {
-                        return Action::show_overlay(Overlay::import(self.import_paths()));
+                        return Action::show_overlay(Overlay::import(self.import_files(), projects));
                     }
                     if let Some(p) = projects.get(target) {
                         return Action::OpenProject(p.id.clone());
@@ -493,7 +495,7 @@ fn plural(n: usize) -> &'static str {
     }
 }
 
-fn human_size(bytes: u64) -> String {
+pub(crate) fn human_size(bytes: u64) -> String {
     let mb = bytes as f64 / 1_048_576.0;
     if mb >= 1.0 {
         format!("{mb:.1} MB")

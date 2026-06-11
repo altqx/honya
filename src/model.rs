@@ -591,6 +591,9 @@ pub struct VolumeData {
     pub synopsis_th: String,
     #[serde(default)]
     pub running_recap: String,
+    /// Source-file metadata discovered at import time (title, author, language, etc.).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub source_metadata: BTreeMap<String, String>,
     /// chapter number (as string key) -> one-line summary.
     #[serde(default)]
     pub chapters: BTreeMap<String, String>,

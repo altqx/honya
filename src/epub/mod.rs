@@ -106,8 +106,15 @@ pub struct SpineEntry {
 #[derive(Debug, Clone, Default)]
 pub struct Metadata {
     pub title: Option<String>,
+    /// First creator, retained for existing callers.
     pub creator: Option<String>,
+    /// All repeated `dc:creator` values, matching MarkItDown's `Authors` block.
+    pub authors: Vec<String>,
     pub language: Option<String>,
+    pub publisher: Option<String>,
+    pub date: Option<String>,
+    pub description: Option<String>,
+    pub identifier: Option<String>,
     /// Archive-relative path of the cover image, if one was identified.
     pub cover_image_path: Option<String>,
 }

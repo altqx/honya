@@ -260,7 +260,12 @@ impl ProjectScreen {
             KeyCode::Char('e') => Action::Goto(Screen::Lexicon),
             KeyCode::Char('y') => {
                 let data = crate::workspace::volume::load(&active.workspace);
-                Action::show_overlay(Overlay::synopsis_edit(data.synopsis_raw, data.synopsis_th))
+                Action::show_overlay(Overlay::synopsis_edit(
+                    data.synopsis_raw,
+                    data.synopsis_th,
+                    active.vol,
+                    active.project.title.clone(),
+                ))
             }
             KeyCode::Char('V') => Action::AddVolume,
             KeyCode::Char('x') => {

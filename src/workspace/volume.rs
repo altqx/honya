@@ -1,14 +1,16 @@
 //! Read/update VOLUME.md. The data block is the full `VolumeData` JSON; the
 //! Markdown body above it is re-rendered from that payload on every write.
 
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Utc};
 
 use crate::model::{
     ChapterRun, ContinuityNote, ReaderAnnotation, ReaderBookmark, RunHistoryEntry,
     RunHistoryStatus, UsageStats, VolumeData,
 };
-use crate::workspace::Workspace;
 use crate::workspace::data_block;
+use crate::workspace::Workspace;
 
 /// Load the volume metadata (defaults when VOLUME.md is absent/empty).
 pub fn load(ws: &Workspace) -> VolumeData {
@@ -20,6 +22,19 @@ pub fn set_synopsis(ws: &Workspace, raw: &str, thai: &str) -> std::io::Result<()
     let mut data = load(ws);
     data.synopsis_raw = raw.trim().to_string();
     data.synopsis_th = thai.trim().to_string();
+    write(ws, &data)
+}
+
+/// Replace source-file metadata discovered during import and persist.
+pub fn set_source_metadata(
+    ws: &Workspace,
+    metadata: BTreeMap<String, String>,
+) -> std::io::Result<()> {
+    if metadata.is_empty() {
+        return Ok(());
+    }
+    let mut data = load(ws);
+    data.source_metadata = metadata;
     write(ws, &data)
 }
 
@@ -351,6 +366,16 @@ pub fn render_body(data: &VolumeData) -> String {
         }
     }
     s.push('\n');
+
+    if !data.source_metadata.is_empty() {
+        s.push_str("## ข้อมูลต้นฉบับ / Source Metadata\n\n");
+        s.push_str("| Field | Value |\n");
+        s.push_str("|-------|-------|\n");
+        for (key, value) in &data.source_metadata {
+            s.push_str(&format!("| {} | {} |\n", cell(key), cell(value)));
+        }
+        s.push('\n');
+    }
 
     s.push_str("## เนื้อเรื่องสะสม (Running Recap)\n\n");
     if data.running_recap.trim().is_empty() {

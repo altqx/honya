@@ -85,10 +85,23 @@ pub fn parse_opf(opf_xml: &str, opf_path: &str) -> Result<ParsedOpf> {
     for node in doc.descendants() {
         if is_dc_elem(&node, "title") && metadata.title.is_none() {
             metadata.title = element_text(&node);
-        } else if is_dc_elem(&node, "creator") && metadata.creator.is_none() {
-            metadata.creator = element_text(&node);
+        } else if is_dc_elem(&node, "creator") {
+            if let Some(author) = element_text(&node) {
+                if metadata.creator.is_none() {
+                    metadata.creator = Some(author.clone());
+                }
+                metadata.authors.push(author);
+            }
         } else if is_dc_elem(&node, "language") && metadata.language.is_none() {
             metadata.language = element_text(&node);
+        } else if is_dc_elem(&node, "publisher") && metadata.publisher.is_none() {
+            metadata.publisher = element_text(&node);
+        } else if is_dc_elem(&node, "date") && metadata.date.is_none() {
+            metadata.date = element_text(&node);
+        } else if is_dc_elem(&node, "description") && metadata.description.is_none() {
+            metadata.description = element_text(&node);
+        } else if is_dc_elem(&node, "identifier") && metadata.identifier.is_none() {
+            metadata.identifier = element_text(&node);
         } else if is_opf_elem(&node, "meta") {
             let name = node.attribute("name").unwrap_or("");
             if name == "cover"
@@ -204,7 +217,12 @@ mod tests {
   <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
     <dc:title>影の物語</dc:title>
     <dc:creator>テスト著者</dc:creator>
+    <dc:creator>共著者</dc:creator>
     <dc:language>ja</dc:language>
+    <dc:publisher>本屋出版</dc:publisher>
+    <dc:date>2024-01-02</dc:date>
+    <dc:description>説明文</dc:description>
+    <dc:identifier>urn:isbn:123</dc:identifier>
     <meta name="cover" content="cover-img"/>
   </metadata>
   <manifest>
@@ -225,7 +243,12 @@ mod tests {
         let p = parse_opf(OPF, "OEBPS/content.opf").unwrap();
         assert_eq!(p.metadata.title.as_deref(), Some("影の物語"));
         assert_eq!(p.metadata.creator.as_deref(), Some("テスト著者"));
+        assert_eq!(p.metadata.authors, vec!["テスト著者", "共著者"]);
         assert_eq!(p.metadata.language.as_deref(), Some("ja"));
+        assert_eq!(p.metadata.publisher.as_deref(), Some("本屋出版"));
+        assert_eq!(p.metadata.date.as_deref(), Some("2024-01-02"));
+        assert_eq!(p.metadata.description.as_deref(), Some("説明文"));
+        assert_eq!(p.metadata.identifier.as_deref(), Some("urn:isbn:123"));
     }
 
     #[test]

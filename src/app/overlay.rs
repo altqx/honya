@@ -142,6 +142,40 @@ fn handle_synopsis_keys(st: &mut SynopsisState, key: KeyEvent) -> SynKey {
     }
 }
 
+/// Standalone synopsis editor (Project screen `y`): the shared editor state plus
+/// the volume / project it targets, named in the modal title.
+#[derive(Debug, Clone)]
+pub struct SynopsisEditState {
+    pub vol: u32,
+    pub title: String,
+    pub syn: SynopsisState,
+}
+
+/// A snapshot of an existing project, carried by the import wizard so it can give
+/// live merge feedback (name collides → "adds into …", existing-volume warnings).
+#[derive(Debug, Clone)]
+pub struct ProjectRef {
+    /// Stable slug = directory name.
+    pub slug: String,
+    pub title: String,
+    /// (volume number, chapter count), ascending.
+    pub volumes: Vec<(u32, usize)>,
+}
+
+impl ProjectRef {
+    pub fn of(p: &crate::model::Project) -> Self {
+        Self {
+            slug: p.id.clone(),
+            title: p.title.clone(),
+            volumes: p
+                .volumes
+                .iter()
+                .map(|v| (v.number, v.chapters.len()))
+                .collect(),
+        }
+    }
+}
+
 /// The import wizard: pick source file → name → volume → synopsis → importing. When
 /// `lock_name` is set (the "add volume to this project" flow), the name step is
 /// skipped and the title is fixed to the open project's.
@@ -149,15 +183,24 @@ fn handle_synopsis_keys(st: &mut SynopsisState, key: KeyEvent) -> SynKey {
 pub struct ImportState {
     /// 0 = pick, 1 = name, 2 = volume, 3 = synopsis, 4 = importing (gauge).
     pub step: u8,
-    pub epubs: Vec<PathBuf>,
+    /// Importable source files (path, byte size) found in the working root.
+    pub files: Vec<(PathBuf, u64)>,
     pub sel: usize,
     pub name: String,
     /// Caret byte-offset into `name` (the wizard's name step).
     pub name_cursor: usize,
+    /// True once the user edited the name; stops re-seeding it from the file stem.
+    name_touched: bool,
     pub vol: u32,
+    /// True once the user adjusted the volume; stops the next-volume auto-suggest.
+    vol_touched: bool,
     /// True for the "add volume" flow: the name is the open project's and locked,
     /// so the wizard skips the name step (pick → volume → synopsis).
     pub lock_name: bool,
+    /// Existing projects, for merge detection and existing-volume feedback.
+    pub projects: Vec<ProjectRef>,
+    /// Transient validation note (name step); cleared on the next edit.
+    pub note: Option<&'static str>,
     /// Synopsis input + translate/reroll loop (wizard step 3).
     pub syn: SynopsisState,
     /// Live preprocessing progress (done, total, label) once the import starts.
@@ -165,22 +208,26 @@ pub struct ImportState {
 }
 
 impl ImportState {
-    fn new(epubs: Vec<PathBuf>) -> Self {
+    fn new(files: Vec<(PathBuf, u64)>, projects: Vec<ProjectRef>) -> Self {
         // Seed the name field from the first source file's stem for a friendly default.
-        let name = epubs
+        let name = files
             .first()
-            .and_then(|p| p.file_stem())
+            .and_then(|(p, _)| p.file_stem())
             .and_then(|s| s.to_str())
             .map(prettify_stem)
             .unwrap_or_default();
         Self {
             step: 0,
-            epubs,
+            files,
             sel: 0,
             name_cursor: name.len(),
             name,
+            name_touched: false,
             vol: 1,
+            vol_touched: false,
             lock_name: false,
+            projects,
+            note: None,
             syn: SynopsisState::new(String::new(), String::new()),
             progress: None,
         }
@@ -189,38 +236,60 @@ impl ImportState {
     /// "Add volume" wizard: name fixed to `title`, volume pre-set to `vol`, and the
     /// name step skipped. The import merges into the existing project because its
     /// slug collides with the open project's.
-    fn new_into(epubs: Vec<PathBuf>, title: String, vol: u32) -> Self {
+    fn new_into(
+        files: Vec<(PathBuf, u64)>,
+        projects: Vec<ProjectRef>,
+        title: String,
+        vol: u32,
+    ) -> Self {
         Self {
             step: 0,
-            epubs,
+            files,
             sel: 0,
             name_cursor: title.len(),
             name: title,
+            name_touched: true,
             vol: vol.max(1),
+            // The caller already computed the project's next volume.
+            vol_touched: true,
             lock_name: true,
+            projects,
+            note: None,
             syn: SynopsisState::new(String::new(), String::new()),
             progress: None,
         }
     }
 
-    /// Total wizard steps before importing: 3 when the name is locked (pick ·
-    /// volume · synopsis), else 4 (pick · name · volume · synopsis).
-    fn step_count(&self) -> u8 {
-        if self.lock_name { 3 } else { 4 }
+    fn selected_file(&self) -> Option<&PathBuf> {
+        self.files.get(self.sel).map(|(p, _)| p)
     }
 
-    /// 1-based step number for the header, accounting for the skipped name step
-    /// when the name is locked (steps 0, 2, 3 read as 1, 2, 3).
-    fn step_display(&self) -> u8 {
-        if self.lock_name {
-            if self.step == 0 { 1 } else { self.step }
-        } else {
-            self.step + 1
+    /// The existing project this import would merge into (its slug matches the
+    /// current name's), if any.
+    pub fn target_project(&self) -> Option<&ProjectRef> {
+        let slug = slugify(self.name.trim());
+        if slug.is_empty() {
+            return None;
         }
+        self.projects.iter().find(|p| p.slug == slug)
     }
 
-    fn selected_epub(&self) -> Option<&PathBuf> {
-        self.epubs.get(self.sel)
+    /// When the name targets an existing project and the user hasn't picked a
+    /// volume yet, default to one past its highest (instead of a colliding 1).
+    fn suggest_volume(&mut self) {
+        if self.vol_touched {
+            return;
+        }
+        self.vol = match self.target_project() {
+            Some(t) => (t.volumes.iter().map(|&(n, _)| n).max().unwrap_or(0) + 1).min(999),
+            None => 1,
+        };
+    }
+
+    /// Replace the file list after an in-wizard rescan, keeping the cursor sane.
+    pub fn set_files(&mut self, files: Vec<(PathBuf, u64)>) {
+        self.files = files;
+        self.sel = self.sel.min(self.files.len().saturating_sub(1));
     }
 }
 
@@ -642,7 +711,7 @@ pub enum Overlay {
     Palette(PaletteState),
     Modal(Dialog),
     /// Standalone volume-synopsis editor (re-opened from the Project screen).
-    Synopsis(SynopsisState),
+    Synopsis(SynopsisEditState),
     /// Translation QA inbox — per-chapter issue counts + navigable findings, opened
     /// from the Project or Reader tab (Enter jumps to the chapter in the Reader).
     Qa(QaState),
@@ -657,14 +726,21 @@ pub enum Overlay {
 }
 
 impl Overlay {
-    pub fn import(epubs: Vec<PathBuf>) -> Self {
-        Overlay::Import(ImportState::new(epubs))
+    pub fn import(files: Vec<(PathBuf, u64)>, projects: &[crate::model::Project]) -> Self {
+        let refs = projects.iter().map(ProjectRef::of).collect();
+        Overlay::Import(ImportState::new(files, refs))
     }
 
     /// "Add volume" wizard, pre-targeted at an open project: the name is locked to
     /// `title` and the volume defaults to `vol` (the project's next number).
-    pub fn import_into(epubs: Vec<PathBuf>, title: String, vol: u32) -> Self {
-        Overlay::Import(ImportState::new_into(epubs, title, vol))
+    pub fn import_into(
+        files: Vec<(PathBuf, u64)>,
+        projects: &[crate::model::Project],
+        title: String,
+        vol: u32,
+    ) -> Self {
+        let refs = projects.iter().map(ProjectRef::of).collect();
+        Overlay::Import(ImportState::new_into(files, refs, title, vol))
     }
 
     /// Welcome overlay seeded with live key / sample status.
@@ -702,9 +778,14 @@ impl Overlay {
         Overlay::Palette(PaletteState::new())
     }
 
-    /// Standalone synopsis editor seeded from a volume's stored raw/Thai.
-    pub fn synopsis_edit(raw: String, th: String) -> Self {
-        Overlay::Synopsis(SynopsisState::new(raw, th))
+    /// Standalone synopsis editor seeded from a volume's stored raw/Thai; `vol`
+    /// and `title` name the target in the modal title.
+    pub fn synopsis_edit(raw: String, th: String, vol: u32, title: String) -> Self {
+        Overlay::Synopsis(SynopsisEditState {
+            vol,
+            title,
+            syn: SynopsisState::new(raw, th),
+        })
     }
 
     pub fn reader_note(chapter: u32, line: u32) -> Self {
@@ -852,7 +933,7 @@ impl Overlay {
     pub fn set_synopsis_result(&mut self, result: std::result::Result<String, String>) {
         let st = match self {
             Overlay::Import(s) if s.step == 3 => &mut s.syn,
-            Overlay::Synopsis(s) => s,
+            Overlay::Synopsis(s) => &mut s.syn,
             _ => return,
         };
         if st.phase != SynPhase::Translating {
@@ -878,7 +959,7 @@ impl Overlay {
             Overlay::Import(st) => {
                 st.step == 1 || (st.step == 3 && st.syn.phase == SynPhase::Editing)
             }
-            Overlay::Synopsis(st) => st.phase == SynPhase::Editing,
+            Overlay::Synopsis(st) => st.syn.phase == SynPhase::Editing,
             Overlay::ReaderNote(_) => true,
             Overlay::ReaderSearch(_) => true, // query field
             Overlay::ReaderJump(_) => true,   // filter field
@@ -963,7 +1044,9 @@ impl Overlay {
         match self {
             Overlay::None => area,
             Overlay::Welcome(_) => centered_modal(76, 24, area),
-            Overlay::Import(st) => centered_modal(76, if st.step == 3 { 24 } else { 18 }, area),
+            // One size for every wizard step (the modal must not jump around as
+            // the user advances); mirrors render_import.
+            Overlay::Import(_) => centered_modal(78, 24, area),
             // Must mirror render_settings' centered_modal(72, 26, …) so clicks
             // near the modal's top/bottom hit-test inside it (not as a dismiss).
             Overlay::Settings(_) => centered_modal(72, 26, area),
@@ -1088,6 +1171,26 @@ impl Overlay {
                 }
                 ClickOutcome::Nothing
             }
+            // Import wizard: in the file-pick step a click selects the row under
+            // it; a double click (or a click on the current pick) advances.
+            Overlay::Import(st) if st.step == 0 => {
+                let top = inner.y + IMPORT_HEADER_ROWS + IMPORT_PICK_LIST_OFFSET;
+                let list_h = inner
+                    .height
+                    .saturating_sub(IMPORT_HEADER_ROWS + IMPORT_PICK_LIST_OFFSET);
+                if m.row >= top && (m.row - top) < list_h {
+                    let start = windowed_start(st.sel, list_h);
+                    let idx = start + (m.row - top) as usize;
+                    if idx < st.files.len() {
+                        let already = st.sel == idx;
+                        st.sel = idx;
+                        if double || already {
+                            return ClickOutcome::Key(KeyCode::Enter);
+                        }
+                    }
+                }
+                ClickOutcome::Nothing
+            }
             // QA findings interleave non-selectable chapter headers, so a click
             // just activates the current pick (the wheel moves it).
             Overlay::Qa(_) => {
@@ -1184,6 +1287,7 @@ impl Overlay {
             // Step 0: pick source file.
             0 => match key.code {
                 KeyCode::Esc => Action::CloseOverlay,
+                KeyCode::Char('r') | KeyCode::Char('R') => Action::RescanImports,
                 KeyCode::Up | KeyCode::Char('k') => {
                     if st.sel > 0 {
                         st.sel -= 1;
@@ -1191,27 +1295,40 @@ impl Overlay {
                     Action::None
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
-                    if st.sel + 1 < st.epubs.len() {
+                    if st.sel + 1 < st.files.len() {
                         st.sel += 1;
                     }
                     Action::None
                 }
+                KeyCode::Home | KeyCode::Char('g') => {
+                    st.sel = 0;
+                    Action::None
+                }
+                KeyCode::End | KeyCode::Char('G') => {
+                    st.sel = st.files.len().saturating_sub(1);
+                    Action::None
+                }
                 KeyCode::Enter => {
-                    if st.epubs.is_empty() {
+                    if st.files.is_empty() {
                         Action::CloseOverlay
                     } else {
-                        // Fresh imports can use the selected file stem as a default.
+                        // Until the user types their own name, follow the selected
+                        // file's stem so the default tracks the actual pick.
                         if !st.lock_name
-                            && st.name.trim().is_empty()
+                            && !st.name_touched
                             && let Some(stem) = st
-                                .selected_epub()
+                                .selected_file()
                                 .and_then(|p| p.file_stem())
                                 .and_then(|s| s.to_str())
                         {
                             st.name = prettify_stem(stem);
                         }
                         st.name_cursor = st.name.len();
-                        st.step = if st.lock_name { 2 } else { 1 };
+                        if st.lock_name {
+                            st.step = 2;
+                        } else {
+                            st.step = 1;
+                        }
                         Action::None
                     }
                 }
@@ -1222,20 +1339,25 @@ impl Overlay {
                 if input::handle(&mut st.name, &mut st.name_cursor, key, EditOpts::default())
                     != Edited::Ignored
                 {
+                    st.name_touched = true;
+                    st.note = None;
                     return Action::None;
                 }
                 match key.code {
                     KeyCode::Esc => {
                         st.step = 0;
+                        st.note = None;
                         Action::None
                     }
                     KeyCode::Enter | KeyCode::Tab => {
                         if st.name.trim().is_empty() {
-                            Action::None
+                            st.note = Some("ใส่ชื่อโปรเจกต์ก่อน · a project name is required");
                         } else {
+                            st.note = None;
                             st.step = 2;
-                            Action::None
+                            st.suggest_volume();
                         }
+                        Action::None
                     }
                     _ => Action::None,
                 }
@@ -1248,19 +1370,23 @@ impl Overlay {
                 }
                 KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('+') | KeyCode::Right => {
                     st.vol = st.vol.saturating_add(1).min(999);
+                    st.vol_touched = true;
                     Action::None
                 }
                 KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('-') | KeyCode::Left => {
                     st.vol = st.vol.saturating_sub(1).max(1);
+                    st.vol_touched = true;
                     Action::None
                 }
                 KeyCode::Char(d @ '0'..='9') => {
                     let digit = d as u32 - '0' as u32;
                     st.vol = (st.vol.saturating_mul(10).saturating_add(digit)).clamp(1, 999);
+                    st.vol_touched = true;
                     Action::None
                 }
                 KeyCode::Backspace => {
                     st.vol = (st.vol / 10).max(1);
+                    st.vol_touched = true;
                     Action::None
                 }
                 KeyCode::Enter => {
@@ -1283,7 +1409,7 @@ impl Overlay {
                         Action::None
                     }
                     SynKey::Accept => {
-                        let source = st.selected_epub().cloned().unwrap_or_default();
+                        let source = st.selected_file().cloned().unwrap_or_default();
                         let title = st.name.trim().to_string();
                         let vol = st.vol.max(1);
                         let synopsis_raw = st.syn.raw.trim().to_string();
@@ -1299,7 +1425,7 @@ impl Overlay {
                         }
                     }
                     SynKey::Skip => {
-                        let source = st.selected_epub().cloned().unwrap_or_default();
+                        let source = st.selected_file().cloned().unwrap_or_default();
                         let title = st.name.trim().to_string();
                         let vol = st.vol.max(1);
                         st.step = 4;
@@ -1635,15 +1761,15 @@ impl Overlay {
         let Overlay::Synopsis(st) = self else {
             return Action::None;
         };
-        match handle_synopsis_keys(st, key) {
+        match handle_synopsis_keys(&mut st.syn, key) {
             SynKey::None => Action::None,
             SynKey::Translate => Action::TranslateSynopsis {
-                raw: st.raw.clone(),
-                attempt: st.attempt,
+                raw: st.syn.raw.clone(),
+                attempt: st.syn.attempt,
             },
             SynKey::Accept => Action::SaveSynopsis {
-                raw: st.raw.clone(),
-                th: st.th.clone(),
+                raw: st.syn.raw.clone(),
+                th: st.syn.th.clone(),
             },
             // Skip/back leave the stored synopsis untouched.
             SynKey::Skip | SynKey::Back => Action::CloseOverlay,
@@ -1654,13 +1780,18 @@ impl Overlay {
         match self {
             Overlay::Welcome(_) => &[("↑↓", "move"), ("↵", "select"), ("Esc", "skip")],
             Overlay::Import(st) => match st.step {
-                0 => &[("↑↓", "pick"), ("↵", "next"), ("Esc", "cancel")],
+                0 => &[
+                    ("↑↓", "pick"),
+                    ("↵", "next"),
+                    ("r", "rescan"),
+                    ("Esc", "cancel"),
+                ],
                 1 => &[("type", "name"), ("↵/Tab", "next"), ("Esc", "back")],
-                2 => &[("↑↓", "volume"), ("↵", "next"), ("Esc", "back")],
-                3 => synopsis_hints(&st.syn),
+                2 => &[("↑↓/type", "volume"), ("↵", "next"), ("Esc", "back")],
+                3 => synopsis_hints(&st.syn, true),
                 _ => &[("Esc", "close")],
             },
-            Overlay::Synopsis(st) => synopsis_hints(st),
+            Overlay::Synopsis(st) => synopsis_hints(&st.syn, false),
             Overlay::Settings(_) => &[("Tab", "field"), ("type", "edit"), ("Esc/↵", "close")],
             Overlay::Theme(_) => &[("jk/↑↓", "preview"), ("↵", "apply"), ("Esc", "revert")],
             Overlay::Palette(_) => &[
@@ -1837,40 +1968,59 @@ impl Overlay {
     }
 
     fn render_import(&self, f: &mut Frame, area: Rect, theme: &Theme, st: &ImportState) {
-        let height = if st.step == 3 { 24 } else { 18 };
-        let modal = centered_modal(76, height, area);
+        // One fixed size for every step; mirrored by modal_rect for hit-testing.
+        let modal = centered_modal(78, 24, area);
         f.render_widget(Clear, modal);
-        // Add-volume skips the project-name step.
-        let verb = if st.lock_name {
-            "Add volume"
+        let title = thai_display_safe(if st.lock_name {
+            "Add volume · เพิ่มเล่ม"
         } else {
-            "Import file"
-        };
-        let title = match st.step {
-            4 => format!("{verb} — importing"),
-            _ => format!("{verb} — step {} / {}", st.step_display(), st.step_count()),
-        };
+            "New project · นำเข้าไฟล์"
+        });
         let block = self.modal_block(&title, theme);
         let inner = block.inner(modal);
         f.render_widget(block, modal);
 
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1), // step rail
+                Constraint::Length(1), // accumulated choices
+                Constraint::Length(1), // gap
+                Constraint::Min(0),    // step body
+            ])
+            .split(inner);
+        f.render_widget(
+            Paragraph::new(step_rail(st, theme)).style(Style::default().bg(theme.bg_panel)),
+            rows[0],
+        );
+        f.render_widget(
+            Paragraph::new(import_context_line(st, theme))
+                .style(Style::default().bg(theme.bg_panel)),
+            rows[1],
+        );
+
         match st.step {
-            0 => self.render_import_pick(f, inner, theme, st),
-            1 => self.render_import_name(f, inner, theme, st),
-            2 => self.render_import_volume(f, inner, theme, st),
-            3 => render_synopsis_body(f, inner, theme, &st.syn),
-            _ => self.render_import_progress(f, inner, theme, st),
+            0 => self.render_import_pick(f, rows[3], theme, st),
+            1 => self.render_import_name(f, rows[3], theme, st),
+            2 => self.render_import_volume(f, rows[3], theme, st),
+            3 => render_synopsis_body(f, rows[3], theme, &st.syn, "เริ่มนำเข้า"),
+            _ => self.render_import_progress(f, rows[3], theme, st),
         }
     }
 
     /// Standalone synopsis editor modal (re-opened from the Project screen).
-    fn render_synopsis(&self, f: &mut Frame, area: Rect, theme: &Theme, st: &SynopsisState) {
+    fn render_synopsis(&self, f: &mut Frame, area: Rect, theme: &Theme, st: &SynopsisEditState) {
         let modal = centered_modal(76, 24, area);
         f.render_widget(Clear, modal);
-        let block = self.modal_block("Volume synopsis · เรื่องย่อเล่ม", theme);
+        let title = thai_display_safe(&format!(
+            "เรื่องย่อเล่ม — Vol.{:02} · {}",
+            st.vol,
+            truncate_cols(st.title.trim(), 40)
+        ));
+        let block = self.modal_block(&title, theme);
         let inner = block.inner(modal);
         f.render_widget(block, modal);
-        render_synopsis_body(f, inner, theme, st);
+        render_synopsis_body(f, inner, theme, &st.syn, "บันทึก");
     }
 
     fn render_reader_note(&self, f: &mut Frame, area: Rect, theme: &Theme, st: &ReaderNoteState) {
@@ -2108,7 +2258,7 @@ impl Overlay {
     }
 
     fn render_import_pick(&self, f: &mut Frame, area: Rect, theme: &Theme, st: &ImportState) {
-        if st.epubs.is_empty() {
+        if st.files.is_empty() {
             let p = Paragraph::new(vec![
                 Line::raw(""),
                 Line::from(Span::styled(
@@ -2117,7 +2267,7 @@ impl Overlay {
                 )),
                 Line::raw(""),
                 Line::from(Span::styled(
-                    "  Drop a supported file here and press r on the Shelf to rescan.",
+                    "  Drop a supported file into this folder, then press r to rescan.",
                     Style::default().fg(theme.ink_faint),
                 )),
                 Line::raw(""),
@@ -2133,31 +2283,39 @@ impl Overlay {
             f.render_widget(p, area);
             return;
         }
-        let mut lines = Vec::new();
-        if st.lock_name {
-            // Add-volume flow: name the target project so the picker reads in context.
-            lines.push(Line::from(vec![
-                Span::styled("  Add ", Style::default().fg(theme.ink_soft)),
+
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1), // header
+                Constraint::Length(1), // gap
+                Constraint::Min(0),    // windowed file list
+            ])
+            .split(area);
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
                 Span::styled(
-                    format!("Vol.{:02}", st.vol),
-                    Style::default()
-                        .fg(theme.accent)
-                        .add_modifier(Modifier::BOLD),
+                    "  Choose a source file",
+                    Style::default().fg(theme.ink_soft),
                 ),
-                Span::styled("  to  ", Style::default().fg(theme.ink_soft)),
                 Span::styled(
-                    thai_display_safe(st.name.trim()),
-                    Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
+                    format!("  ({} found · r rescan)", st.files.len()),
+                    Style::default().fg(theme.ink_faint),
                 ),
-            ]));
-            lines.push(Line::raw(""));
-        }
-        lines.push(Line::from(Span::styled(
-            "  Choose a source file:",
-            Style::default().fg(theme.ink_soft),
-        )));
-        lines.push(Line::raw(""));
-        for (i, p) in st.epubs.iter().enumerate() {
+            ]))
+            .style(Style::default().bg(theme.bg_panel)),
+            rows[0],
+        );
+
+        // Window the rows so the selection stays visible with long file lists.
+        let cap = rows[2].height.max(1);
+        let start = windowed_start(st.sel, cap);
+        let end = (start + cap as usize).min(st.files.len());
+        let size_w = 9usize;
+        let name_w = (rows[2].width as usize).saturating_sub(6 + size_w);
+
+        let mut lines = Vec::with_capacity(end - start);
+        for (i, (p, size)) in st.files.iter().enumerate().take(end).skip(start) {
             let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("?");
             let selected = i == st.sel;
             let bar = if selected {
@@ -2172,55 +2330,39 @@ impl Overlay {
             };
             lines.push(Line::from(vec![
                 Span::styled(format!(" {bar} "), Style::default().fg(theme.accent)),
+                Span::styled(pad_to_cols(&thai_display_safe(name), name_w), style),
                 Span::styled(
-                    truncate_cols(
-                        &thai_display_safe(name),
-                        area.width.saturating_sub(6) as usize,
-                    ),
-                    style,
+                    format!("{:>size_w$}", super::shelf::human_size(*size)),
+                    Style::default().fg(theme.ink_faint),
                 ),
             ]));
         }
         f.render_widget(
             Paragraph::new(lines).style(Style::default().bg(theme.bg_panel)),
-            area,
+            rows[2],
         );
     }
 
     fn render_import_name(&self, f: &mut Frame, area: Rect, theme: &Theme, st: &ImportState) {
-        let src = st
-            .selected_epub()
-            .and_then(|p| p.file_name())
-            .and_then(|s| s.to_str())
-            .unwrap_or("?");
-        let slug = slugify(&st.name);
+        let slug = slugify(st.name.trim());
         let rows = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(1), // source
-                Constraint::Length(1), // gap
                 Constraint::Length(1), // label
                 Constraint::Length(3), // boxed input
-                Constraint::Length(1), // slug
-                Constraint::Min(0),
+                Constraint::Length(1), // folder preview
+                Constraint::Length(1), // gap
+                Constraint::Min(0),    // validation / merge feedback
             ])
             .split(area);
 
-        f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled("  Source:  ", Style::default().fg(theme.ink_faint)),
-                Span::styled(thai_display_safe(src), Style::default().fg(theme.ink_soft)),
-            ]))
-            .style(Style::default().bg(theme.bg_panel)),
-            rows[0],
-        );
         f.render_widget(
             Paragraph::new(Span::styled(
                 "  Project name",
                 Style::default().fg(theme.ink_soft),
             ))
             .style(Style::default().bg(theme.bg_panel)),
-            rows[2],
+            rows[0],
         );
 
         let input_block = Block::default()
@@ -2228,57 +2370,139 @@ impl Overlay {
             .border_set(theme::hairline_set())
             .border_style(Style::default().fg(theme.accent_soft))
             .style(Style::default().bg(theme.bg_inset));
+        let field_w = rows[1].width.saturating_sub(6) as usize;
+        let (before, after) = input::caret_halves(&st.name, st.name_cursor, field_w);
         let caret_line = Line::from(vec![
-            Span::styled(thai_display_safe(&st.name), Style::default().fg(theme.ink)),
+            Span::styled(thai_display_safe(&before), Style::default().fg(theme.ink)),
             Span::styled("▏", Style::default().fg(theme.stream_cursor)),
+            Span::styled(thai_display_safe(&after), Style::default().fg(theme.ink)),
         ]);
         f.render_widget(
             Paragraph::new(caret_line).block(input_block),
-            indent(rows[3], 2),
+            indent(rows[1], 2),
         );
+
         f.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled("  Slug:  ", Style::default().fg(theme.ink_faint)),
+                Span::styled("  Folder   ", Style::default().fg(theme.ink_faint)),
                 Span::styled(
-                    thai_display_safe(&slug),
+                    if slug.is_empty() {
+                        "—".to_string()
+                    } else {
+                        thai_display_safe(&format!("./{slug}/"))
+                    },
                     Style::default().fg(theme.accent_soft),
                 ),
             ]))
             .style(Style::default().bg(theme.bg_panel)),
+            rows[2],
+        );
+
+        // Live feedback: required-name nudge, or what this name will do (create
+        // a fresh project vs merge into the existing one with the same slug).
+        let mut feedback: Vec<Line> = Vec::new();
+        if let Some(note) = st.note {
+            feedback.push(Line::from(Span::styled(
+                thai_display_safe(&format!("  ⚠ {note}")),
+                Style::default().fg(theme.status_warn),
+            )));
+        } else if st.name.trim().is_empty() {
+            feedback.push(Line::from(Span::styled(
+                "  type a project name to continue",
+                Style::default().fg(theme.ink_faint),
+            )));
+        } else if let Some(target) = st.target_project() {
+            feedback.push(Line::from(Span::styled(
+                thai_display_safe(&format!(
+                    "  ⊕ adds into the existing project “{}”",
+                    truncate_cols(target.title.trim(), 40)
+                )),
+                Style::default().fg(theme.status_warn),
+            )));
+            feedback.push(Line::from(Span::styled(
+                format!("    already has {}", volume_chips(&target.volumes)),
+                Style::default().fg(theme.ink_faint),
+            )));
+        } else {
+            feedback.push(Line::from(Span::styled(
+                "  ✓ creates a new project",
+                Style::default().fg(theme.status_done),
+            )));
+        }
+        f.render_widget(
+            Paragraph::new(feedback)
+                .wrap(Wrap { trim: false })
+                .style(Style::default().bg(theme.bg_panel)),
             rows[4],
         );
     }
 
     fn render_import_volume(&self, f: &mut Frame, area: Rect, theme: &Theme, st: &ImportState) {
-        // In the add-volume flow the pre-filled number is the project's next volume.
-        let vol_note = if st.lock_name {
-            Span::styled("  (next)", Style::default().fg(theme.ink_faint))
-        } else {
-            Span::raw("")
-        };
-        let lines = vec![
-            Line::raw(""),
-            Line::from(Span::styled(
-                format!("  Project:  {}", thai_display_safe(st.name.trim())),
-                Style::default().fg(theme.ink_soft),
-            )),
+        let target = st.target_project();
+        let existing = target.map(|t| t.volumes.as_slice()).unwrap_or(&[]);
+        let collides = existing.iter().any(|&(n, _)| n == st.vol);
+
+        let mut lines = vec![
+            Line::from(vec![
+                Span::styled("  Project   ", Style::default().fg(theme.ink_faint)),
+                Span::styled(
+                    thai_display_safe(st.name.trim()),
+                    Style::default().fg(theme.ink_soft),
+                ),
+                Span::styled(
+                    if target.is_some() {
+                        "  (existing)"
+                    } else {
+                        "  (new)"
+                    },
+                    Style::default().fg(theme.ink_faint),
+                ),
+            ]),
             Line::raw(""),
             Line::from(vec![
-                Span::styled("  Volume   ", Style::default().fg(theme.ink_soft)),
+                Span::styled("  Volume    ", Style::default().fg(theme.ink_faint)),
+                Span::styled("◂  ", Style::default().fg(theme.accent_soft)),
                 Span::styled(
                     format!("Vol.{:02}", st.vol),
                     Style::default()
                         .fg(theme.accent)
                         .add_modifier(Modifier::BOLD),
                 ),
-                vol_note,
+                Span::styled("  ▸", Style::default().fg(theme.accent_soft)),
             ]),
             Line::raw(""),
-            Line::from(Span::styled(
-                "  ↑↓ adjust · type a number · Enter to continue",
-                Style::default().fg(theme.ink_faint),
-            )),
+            Line::from(vec![
+                Span::styled("  Existing  ", Style::default().fg(theme.ink_faint)),
+                Span::styled(
+                    if existing.is_empty() {
+                        "none — this is the project's first volume".to_string()
+                    } else {
+                        volume_chips(existing)
+                    },
+                    Style::default().fg(theme.ink_soft),
+                ),
+            ]),
+            Line::raw(""),
         ];
+        if collides {
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "  ⚠ Vol.{:02} already exists — imported chapters are added into it",
+                    st.vol
+                ),
+                Style::default().fg(theme.status_warn),
+            )));
+        } else {
+            lines.push(Line::from(Span::styled(
+                format!("  ✓ creates a new volume (Vol_{:02})", st.vol),
+                Style::default().fg(theme.status_done),
+            )));
+        }
+        lines.push(Line::raw(""));
+        lines.push(Line::from(Span::styled(
+            "  ↑↓ / + - adjust · type a number · Enter to continue",
+            Style::default().fg(theme.ink_faint),
+        )));
         f.render_widget(
             Paragraph::new(lines).style(Style::default().bg(theme.bg_panel)),
             area,
@@ -2296,7 +2520,8 @@ impl Overlay {
                 Constraint::Length(2),
                 Constraint::Length(1), // label
                 Constraint::Length(1), // gauge
-                Constraint::Min(0),
+                Constraint::Length(2), // gap
+                Constraint::Min(0),    // background note
             ])
             .split(area);
         f.render_widget(
@@ -2311,6 +2536,14 @@ impl Overlay {
             rows[1],
         );
         render_gauge(f, indent(rows[2], 2), done, total.max(1), theme);
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                "  Esc closes this dialog — the import keeps running in the background.",
+                Style::default().fg(theme.ink_faint),
+            ))
+            .style(Style::default().bg(theme.bg_panel)),
+            rows[4],
+        );
     }
 
     fn render_export(&self, f: &mut Frame, area: Rect, theme: &Theme, st: &ExportState) {
@@ -2818,6 +3051,7 @@ impl Overlay {
                     ("h / l", "collapse · expand / focus"),
                     ("e", "edit context (Lexicon)"),
                     ("y", "volume synopsis (translate/reroll)"),
+                    ("V", "add volume (import wizard)"),
                     ("Q", "QA review (flagged issues)"),
                 ],
             ),
@@ -3194,9 +3428,97 @@ fn modal_button_at(dlg: &Dialog, inner: Rect, col: u16) -> Option<ModalButton> {
     None
 }
 
+/// Rows of wizard chrome (step rail · context line · gap) above each step body;
+/// resolve_click must mirror render_import's layout.
+const IMPORT_HEADER_ROWS: u16 = 3;
+/// Rows the pick step draws above its file list (header · gap).
+const IMPORT_PICK_LIST_OFFSET: u16 = 2;
+
+/// The wizard's step rail: done steps get a check, the current step is
+/// highlighted, future steps are dimmed. The add-volume flow hides "Name".
+fn step_rail(st: &ImportState, theme: &Theme) -> Line<'static> {
+    let steps: &[(u8, &str)] = if st.lock_name {
+        &[(0, "File"), (2, "Volume"), (3, "Synopsis")]
+    } else {
+        &[(0, "File"), (1, "Name"), (2, "Volume"), (3, "Synopsis")]
+    };
+    let mut spans = vec![Span::raw(" ")];
+    for (i, &(id, label)) in steps.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled("  ›  ", Style::default().fg(theme.rule)));
+        }
+        if st.step > id {
+            spans.push(Span::styled(
+                format!("✓ {label}"),
+                Style::default().fg(theme.status_done),
+            ));
+        } else if st.step == id {
+            spans.push(Span::styled(
+                format!("{} {label}", i + 1),
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        } else {
+            spans.push(Span::styled(
+                format!("{} {label}", i + 1),
+                Style::default().fg(theme.ink_faint),
+            ));
+        }
+    }
+    Line::from(spans)
+}
+
+/// One line of accumulated choices under the rail, so every step shows what is
+/// already decided: file · project name · volume. The file is dimmed while it is
+/// still being picked; the add-volume flow shows its fixed target up front.
+fn import_context_line(st: &ImportState, theme: &Theme) -> Line<'static> {
+    let confirmed = Style::default().fg(theme.ink_soft);
+    let pending = Style::default().fg(theme.ink_faint);
+    let sep = Span::styled("  ·  ", Style::default().fg(theme.rule));
+    let mut spans: Vec<Span> = vec![Span::raw(" ")];
+    let file = st
+        .selected_file()
+        .and_then(|p| p.file_name())
+        .and_then(|s| s.to_str())
+        .unwrap_or("—");
+    spans.push(Span::styled(
+        truncate_cols(&thai_display_safe(file), 30),
+        if st.step == 0 { pending } else { confirmed },
+    ));
+    if st.lock_name || st.step > 1 {
+        spans.push(sep.clone());
+        spans.push(Span::styled(
+            truncate_cols(&thai_display_safe(st.name.trim()), 30),
+            confirmed,
+        ));
+    }
+    if st.lock_name || st.step > 2 {
+        spans.push(sep);
+        spans.push(Span::styled(
+            format!("Vol.{:02}", st.vol),
+            Style::default().fg(theme.accent_soft),
+        ));
+    }
+    Line::from(spans)
+}
+
+/// `Vol.01 (12 ch) · Vol.02 (9 ch)` chips for a project's existing volumes.
+fn volume_chips(volumes: &[(u32, usize)]) -> String {
+    volumes
+        .iter()
+        .map(|&(n, ch)| format!("Vol.{n:02} ({ch} ch)"))
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
 /// Phase-dependent footer hints for the synopsis editor (shared by the wizard
-/// step and the standalone overlay).
-fn synopsis_hints(st: &SynopsisState) -> &'static [(&'static str, &'static str)] {
+/// step and the standalone overlay); `wizard` switches the accept label, since
+/// accepting in the wizard starts the import while standalone accept saves.
+fn synopsis_hints(
+    st: &SynopsisState,
+    wizard: bool,
+) -> &'static [(&'static str, &'static str)] {
     match st.phase {
         SynPhase::Editing => {
             if st.raw.trim().is_empty() {
@@ -3206,10 +3528,16 @@ fn synopsis_hints(st: &SynopsisState) -> &'static [(&'static str, &'static str)]
             }
         }
         SynPhase::Translating => &[("Esc", "cancel"), ("…", "translating")],
-        SynPhase::Done => &[
+        SynPhase::Done if wizard => &[
+            ("↵", "start import"),
             ("r", "reroll"),
             ("e", "edit"),
-            ("↵", "accept"),
+            ("s", "skip"),
+        ],
+        SynPhase::Done => &[
+            ("↵", "save"),
+            ("r", "reroll"),
+            ("e", "edit"),
             ("s", "skip"),
         ],
         SynPhase::Failed => &[("r", "retry"), ("e", "edit"), ("s", "skip")],
@@ -3218,12 +3546,18 @@ fn synopsis_hints(st: &SynopsisState) -> &'static [(&'static str, &'static str)]
 
 /// Render the synopsis editor body (raw input box, status line, translation) into
 /// `area`. Shared verbatim by the import wizard's step 3 and `render_synopsis`.
-fn render_synopsis_body(f: &mut Frame, area: Rect, theme: &Theme, st: &SynopsisState) {
+fn render_synopsis_body(
+    f: &mut Frame,
+    area: Rect,
+    theme: &Theme,
+    st: &SynopsisState,
+    accept_label: &str,
+) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1), // label
-            Constraint::Length(8), // raw input box (incl. border)
+            Constraint::Length(9), // raw input box (incl. border)
             Constraint::Length(1), // status line
             Constraint::Length(1), // divider
             Constraint::Min(0),    // translation / error
@@ -3232,7 +3566,7 @@ fn render_synopsis_body(f: &mut Frame, area: Rect, theme: &Theme, st: &SynopsisS
 
     f.render_widget(
         Paragraph::new(Span::styled(
-            "  เรื่องย่อเล่ม (ต้นฉบับ) / Volume synopsis — raw source",
+            thai_display_safe("  เรื่องย่อเล่ม (ไม่บังคับ) — AI ใช้เป็นบริบทตอนแปล"),
             Style::default().fg(theme.ink_soft),
         ))
         .style(Style::default().bg(theme.bg_panel)),
@@ -3254,7 +3588,7 @@ fn render_synopsis_body(f: &mut Frame, area: Rect, theme: &Theme, st: &SynopsisS
     if st.raw.is_empty() {
         text_lines.push(Line::from(vec![
             Span::styled(
-                "พิมพ์หรือวางเรื่องย่อภาษาต้นฉบับ…",
+                thai_display_safe("พิมพ์หรือวางเรื่องย่อภาษาต้นฉบับ… (เว้นว่างแล้วกด Tab เพื่อข้าม)"),
                 Style::default().fg(theme.ink_faint),
             ),
             if editing {
@@ -3302,23 +3636,29 @@ fn render_synopsis_body(f: &mut Frame, area: Rect, theme: &Theme, st: &SynopsisS
 
     let status = match st.phase {
         SynPhase::Editing => Span::styled(
-            thai_display_safe(if st.raw.trim().is_empty() {
-                "  Tab ข้าม (ไม่ใส่เรื่องย่อ) · Esc กลับ"
+            thai_display_safe(&if st.raw.trim().is_empty() {
+                "  ยังไม่มีข้อความ — Tab ข้ามขั้นตอนนี้ · Esc กลับ".to_string()
             } else {
-                "  Tab แปล · Enter ขึ้นบรรทัด · Esc กลับ"
+                format!(
+                    "  {} ตัวอักษร · Tab แปล · Enter ขึ้นบรรทัดใหม่ · Esc กลับ",
+                    st.raw.chars().count()
+                )
             }),
             Style::default().fg(theme.ink_faint),
         ),
         SynPhase::Translating => Span::styled(
-            thai_display_safe("  ◐ กำลังแปลด้วย Translator agent …"),
+            thai_display_safe("  ◐ กำลังแปลด้วย Translator agent … (Esc ยกเลิก)"),
             Style::default().fg(theme.status_working),
         ),
         SynPhase::Done => Span::styled(
-            thai_display_safe(&format!("  ✓ แปลแล้ว (roll {})", st.attempt + 1)),
+            thai_display_safe(&format!(
+                "  ✓ แปลแล้ว (รอบ {}) — Enter {accept_label} · r แปลใหม่ · e แก้ต้นฉบับ · s ข้าม",
+                st.attempt + 1
+            )),
             Style::default().fg(theme.status_done),
         ),
         SynPhase::Failed => Span::styled(
-            thai_display_safe("  ✗ แปลไม่สำเร็จ"),
+            thai_display_safe("  ✗ แปลไม่สำเร็จ — r ลองใหม่ · e แก้ต้นฉบับ · s ข้าม"),
             Style::default().fg(theme.status_failed),
         ),
     };
@@ -3440,7 +3780,7 @@ mod tests {
     fn rendered_glyphs(st: &SynopsisState) -> String {
         let theme = Theme::washi();
         let mut term = Terminal::new(TestBackend::new(80, 16)).unwrap();
-        term.draw(|f| render_synopsis_body(f, f.area(), &theme, st))
+        term.draw(|f| render_synopsis_body(f, f.area(), &theme, st, "บันทึก"))
             .unwrap();
         term.backend()
             .buffer()
@@ -3448,6 +3788,125 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect()
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn wizard(projects: Vec<ProjectRef>) -> Overlay {
+        Overlay::Import(ImportState::new(
+            vec![(PathBuf::from("cursed_blade_v03.epub"), 2_345_678)],
+            projects,
+        ))
+    }
+
+    /// An empty name no longer fails silently: Enter stays on the step and shows
+    /// a visible nudge, and the nudge clears on the next keystroke.
+    #[test]
+    fn name_step_requires_a_name_and_says_so() {
+        let mut ov = wizard(vec![]);
+        if let Overlay::Import(st) = &mut ov {
+            st.step = 1;
+            st.name.clear();
+            st.name_cursor = 0;
+        }
+        ov.handle_key(key(KeyCode::Enter));
+        let Overlay::Import(st) = &ov else {
+            panic!("overlay changed variant")
+        };
+        assert_eq!(st.step, 1, "must not advance without a name");
+        assert!(st.note.is_some(), "must surface why Enter did nothing");
+
+        ov.handle_key(key(KeyCode::Char('x')));
+        let Overlay::Import(st) = &ov else {
+            panic!("overlay changed variant")
+        };
+        assert!(st.note.is_none(), "typing must clear the nudge");
+    }
+
+    /// A name whose slug matches an existing project is detected (merge notice)
+    /// and the volume step defaults to that project's next volume, not 1.
+    #[test]
+    fn name_matching_existing_project_suggests_next_volume() {
+        let existing = ProjectRef {
+            slug: slugify("Cursed Blade"),
+            title: "Cursed Blade".to_string(),
+            volumes: vec![(1, 12), (2, 9)],
+        };
+        let mut ov = wizard(vec![existing]);
+        if let Overlay::Import(st) = &mut ov {
+            st.step = 1;
+            st.name = "Cursed Blade".to_string();
+            st.name_cursor = st.name.len();
+        }
+        ov.handle_key(key(KeyCode::Enter));
+        let Overlay::Import(st) = &ov else {
+            panic!("overlay changed variant")
+        };
+        assert!(st.target_project().is_some());
+        assert_eq!(st.step, 2);
+        assert_eq!(st.vol, 3, "should pre-pick one past the highest volume");
+    }
+
+    /// A manually adjusted volume must survive going back and forward again.
+    #[test]
+    fn user_chosen_volume_is_not_overridden_by_the_suggestion() {
+        let existing = ProjectRef {
+            slug: slugify("Cursed Blade"),
+            title: "Cursed Blade".to_string(),
+            volumes: vec![(1, 12)],
+        };
+        let mut ov = wizard(vec![existing]);
+        if let Overlay::Import(st) = &mut ov {
+            st.step = 1;
+            st.name = "Cursed Blade".to_string();
+            st.name_cursor = st.name.len();
+        }
+        ov.handle_key(key(KeyCode::Enter)); // → volume step, suggested 2
+        ov.handle_key(key(KeyCode::Up)); // user picks 3
+        ov.handle_key(key(KeyCode::Esc)); // back to name
+        ov.handle_key(key(KeyCode::Enter)); // forward again
+        let Overlay::Import(st) = &ov else {
+            panic!("overlay changed variant")
+        };
+        assert_eq!(st.vol, 3, "manual pick must not be re-suggested away");
+    }
+
+    /// Every wizard step must render without leaking raw SARA AM, including the
+    /// new chrome (step rail, context line, feedback, volume chips).
+    #[test]
+    fn import_wizard_steps_render_without_raw_sara_am() {
+        let theme = Theme::washi();
+        let existing = ProjectRef {
+            slug: slugify("Cursed Blade"),
+            title: "ดาบคำสาป".to_string(),
+            volumes: vec![(1, 3)],
+        };
+        let mut st = ImportState::new(
+            vec![(PathBuf::from("ดาบคำสาป_v01.epub"), 2_345_678)],
+            vec![existing],
+        );
+        st.name = "ดาบคำสาป".to_string();
+        st.name_cursor = st.name.len();
+        st.syn.raw = "คำสาปแห่งดาบ".to_string();
+        for step in 0..=4u8 {
+            st.step = step;
+            let mut term = Terminal::new(TestBackend::new(80, 26)).unwrap();
+            term.draw(|f| Overlay::None.render_import(f, f.area(), &theme, &st))
+                .unwrap();
+            let glyphs: String = term
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            assert!(
+                !glyphs.contains('\u{0E33}'),
+                "raw SARA AM leaked into wizard step {step}"
+            );
+        }
     }
 
     /// SARA AM (`ำ`, U+0E33) must never reach the terminal: every Thai label is
@@ -3473,3 +3932,5 @@ mod tests {
         }
     }
 }
+
+

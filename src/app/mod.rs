@@ -11,7 +11,7 @@ pub mod reader;
 pub mod shelf;
 pub mod translate;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -107,6 +107,9 @@ pub enum Action {
     },
     /// Open the import wizard pre-targeted at the open project to add the next volume.
     AddVolume,
+    /// Re-discover importable source files while the import wizard is open (its
+    /// pick step's `r`), so a freshly-dropped file shows up without reopening.
+    RescanImports,
     /// Export the given volume of the open project to the chosen deliverable
     /// formats (merged Markdown / EPUB / DOCX), written under `<root>/exports/`.
     ExportVolume {
@@ -1301,6 +1304,17 @@ impl App {
             Action::AddVolume => {
                 self.open_add_volume();
             }
+            Action::RescanImports => {
+                let files = crate::workspace::scan::find_importable_files(&working_root());
+                self.shelf.rescan(&working_root());
+                if let Overlay::Import(st) = &mut self.overlay {
+                    st.set_files(files.clone());
+                }
+                self.toast = Some(Toast::info(format!(
+                    "{} importable file(s) found",
+                    files.len()
+                )));
+            }
             Action::ExportVolume { vol, formats } => {
                 self.start_export(vol, formats);
             }
@@ -1481,11 +1495,8 @@ impl App {
                 self.create_sample_project();
             }
             Action::OpenImport => {
-                let files = crate::workspace::scan::find_importable_files(&working_root())
-                    .into_iter()
-                    .map(|(p, _)| p)
-                    .collect();
-                self.overlay = Overlay::import(files);
+                let files = crate::workspace::scan::find_importable_files(&working_root());
+                self.overlay = Overlay::import(files, &self.projects);
             }
             Action::DismissWelcome => {
                 self.mark_onboarded();
@@ -1569,11 +1580,8 @@ impl App {
             .max()
             .unwrap_or(0)
             + 1;
-        let files: Vec<PathBuf> = crate::workspace::scan::find_importable_files(&working_root())
-            .into_iter()
-            .map(|(p, _)| p)
-            .collect();
-        self.overlay = Overlay::import_into(files, title, next);
+        let files = crate::workspace::scan::find_importable_files(&working_root());
+        self.overlay = Overlay::import_into(files, &self.projects, title, next);
     }
 
     /// Permanently delete a project directory from disk (the only way to remove it
@@ -3224,6 +3232,7 @@ async fn run_epub_import(
         .collect();
     let total = doc_paths.len();
     let ws = Workspace::new(dest.clone(), vol);
+    crate::workspace::volume::set_source_metadata(&ws, epub_source_metadata(&book.metadata))?;
 
     // TOC title per content doc (first entry wins); prepended as a `# ` heading on prose
     // so real chapter names survive instead of the generic "Chapter NNN".
@@ -3378,6 +3387,29 @@ fn write_import_chapter(
         crate::workspace::translation::write_image_only(ws, chapter, body)?;
     }
     Ok(())
+}
+
+fn epub_source_metadata(metadata: &crate::epub::Metadata) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    insert_metadata(&mut out, "Title", metadata.title.as_deref());
+    if metadata.authors.is_empty() {
+        insert_metadata(&mut out, "Authors", metadata.creator.as_deref());
+    } else {
+        out.insert("Authors".to_string(), metadata.authors.join(", "));
+    }
+    insert_metadata(&mut out, "Language", metadata.language.as_deref());
+    insert_metadata(&mut out, "Publisher", metadata.publisher.as_deref());
+    insert_metadata(&mut out, "Date", metadata.date.as_deref());
+    insert_metadata(&mut out, "Description", metadata.description.as_deref());
+    insert_metadata(&mut out, "Identifier", metadata.identifier.as_deref());
+    insert_metadata(&mut out, "Cover image", metadata.cover_image_path.as_deref());
+    out
+}
+
+fn insert_metadata(out: &mut BTreeMap<String, String>, key: &str, value: Option<&str>) {
+    if let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) {
+        out.insert(key.to_string(), value.to_string());
+    }
 }
 
 /// Count `<a href="…​.xhtml…">` links in raw HTML — the in-spine TOC/nav signal.
