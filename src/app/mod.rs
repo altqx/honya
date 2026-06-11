@@ -366,8 +366,7 @@ impl App {
             shelf.select_first();
         }
         let theme = cfg.theme.build();
-        // Seed the Reader's chunk budgets from config so `s` (show source) re-derives
-        // JA chunk boundaries the same way the pipeline did.
+        // Keep Reader source chunks aligned with the pipeline budget.
         let mut reader = ReaderScreen::new();
         reader.set_chunk_cfg(cfg.chunk_target_tokens, cfg.chunk_hard_cap_tokens);
         Self {
@@ -404,11 +403,8 @@ impl App {
         }
     }
 
-    /// Check for an interrupted run (crash / power loss / hard kill) and, if one
-    /// is resumable, raise the recovery overlay. Called once from `main` after
-    /// `App::new`; kept out of `App::new` itself so test apps never touch the real
-    /// recovery file. A stale checkpoint (project gone, or already fully done) is
-    /// cleared quietly rather than prompted.
+    /// Raise the recovery overlay for a resumable checkpoint. Kept out of
+    /// `App::new` so tests never touch the real recovery file.
     pub fn init_recovery_prompt(&mut self) {
         let Some(mut cp) = crate::workspace::session::load() else {
             return;
@@ -420,9 +416,7 @@ impl App {
         }
         let (done, total) = self.recovery_progress(&cp);
         if total > 0 && done >= total {
-            // The crash landed after the last chunk committed but before the run
-            // was marked finished — nothing left to do, so don't nag. Close the
-            // run-history row too so it never remains stuck at "running".
+            // Crash after the last commit: clear the prompt and close the run row.
             self.finish_recovered_all_done(&cp, done as u32);
             crate::workspace::session::clear();
             return;
@@ -440,9 +434,7 @@ impl App {
         self.pending_recovery = Some(cp);
     }
 
-    /// Count how many of the checkpoint's chapters are already finished on disk,
-    /// using the freshly-scanned project state when it is in the current shelf and
-    /// falling back to scanning the checkpoint's absolute project path.
+    /// Count checkpoint progress from the shelf scan or checkpoint path fallback.
     fn recovery_progress(
         &self,
         cp: &crate::workspace::session::SessionCheckpoint,
@@ -476,8 +468,7 @@ impl App {
                 if let Some(title) = self.chapter_title(*chapter) {
                     self.translate.set_chapter_title(title);
                 }
-                // The pipeline popped this chapter to the queue's running head before
-                // emitting the event, so refresh now drops it from the pending panel.
+                // The pipeline already moved this chapter into the running slot.
                 self.refresh_queue_panel();
             }
             AppEvent::ChapterQueued { chapter } => {
@@ -487,9 +478,7 @@ impl App {
                 self.refresh_queue_panel();
             }
             AppEvent::VolumeStarted { vol, label } => {
-                // The project run advanced to a new volume: re-point the live
-                // volume so subsequent per-chapter events scope correctly, and
-                // surface which volume is running.
+                // Scope following chapter events to the new running volume.
                 self.running_vol = Some(*vol);
                 self.set_active_volume(*vol);
                 let name = label
@@ -1539,10 +1528,8 @@ impl App {
         self.activate_project(project, vol);
     }
 
-    /// Switch the active volume in place (no screen reset): re-point the workspace at
-    /// `vol` so Reader / Translate / synopsis / QA resolve against it. No-op if `vol`
-    /// is already active or absent. Lightweight — called as the Project tree cursor
-    /// crosses volume boundaries, so it must stay cheap and side-effect-free.
+    /// Switch the active volume without resetting screens. Called while the Project
+    /// cursor crosses volume boundaries, so it must stay cheap.
     fn set_active_volume(&mut self, vol: u32) {
         if let Some(active) = self.active.as_mut()
             && active.vol != vol
@@ -1553,9 +1540,7 @@ impl App {
         }
     }
 
-    /// Move the Project tree cursor onto `vol` and make it the active volume, so the
-    /// user lands on a freshly-imported volume (cursor and active volume stay in
-    /// sync). No-op if no project is open or `vol` is absent.
+    /// Move the Project cursor onto `vol` and make it the active volume.
     fn focus_active_volume(&mut self, vol: u32) {
         if let Some(active) = self.active.as_ref() {
             self.project.focus_volume(active, vol);
@@ -1563,9 +1548,7 @@ impl App {
         self.set_active_volume(vol);
     }
 
-    /// Open the import wizard pre-targeted at the open project to add its next
-    /// volume: the name is locked to the project's and the volume defaults to one
-    /// past its highest. The import merges in because the slug collides.
+    /// Open the import wizard for adding the open project's next volume.
     fn open_add_volume(&mut self) {
         if self.run_active {
             self.toast = Some(Toast::warn("a run is already in progress"));
@@ -1588,10 +1571,8 @@ impl App {
         self.overlay = Overlay::import_into(files, &self.projects, title, next);
     }
 
-    /// Permanently delete a project directory from disk (the only way to remove it
-    /// from the shelf, which is a live scan of the working root — there is no
-    /// separate list to drop it from). Guarded: refuses during an active run, and
-    /// `remove_project_dir` refuses any directory that is not actually a project.
+    /// Delete a project directory from disk. The shelf is a live scan, so this is
+    /// the only removal path; `remove_project_dir` guards the recursive delete.
     fn delete_project(&mut self, id: String) {
         if self.run_active {
             self.toast = Some(Toast::warn(
@@ -1599,16 +1580,14 @@ impl App {
             ));
             return;
         }
-        // The id comes from the rendered shelf (`self.projects`), so find it there;
-        // a stale entry just fails the disk guard below rather than deleting wrongly.
+        // Resolve from the rendered shelf; stale entries still hit the disk guard.
         let Some(project) = self.projects.iter().find(|p| p.id == id).cloned() else {
             self.toast = Some(Toast::error(format!("project {id} not found")));
             return;
         };
         match remove_project_dir(&project.dir) {
             Ok(()) => {
-                // Close it if it was the open project, so we don't keep a dangling
-                // workspace pointed at a now-deleted directory.
+                // Close the workspace if it pointed at the deleted directory.
                 if self.active.as_ref().is_some_and(|a| a.project.id == id) {
                     self.active = None;
                     self.screen = Screen::Shelf;
@@ -1626,11 +1605,8 @@ impl App {
         }
     }
 
-    /// Make `project` the active project on volume `vol`: build its LLM client (if a
-    /// key is configured), reset the per-project screens, and land on the Project
-    /// tab. Always succeeds — a missing key only disables translation, not browsing,
-    /// so the client is left `None` and built lazily once a key is set. Returns
-    /// `true` for callers that branch on activation.
+    /// Open `project` on `vol`, reset per-project screens, and land on Project.
+    /// Missing keys disable translation only; browsing still works.
     fn activate_project(&mut self, project: Project, vol: u32) -> bool {
         let models = project
             .models
@@ -1638,8 +1614,7 @@ impl App {
             .unwrap_or_else(|| self.cfg.models.clone());
         let workspace = Workspace::new(project.dir.clone(), vol);
         let client = crate::build_client(&self.cfg).ok();
-        // Distinguish "no key configured" (the expected offline case) from a client
-        // that failed to build despite a key — only the former drives the hint toast.
+        // Only the no-key case gets the Settings hint toast.
         let no_key = crate::config::resolve_api_key(&self.cfg).is_none();
         let id = project.id.clone();
         self.active = Some(ActiveProject {
@@ -1652,8 +1627,7 @@ impl App {
         self.lexicon.reset();
         self.project = ProjectScreen::new();
         self.screen = Screen::Project;
-        // Reconcile STYLE.md / PROJECT.md with the freshly-scanned progress, so a
-        // project finished in a previous session no longer shows a stale "draft".
+        // Clear stale "draft" status from projects finished in another session.
         self.persist_project_status();
         self.toast = Some(if no_key {
             Toast::info(format!(
@@ -2468,7 +2442,9 @@ impl App {
         };
         // Rebuild the active client so a newly-added/changed/cleared key — or a new
         // service tier (snapshotted into ClientConfig) — takes hold without reopening.
-        if (key_changed || tier_changed) && let Some(active) = self.active.as_mut() {
+        if (key_changed || tier_changed)
+            && let Some(active) = self.active.as_mut()
+        {
             active.client = crate::build_client(&self.cfg).ok();
         }
         match crate::config::save(&self.cfg) {
@@ -2905,12 +2881,8 @@ impl App {
     }
 }
 
-/// (done, total) prose chapters across every volume — the recovery progress for a
-/// whole-project run, whose queue spans all volumes. Completeness is re-derived
-/// from disk (every chunk committed), NOT from the scanned status: a chapter
-/// interrupted mid-way scans as `Done`/`NeedsReview` (any non-empty translated
-/// file) yet is missing chunks, and must NOT count as done or the recovery prompt
-/// would silently clear a run with real work left.
+/// Whole-project recovery progress. Completeness comes from chunk markers on disk,
+/// not scanned status, because partial translated files can scan as done.
 fn project_prose_progress(project: &Project, cfg: &AppConfig) -> (usize, usize) {
     let mut done = 0;
     let mut total = 0;
@@ -2929,22 +2901,15 @@ fn project_prose_progress(project: &Project, cfg: &AppConfig) -> (usize, usize) 
     (done, total)
 }
 
-/// Whether a chapter's translated output is fully present on disk: every chunk the
-/// raw produces has a committed marker (clean or flagged-needs-review both count as
-/// "written"). This is the authoritative completeness signal — the scanned
-/// `ChapterStatus` cannot distinguish a finished chapter from one interrupted with
-/// only some chunks committed (the translated file is non-empty either way), so any
-/// "skip if done" decision for the whole-project run must consult this instead.
-/// Mirrors `pipeline::process_chapter`'s own resume/skip accounting.
+/// True when every source chunk has a translated marker on disk. This mirrors the
+/// pipeline's resume accounting and avoids trusting partial translated files.
 fn chapter_complete_on_disk(ws: &Workspace, chapter: u32, cfg: &AppConfig) -> bool {
     let raw = std::fs::read_to_string(ws.raw(chapter)).unwrap_or_default();
     if raw.trim().is_empty() {
-        // No source to translate → nothing outstanding.
         return true;
     }
     let translated = std::fs::read_to_string(ws.translated(chapter)).unwrap_or_default();
-    // Image-only / no-prose chapters are written straight to translated/ at import;
-    // their completeness is just "the file exists".
+    // Image-only chapters are written directly to translated/ during import.
     if crate::cleanse::is_image_only(&raw) {
         return !translated.trim().is_empty();
     }
@@ -3425,7 +3390,11 @@ fn epub_source_metadata(metadata: &crate::epub::Metadata) -> BTreeMap<String, St
     insert_metadata(&mut out, "Date", metadata.date.as_deref());
     insert_metadata(&mut out, "Description", metadata.description.as_deref());
     insert_metadata(&mut out, "Identifier", metadata.identifier.as_deref());
-    insert_metadata(&mut out, "Cover image", metadata.cover_image_path.as_deref());
+    insert_metadata(
+        &mut out,
+        "Cover image",
+        metadata.cover_image_path.as_deref(),
+    );
     out
 }
 

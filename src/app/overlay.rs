@@ -1303,7 +1303,6 @@ impl Overlay {
             return Action::None;
         };
         match st.step {
-            // Step 0: pick source file.
             0 => match key.code {
                 KeyCode::Esc => Action::CloseOverlay,
                 KeyCode::Char('r') | KeyCode::Char('R') => Action::RescanImports,
@@ -1353,7 +1352,6 @@ impl Overlay {
                 }
                 _ => Action::None,
             },
-            // Step 1: name.
             1 => {
                 if input::handle(&mut st.name, &mut st.name_cursor, key, EditOpts::default())
                     != Edited::Ignored
@@ -1381,7 +1379,6 @@ impl Overlay {
                     _ => Action::None,
                 }
             }
-            // Step 2: volume.
             2 => match key.code {
                 KeyCode::Esc => {
                     st.step = if st.lock_name { 0 } else { 1 };
@@ -1414,7 +1411,6 @@ impl Overlay {
                 }
                 _ => Action::None,
             },
-            // Step 3: synopsis.
             3 => {
                 let intent = handle_synopsis_keys(&mut st.syn, key);
                 match intent {
@@ -1459,7 +1455,6 @@ impl Overlay {
                     }
                 }
             }
-            // Step 4: importing.
             _ => match key.code {
                 KeyCode::Esc => Action::CloseOverlay,
                 _ => Action::None,

@@ -2,20 +2,20 @@
 
 use std::path::PathBuf;
 
+use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
-use ratatui::Frame;
 
 use crate::model::{ChapterKind, ChapterStatus, Project};
-use crate::theme::{self, status_glyph, Theme};
+use crate::theme::{self, Theme, status_glyph};
 use crate::ui::mouse::{MouseGesture, MouseInput};
 use crate::ui::text::{col_width, pad_to_cols, thai_display_safe, truncate_cols};
 
-use super::overlay::Overlay;
 use super::Action;
+use super::overlay::Overlay;
 
 /// Selection covers `projects.len()` project rows plus the trailing import row.
 pub struct ShelfScreen {
@@ -158,7 +158,10 @@ impl ShelfScreen {
                 self.list.select(Some(target));
                 if double || already {
                     if target == import_idx {
-                        return Action::show_overlay(Overlay::import(self.import_files(), projects));
+                        return Action::show_overlay(Overlay::import(
+                            self.import_files(),
+                            projects,
+                        ));
                     }
                     if let Some(p) = projects.get(target) {
                         return Action::OpenProject(p.id.clone());
@@ -397,7 +400,7 @@ fn project_row(p: &Project, selected: bool, name_w: usize, theme: &Theme) -> Lis
     ListItem::new(Line::from(spans))
 }
 
-/// Project-level glyph: the "least finished" interesting state wins (failed > working > pending > done).
+/// Project glyph: the most urgent state wins.
 fn overall_glyph(p: &Project, theme: &Theme) -> (char, ratatui::style::Color) {
     let mut any_working = false;
     let mut any_failed = false;
@@ -488,11 +491,7 @@ fn touched_label(p: &Project) -> String {
 }
 
 fn plural(n: usize) -> &'static str {
-    if n == 1 {
-        ""
-    } else {
-        "s"
-    }
+    if n == 1 { "" } else { "s" }
 }
 
 pub(crate) fn human_size(bytes: u64) -> String {
@@ -514,8 +513,8 @@ mod tests {
     use super::*;
     use crate::model::ThemeId;
     use crate::ui::mouse::{MouseGesture, MouseInput};
-    use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     fn proj(id: &str) -> Project {
         Project {

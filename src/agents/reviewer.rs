@@ -7,8 +7,8 @@ use crate::llm::structured::{chat_structured, reviewer_schema};
 use crate::llm::{ChatRequest, Message, Usage};
 use crate::model::ReviewerOut;
 
-/// Review one translated chunk against its source. `reference_ctx` is the same
-/// glossary/pronoun/style context the Translator saw, so checklist items 3 & 4 are enforceable. Returns verdict + token `Usage`.
+/// Review one translated chunk against its source. `reference_ctx` matches the
+/// Translator context so glossary/pronoun/style checks are enforceable.
 pub async fn review_chunk(
     client: &dyn LlmClient,
     model: &str,

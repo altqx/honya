@@ -226,11 +226,9 @@ fn theme_picker_preview_commit_and_revert() {
     use crate::app::overlay::Overlay;
     use crate::model::ThemeId;
 
-    // Serialize against every other env-mutating test (shared process `environ`).
     let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
-    // Redirect config writes to a throwaway dir so committing a theme can't
-    // clobber the real ~/.config/honya/config.json.
+    // Redirect config writes away from the real user config.
     let tmp = std::env::temp_dir().join(format!("honya-test-cfg-{}", std::process::id()));
     unsafe {
         std::env::set_var("XDG_CONFIG_HOME", &tmp);
@@ -248,20 +246,17 @@ fn theme_picker_preview_commit_and_revert() {
         "fresh config defaults to Washi"
     );
 
-    // Open via Ctrl-T.
     app.on_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
     assert!(
         matches!(app.overlay, Overlay::Theme(_)),
         "Ctrl-T opens picker"
     );
 
-    // Navigate down once: the live theme must change, but config stays put.
     let baseline_bg = app.theme.bg;
     app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::empty()));
     assert_ne!(app.theme.bg, baseline_bg, "preview recolors the live theme");
     assert_eq!(app.cfg.theme, ThemeId::Washi, "preview does not persist");
 
-    // Esc reverts the live theme back to the saved one and closes.
     app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
     assert!(
         matches!(app.overlay, Overlay::None),
@@ -269,7 +264,6 @@ fn theme_picker_preview_commit_and_revert() {
     );
     assert_eq!(app.theme.bg, baseline_bg, "Esc reverts the preview");
 
-    // Reopen, move down twice, and commit with Enter — config persists.
     app.on_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
     app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::empty()));
     app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::empty()));
@@ -289,7 +283,6 @@ fn theme_picker_preview_commit_and_revert() {
         "live theme matches commit"
     );
 
-    // Restore the process-wide env so no later config-touching test inherits it.
     unsafe {
         std::env::remove_var("XDG_CONFIG_HOME");
     }
@@ -305,15 +298,12 @@ fn welcome_menu_returns_expected_actions() {
     let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::empty());
     let mk = || Overlay::welcome(false, false);
 
-    // Row 0 → create the sample project.
     assert!(matches!(mk().handle_key(enter), Action::CreateSample));
 
-    // Row 1 → open import.
     let mut ov = mk();
     ov.handle_key(down);
     assert!(matches!(ov.handle_key(enter), Action::OpenImport));
 
-    // Row 2 → open Settings (focused on the key field).
     let mut ov = mk();
     ov.handle_key(down);
     ov.handle_key(down);
@@ -321,19 +311,16 @@ fn welcome_menu_returns_expected_actions() {
         matches!(ov.handle_key(enter), Action::ShowOverlay(b) if matches!(*b, Overlay::Settings(_)))
     );
 
-    // Row 3 → dismiss.
     let mut ov = mk();
     for _ in 0..3 {
         ov.handle_key(down);
     }
     assert!(matches!(ov.handle_key(enter), Action::DismissWelcome));
 
-    // Up from row 0 wraps to the last row (dismiss).
     let mut ov = mk();
     ov.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::empty()));
     assert!(matches!(ov.handle_key(enter), Action::DismissWelcome));
 
-    // Esc dismisses outright.
     assert!(matches!(
         mk().handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty())),
         Action::DismissWelcome
@@ -443,7 +430,6 @@ fn settings_ctrl_u_toggles_update_mode_and_saves_it() {
         _ => panic!("settings overlay"),
     }
 
-    // Enter carries the toggled mode out for persistence.
     match ov.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty())) {
         Action::SaveSettings { update_mode, .. } => assert_eq!(update_mode, UpdateMode::Notify),
         other => panic!("expected SaveSettings, got {other:?}"),
@@ -512,7 +498,6 @@ fn settings_retries_field_is_digit_only_and_clamped() {
             update_mode: crate::model::UpdateMode::Auto,
             release_channel: crate::model::ReleaseChannel::Stable,
             service_tier: None,
-            // Focus the retries field (index 5).
             max_attempts: String::new(),
             loop_stall_secs: String::new(),
             max_chapter_retranslates: String::new(),
@@ -643,7 +628,6 @@ fn onboarding_shows_welcome_on_first_run_only() {
         models: None,
     };
 
-    // Fresh + empty + not onboarded → Welcome opens and the flag is persisted.
     let mut app = fresh_app();
     app.projects.clear();
     app.cfg.onboarded = false;
@@ -655,7 +639,6 @@ fn onboarding_shows_welcome_on_first_run_only() {
     );
     assert!(app.cfg.onboarded, "shown once → marked onboarded");
 
-    // Already onboarded → nothing opens.
     let mut app = fresh_app();
     app.projects.clear();
     app.cfg.onboarded = true;
@@ -666,7 +649,6 @@ fn onboarding_shows_welcome_on_first_run_only() {
         "onboarded → no Welcome"
     );
 
-    // Returning user (has projects) without the flag → quietly marked, no Welcome.
     let mut app = fresh_app();
     app.cfg.onboarded = false;
     app.overlay = Overlay::None;
@@ -678,7 +660,6 @@ fn onboarding_shows_welcome_on_first_run_only() {
     );
     assert!(app.cfg.onboarded, "returning user marked onboarded");
 
-    // Another overlay already up (recovery prompt) keeps priority.
     let mut app = fresh_app();
     app.projects.clear();
     app.cfg.onboarded = false;
@@ -702,13 +683,11 @@ fn remove_project_dir_guards_non_projects() {
     let base = std::env::temp_dir().join(format!("honya-rmguard-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
 
-    // A directory without PROJECT.md must be refused and left intact.
     let bystander = base.join("not-a-project");
     std::fs::create_dir_all(&bystander).unwrap();
     assert!(crate::app::remove_project_dir(&bystander).is_err());
     assert!(bystander.exists(), "non-project directory is not deleted");
 
-    // A real project directory (has PROJECT.md) is removed wholesale.
     let proj = base.join("re-zero");
     std::fs::create_dir_all(proj.join("Vol_01/translated")).unwrap();
     std::fs::write(proj.join("PROJECT.md"), "# Re:Zero\n").unwrap();
@@ -741,13 +720,11 @@ fn shelf_delete_confirm_removes_project() {
     }];
     app.shelf.select_first();
 
-    // `d` raises a confirm modal whose confirm action is the real delete.
     app.on_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::empty()));
     assert!(
         matches!(app.overlay, Overlay::Modal(_)),
         "delete asks for confirmation first"
     );
-    // `y` confirms → the directory is gone and the overlay closes.
     app.on_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::empty()));
     assert!(
         !dir.exists(),
@@ -793,14 +770,12 @@ fn recovery_prompt_appears_and_discards() {
     unsafe {
         std::env::set_var("HONYA_SESSION_FILE", &session_file);
     }
-    // Fail loud rather than touch the real recovery file.
     assert_eq!(
         session::path(),
         session_file,
         "recovery path must be redirected into the throwaway dir"
     );
 
-    // A real, resumable project on disk (PROJECT.md present).
     let project_dir = tmp.join("re-zero");
     crate::workspace::scaffold::create_project(&project_dir, "Re:Zero", &ModelSet::default(), 1)
         .expect("scaffold project");
@@ -825,7 +800,6 @@ fn recovery_prompt_appears_and_discards() {
         "the checkpoint is held pending the user's choice"
     );
 
-    // Discard: clears both the in-memory pending state and the on-disk file.
     app.on_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::empty()));
     assert!(
         matches!(app.overlay, Overlay::None),
@@ -1489,8 +1463,7 @@ async fn end_to_end_import_and_mock_translate() {
     };
     run_pipeline(ctx, vec![1]).await.expect("run_pipeline");
 
-    // Drain the event channel and confirm cost accounting reached the UI: the
-    // last UsageUpdate must carry the BYOK-aware running total, not a hardcoded 0.
+    // Last UsageUpdate must carry BYOK-aware running totals.
     let mut last_run = None;
     let mut chapter_delta = None;
     while let Ok(ev) = rx.try_recv() {
@@ -1508,17 +1481,14 @@ async fn end_to_end_import_and_mock_translate() {
         "run cost should accumulate from API usage, got {}",
         last_run.cost_usd
     );
-    // Total tokens must accumulate from prompt+completion across every call.
     assert!(
         last_run.tokens.total > 0,
         "run token total should accumulate"
     );
 
-    // The chapter's spend is emitted for the in-memory roll-up...
     let delta = chapter_delta.expect("ChapterUsage emitted for chapter 1");
     assert!(delta.cost_usd > 0.0 && delta.tokens.total > 0);
 
-    // ...and persisted into VOLUME.md's data block (per-chapter, cumulative).
     let vol_data = crate::workspace::volume::load(&Workspace::new(project_root.clone(), 1));
     let ch1 = vol_data
         .chapter_usage
@@ -1533,13 +1503,10 @@ async fn end_to_end_import_and_mock_translate() {
     let out = std::fs::read_to_string(&translated).expect("translated file written");
     assert!(out.contains("honya:chunk"), "chunk marker present: {out}");
     assert!(out.contains("ข้อความแปลจำลอง"), "mock Thai appended: {out}");
-    // VOLUME.md re-renders a Usage & Cost table from the data block.
     let vol_md = std::fs::read_to_string(project_root.join("Vol_01/VOLUME.md")).unwrap();
     assert!(vol_md.contains("Usage & Cost"), "usage table rendered");
 
-    // Re-scan from disk: the persisted usage must round-trip into the in-memory
-    // model and roll up to identical volume and project totals (the path that
-    // makes per-project cost survive across sessions).
+    // Re-scan proves per-project cost survives across sessions.
     let projects = crate::workspace::scan::scan_projects(&base);
     let project = projects
         .iter()

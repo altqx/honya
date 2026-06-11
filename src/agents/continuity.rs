@@ -14,11 +14,11 @@ static CHUNK_MARKER: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"<!--\s*honya:chunk\s+\d+\s*-->").expect("chunk-marker regex is valid")
 });
 
-/// Sentence terminators for continuity: western `.!?…` and east-asian `。！？`. Thai `ฯ`/`ๆ` are word-level, deliberately excluded.
+/// Sentence terminators for continuity. Thai `ฯ`/`ๆ` are word-level, so excluded.
 static TERMINATOR: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"[.!?。！？…]+[”’」』）】\)\]]*").expect("terminator regex is valid"));
 
-/// Char ceiling on the continuity tail: Thai often lacks terminators, so a lone "sentence" can be a whole long line; bound by length so the prompt can't balloon.
+/// Bounds Thai tails when missing terminators make one "sentence" very long.
 const MAX_CONTINUITY_CHARS: usize = 1200;
 
 /// Return the last `n` non-empty Thai sentences of `chapter` (in order) to seed
@@ -40,7 +40,7 @@ pub async fn last_thai_sentences(ws: &Workspace, chapter: u32, n: usize) -> Vec<
     let start = len.saturating_sub(n);
     let mut tail = sentences[start..].to_vec();
 
-    // Drop oldest sentences until the tail fits, then clamp a lone over-long one to its most-recent chars.
+    // Drop old sentences first; clamp one over-long survivor to its newest chars.
     while tail.len() > 1 && joined_chars(&tail) > MAX_CONTINUITY_CHARS {
         tail.remove(0);
     }

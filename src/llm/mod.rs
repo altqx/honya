@@ -231,7 +231,7 @@ pub struct FunctionCall {
 }
 
 impl FunctionCall {
-    /// Decode the JSON-string `arguments`; fully-qualified `Result` dodges the crate's `Result<T>` alias.
+    /// Decode `arguments` without using the crate's `Result<T>` alias.
     pub fn parse_args<T: DeserializeOwned>(&self) -> std::result::Result<T, serde_json::Error> {
         serde_json::from_str(&self.arguments)
     }

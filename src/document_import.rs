@@ -115,7 +115,9 @@ fn convert_raw(path: &Path, on_progress: &impl Fn(&str)) -> anyhow::Result<RawCo
 fn convert_pdf(path: &Path, on_progress: &impl Fn(&str)) -> anyhow::Result<RawConversion> {
     on_progress("extracting PDF text");
     let data = std::fs::read(path)?;
-    let extracted = catch_unwind(AssertUnwindSafe(|| pdf_extract::extract_text_from_mem(&data)));
+    let extracted = catch_unwind(AssertUnwindSafe(|| {
+        pdf_extract::extract_text_from_mem(&data)
+    }));
     let text = match extracted {
         Ok(Ok(text)) => text,
         Ok(Err(e)) => bail!("failed to extract text from PDF: {e}"),
@@ -124,8 +126,9 @@ fn convert_pdf(path: &Path, on_progress: &impl Fn(&str)) -> anyhow::Result<RawCo
 
     if text.trim().is_empty() {
         return Ok(RawConversion {
-            markdown: "<!-- This PDF appears to be scanned or image-only; no text layer was found. -->"
-                .to_string(),
+            markdown:
+                "<!-- This PDF appears to be scanned or image-only; no text layer was found. -->"
+                    .to_string(),
             title: None,
             degraded: true,
         });
@@ -284,7 +287,10 @@ fn parse_docx_style_names(xml: &str) -> HashMap<String, String> {
         return HashMap::new();
     };
     let mut out = HashMap::new();
-    for style in doc.descendants().filter(|n| n.is_element() && local(*n) == "style") {
+    for style in doc
+        .descendants()
+        .filter(|n| n.is_element() && local(*n) == "style")
+    {
         let Some(id) = attr_local(style, "styleId") else {
             continue;
         };
@@ -336,9 +342,15 @@ fn render_docx_table(
     style_names: &HashMap<String, String>,
 ) -> String {
     let mut rows = Vec::new();
-    for tr in table.children().filter(|n| n.is_element() && local(*n) == "tr") {
+    for tr in table
+        .children()
+        .filter(|n| n.is_element() && local(*n) == "tr")
+    {
         let mut row = Vec::new();
-        for tc in tr.children().filter(|n| n.is_element() && local(*n) == "tc") {
+        for tc in tr
+            .children()
+            .filter(|n| n.is_element() && local(*n) == "tc")
+        {
             let cell = tc
                 .children()
                 .filter(|n| n.is_element() && local(*n) == "p")
@@ -364,7 +376,10 @@ fn render_docx_paragraph(
         match local(child) {
             "r" => out.push_str(&render_docx_run(child)),
             "hyperlink" => {
-                for run in child.children().filter(|n| n.is_element() && local(*n) == "r") {
+                for run in child
+                    .children()
+                    .filter(|n| n.is_element() && local(*n) == "r")
+                {
                     out.push_str(&render_docx_run(run));
                 }
             }
@@ -668,7 +683,8 @@ mod tests {
 
     #[test]
     fn markitdown_text_conversion_gets_honya_cleanup() {
-        let dir = std::env::temp_dir().join(format!("honya_markitdown_text_{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("honya_markitdown_text_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("sample.txt");

@@ -1338,7 +1338,11 @@ mod tests {
     #[test]
     fn theme_fingerprint_differs_across_themes_and_is_stable() {
         let washi = theme_fingerprint(&Theme::washi());
-        assert_eq!(washi, theme_fingerprint(&Theme::washi()), "stable per theme");
+        assert_eq!(
+            washi,
+            theme_fingerprint(&Theme::washi()),
+            "stable per theme"
+        );
         assert_ne!(
             washi,
             theme_fingerprint(&Theme::sumi()),

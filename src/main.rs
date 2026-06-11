@@ -1,9 +1,5 @@
 //! honya 本屋 — a Ratatui TUI for AI-assisted Japanese→Thai light-novel translation.
-//!
-//! Entry point: load config, build the App, init the terminal, and run an async
-//! `select!` event loop that fans in (a) an animation tick, (b) terminal input via
-//! crossterm's EventStream, and (c) background pipeline/import events over an mpsc
-//! channel. The terminal is always restored before any error is printed.
+//! Owns config load, terminal lifecycle, and async event fan-in.
 
 mod agents;
 mod app;
@@ -62,20 +58,13 @@ async fn main() -> anyhow::Result<()> {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
     let mut app = App::new(EventTx(tx), cfg);
 
-    // Offer to resume a run that a crash / power loss left interrupted (raises the
-    // recovery overlay over the Shelf when a resumable checkpoint is found).
+    // Raises the recovery overlay when a resumable checkpoint exists.
     app.init_recovery_prompt();
 
-    // First-run onboarding happens in-app (not via a pre-TUI prompt): the Welcome
-    // overlay guides setting an API key, creating the sample, or importing. It
-    // defers to a pending recovery prompt and is skipped for returning users.
+    // In-app onboarding defers to crash recovery and skips returning users.
     app.init_onboarding();
 
-    // Best-effort background update handling; never blocks startup. Auto mode
-    // (the default) installs the newest build for the configured channel in
-    // place — a release binary on stable, a local source build on dev — and
-    // flags a restart; Notify mode only surfaces the "honya update" hint. Both
-    // honor HONYA_NO_UPDATE_CHECK (it makes the check a no-op).
+    // Best-effort update handling; honors HONYA_NO_UPDATE_CHECK and never blocks startup.
     update::spawn_background_update(app.tx.clone(), app.cfg.update_mode, app.cfg.release_channel);
 
     // Restore the terminal before panic output; normal teardown does not run on panic.
@@ -87,8 +76,7 @@ async fn main() -> anyhow::Result<()> {
     }));
 
     let mut terminal = ratatui::init();
-    // Mouse reporting is opt-in; enable it so the TUI is fully click/scroll
-    // driven. Best-effort — a terminal that rejects it just stays keyboard-only.
+    // Best-effort mouse support; terminals that reject it stay keyboard-only.
     let _ = execute!(std::io::stdout(), EnableMouseCapture);
     let result = run(&mut terminal, &mut app, rx).await;
     let _ = execute!(std::io::stdout(), DisableMouseCapture);

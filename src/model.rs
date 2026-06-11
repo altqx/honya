@@ -1,4 +1,4 @@
-//! The single source of truth for honya's domain + event types; nothing here depends on other modules.
+//! Domain and event types shared across honya.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

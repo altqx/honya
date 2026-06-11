@@ -292,7 +292,7 @@ struct GetCharacterArgs {
     id: Option<String>,
 }
 
-/// Derive a stable id from a name when the model omits `id`; non-alphanumeric runs collapse to `-`, CJK kept verbatim.
+/// Derive a stable fallback id; CJK is kept verbatim.
 fn slugify(name: &str) -> String {
     let mut out = String::new();
     let mut prev_dash = false;

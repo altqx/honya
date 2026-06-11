@@ -26,8 +26,8 @@ use std::sync::OnceLock;
 
 use ego_tree::NodeRef;
 use regex::Regex;
-use scraper::node::Node;
 use scraper::Html;
+use scraper::node::Node;
 
 /// The fixed chapter-relative prefix for relocated images (hard spec).
 const IMAGE_PREFIX: &str = "../../images/";

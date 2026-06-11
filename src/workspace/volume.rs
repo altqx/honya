@@ -9,8 +9,8 @@ use crate::model::{
     ChapterRun, ContinuityNote, ReaderAnnotation, ReaderBookmark, RunHistoryEntry,
     RunHistoryStatus, UsageStats, VolumeData,
 };
-use crate::workspace::data_block;
 use crate::workspace::Workspace;
+use crate::workspace::data_block;
 
 /// Load the volume metadata (defaults when VOLUME.md is absent/empty).
 pub fn load(ws: &Workspace) -> VolumeData {

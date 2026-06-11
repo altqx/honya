@@ -7,12 +7,12 @@
 use std::cell::RefCell;
 use std::hash::{Hash, Hasher};
 
+use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
-use ratatui::Frame;
 
 use chrono::{DateTime, Utc};
 
@@ -21,8 +21,8 @@ use crate::theme::{self, Theme};
 use crate::ui::mouse::{MouseGesture, MouseInput};
 use crate::workspace::Workspace;
 
-use super::overlay::Overlay;
 use super::Action;
+use super::overlay::Overlay;
 
 /// Layout modes for `o`.
 const MODE_SPLIT: u8 = 0;
@@ -1394,11 +1394,7 @@ fn short_dt(dt: DateTime<Utc>) -> String {
 }
 
 fn yesno(b: bool) -> &'static str {
-    if b {
-        "y"
-    } else {
-        "n"
-    }
+    if b { "y" } else { "n" }
 }
 
 impl Default for ReaderScreen {
