@@ -2116,7 +2116,9 @@ impl App {
             })
             .unwrap_or_default();
         if chapters.is_empty() {
-            self.toast = Some(Toast::info(format!("Vol.{vol:02} already fully translated")));
+            self.toast = Some(Toast::info(format!(
+                "Vol.{vol:02} already fully translated"
+            )));
             return;
         }
         self.overlay = Overlay::confirm(

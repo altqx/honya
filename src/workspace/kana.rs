@@ -108,15 +108,32 @@ fn digraph(base: char, small: char) -> Option<String> {
         return Some("di".to_string());
     }
     let lead = match base {
-        'き' => "ky", 'ぎ' => "gy", 'に' => "ny", 'ひ' => "hy",
-        'び' => "by", 'ぴ' => "py", 'み' => "my", 'り' => "ry",
-        'し' => "sh", 'じ' => "j", 'ち' => "ch", 'ぢ' => "j",
-        'ふ' => "f", 'ゔ' => "v", 'う' => "w",
+        'き' => "ky",
+        'ぎ' => "gy",
+        'に' => "ny",
+        'ひ' => "hy",
+        'び' => "by",
+        'ぴ' => "py",
+        'み' => "my",
+        'り' => "ry",
+        'し' => "sh",
+        'じ' => "j",
+        'ち' => "ch",
+        'ぢ' => "j",
+        'ふ' => "f",
+        'ゔ' => "v",
+        'う' => "w",
         _ => return None,
     };
     let tail = match small {
-        'ゃ' => "ya", 'ゅ' => "yu", 'ょ' => "yo",
-        'ぁ' => "a", 'ぃ' => "i", 'ぅ' => "u", 'ぇ' => "e", 'ぉ' => "o",
+        'ゃ' => "ya",
+        'ゅ' => "yu",
+        'ょ' => "yo",
+        'ぁ' => "a",
+        'ぃ' => "i",
+        'ぅ' => "u",
+        'ぇ' => "e",
+        'ぉ' => "o",
         _ => return None,
     };
     // Every lead already encodes the glide (ky, sh, j …): きゃ → kya, しゃ → sha.

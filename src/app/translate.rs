@@ -8,7 +8,7 @@ use std::hash::{Hash, Hasher};
 
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
@@ -737,6 +737,7 @@ impl TranslateScreen {
                 theme.ink_faint,
             ),
         };
+        let status_title = self.pipeline_status_title(area.width, &title, theme);
         let block = Block::default()
             .borders(Borders::ALL)
             .border_set(theme::hairline_set())
@@ -746,6 +747,11 @@ impl TranslateScreen {
                 Style::default().fg(accent).add_modifier(Modifier::BOLD),
             ))
             .style(Style::default().bg(theme.bg_panel));
+        let block = if let Some(status_title) = status_title {
+            block.title(status_title)
+        } else {
+            block
+        };
         let inner = block.inner(area);
         f.render_widget(block, area);
 
@@ -980,27 +986,32 @@ impl TranslateScreen {
             .scroll((scroll, 0))
             .style(Style::default().bg(theme.bg_panel));
         f.render_widget(para, inner);
+    }
 
-        // Last-note line at the very bottom, if there's room.
-        if inner.height >= 2 && !self.last_note.is_empty() {
-            let note_area = Rect {
-                x: inner.x,
-                y: inner.y + inner.height - 1,
-                width: inner.width,
-                height: 1,
-            };
-            f.render_widget(
-                Paragraph::new(Span::styled(
-                    format!(
-                        " ✓ {}",
-                        truncate_cols(&self.last_note, inner.width.saturating_sub(4) as usize)
-                    ),
-                    Style::default().fg(theme.status_done),
-                ))
-                .style(Style::default().bg(theme.bg_panel)),
-                note_area,
-            );
+    fn pipeline_status_title(
+        &self,
+        width: u16,
+        left_title: &str,
+        theme: &Theme,
+    ) -> Option<Line<'static>> {
+        if self.last_note.is_empty() {
+            return None;
         }
+
+        let title_area = width.saturating_sub(2) as usize;
+        let budget = title_area.saturating_sub(col_width(left_title) + 2);
+        let note_budget = budget.saturating_sub(col_width(" ✓  "));
+        if note_budget < 8 {
+            return None;
+        }
+
+        Some(
+            Line::from(Span::styled(
+                format!(" ✓ {} ", truncate_cols(&self.last_note, note_budget)),
+                Style::default().fg(theme.status_done),
+            ))
+            .alignment(Alignment::Right),
+        )
     }
 
     pub fn hints(&self) -> &'static [(&'static str, &'static str)] {

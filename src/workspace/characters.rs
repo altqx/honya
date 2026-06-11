@@ -909,7 +909,11 @@ mod tests {
     #[test]
     fn get_query_is_whitespace_insensitive() {
         let (base, ws) = temp_ws("get_spaced");
-        upsert(&ws, ch("shuka", "桐島朱夏", "คิริชิมะ ชูคะ", Some("Kirishima Shuka"))).unwrap();
+        upsert(
+            &ws,
+            ch("shuka", "桐島朱夏", "คิริชิมะ ชูคะ", Some("Kirishima Shuka")),
+        )
+        .unwrap();
 
         assert_eq!(get(&ws, Some("桐島 朱夏"), None).len(), 1);
         assert_eq!(get(&ws, Some("kirishima shuka"), None).len(), 1);
@@ -929,7 +933,11 @@ mod tests {
 
         assert_eq!(get(&ws, Some("ののか"), None).len(), 1, "hiragana reading");
         assert_eq!(get(&ws, Some("ノノカ"), None).len(), 1, "katakana reading");
-        assert_eq!(get(&ws, Some("sumomo"), None).len(), 1, "romaji vs kana name");
+        assert_eq!(
+            get(&ws, Some("sumomo"), None).len(),
+            1,
+            "romaji vs kana name"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 

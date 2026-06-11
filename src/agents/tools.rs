@@ -947,8 +947,14 @@ mod tests {
     async fn get_character_summary_names_the_query() {
         let (base, ws) = temp_ws("char_get_summary");
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let result =
-            dispatch_tool(&ws, &EventTx(tx), 3, "get_character", r#"{"query":"乃々香"}"#).await;
+        let result = dispatch_tool(
+            &ws,
+            &EventTx(tx),
+            3,
+            "get_character",
+            r#"{"query":"乃々香"}"#,
+        )
+        .await;
         assert!(result.ok);
 
         let mut summary = String::new();

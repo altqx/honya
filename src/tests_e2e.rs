@@ -1812,9 +1812,12 @@ fn whole_volume_translate_requeues_legacy_partial_chapter() {
     };
     let raw = "# 第一章\n\n一文目。\n\n二文目。\n\n三文目。\n\n四文目。\n\n五文目。\n\n六文目。";
     crate::workspace::translation::write_raw(&ws, 1, raw).unwrap();
-    let n_chunks =
-        crate::agents::chunk::chunk_chapter(raw, cfg.chunk_target_tokens, cfg.chunk_hard_cap_tokens)
-            .len();
+    let n_chunks = crate::agents::chunk::chunk_chapter(
+        raw,
+        cfg.chunk_target_tokens,
+        cfg.chunk_hard_cap_tokens,
+    )
+    .len();
     assert!(n_chunks >= 2, "fixture must chunk into several pieces");
 
     // Legacy partial: only chunk 0 committed, no chunks-total marker → a scan

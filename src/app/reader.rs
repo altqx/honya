@@ -1247,13 +1247,11 @@ fn th_chunk_at_line(th: &str, line: usize) -> Option<u32> {
 /// First non-blank, non-marker line of a chunk's source text, used to locate it back
 /// in the JA pane.
 fn first_nonempty_line(text: &str) -> Option<&str> {
-    text.lines()
-        .map(str::trim)
-        .find(|l| {
-            !l.is_empty()
-                && crate::workspace::translation::parse_chunk_marker(l).is_none()
-                && crate::workspace::translation::parse_total_marker(l).is_none()
-        })
+    text.lines().map(str::trim).find(|l| {
+        !l.is_empty()
+            && crate::workspace::translation::parse_chunk_marker(l).is_none()
+            && crate::workspace::translation::parse_total_marker(l).is_none()
+    })
 }
 
 /// 0-based line in `hay` whose trimmed content equals (else contains) `needle`. Used

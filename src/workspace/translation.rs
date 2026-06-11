@@ -46,11 +46,7 @@ pub fn total_chunks_in(text: &str) -> Option<u32> {
 /// after a stop or crash, the resting status can be derived as partial rather
 /// than done. Idempotent; if a previous run recorded a different total (chunk
 /// config changed), the old marker is replaced.
-pub async fn record_total_chunks(
-    ws: &Workspace,
-    chapter: u32,
-    total: u32,
-) -> std::io::Result<()> {
+pub async fn record_total_chunks(ws: &Workspace, chapter: u32, total: u32) -> std::io::Result<()> {
     let path = ws.translated(chapter);
     let existing = tokio::fs::read_to_string(&path).await.unwrap_or_default();
     match total_chunks_in(&existing) {

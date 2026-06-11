@@ -855,7 +855,8 @@ async fn process_chapter(
             } else {
                 ChapterStatus::Partial
             };
-            ctx.tx.send(AppEvent::ChapterStateChanged { chapter, state });
+            ctx.tx
+                .send(AppEvent::ChapterStateChanged { chapter, state });
             return Ok(Outcome::Stopped);
         }
         ctx.tx.send(AppEvent::ChunkStarted {
@@ -2214,7 +2215,10 @@ mod tests {
             ..crate::model::AppConfig::default()
         };
         let chunks = chunk_chapter(raw, cfg.chunk_target_tokens, cfg.chunk_hard_cap_tokens);
-        assert!(chunks.len() >= 2, "need several chunks to prove per-model dedup");
+        assert!(
+            chunks.len() >= 2,
+            "need several chunks to prove per-model dedup"
+        );
 
         let client = std::sync::Arc::new(TierEchoClient {
             inner: CountingClient::default(),
@@ -2250,9 +2254,10 @@ mod tests {
         // One notice per model (translator/reviewer/orchestrator), not per chunk.
         assert_eq!(logs.len(), 3, "{logs:?}");
         assert!(
-            logs.iter().all(|(level, msg)| matches!(level, LogLevel::Warn)
-                && msg.contains("flex not applied")
-                && msg.contains("standard rate")),
+            logs.iter()
+                .all(|(level, msg)| matches!(level, LogLevel::Warn)
+                    && msg.contains("flex not applied")
+                    && msg.contains("standard rate")),
             "{logs:?}"
         );
     }
@@ -2263,8 +2268,7 @@ mod tests {
         assert_eq!(logs.len(), 3, "{logs:?}");
         assert!(
             logs.iter()
-                .all(|(level, msg)| matches!(level, LogLevel::Info)
-                    && msg.contains("flex active")),
+                .all(|(level, msg)| matches!(level, LogLevel::Info) && msg.contains("flex active")),
             "{logs:?}"
         );
     }

@@ -194,8 +194,7 @@ impl ServedTier {
         use crate::model::ServiceTier;
         matches!(
             (self, requested),
-            (ServedTier::Flex, ServiceTier::Flex)
-                | (ServedTier::Priority, ServiceTier::Priority)
+            (ServedTier::Flex, ServiceTier::Flex) | (ServedTier::Priority, ServiceTier::Priority)
         )
     }
 }
@@ -467,11 +466,9 @@ mod service_tier_tests {
 
     #[test]
     fn served_tier_parses_from_response_echo() {
-        let resp: ChatResponse =
-            serde_json::from_str(&response_with_tier(r#""flex""#)).unwrap();
+        let resp: ChatResponse = serde_json::from_str(&response_with_tier(r#""flex""#)).unwrap();
         assert_eq!(resp.service_tier, Some(ServedTier::Flex));
-        let resp: ChatResponse =
-            serde_json::from_str(&response_with_tier(r#""default""#)).unwrap();
+        let resp: ChatResponse = serde_json::from_str(&response_with_tier(r#""default""#)).unwrap();
         assert_eq!(resp.service_tier, Some(ServedTier::Default));
     }
 
@@ -479,8 +476,7 @@ mod service_tier_tests {
     fn served_tier_tolerates_null_and_unknown_values() {
         let resp: ChatResponse = serde_json::from_str(&response_with_tier("null")).unwrap();
         assert_eq!(resp.service_tier, None);
-        let resp: ChatResponse =
-            serde_json::from_str(&response_with_tier(r#""scale""#)).unwrap();
+        let resp: ChatResponse = serde_json::from_str(&response_with_tier(r#""scale""#)).unwrap();
         assert_eq!(resp.service_tier, None);
     }
 
