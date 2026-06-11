@@ -154,7 +154,7 @@ pub fn orchestrator_tools() -> serde_json::Value {
             "type": "function",
             "function": {
                 "name": "get_glossary",
-                "description": "Read glossary terms from GLOSSARY.md, optionally filtered by query/category/policy/protected_only, to check existing terminology controls before inventing new terms.",
+                "description": "Read glossary terms from GLOSSARY.md, optionally filtered by query/category/policy/protected_only, to check existing terminology controls before inventing new terms. The query matches JP/Thai/romaji forms and kana readings, in either direction (聖剣エクスカリバー finds 聖剣); omit it to list everything.",
                 "parameters": {
                     "type": "object",
                     "additionalProperties": false,
@@ -173,7 +173,7 @@ pub fn orchestrator_tools() -> serde_json::Value {
             "type": "function",
             "function": {
                 "name": "get_character",
-                "description": "Read characters from CHARACTERS.md, optionally filtered by query or id, to confirm an existing character before adding a duplicate.",
+                "description": "Read characters from CHARACTERS.md, optionally filtered by query or id, to confirm an existing character before adding a duplicate. The query matches names, aliases, romaji, and kana readings (e.g. ノノカ finds 乃々香/Nonoka), in either direction (朱夏ちゃん finds 朱夏); omit both parameters to list the whole roster.",
                 "parameters": {
                     "type": "object",
                     "additionalProperties": false,
@@ -587,14 +587,19 @@ pub async fn dispatch_tool(
                 protected_only,
                 limit,
             );
+            let kind = if protected_only {
+                "protected glossary term(s)"
+            } else {
+                "glossary term(s)"
+            };
             tx.send(AppEvent::ToolInvoked {
                 chapter,
                 tool: name.to_string(),
-                summary: if protected_only {
-                    format!("read {} protected glossary term(s)", terms.len())
-                } else {
-                    format!("read {} glossary term(s)", terms.len())
-                },
+                summary: format!(
+                    "read {} {kind}{}",
+                    terms.len(),
+                    lookup_suffix(a.query.as_deref(), None)
+                ),
             });
             let data = serde_json::to_value(&terms).unwrap_or(serde_json::Value::Null);
             ToolResult::data(
@@ -612,7 +617,11 @@ pub async fn dispatch_tool(
             tx.send(AppEvent::ToolInvoked {
                 chapter,
                 tool: name.to_string(),
-                summary: format!("read {} character(s)", chars.len()),
+                summary: format!(
+                    "read {} character(s){}",
+                    chars.len(),
+                    lookup_suffix(a.query.as_deref(), a.id.as_deref())
+                ),
             });
             let data = serde_json::to_value(&chars).unwrap_or(serde_json::Value::Null);
             ToolResult::data(
@@ -622,6 +631,23 @@ pub async fn dispatch_tool(
         }
 
         other => ToolResult::err(format!("unknown tool: {other}")),
+    }
+}
+
+/// ` for 「needle」` shown in read-tool summaries, so a 0-hit lookup of a genuinely
+/// new name reads as "not found: X" rather than looking like a broken read.
+fn lookup_suffix(query: Option<&str>, id: Option<&str>) -> String {
+    let needle = [query, id]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("/");
+    if needle.is_empty() {
+        String::new()
+    } else {
+        format!(" for 「{}」", crate::ui::text::truncate_cols(&needle, 24))
     }
 }
 
@@ -912,6 +938,60 @@ mod tests {
             .expect("characters array");
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0].get("id").and_then(|v| v.as_str()), Some("yuu"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Read-tool summaries name the needle, so a legitimate 0-hit lookup is
+    /// distinguishable from a broken read in the activity panel.
+    #[tokio::test]
+    async fn get_character_summary_names_the_query() {
+        let (base, ws) = temp_ws("char_get_summary");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let result =
+            dispatch_tool(&ws, &EventTx(tx), 3, "get_character", r#"{"query":"乃々香"}"#).await;
+        assert!(result.ok);
+
+        let mut summary = String::new();
+        while let Ok(ev) = rx.try_recv() {
+            if let AppEvent::ToolInvoked { summary: s, .. } = ev {
+                summary = s;
+            }
+        }
+        assert!(
+            summary.contains("read 0 character(s) for 「乃々香」"),
+            "summary should name the needle: {summary}"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Kana reading queries reach glossary romaji, and longer surface forms find
+    /// their stored prefix term.
+    #[tokio::test]
+    async fn get_glossary_matches_reading_and_longer_form() {
+        let (base, ws) = temp_ws("gloss_get_reading");
+        let mut sword = term("聖剣", "ดาบศักดิ์สิทธิ์", None);
+        sword.romaji = Some("Seiken".to_string());
+        glossary::upsert(&ws, sword).unwrap();
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        for query in ["せいけん", "セイケン", "聖剣エクスカリバー"] {
+            let result = dispatch_tool(
+                &ws,
+                &EventTx(tx.clone()),
+                3,
+                "get_glossary",
+                &format!(r#"{{"query":"{query}"}}"#),
+            )
+            .await;
+            assert!(result.ok);
+            let n = result
+                .data
+                .as_ref()
+                .and_then(|d| d.get("terms"))
+                .and_then(|v| v.as_array())
+                .map(Vec::len);
+            assert_eq!(n, Some(1), "query {query} should find 聖剣");
+        }
         let _ = std::fs::remove_dir_all(&base);
     }
 }

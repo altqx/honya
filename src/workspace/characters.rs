@@ -363,8 +363,8 @@ fn fnv1a(s: &str) -> u32 {
 
 fn character_matches(c: &Character, needle: &str) -> bool {
     // Strip spaces/separators on both sides so "桐島 朱夏" finds "桐島朱夏".
-    let needle = norm_name(needle).to_lowercase();
-    if needle.is_empty() {
+    let norm_needle = norm_name(needle).to_lowercase();
+    if norm_needle.is_empty() {
         return false;
     }
     let mut hay = vec![
@@ -374,7 +374,40 @@ fn character_matches(c: &Character, needle: &str) -> bool {
         norm_name(c.romaji.as_deref().unwrap_or("")).to_lowercase(),
     ];
     hay.extend(c.aliases.iter().map(|a| norm_name(a).to_lowercase()));
-    hay.iter().any(|h| h.contains(&needle))
+    if hay.iter().any(|h| contains_either(h, &norm_needle)) {
+        return true;
+    }
+
+    // Reading channel: the Orchestrator searches "by reading", which arrives as
+    // kana (ノノカ) and can never substring-match kanji — bridge it through the
+    // romaji field (and kana names/aliases) instead.
+    let needle_reading = crate::workspace::kana::kana_to_romaji(needle)
+        .map(|r| norm_romaji(&r))
+        .unwrap_or_else(|| norm_romaji(needle));
+    if needle_reading.is_empty() {
+        return false;
+    }
+    let mut readings: Vec<String> = vec![norm_romaji(c.romaji.as_deref().unwrap_or(""))];
+    readings.extend(
+        std::iter::once(c.jp_name.as_str())
+            .chain(c.aliases.iter().map(String::as_str))
+            .filter_map(crate::workspace::kana::kana_to_romaji)
+            .map(|r| norm_romaji(&r)),
+    );
+    readings.iter().any(|h| contains_either(h, &needle_reading))
+}
+
+/// Substring match in either direction, so the query 「朱夏ちゃん」 still finds the
+/// entry stored as 朱夏. The reverse direction requires the stored form to be more
+/// than one ASCII char, or single-letter ids would match almost any query.
+pub(crate) fn contains_either(hay: &str, needle: &str) -> bool {
+    if hay.is_empty() || needle.is_empty() {
+        return false;
+    }
+    if hay.contains(needle) {
+        return true;
+    }
+    (hay.chars().count() >= 2 || !hay.is_ascii()) && needle.contains(hay)
 }
 
 // ---- Deduplication helpers -------------------------------------------------
@@ -571,7 +604,7 @@ fn romaji_tokens(s: &str) -> Vec<String> {
 
 /// Normalize romaji for loose comparison: lowercase, drop spacing/punctuation, fold
 /// long-vowel macrons to doubled vowels (ū→uu, ō→ou).
-fn norm_romaji(s: &str) -> String {
+pub(crate) fn norm_romaji(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for ch in s.trim().chars() {
         match ch {
@@ -881,6 +914,37 @@ mod tests {
         assert_eq!(get(&ws, Some("桐島 朱夏"), None).len(), 1);
         assert_eq!(get(&ws, Some("kirishima shuka"), None).len(), 1);
         assert_eq!(get(&ws, Some("ชูคะ"), None).len(), 1);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The Orchestrator searches "by reading": kana queries must reach the stored
+    /// romaji, and romaji queries must reach kana-only names.
+    #[test]
+    fn get_matches_kana_reading_against_romaji() {
+        let (base, ws) = temp_ws("get_reading");
+        upsert(&ws, ch("nonoka", "乃々香", "โนโนกะ", Some("Nonoka"))).unwrap();
+        let mut sumomo = ch("sumomo", "日比野すもも", "ฮิบิโนะ สึโมโมะ", None);
+        sumomo.aliases = vec!["すもも".into()];
+        upsert(&ws, sumomo).unwrap();
+
+        assert_eq!(get(&ws, Some("ののか"), None).len(), 1, "hiragana reading");
+        assert_eq!(get(&ws, Some("ノノカ"), None).len(), 1, "katakana reading");
+        assert_eq!(get(&ws, Some("sumomo"), None).len(), 1, "romaji vs kana name");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A surface form with an honorific still finds the bare stored name.
+    #[test]
+    fn get_matches_query_with_honorific() {
+        let (base, ws) = temp_ws("get_honorific");
+        let mut shuka = ch("shuka", "桐島朱夏", "คิริชิมะ ชูคะ", Some("Kirishima Shuka"));
+        shuka.aliases = vec!["朱夏".into()];
+        upsert(&ws, shuka).unwrap();
+        upsert(&ws, ch("naruse", "成瀬", "นารุเสะ", Some("Naruse"))).unwrap();
+
+        assert_eq!(get(&ws, Some("朱夏ちゃん"), None).len(), 1);
+        assert_eq!(get(&ws, Some("桐島朱夏さん"), None).len(), 1);
+        assert_eq!(get(&ws, Some("成瀬先生"), None).len(), 1);
         let _ = std::fs::remove_dir_all(&base);
     }
 

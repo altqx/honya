@@ -419,16 +419,39 @@ fn normalize(s: &str) -> String {
 }
 
 fn term_matches(t: &GlossaryTerm, needle: &str) -> bool {
-    let mut hay = vec![
+    // Term-ish fields match in both directions (query 「聖剣エクスカリバー」 finds
+    // the stored 聖剣); prose fields only forward, since a long query trivially
+    // "contains" short prose fragments.
+    let names = [
         t.jp_term.to_lowercase(),
         t.thai_term.to_lowercase(),
         t.romaji.as_deref().unwrap_or("").to_lowercase(),
+    ];
+    if names
+        .iter()
+        .any(|h| crate::workspace::characters::contains_either(h, needle))
+    {
+        return true;
+    }
+
+    let mut prose = vec![
         t.gloss.as_deref().unwrap_or("").to_lowercase(),
         t.context_rule.as_deref().unwrap_or("").to_lowercase(),
         policy_label(effective_policy(t)).to_lowercase(),
     ];
-    hay.extend(t.forbidden_thai.iter().map(|v| v.to_lowercase()));
-    hay.iter().any(|h| h.contains(needle))
+    prose.extend(t.forbidden_thai.iter().map(|v| v.to_lowercase()));
+    if prose.iter().any(|h| h.contains(needle)) {
+        return true;
+    }
+
+    // Reading channel: a kana query (ブレイブ) reaches the romaji field.
+    let Some(reading) = crate::workspace::kana::kana_to_romaji(needle) else {
+        return false;
+    };
+    let stored = t.romaji.as_deref().unwrap_or("").to_lowercase();
+    let jp_reading = crate::workspace::kana::kana_to_romaji(&t.jp_term).unwrap_or_default();
+    crate::workspace::characters::contains_either(&stored, &reading)
+        || crate::workspace::characters::contains_either(&jp_reading.to_lowercase(), &reading)
 }
 
 fn cell(s: &str) -> String {
