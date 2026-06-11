@@ -19,6 +19,12 @@ impl TranslatorStreamError {
     pub fn partial_translated_text(&self) -> &str {
         &self.partial_translated_text
     }
+
+    /// True when the underlying failure is a provider content-policy block (e.g.
+    /// Gemini `PROHIBITED_CONTENT`), which a verbatim retry can't clear.
+    pub fn is_content_policy_block(&self) -> bool {
+        self.source.is_content_policy_block()
+    }
 }
 
 pub async fn translate_chunk_streaming<F>(

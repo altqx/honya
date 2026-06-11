@@ -1296,15 +1296,32 @@ async fn process_chunk(
                         )
                         .await;
                     }
+                    // A content-policy block (e.g. Gemini PROHIBITED_CONTENT) won't
+                    // clear on a verbatim replay, so retry with the de-escalation
+                    // prompt — reframing the request as neutral literary translation
+                    // is what actually shifts the outcome.
+                    let policy_block = e.is_content_policy_block();
                     if attempt < max {
-                        emit_attempt_failed_retry(
-                            ctx,
-                            chapter,
-                            chunk,
-                            attempt,
-                            max,
-                            &format!("translator error, retrying: {e}"),
-                        );
+                        if policy_block {
+                            emit_attempt_failed_retry(
+                                ctx,
+                                chapter,
+                                chunk,
+                                attempt,
+                                max,
+                                REFUSAL_RETRY_FEEDBACK,
+                            );
+                            feedback = Some(REFUSAL_RETRY_FEEDBACK.to_string());
+                        } else {
+                            emit_attempt_failed_retry(
+                                ctx,
+                                chapter,
+                                chunk,
+                                attempt,
+                                max,
+                                &format!("translator error, retrying: {e}"),
+                            );
+                        }
                         continue;
                     }
                     match candidate {
@@ -1322,13 +1339,15 @@ async fn process_chunk(
                         // Nothing to keep, but don't sink the chapter: commit an
                         // empty NeedsReview chunk (a re-run rechecks it).
                         None => {
+                            let reason = if policy_block {
+                                format!(
+                                    "translator blocked by the model's content policy after {max} attempts ({e}) — try a different translator model for this chunk"
+                                )
+                            } else {
+                                format!("translator produced no output after {max} attempts: {e}")
+                            };
                             return commit_chunk_needs_review(
-                                ctx,
-                                chapter,
-                                chunk,
-                                "",
-                                attempt,
-                                format!("translator produced no output after {max} attempts: {e}"),
+                                ctx, chapter, chunk, "", attempt, reason,
                             )
                             .await;
                         }

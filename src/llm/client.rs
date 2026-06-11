@@ -52,6 +52,32 @@ pub enum LlmError {
     },
 }
 
+impl LlmError {
+    /// True when this is a provider **content-policy block** rather than a real
+    /// transport/HTTP fault — e.g. Gemini's `PROHIBITED_CONTENT`/`SAFETY`/`RECITATION`
+    /// finish reasons, which OpenRouter surfaces as an `Api`/stream error (often
+    /// `status 0`). These won't clear on a verbatim replay, so the pipeline retries
+    /// them with a de-escalation prompt instead of the generic "retrying" feedback.
+    pub fn is_content_policy_block(&self) -> bool {
+        let LlmError::Api { message, .. } = self else {
+            return false;
+        };
+        let m = message.to_ascii_uppercase();
+        [
+            "PROHIBITED_CONTENT",
+            "SAFETY",
+            "RECITATION",
+            "BLOCKLIST",
+            "CONTENT_POLICY",
+            "CONTENT POLICY",
+            "CONTENT_FILTER",
+            "CONTENT FILTER",
+        ]
+        .iter()
+        .any(|needle| m.contains(needle))
+    }
+}
+
 /// LLM-layer result alias. Shadows `std::result::Result` within `crate::llm::*`.
 pub type Result<T> = std::result::Result<T, LlmError>;
 
@@ -498,6 +524,38 @@ mod tests {
             ..ChatRequest::new("m", vec![])
         };
         assert_eq!(body_json(&client, &req)["service_tier"], "priority");
+    }
+
+    #[test]
+    fn content_policy_block_detected_across_provider_phrasings() {
+        for msg in [
+            "PROHIBITED_CONTENT",
+            "blocked: SAFETY",
+            "finish_reason=recitation",
+            "request violates our content policy",
+            "content_filter triggered",
+        ] {
+            let err = LlmError::Api {
+                status: 0,
+                message: msg.to_string(),
+            };
+            assert!(err.is_content_policy_block(), "should flag: {msg}");
+        }
+    }
+
+    #[test]
+    fn transport_and_plain_api_errors_are_not_policy_blocks() {
+        assert!(
+            !LlmError::Api {
+                status: 500,
+                message: "internal server error".into(),
+            }
+            .is_content_policy_block()
+        );
+        assert!(
+            !LlmError::EmptyChoices.is_content_policy_block(),
+            "non-Api errors are never policy blocks"
+        );
     }
 
     #[test]
