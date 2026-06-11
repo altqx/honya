@@ -15,7 +15,6 @@ use crate::ui::mouse::{MouseGesture, MouseInput, row_index};
 use crate::ui::text::{col_width, pad_to_cols, thai_display_safe, truncate_cols};
 use crate::ui::widgets::{render_line_gauge, status_cell};
 
-use super::Screen;
 use super::overlay::Overlay;
 use super::{Action, ActiveProject};
 
@@ -126,13 +125,7 @@ impl ProjectScreen {
 
     pub fn handle_key(&mut self, key: KeyEvent, active: Option<&ActiveProject>) -> Action {
         let Some(active) = active else {
-            // No project: `e` (go to lexicon) and `Q` (QA inbox, shows the
-            // "no project" state) are the only live keys.
-            return match key.code {
-                KeyCode::Char('e') => Action::Goto(Screen::Lexicon),
-                KeyCode::Char('Q') => Action::show_overlay(Overlay::qa_placeholder()),
-                _ => Action::None,
-            };
+            return Action::None;
         };
 
         let rows = self.rows(active);
@@ -192,36 +185,7 @@ impl ProjectScreen {
                 }
                 Action::None
             }
-            KeyCode::Char('t') => {
-                let marked = self.marked_chapters(active);
-                if !marked.is_empty() {
-                    self.selected.clear();
-                    Action::StartTranslation { chapters: marked }
-                } else if let Some(ch) = self.selected_chapter(active) {
-                    Action::StartTranslation { chapters: vec![ch] }
-                } else {
-                    Action::None
-                }
-            }
-            KeyCode::Char('T') => {
-                // Chapter selection (incl. the disk-completeness check that catches
-                // partial files scanning as Done) happens in apply, which has cfg.
-                match self.selected_volume(active) {
-                    Some(vol) => Action::StartVolumeTranslation { vol },
-                    None => Action::None,
-                }
-            }
-            KeyCode::Char('a') => {
-                let chapters = self.marked_chapters(active);
-                if chapters.is_empty() {
-                    Action::None
-                } else {
-                    self.selected.clear();
-                    Action::StartTranslation { chapters }
-                }
-            }
-            // Keep same-numbered chapters bound to the cursor's volume.
-            KeyCode::Char('i') => {
+            KeyCode::Char('t') | KeyCode::Char('a') => {
                 let marked = self.marked_chapters(active);
                 let chapters = if !marked.is_empty() {
                     self.selected.clear();
@@ -236,8 +200,15 @@ impl ProjectScreen {
                     _ => Action::None,
                 }
             }
+            KeyCode::Char('T') => {
+                // Chapter selection (incl. the disk-completeness check that catches
+                // partial files scanning as Done) happens in apply, which has cfg.
+                match self.selected_volume(active) {
+                    Some(vol) => Action::StartVolumeTranslation { vol },
+                    None => Action::None,
+                }
+            }
             KeyCode::Char('A') => Action::StartProjectTranslation,
-            KeyCode::Char('e') => Action::Goto(Screen::Lexicon),
             KeyCode::Char('y') => {
                 let data = crate::workspace::volume::load(&active.workspace);
                 Action::show_overlay(Overlay::synopsis_edit(
@@ -247,17 +218,11 @@ impl ProjectScreen {
                     active.project.title.clone(),
                 ))
             }
-            KeyCode::Char('R') => Action::show_overlay(Overlay::project_title_edit(
-                active.project.id.clone(),
-                active.project.title.clone(),
-                active.project.title_th.clone(),
-            )),
             KeyCode::Char('V') => Action::AddVolume,
             KeyCode::Char('x') => {
                 let vol = self.selected_volume(active).unwrap_or(active.vol);
                 Action::show_overlay(Overlay::export(vol))
             }
-            KeyCode::Char('Q') => Action::show_overlay(Overlay::qa_placeholder()),
             _ => Action::None,
         };
 
@@ -699,10 +664,10 @@ impl ProjectScreen {
                 ]));
             }
             lines.push(Line::raw(""));
-            lines.push(Line::from(vec![
-                Span::styled(" t translate ", Style::default().fg(theme.accent)),
-                Span::styled("  e edit context ", Style::default().fg(theme.ink_soft)),
-            ]));
+            lines.push(Line::from(vec![Span::styled(
+                " t translate ",
+                Style::default().fg(theme.accent),
+            )]));
         } else {
             lines.push(usage_line("project", &active.project.usage_total(), theme));
             lines.push(Line::raw(""));
@@ -720,18 +685,14 @@ impl ProjectScreen {
     pub fn hints(&self) -> &'static [(&'static str, &'static str)] {
         &[
             ("↵", "read"),
-            ("t", "marked/current"),
+            ("t", "translate/queue"),
             ("T", "whole vol"),
             ("A", "whole project"),
-            ("i", "enqueue"),
             ("V", "add vol"),
             ("x", "export"),
             ("Space", "mark"),
             ("h/l", "tree/focus"),
-            ("e", "edit ctx"),
             ("y", "synopsis"),
-            ("R", "rename"),
-            ("Q", "QA"),
         ]
     }
 }
@@ -1053,8 +1014,8 @@ mod tests {
             Action::None
         ));
         match screen.handle_key(key(KeyCode::Char('t')), Some(&active)) {
-            Action::StartTranslation { chapters } => assert_eq!(chapters, vec![1]),
-            other => panic!("expected StartTranslation, got {other:?}"),
+            Action::EnqueueChapters { chapters, .. } => assert_eq!(chapters, vec![1]),
+            other => panic!("expected EnqueueChapters, got {other:?}"),
         }
         assert!(
             screen.selected.is_empty(),
@@ -1063,8 +1024,8 @@ mod tests {
 
         // With no marks, `t` remains the single-chapter shortcut for the cursor row.
         match screen.handle_key(key(KeyCode::Char('t')), Some(&active)) {
-            Action::StartTranslation { chapters } => assert_eq!(chapters, vec![2]),
-            other => panic!("expected StartTranslation, got {other:?}"),
+            Action::EnqueueChapters { chapters, .. } => assert_eq!(chapters, vec![2]),
+            other => panic!("expected EnqueueChapters, got {other:?}"),
         }
     }
 

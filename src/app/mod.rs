@@ -1873,7 +1873,7 @@ impl App {
     fn request_translation(&mut self, chapters: Vec<u32>) {
         if self.run_active {
             self.toast = Some(Toast::warn(
-                "a run is in progress — press i to add chapters to the queue",
+                "a run is in progress — press t to add chapters to the queue",
             ));
             return;
         }
@@ -2089,7 +2089,7 @@ impl App {
     fn request_volume_translation(&mut self, vol: u32) {
         if self.run_active {
             self.toast = Some(Toast::warn(
-                "a run is in progress — press i to add chapters to the queue",
+                "a run is in progress — press t to add chapters to the queue",
             ));
             return;
         }
