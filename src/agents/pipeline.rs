@@ -16,7 +16,9 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
-use crate::agents::audit::{advisory_findings, audit_translation_with_terms, strip_copied_continuity};
+use crate::agents::audit::{
+    advisory_findings, audit_translation_with_terms, strip_copied_continuity,
+};
 use crate::agents::chunk::{Chunk, chunk_chapter};
 use crate::agents::coherence;
 use crate::agents::continuity;
@@ -570,6 +572,8 @@ async fn maybe_run_prepass(ctx: &PipelineCtx, acc: &mut Acc) {
     if volume::load(&ctx.ws).prepass_done {
         return;
     }
+    let vol = ctx.vol_number();
+    ctx.tx.send(AppEvent::PrepassStarted { vol });
     ctx.tx.send(AppEvent::Log {
         level: LogLevel::Info,
         msg: "pre-scan: extracting characters & terms before translating".to_string(),
@@ -583,6 +587,12 @@ async fn maybe_run_prepass(ctx: &PipelineCtx, acc: &mut Acc) {
                 chapter: acc.chapter,
             });
             let _ = volume::set_prepass_done(&ctx.ws, true);
+            ctx.tx.send(AppEvent::PrepassFinished {
+                vol,
+                characters: seeded.characters,
+                terms: seeded.terms,
+                examples: seeded.examples,
+            });
             ctx.tx.send(AppEvent::Log {
                 level: LogLevel::Info,
                 msg: format!(
@@ -592,8 +602,19 @@ async fn maybe_run_prepass(ctx: &PipelineCtx, acc: &mut Acc) {
             });
         }
         // No raw to sample (empty volume): leave prepass_done false, nothing to do.
-        Ok(None) => {}
+        Ok(None) => {
+            ctx.tx.send(AppEvent::PrepassFinished {
+                vol,
+                characters: 0,
+                terms: 0,
+                examples: 0,
+            });
+        }
         Err(e) => {
+            ctx.tx.send(AppEvent::PrepassFailed {
+                vol,
+                reason: e.to_string(),
+            });
             ctx.tx.send(AppEvent::Log {
                 level: LogLevel::Warn,
                 msg: format!("pre-scan skipped: {e}"),
@@ -925,7 +946,17 @@ async fn process_chapter(
         // Fresh repetition state per chunk so one chunk's tail can't trip on the
         // next chunk's start.
         wd.reset_chunk();
-        match process_chunk(ctx, chapter, chunk, acc, wd, &mut pov_carry, prev_chunk_text).await? {
+        match process_chunk(
+            ctx,
+            chapter,
+            chunk,
+            acc,
+            wd,
+            &mut pov_carry,
+            prev_chunk_text,
+        )
+        .await?
+        {
             ChunkOutcome::Committed | ChunkOutcome::NeedsReview => {}
         }
         prev_chunk_text = Some(chunk.text.as_str());
@@ -1881,8 +1912,12 @@ async fn run_coherence_sweep(
 
     wd.ping();
     let result = {
-        let fut =
-            coherence::coherence_sweep(ctx.client.as_ref(), &ctx.models.reviewer, &thai, &reference_ctx);
+        let fut = coherence::coherence_sweep(
+            ctx.client.as_ref(),
+            &ctx.models.reviewer,
+            &thai,
+            &reference_ctx,
+        );
         tokio::pin!(fut);
         loop {
             tokio::select! {
@@ -2600,9 +2635,16 @@ mod tests {
 
         // The current chunk never names ひかり; only the previous chunk did.
         let without = build_reference_ctx(&ws, "そして彼女は歩き出した。", None);
-        assert!(!without.contains("ฮิคาริ"), "no carry → not injected:\n{without}");
+        assert!(
+            !without.contains("ฮิคาริ"),
+            "no carry → not injected:\n{without}"
+        );
 
-        let with = build_reference_ctx(&ws, "そして彼女は歩き出した。", Some("ひかりは振り返った。"));
+        let with = build_reference_ctx(
+            &ws,
+            "そして彼女は歩き出した。",
+            Some("ひかりは振り返った。"),
+        );
         assert!(
             with.contains("ฮิคาริ"),
             "previous-chunk character carried into scope:\n{with}"
@@ -2629,8 +2671,14 @@ mod tests {
         .unwrap();
 
         let ctx = build_reference_ctx(&ws, "無関係なテキスト", None);
-        assert!(ctx.contains("STYLE_EXAMPLES"), "exemplar section present:\n{ctx}");
-        assert!(ctx.contains("เขาหัวเราะออกมา"), "exemplar Thai injected:\n{ctx}");
+        assert!(
+            ctx.contains("STYLE_EXAMPLES"),
+            "exemplar section present:\n{ctx}"
+        );
+        assert!(
+            ctx.contains("เขาหัวเราะออกมา"),
+            "exemplar Thai injected:\n{ctx}"
+        );
 
         let _ = std::fs::remove_dir_all(&base);
     }

@@ -1000,6 +1000,20 @@ pub enum AppEvent {
         vol: u32,
         label: Option<String>,
     },
+    /// A volume-level pre-extraction pass is running before chapter translation.
+    PrepassStarted {
+        vol: u32,
+    },
+    PrepassFinished {
+        vol: u32,
+        characters: usize,
+        terms: usize,
+        examples: usize,
+    },
+    PrepassFailed {
+        vol: u32,
+        reason: String,
+    },
     /// The loop watchdog tripped on a chapter (degenerate repetition or a stall):
     /// the whole chapter is being re-translated from scratch. `attempt` is the
     /// 1-based re-translate count, `max` the configured ceiling.

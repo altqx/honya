@@ -407,7 +407,10 @@ pub fn render_body(data: &VolumeData) -> String {
                 "| {} | {} | {} |\n",
                 cell(&ex.jp),
                 cell(&ex.th),
-                ex.note.as_deref().map(cell).unwrap_or_else(|| "—".to_string()),
+                ex.note
+                    .as_deref()
+                    .map(cell)
+                    .unwrap_or_else(|| "—".to_string()),
             ));
         }
         s.push('\n');

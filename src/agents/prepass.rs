@@ -198,7 +198,8 @@ fn sample_volume_raw(ws: &Workspace) -> String {
         return String::new();
     }
 
-    let per_chapter = (SAMPLE_BUDGET_CHARS / chapters.len()).clamp(PER_CHAPTER_MIN, PER_CHAPTER_MAX);
+    let per_chapter =
+        (SAMPLE_BUDGET_CHARS / chapters.len()).clamp(PER_CHAPTER_MIN, PER_CHAPTER_MAX);
     let mut out = String::new();
     let mut used = 0usize;
     for ch in chapters {
@@ -248,9 +249,7 @@ fn raw_chapter_numbers(ws: &Workspace) -> Vec<u32> {
 mod tests {
     use super::*;
     use crate::llm::client::Result as LlmResult;
-    use crate::llm::{
-        ChatRequest, ChatResponse, Choice, ResponseFormat, ResponseMessage, Usage,
-    };
+    use crate::llm::{ChatRequest, ChatResponse, Choice, ResponseFormat, ResponseMessage, Usage};
     use async_trait::async_trait;
 
     /// Returns one character / term / exemplar for a `prepass_result` request.

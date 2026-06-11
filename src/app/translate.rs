@@ -38,6 +38,7 @@ pub struct QueueRow {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RunPhase {
     Idle,
+    Preparing,
     Running,
     Paused,
 }
@@ -151,6 +152,46 @@ impl TranslateScreen {
 
     pub fn on_app_event(&mut self, ev: &AppEvent) {
         match ev {
+            AppEvent::PrepassStarted { vol } => {
+                if self.phase == RunPhase::Idle {
+                    self.run = UsageStats::default();
+                    self.retries = 0;
+                }
+                self.chapter = UsageStats::default();
+                self.phase = RunPhase::Preparing;
+                self.current_chapter = None;
+                self.chapter_title = format!("Vol.{vol:02} pre-scan");
+                self.preview.clear();
+                self.pending_preview_separator = false;
+                self.scroll = 0;
+                self.chunk = (0, 0);
+                self.active_agent = 1;
+                self.agent_lines = [
+                    "sampling raw chapters".to_string(),
+                    "extracting cast, terms, and style".to_string(),
+                    "queued".to_string(),
+                ];
+                self.last_note = format!("Vol.{vol:02} pre-scan started");
+            }
+            AppEvent::PrepassFinished {
+                vol,
+                characters,
+                terms,
+                examples,
+            } => {
+                self.active_agent = 1;
+                self.agent_lines[0] = "references ready".to_string();
+                self.agent_lines[1] =
+                    format!("seeded {characters} char · {terms} term · {examples} style");
+                self.last_note =
+                    format!("Vol.{vol:02} pre-scan seeded {characters}/{terms}/{examples}");
+            }
+            AppEvent::PrepassFailed { vol, reason } => {
+                self.active_agent = 1;
+                self.agent_lines[1] =
+                    format!("pre-scan skipped · {}", truncate_one_line(reason, 52));
+                self.last_note = format!("Vol.{vol:02} pre-scan skipped");
+            }
             AppEvent::ChapterStarted { chapter } => {
                 // A fresh run (we were idle): zero the run meter + retries so they
                 // don't carry over from the last run.
@@ -715,6 +756,10 @@ impl TranslateScreen {
 
     fn render_pipeline(&mut self, f: &mut Frame, area: Rect, frame: u64, theme: &Theme) {
         let (title, accent) = match self.phase {
+            RunPhase::Preparing => (
+                " 下準備 — Preparing volume pre-scan ".to_string(),
+                theme.accent,
+            ),
             RunPhase::Running => (
                 match self.current_chapter {
                     Some(ch) => format!(" いま訳しているところ — Now translating · ch {ch} "),
@@ -774,6 +819,7 @@ impl TranslateScreen {
         let (cur, total) = self.chunk;
         let working = match self.phase {
             RunPhase::Idle => "idle".to_string(),
+            RunPhase::Preparing => format!("{} pre-scan", spinner_frame(frame)),
             RunPhase::Paused => "paused".to_string(),
             RunPhase::Running => {
                 if total > 0 && cur > 0 && cur <= total {
@@ -834,7 +880,8 @@ impl TranslateScreen {
             if line_area.y >= agent_area.y + agent_area.height {
                 break;
             }
-            let active = self.phase == RunPhase::Running && i == self.active_agent;
+            let active = matches!(self.phase, RunPhase::Preparing | RunPhase::Running)
+                && i == self.active_agent;
             let spin = if active {
                 format!("{} ", agent_spinner_frame(*role, frame))
             } else {
@@ -939,6 +986,7 @@ impl TranslateScreen {
                     "No active run — start one from 棚 Project (t: chapter · T: volume)."
                 }
                 RunPhase::Paused => "Paused.",
+                RunPhase::Preparing => "…pre-scanning this volume before the first chunk…",
                 RunPhase::Running => "…waiting for the first chunk…",
             };
             vec![Line::from(Span::styled(
@@ -1136,6 +1184,49 @@ mod queue_panel_tests {
             term.draw(|f| screen.render(f, f.area(), 0, &theme))
                 .unwrap();
         }
+    }
+
+    #[test]
+    fn prepass_events_show_preparation_and_preserve_run_usage() {
+        let mut screen = TranslateScreen::new();
+        screen.run.tokens.total = 99;
+
+        screen.on_app_event(&AppEvent::PrepassStarted { vol: 2 });
+
+        assert!(matches!(screen.phase, RunPhase::Preparing));
+        assert_eq!(
+            screen.run.tokens.total, 0,
+            "fresh prepass starts a fresh run"
+        );
+        assert_eq!(screen.current_chapter, None);
+        assert_eq!(screen.chapter_title, "Vol.02 pre-scan");
+        assert!(screen.agent_lines[1].contains("extracting"));
+
+        let mut run = UsageStats::default();
+        run.tokens.prompt = 7;
+        run.tokens.completion = 5;
+        run.tokens.total = 12;
+        screen.on_app_event(&AppEvent::UsageUpdate {
+            run,
+            chapter: UsageStats::default(),
+        });
+        screen.on_app_event(&AppEvent::PrepassFinished {
+            vol: 2,
+            characters: 3,
+            terms: 4,
+            examples: 2,
+        });
+
+        assert!(screen.last_note.contains("Vol.02 pre-scan seeded"));
+        screen.on_app_event(&AppEvent::ChapterStarted { chapter: 1 });
+
+        assert!(matches!(screen.phase, RunPhase::Running));
+        assert_eq!(
+            screen.run.tokens.total, 12,
+            "chapter start must not discard prepass usage"
+        );
+        assert_eq!(screen.chapter.tokens.total, 0);
+        assert_eq!(screen.current_chapter, Some(1));
     }
 
     #[test]

@@ -4483,7 +4483,8 @@ mod tests {
         );
         st.name = "ดาบคำสาป".to_string();
         st.name_cursor = st.name.len();
-        st.title_syn = SynopsisState::new_single_line("ดาบคำสาป".to_string(), "คำสาปดาบ".to_string());
+        st.title_syn =
+            SynopsisState::new_single_line("ดาบคำสาป".to_string(), "คำสาปดาบ".to_string());
         st.syn.raw = "คำสาปแห่งดาบ".to_string();
         for step in 0..=5u8 {
             st.step = step;

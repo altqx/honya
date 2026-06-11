@@ -551,9 +551,7 @@ impl App {
                 reason,
                 salvaged,
             } => {
-                if !*salvaged
-                    && let Some(ch) = self.chapter_in_event_vol_mut(*chapter)
-                {
+                if !*salvaged && let Some(ch) = self.chapter_in_event_vol_mut(*chapter) {
                     ch.skipped_chunks = ch.skipped_chunks.saturating_add(1);
                 }
                 let verb = if *salvaged {

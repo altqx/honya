@@ -670,7 +670,9 @@ mod tests {
             "multi-digit number drop flagged: {findings:?}"
         );
         assert!(
-            !findings.iter().any(|f| f.contains('3') && f.contains("`3`")),
+            !findings
+                .iter()
+                .any(|f| f.contains('3') && f.contains("`3`")),
             "single digit must not be flagged: {findings:?}"
         );
     }
@@ -717,7 +719,9 @@ mod tests {
         let thai = "เธอเงียบงันแล้วลุกขึ้นยืน 그리고 อย่างช้า ๆ และเดินจากไป";
         let findings = audit_translation_with_terms(source, thai, &[], &[]);
         assert!(
-            findings.iter().any(|f| f.contains("corrupted non-Thai glyphs")),
+            findings
+                .iter()
+                .any(|f| f.contains("corrupted non-Thai glyphs")),
             "Korean corruption flagged: {findings:?}"
         );
 
@@ -725,7 +729,9 @@ mod tests {
         let thai_cyr = format!("{thai_cyr} привет");
         let findings = audit_translation_with_terms(source, &thai_cyr, &[], &[]);
         assert!(
-            findings.iter().any(|f| f.contains("corrupted non-Thai glyphs")),
+            findings
+                .iter()
+                .any(|f| f.contains("corrupted non-Thai glyphs")),
             "Cyrillic corruption flagged: {findings:?}"
         );
     }
@@ -758,7 +764,9 @@ mod tests {
         let thai = "เธอพยักหน้าอย่างเงียบ ๆ rồi bước đi";
         let findings = audit_translation_with_terms(source, thai, &[], &[]);
         assert!(
-            findings.iter().any(|f| f.contains("corrupted non-Thai glyphs")),
+            findings
+                .iter()
+                .any(|f| f.contains("corrupted non-Thai glyphs")),
             "Vietnamese corruption flagged: {findings:?}"
         );
 
@@ -766,7 +774,9 @@ mod tests {
         let thai_ok = "Akira หันกลับมามองเธอ";
         let findings = audit_translation_with_terms(source, thai_ok, &[], &[]);
         assert!(
-            !findings.iter().any(|f| f.contains("corrupted non-Thai glyphs")),
+            !findings
+                .iter()
+                .any(|f| f.contains("corrupted non-Thai glyphs")),
             "plain Latin name must not be flagged: {findings:?}"
         );
     }
