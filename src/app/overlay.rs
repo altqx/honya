@@ -1675,7 +1675,8 @@ impl Overlay {
         let Overlay::ReaderNote(st) = self else {
             return Action::None;
         };
-        if input::handle(&mut st.text, &mut st.cursor, key, EditOpts::default()) != Edited::Ignored {
+        if input::handle(&mut st.text, &mut st.cursor, key, EditOpts::default()) != Edited::Ignored
+        {
             return Action::None;
         }
         match key.code {
@@ -2090,8 +2091,11 @@ impl Overlay {
                 Span::styled("▏", Style::default().fg(theme.stream_cursor)),
             ])
         } else {
-            let (before, after) =
-                input::caret_halves(&st.text, st.cursor, rows[2].width.saturating_sub(6) as usize);
+            let (before, after) = input::caret_halves(
+                &st.text,
+                st.cursor,
+                rows[2].width.saturating_sub(6) as usize,
+            );
             Line::from(vec![
                 Span::styled(before, Style::default().fg(theme.ink)),
                 Span::styled("▏", Style::default().fg(theme.stream_cursor)),
@@ -2173,8 +2177,11 @@ impl Overlay {
                 Span::styled("▏", Style::default().fg(theme.stream_cursor)),
             ])
         } else {
-            let (before, after) =
-                input::caret_halves(&st.query, st.cursor, rows[1].width.saturating_sub(6) as usize);
+            let (before, after) = input::caret_halves(
+                &st.query,
+                st.cursor,
+                rows[1].width.saturating_sub(6) as usize,
+            );
             Line::from(vec![
                 Span::styled(before, Style::default().fg(theme.ink)),
                 Span::styled("▏", Style::default().fg(theme.stream_cursor)),
@@ -2210,8 +2217,11 @@ impl Overlay {
             .constraints([Constraint::Length(2), Constraint::Min(0)])
             .split(inner);
 
-        let (before, after) =
-            input::caret_halves(&st.query, st.cursor, rows[0].width.saturating_sub(5) as usize);
+        let (before, after) = input::caret_halves(
+            &st.query,
+            st.cursor,
+            rows[0].width.saturating_sub(5) as usize,
+        );
         f.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled("  / ", Style::default().fg(theme.accent)),
@@ -2719,34 +2729,35 @@ impl Overlay {
         let val_w = area.width.saturating_sub(26) as usize;
         // `caret` positions the bar inside the value (None → caret at the end,
         // used for the masked API-key field where mid-string position is moot).
-        let field_line = |label: &str, value: String, focused: bool, caret: Option<usize>| -> Line<'static> {
-            let marker = if focused { theme::SELECT_BAR } else { ' ' };
-            let value_style = if focused {
-                Style::default().fg(theme.ink).bg(theme.accent_bg)
-            } else {
-                Style::default().fg(theme.ink_soft)
+        let field_line =
+            |label: &str, value: String, focused: bool, caret: Option<usize>| -> Line<'static> {
+                let marker = if focused { theme::SELECT_BAR } else { ' ' };
+                let value_style = if focused {
+                    Style::default().fg(theme.ink).bg(theme.accent_bg)
+                } else {
+                    Style::default().fg(theme.ink_soft)
+                };
+                let mut spans = vec![
+                    Span::styled(format!(" {marker} "), Style::default().fg(theme.accent)),
+                    Span::styled(format!("{label:<20}"), Style::default().fg(theme.ink_faint)),
+                ];
+                match (focused, caret) {
+                    (true, Some(cursor)) => {
+                        let (before, after) = input::caret_halves(&value, cursor, val_w);
+                        spans.push(Span::styled(before, value_style));
+                        spans.push(Span::styled("▏", Style::default().fg(theme.stream_cursor)));
+                        spans.push(Span::styled(after, value_style));
+                    }
+                    (true, None) => {
+                        spans.push(Span::styled(truncate_cols(&value, val_w), value_style));
+                        spans.push(Span::styled("▏", Style::default().fg(theme.stream_cursor)));
+                    }
+                    (false, _) => {
+                        spans.push(Span::styled(truncate_cols(&value, val_w), value_style));
+                    }
+                }
+                Line::from(spans)
             };
-            let mut spans = vec![
-                Span::styled(format!(" {marker} "), Style::default().fg(theme.accent)),
-                Span::styled(format!("{label:<20}"), Style::default().fg(theme.ink_faint)),
-            ];
-            match (focused, caret) {
-                (true, Some(cursor)) => {
-                    let (before, after) = input::caret_halves(&value, cursor, val_w);
-                    spans.push(Span::styled(before, value_style));
-                    spans.push(Span::styled("▏", Style::default().fg(theme.stream_cursor)));
-                    spans.push(Span::styled(after, value_style));
-                }
-                (true, None) => {
-                    spans.push(Span::styled(truncate_cols(&value, val_w), value_style));
-                    spans.push(Span::styled("▏", Style::default().fg(theme.stream_cursor)));
-                }
-                (false, _) => {
-                    spans.push(Span::styled(truncate_cols(&value, val_w), value_style));
-                }
-            }
-            Line::from(spans)
-        };
 
         let fields = [
             ("Base URL", st.base_url.as_str(), 0u8),
@@ -2756,7 +2767,12 @@ impl Overlay {
         ];
         let mut lines = vec![Line::raw("")];
         for (label, value, idx) in fields {
-            lines.push(field_line(label, value.to_string(), st.field == idx, Some(st.cursor)));
+            lines.push(field_line(
+                label,
+                value.to_string(),
+                st.field == idx,
+                Some(st.cursor),
+            ));
         }
 
         let focused_key = st.field == SETTINGS_KEY_FIELD;
@@ -2932,8 +2948,11 @@ impl Overlay {
             .constraints([Constraint::Length(2), Constraint::Min(0)])
             .split(inner);
 
-        let (before, after) =
-            input::caret_halves(&st.query, st.cursor, rows[0].width.saturating_sub(5) as usize);
+        let (before, after) = input::caret_halves(
+            &st.query,
+            st.cursor,
+            rows[0].width.saturating_sub(5) as usize,
+        );
         f.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled("  : ", Style::default().fg(theme.accent)),
@@ -3226,7 +3245,7 @@ impl Overlay {
                 ),
             ]),
             Line::from(Span::styled(
-                concat!("v", env!("CARGO_PKG_VERSION"), " · Rust + Ratatui · Apache-2.0"),
+                concat!("v", env!("CARGO_PKG_VERSION")),
                 Style::default().fg(theme.ink_faint),
             )),
             Line::raw(""),
@@ -3665,10 +3684,7 @@ fn volume_chips(volumes: &[(u32, usize)]) -> String {
 /// Phase-dependent footer hints for the synopsis editor (shared by the wizard
 /// step and the standalone overlay); `wizard` switches the accept label, since
 /// accepting in the wizard starts the import while standalone accept saves.
-fn synopsis_hints(
-    st: &SynopsisState,
-    wizard: bool,
-) -> &'static [(&'static str, &'static str)] {
+fn synopsis_hints(st: &SynopsisState, wizard: bool) -> &'static [(&'static str, &'static str)] {
     match st.phase {
         SynPhase::Editing => {
             if st.raw.trim().is_empty() {
@@ -3684,12 +3700,7 @@ fn synopsis_hints(
             ("e", "edit"),
             ("s", "skip"),
         ],
-        SynPhase::Done => &[
-            ("↵", "save"),
-            ("r", "reroll"),
-            ("e", "edit"),
-            ("s", "skip"),
-        ],
+        SynPhase::Done => &[("↵", "save"), ("r", "reroll"), ("e", "edit"), ("s", "skip")],
         SynPhase::Failed => &[("r", "retry"), ("e", "edit"), ("s", "skip")],
     }
 }
@@ -4081,7 +4092,10 @@ mod tests {
                 !glyphs.contains('\u{0E33}'),
                 "raw SARA AM leaked into the About card at frame {frame}"
             );
-            assert!(glyphs.contains("honya"), "brand line missing at frame {frame}");
+            assert!(
+                glyphs.contains("honya"),
+                "brand line missing at frame {frame}"
+            );
             if glyphs.contains("เหลือเกินนะ") {
                 saw_full_line = true;
             }
@@ -4112,5 +4126,3 @@ mod tests {
         }
     }
 }
-
-
