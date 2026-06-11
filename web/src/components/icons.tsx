@@ -79,12 +79,16 @@ export function ChevronIcon(props: IconProps) {
   )
 }
 
-/** The honya wordmark mark — a waxing moon (the chapter-status motif). */
+/**
+ * The honya brand mark — a two-tone waxing-gibbous moon (the chapter-status
+ * motif). A warm amber crescent shadow sits under a lit gibbous drawn in
+ * `currentColor`, so on the indigo brand chip it reads washi-lit / amber-shadow.
+ */
 export function MoonMark(props: IconProps) {
   return (
     <svg viewBox="0 0 24 24" fill="none" aria-hidden="true" {...props}>
-      <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="2" />
-      <path d="M12 3a9 9 0 0 1 0 18 6 9 0 0 0 0-18Z" fill="currentColor" />
+      <circle cx="12" cy="12" r="8.5" fill="#b08a4a" />
+      <path d="M12 3.5a8.5 8.5 0 0 1 0 17 5.6 8.5 0 0 0 0-17Z" fill="currentColor" />
     </svg>
   )
 }

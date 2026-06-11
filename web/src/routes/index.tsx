@@ -1,16 +1,16 @@
 import { createFileRoute } from '@tanstack/react-router'
+import type { ReactNode } from 'react'
 import { Header } from '../components/Header'
 import { Footer } from '../components/Footer'
-import { Terminal } from '../components/Terminal'
+import { AppDemo } from '../components/AppDemo'
 import { ScreenTabs } from '../components/ScreenTabs'
 import { PipelineDiagram } from '../components/PipelineDiagram'
 import { InstallCard } from '../components/InstallCard'
 import { Reveal } from '../components/Reveal'
 import { ArrowIcon, ChevronIcon, GitHubIcon } from '../components/icons'
-import { GITHUB_URL, SITE_URL } from '../data/site'
+import { GITHUB_URL, SITE_URL, VERSION } from '../data/site'
 
-const OG_IMAGE =
-  "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1200' height='630'%3E%3Crect width='1200' height='630' fill='%23F3EFE6'/%3E%3Crect x='40' y='40' width='1120' height='550' rx='14' fill='%23ECE7DC' stroke='%23CEC6B8'/%3E%3Ctext x='90' y='300' font-family='serif' font-size='180' fill='%232D2A26'%3E%E6%9C%AC%E5%B1%8B%3C/text%3E%3Ctext x='96' y='370' font-family='monospace' font-size='38' fill='%235C564E'%3Ehonya — JA%E2%86%92TH light-novel translation%3C/text%3E%3Ctext x='96' y='430' font-family='monospace' font-size='30' fill='%233A5078'%3EOrchestrator %C2%B7 Translator %C2%B7 Reviewer%3C/text%3E%3C/svg%3E"
+const OG_IMAGE = `${SITE_URL}/og.png`
 
 export const Route = createFileRoute('/')({
   head: () => ({
@@ -40,6 +40,7 @@ export const Route = createFileRoute('/')({
       },
       { property: 'og:image:width', content: '1200' },
       { property: 'og:image:height', content: '630' },
+      { property: 'og:image:type', content: 'image/png' },
       {
         name: 'twitter:title',
         content: 'honya — TUI สำหรับแปลไลต์โนเวลญี่ปุ่น→ไทย',
@@ -56,96 +57,97 @@ export const Route = createFileRoute('/')({
   component: Home,
 })
 
-const FEATURES: Array<{ icon: React.ReactNode; title: string; body: React.ReactNode }> = [
+/** Editorial section header — folio number + vertical JP marker + heading. */
+function EdHead({
+  n,
+  tate,
+  eyebrow,
+  title,
+  lead,
+  id,
+}: {
+  n: string
+  tate: string
+  eyebrow: string
+  title: ReactNode
+  lead: ReactNode
+  id?: string
+}) {
+  return (
+    <div className="edhead">
+      <div className="edhead-rail" aria-hidden="true">
+        <span className="folio">{n}</span>
+        <span className="edhead-line" />
+        <span className="edhead-tate ja" lang="ja">
+          {tate}
+        </span>
+      </div>
+      <div className="edhead-body">
+        <span className="eyebrow">{eyebrow}</span>
+        <h2 id={id}>{title}</h2>
+        <p>{lead}</p>
+      </div>
+    </div>
+  )
+}
+
+const FEATURES: Array<{ kanji: string; title: string; body: ReactNode }> = [
   {
-    icon: (
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M12 2v4M12 18v4M4.9 4.9l2.9 2.9M16.2 16.2l2.9 2.9M2 12h4M18 12h4M4.9 19.1l2.9-2.9M16.2 7.8l2.9-2.9" />
-      </svg>
-    ),
+    kanji: '鍵',
     title: 'ใช้คีย์ของคุณเอง',
     body: (
       <>
-        honya ทำงานกับ API ที่รองรับ OpenRouter ระบบจะขอคีย์เมื่อเปิดครั้งแรกและบันทึกไว้ในเครื่อง
-        ที่ <code>~/.config/honya</code> — หรือจะอ่าน <code>HONYA_API_KEY</code> จากตัวแปร
-        สภาพแวดล้อมก็ได้ ไม่มีบัญชีของ honya; คำขอแปลยังถูกส่งไปยัง provider ที่คุณเลือก
+        ทำงานกับ API ที่รองรับ OpenRouter — ขอคีย์ครั้งแรกแล้วเก็บไว้ที่{' '}
+        <code>~/.config/honya</code> ไม่มีบัญชี honya คำขอส่งตรงไปยัง provider ของคุณ
       </>
     ),
   },
   {
-    icon: (
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-        <circle cx="6" cy="6" r="2.4" />
-        <circle cx="18" cy="6" r="2.4" />
-        <circle cx="12" cy="18" r="2.4" />
-        <path d="M8.4 6h7.2M7.2 8 11 15.6M16.8 8 13 15.6" />
-      </svg>
-    ),
+    kanji: '三',
     title: 'ไปป์ไลน์สามเอเจนต์',
     body: (
       <>
-        Orchestrator, Translator และ Reviewer แบ่งงานกันทีละ chunk เป็นวงจรร่าง ตรวจ
-        และลองใหม่ก่อนที่ผลแปลจะถูกบันทึกลงดิสก์
+        Orchestrator, Translator และ Reviewer แบ่งงานทีละ chunk เป็นวงจรร่าง–ตรวจ–
+        ลองใหม่ ก่อนบันทึกลงดิสก์
       </>
     ),
   },
   {
-    icon: (
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M4 4h11l5 5v11a0 0 0 0 1 0 0H4a0 0 0 0 1 0 0Z" />
-        <path d="M15 4v5h5M8 13h8M8 17h6" />
-      </svg>
-    ),
+    kanji: '書',
     title: 'การเตรียมข้อมูล EPUB',
     body: (
       <>
-        จัดบทตามลำดับสันหนังสือ ย้ายภาพประกอบ และล้าง HTML ให้เป็น Markdown
-        เพื่อให้โมเดลอ่านเนื้อหา ไม่ใช่มาร์กอัปจาก EPUB
+        จัดบทตามลำดับสันหนังสือ ย้ายภาพประกอบ และล้าง HTML เป็น Markdown —
+        โมเดลอ่านเนื้อหา ไม่ใช่มาร์กอัป
       </>
     ),
   },
   {
-    icon: (
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-        <rect x="3" y="4" width="18" height="16" rx="2" />
-        <path d="M12 4v16M6 9h3M6 13h3M15 9h3M15 13h3" />
-      </svg>
-    ),
+    kanji: '読',
     title: 'โหมดอ่านเทียบคู่',
     body: (
       <>
-        พิสูจน์อักษร JA→TH แบบซิงก์กัน โดยล็อกคอลัมน์ให้ตรงกันทีละย่อหน้า
-        เพื่อให้สายตาคุณไม่หลงตำแหน่งระหว่างการตรวจ
+        พิสูจน์อักษร JA→TH แบบเทียบคู่ ซิงก์เลื่อนทีละย่อหน้า ให้สายตาไม่หลงตำแหน่ง
       </>
     ),
   },
   {
-    icon: (
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M4 19.5V6a2 2 0 0 1 2-2h11v16H6a2 2 0 0 0-2 2Z" />
-        <path d="M9 8h5M9 11h5" />
-      </svg>
-    ),
+    kanji: '辞',
     title: 'ไฟล์บริบทที่แก้เองได้',
     body: (
       <>
-        GLOSSARY, CHARACTERS และโน้ตถูกอัปเดตผ่าน tool calls ระหว่างแปล
-        คุณยังเปิดไฟล์เหล่านี้มาแก้เองได้เมื่อคำศัพท์หรือชื่อตัวละครต้องล็อกให้ชัด
+        GLOSSARY, CHARACTERS และโน้ตอัปเดตผ่าน tool calls ระหว่างแปล
+        และคุณเปิดแก้เองได้ทุกเมื่อ
       </>
     ),
   },
   {
-    icon: (
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M3 7l9-4 9 4-9 4-9-4Z" />
-        <path d="M3 7v6l9 4 9-4V7" />
-      </svg>
-    ),
+    kanji: '匣',
     title: 'ทุกอย่างเป็นเพียงไฟล์',
     body: (
       <>
-        PROJECT.md, GLOSSARY.md, STYLE.md และโฟลเดอร์แยกตามเล่ม — อ่านได้ เทียบ diff ได้
-        และเป็นของคุณ แก้ด้วยมือเมื่อไหร่ก็ได้ honya จะทำงานต่อจากจุดที่คุณค้างไว้
+        PROJECT.md, GLOSSARY.md, STYLE.md และโฟลเดอร์ต่อเล่ม — อ่านได้ diff ได้ แก้ได้
+        honya ทำงานต่อจากจุดที่ค้างไว้
       </>
     ),
   },
@@ -158,15 +160,14 @@ const TRUST: Array<[string, string]> = [
   ['100%', 'งานเป็นไฟล์บนเครื่องคุณ — ใช้คีย์ของคุณเอง ฟรีและโอเพนซอร์ส'],
 ]
 
-const FAQ: Array<{ q: string; a: React.ReactNode }> = [
+const FAQ: Array<{ q: string; a: ReactNode }> = [
   {
     q: 'ต้องมีคีย์ API ไหม และใช้ผู้ให้บริการเจ้าไหน?',
     a: (
       <>
-        ต้องมี honya ไม่ได้มาพร้อมโมเดลในตัว แต่ทำงานกับ API ที่รองรับ OpenRouter
-        เมื่อเปิดครั้งแรกโปรแกรมจะถามคีย์ของคุณและบันทึกไว้ที่ <code>~/.config/honya</code>{' '}
-        หรือจะตั้งผ่านตัวแปร <code>HONYA_API_KEY</code> เองก็ได้
-        คุณเลือกโมเดลแยกได้สำหรับแต่ละเอเจนต์
+        ต้องมี honya ไม่มีโมเดลในตัว แต่ทำงานกับ API ที่รองรับ OpenRouter — เปิดครั้งแรก
+        จะถามคีย์แล้วเก็บไว้ที่ <code>~/.config/honya</code> หรือตั้ง{' '}
+        <code>HONYA_API_KEY</code> เอง (เลือกโมเดลแยกได้ต่อเอเจนต์)
       </>
     ),
   },
@@ -194,10 +195,9 @@ const FAQ: Array<{ q: string; a: React.ReactNode }> = [
     q: 'คำแปลเชื่อถือได้แค่ไหน?',
     a: (
       <>
-        honya ช่วย<b>จัดงาน</b>แปล ไม่ได้รับประกันคำแปลที่สมบูรณ์ ไปป์ไลน์มีรอบตรวจ
-        (Reviewer) และการตรวจสอบในเครื่องอยู่แล้ว แต่ผลลัพธ์ยังควรอ่านตรวจเอง
-        โดยเฉพาะชื่อเฉพาะ น้ำเสียง และประโยคที่พึ่งพาบริบทมาก — โหมด Reader
-        แบบเทียบคู่มีไว้เพื่อการนี้
+        honya ช่วย<b>จัดงาน</b>แปล ไม่รับประกันคำแปลสมบูรณ์ มีรอบตรวจ (Reviewer)
+        และ audit ในเครื่อง แต่ควรอ่านตรวจเอง โดยเฉพาะชื่อเฉพาะและน้ำเสียง —
+        โหมด Reader เทียบคู่มีไว้เพื่อการนี้
       </>
     ),
   },
@@ -219,24 +219,45 @@ function Home() {
     <>
       <Header page="home" />
       <main id="main">
-        {/* HERO */}
-        <section className="hero" aria-labelledby="hero-h">
+        {/* ───── COVER ───── */}
+        <section className="cover" aria-labelledby="hero-h">
           <div className="wrap">
-            <div className="hero-grid">
-              <div className="hero-copy">
-                <span className="eyebrow">Ratatui TUI · Rust · ใช้คีย์ของคุณเอง</span>
+            <div className="cover-masthead" aria-hidden="true">
+              <span className="cm-l">
+                <span className="ja" lang="ja">
+                  本屋
+                </span>{' '}
+                — 日本語 → ไทย 翻訳
+              </span>
+              <span className="cm-r">No.01 — {VERSION}</span>
+            </div>
+
+            <div className="cover-grid">
+              <div className="cover-tate" aria-hidden="true">
+                <span className="ja" lang="ja">
+                  一冊まるごと、訳す。
+                </span>
+              </div>
+
+              <div className="cover-main">
+                <span className="eyebrow">honya · 本屋</span>
                 <h1 id="hero-h">
-                  แปลไลต์โนเวลญี่ปุ่นเป็นไทย <span className="accent">JA→TH</span>{' '}
-                  ในเทอร์มินัลด้วย{' '}
-                  <span className="wordmark" lang="ja">
+                  แปลไลต์โนเวล
+                  <br />
+                  ญี่ปุ่น
+                  <span className="seal" aria-hidden="true">
+                    →
+                  </span>
+                  ไทย
+                  <br />
+                  <span className="wordmark ja" lang="ja">
                     本屋
                   </span>
                 </h1>
-                <p className="hero-sub">
-                  <b>honya</b> นำเข้า EPUB แล้วแตกเป็นโปรเจกต์บนดิสก์: บทที่ล้างเป็น
-                  Markdown, โฟลเดอร์ภาพ, ไฟล์ศัพท์ ตัวละคร สไตล์ และคำแปลแยกตามเล่ม
-                  จากนั้นเรียกโมเดลผ่าน API ที่รองรับ OpenRouter เพื่อแปลทีละ chunk
-                  พร้อมหน้าจอสำหรับตรวจงานเอง
+                <p className="lede">
+                  <b>honya</b> นำเข้าไฟล์แล้วแตกเป็นโปรเจกต์บนดิสก์ — บท Markdown, ภาพ,
+                  ศัพท์ ตัวละคร สไตล์ และคำแปลแยกตามเล่ม แล้วแปลทีละ chunk ผ่าน API
+                  ที่รองรับ OpenRouter พร้อมหน้าจอตรวจงานเอง
                 </p>
                 <div className="cta-row">
                   <a className="btn btn-primary" href="#install">
@@ -248,55 +269,68 @@ function Home() {
                     ดูบน GitHub
                   </a>
                 </div>
-                <div className="hero-meta">
-                  <span>
+                <ul className="cover-meta">
+                  <li>
                     <span className="dot" />
                     ใช้คีย์ OpenRouter ของคุณเอง
-                  </span>
-                  <span>
+                  </li>
+                  <li>
                     <span className="dot" />
                     โปรเจกต์เป็นไฟล์ในเครื่อง
-                  </span>
-                  <span>
+                  </li>
+                  <li>
                     <span className="dot" />
                     ฟรีและโอเพนซอร์ส
-                  </span>
-                </div>
+                  </li>
+                </ul>
               </div>
-              <Terminal />
             </div>
           </div>
         </section>
 
-        {/* WHAT IT IS */}
-        <Reveal as="section" className="what" id="what" aria-labelledby="what-h">
+        {/* ───── DEMO SPREAD (centerfold) ───── */}
+        <Reveal as="section" className="spread" aria-label="ตัวอย่างแอป honya">
           <div className="wrap">
-            <div className="sec-head">
-              <span className="eyebrow">คืออะไร</span>
-              <h2 id="what-h">เครื่องมือสำหรับจัดงานแปลยาว ๆ ในเทอร์มินัล</h2>
-              <p>
-                honya ไม่ได้แทนที่คนตรวจแปล แต่ช่วยจัดไฟล์ บริบท และรอบแปลให้ตามงานได้ง่ายขึ้น
-                เมื่อโปรเจกต์มีหลายบทหรือหลายเล่ม
-              </p>
+            <div className="spread-bar">
+              <span className="folio">図 01</span>
+              <span className="spread-cap">
+                TUI จริงในเบราว์เซอร์ — คลิกแล้วกด{' '}
+                <span className="kbd">1</span>–<span className="kbd">5</span> สลับหน้าจอ,{' '}
+                <span className="kbd">t</span> เริ่มแปล
+              </span>
+              <span className="spread-edge ja" lang="ja">
+                実演
+              </span>
             </div>
+            <AppDemo />
+          </div>
+        </Reveal>
+
+        {/* ───── 01 · WHAT IT IS ───── */}
+        <Reveal as="section" className="ed what" id="what" aria-labelledby="what-h">
+          <div className="wrap">
+            <EdHead
+              n="01"
+              tate="仕組み"
+              eyebrow="คืออะไร"
+              id="what-h"
+              title="เครื่องมือสำหรับจัดงานแปลยาว ๆ ในเทอร์มินัล"
+              lead="ไม่ได้แทนที่คนตรวจแปล แต่ช่วยจัดไฟล์ บริบท และรอบแปลให้ตามงานง่ายขึ้น เมื่อมีหลายบทหลายเล่ม"
+            />
             <div className="what-grid">
               <div className="what-text">
                 <p className="big">
-                  คุณเริ่มจาก EPUB แล้วได้โฟลเดอร์โปรเจกต์ที่เปิดอ่าน แก้ และ diff ได้ —
-                  ต้นฉบับญี่ปุ่นอยู่ใน <code>raw/</code> และผลแปลไทยอยู่ใน{' '}
-                  <code>translated/</code>
+                  เริ่มจาก EPUB แล้วได้โฟลเดอร์ที่อ่าน แก้ และ diff ได้ — ต้นฉบับญี่ปุ่นใน{' '}
+                  <code>raw/</code> ผลแปลไทยใน <code>translated/</code>
                 </p>
                 <p>
-                  ขั้นตอนนำเข้าจะจัดบทตามลำดับสันหนังสือ ย้ายภาพประกอบ และล้าง HTML
-                  ให้เหลือ Markdown จากนั้นแต่ละบทจะถูกแบ่งเป็น chunk ขนาดประมาณ 1,000
-                  โทเคน พร้อมส่งบริบทที่จำเป็น เช่น ศัพท์ ตัวละคร สไตล์ และข้อความก่อนหน้า
-                  ให้โมเดลในแต่ละรอบ
+                  ขั้นตอนนำเข้าจัดบทตามสันหนังสือ ย้ายภาพ และล้าง HTML เป็น Markdown
+                  จากนั้นแบ่งแต่ละบทเป็น chunk ราว 1,000 โทเคน พร้อมส่งบริบทที่จำเป็น —
+                  ศัพท์ ตัวละคร สไตล์ และข้อความก่อนหน้า
                 </p>
                 <p>
-                  honya ไม่มาพร้อมโมเดลในตัว ต้องใช้{' '}
-                  <b>API ที่รองรับ OpenRouter</b> เมื่อเปิดครั้งแรกโปรแกรมจะถามคีย์และ
-                  บันทึกไว้ที่ <code>~/.config/honya</code> หรือจะตั้ง{' '}
-                  <code>HONYA_API_KEY</code> เองก็ได้
+                  honya ไม่มีโมเดลในตัว ต้องใช้ <b>API ที่รองรับ OpenRouter</b>{' '}
+                  เปิดครั้งแรกจะถามคีย์แล้วเก็บไว้ที่ <code>~/.config/honya</code>
                 </p>
               </div>
               <div className="what-vis">
@@ -355,18 +389,23 @@ function Home() {
           </div>
         </Reveal>
 
-        {/* FIVE SCREENS */}
-        <Reveal as="section" id="screens" aria-labelledby="screens-h">
+        {/* ───── 02 · FIVE SCREENS ───── */}
+        <Reveal as="section" className="ed" id="screens" aria-labelledby="screens-h">
           <div className="wrap">
-            <div className="sec-head">
-              <span className="eyebrow">ห้าหน้าจอ</span>
-              <h2 id="screens-h">ห้าหน้าจอสำหรับนำเข้า แปล ตรวจ และแก้บริบท</h2>
-              <p>
-                กด <span className="kbd">1</span>–<span className="kbd">5</span>{' '}
-                ในแอปเพื่อสลับมุมมอง แต่ละหน้าจอมีงานหลักของตัวเอง —
-                เลือกแท็บเพื่อดูตัวอย่าง
-              </p>
-            </div>
+            <EdHead
+              n="02"
+              tate="五画面"
+              eyebrow="ห้าหน้าจอ"
+              id="screens-h"
+              title="ห้าหน้าจอสำหรับนำเข้า แปล ตรวจ และแก้บริบท"
+              lead={
+                <>
+                  กด <span className="kbd">1</span>–<span className="kbd">5</span>{' '}
+                  ในแอปเพื่อสลับมุมมอง แต่ละหน้าจอมีงานหลักของตัวเอง —
+                  เลือกแท็บเพื่อดูตัวอย่าง
+                </>
+              }
+            />
             <ScreenTabs />
             <div
               className="moon-legend"
@@ -417,17 +456,17 @@ function Home() {
           </div>
         </Reveal>
 
-        {/* PIPELINE */}
-        <Reveal as="section" className="pipeline" id="pipeline" aria-labelledby="pipe-h">
+        {/* ───── 03 · PIPELINE ───── */}
+        <Reveal as="section" className="ed pipeline" id="pipeline" aria-labelledby="pipe-h">
           <div className="wrap">
-            <div className="sec-head">
-              <span className="eyebrow">วิธีแปล</span>
-              <h2 id="pipe-h">แปลทีละ Chunk พร้อมบริบทที่จำเป็น</h2>
-              <p>
-                แต่ละบทถูกแบ่งเป็น chunk ขนาดประมาณ 1,000 โทเคน Orchestrator เตรียมบริบท,
-                Translator ร่างคำแปล และ Reviewer ตรวจเบื้องต้นก่อนที่แอปจะเขียนผลลงไฟล์
-              </p>
-            </div>
+            <EdHead
+              n="03"
+              tate="翻訳"
+              eyebrow="วิธีแปล"
+              id="pipe-h"
+              title="แปลทีละ Chunk พร้อมบริบทที่จำเป็น"
+              lead="แต่ละบทแบ่งเป็น chunk ราว 1,000 โทเคน — Orchestrator เตรียมบริบท, Translator ร่าง, Reviewer ตรวจ ก่อนเขียนลงไฟล์"
+            />
             <div className="pipe-wrap">
               <PipelineDiagram />
               <div className="pipe-steps">
@@ -440,8 +479,8 @@ function Home() {
                   </span>
                   <h4>จัดเตรียมทุกอย่าง</h4>
                   <p>
-                    เลือกข้อมูลที่ควรส่งให้โมเดลในรอบนั้น เช่น ศัพท์ ตัวละคร สไตล์ บทสรุป
-                    และประโยคภาษาไทยท้าย ๆ จาก chunk ก่อนหน้า
+                    เลือกบริบทที่ต้องส่งให้โมเดล — ศัพท์ ตัวละคร สไตล์ บทสรุป
+                    และประโยคไทยท้าย chunk ก่อนหน้า
                   </p>
                 </div>
                 <div className="pstep">
@@ -453,8 +492,7 @@ function Home() {
                   </span>
                   <h4>ร่างภาษาไทย</h4>
                   <p>
-                    ร่างคำแปลของ chunk ปัจจุบันและสตรีมข้อความกลับมาให้เห็นระหว่างรัน
-                    เพื่อให้รู้ว่างานยังเดินอยู่
+                    ร่างคำแปลของ chunk ปัจจุบัน สตรีมข้อความกลับมาให้เห็นระหว่างรัน
                   </p>
                 </div>
                 <div className="pstep">
@@ -466,47 +504,47 @@ function Home() {
                   </span>
                   <h4>อนุมัติหรือส่งกลับ</h4>
                   <p>
-                    ตรวจความตรงต้นฉบับและข้อผิดพลาดชัดเจนในรอบอัตโนมัติ ถ้าไม่ผ่าน
-                    ฟีดแบ็กจะถูกส่งกลับไปให้ Translator ลองใหม่
+                    ตรวจความตรงต้นฉบับในรอบอัตโนมัติ ถ้าไม่ผ่าน ฟีดแบ็กกลับไปให้
+                    Translator ลองใหม่
                   </p>
                 </div>
               </div>
               <div className="pipe-note">
-                เมื่อ Reviewer อนุมัติ แอปจะ
-                <b>ผนวกคำแปลและบันทึกศัพท์ ตัวละคร หรือโน้ตใหม่</b> ลงไฟล์โปรเจกต์
-                จากนั้นจึงอัปเดตบทสรุป เมื่อปฏิเสธ จะยังไม่เขียนผลแปล:{' '}
-                <span className="vermilion">ฟีดแบ็กของ Reviewer</span>
-                จะถูกส่งกลับไปยัง Translator จนกว่า chunk จะผ่าน
+                อนุมัติแล้วแอปจะ
+                <b>ผนวกคำแปลและบันทึกศัพท์ ตัวละคร หรือโน้ตใหม่</b> ลงไฟล์ ถ้าปฏิเสธ
+                ยังไม่เขียนผล — <span className="vermilion">ฟีดแบ็ก</span> กลับไปให้
+                Translator จนกว่าจะผ่าน
               </div>
             </div>
           </div>
         </Reveal>
 
-        {/* INSTALL */}
-        <Reveal as="section" id="install" aria-labelledby="install-h">
+        {/* ───── 04 · INSTALL ───── */}
+        <Reveal as="section" className="ed install" id="install" aria-labelledby="install-h">
           <div className="wrap">
             <InstallCard />
           </div>
         </Reveal>
 
-        <hr className="divider" />
-
-        {/* FEATURES */}
-        <Reveal as="section" aria-labelledby="feat-h">
+        {/* ───── FEATURES ───── */}
+        <Reveal as="section" className="ed feats" aria-labelledby="feat-h">
           <div className="wrap">
-            <div className="sec-head">
-              <span className="eyebrow">สิ่งที่ควรรู้</span>
-              <h2 id="feat-h">honya ช่วยจัดงาน ไม่ได้สัญญาว่าคำแปลสมบูรณ์</h2>
-              <p>
-                ผลลัพธ์ยังควรอ่านตรวจเอง โดยเฉพาะชื่อเฉพาะ น้ำเสียง
-                และประโยคที่พึ่งพาบริบทมาก
-              </p>
-            </div>
+            <EdHead
+              n="05"
+              tate="要点"
+              eyebrow="สิ่งที่ควรรู้"
+              id="feat-h"
+              title="honya ช่วยจัดงาน ไม่ได้สัญญาว่าคำแปลสมบูรณ์"
+              lead="ผลลัพธ์ยังควรอ่านตรวจเอง โดยเฉพาะชื่อเฉพาะ น้ำเสียง และประโยคที่พึ่งพาบริบทมาก"
+            />
             <div className="feat-grid">
-              {FEATURES.map((f) => (
+              {FEATURES.map((f, i) => (
                 <div className="feat" key={f.title}>
-                  <span className="ficon" aria-hidden="true">
-                    {f.icon}
+                  <span className="feat-idx" aria-hidden="true">
+                    {String(i + 1).padStart(2, '0')}
+                  </span>
+                  <span className="feat-kanji ja" lang="ja" aria-hidden="true">
+                    {f.kanji}
                   </span>
                   <h3>{f.title}</h3>
                   <p>{f.body}</p>
@@ -516,7 +554,7 @@ function Home() {
           </div>
         </Reveal>
 
-        {/* TRUST STRIP */}
+        {/* ───── TRUST ───── */}
         <div className="trust">
           <div className="wrap">
             <div className="trust-row">
@@ -530,14 +568,17 @@ function Home() {
           </div>
         </div>
 
-        {/* FAQ */}
-        <Reveal as="section" aria-labelledby="faq-h">
+        {/* ───── FAQ ───── */}
+        <Reveal as="section" className="ed" aria-labelledby="faq-h">
           <div className="wrap">
-            <div className="sec-head">
-              <span className="eyebrow">คำถามที่พบบ่อย</span>
-              <h2 id="faq-h">FAQ</h2>
-              <p>สั้น ๆ เกี่ยวกับคีย์ ความเป็นส่วนตัว ไฟล์ที่รองรับ และคุณภาพคำแปล</p>
-            </div>
+            <EdHead
+              n="06"
+              tate="質問"
+              eyebrow="คำถามที่พบบ่อย"
+              id="faq-h"
+              title="FAQ"
+              lead="สั้น ๆ เกี่ยวกับคีย์ ความเป็นส่วนตัว ไฟล์ที่รองรับ และคุณภาพคำแปล"
+            />
             <div className="faq-grid">
               {FAQ.map((item) => (
                 <details className="faq-item" key={item.q}>
@@ -555,24 +596,34 @@ function Home() {
           </div>
         </Reveal>
 
-        {/* END BAND */}
+        {/* ───── END BAND ───── */}
         <section className="endband" aria-labelledby="end-h">
           <div className="wrap">
-            <span className="eyebrow">ลองใช้งาน</span>
-            <h2 id="end-h">นำเข้า EPUB แล้วตรวจงานแปลในที่เดียว</h2>
-            <p>
-              เหมาะกับคนที่ต้องการโปรเจกต์แปลเป็นไฟล์ อ่าน diff ได้ และยอมตรวจคำแปลเอง
-              ไม่ใช่บริการแปลสำเร็จรูป
-            </p>
-            <div className="cta-row">
-              <a className="btn btn-primary" href="#install">
-                <ArrowIcon />
-                ติดตั้ง
-              </a>
-              <a className="btn btn-ghost" href={GITHUB_URL} rel="noopener">
-                <GitHubIcon />
-                ดูซอร์สโค้ด
-              </a>
+            <div className="endband-tate ja" lang="ja" aria-hidden="true">
+              読み継ぐ
+            </div>
+            <div className="endband-body">
+              <span className="eyebrow">ลองใช้งาน</span>
+              <h2 id="end-h">
+                นำเข้า EPUB แล้วตรวจงานแปลในที่เดียว{' '}
+                <span className="ja" lang="ja">
+                  本屋
+                </span>
+              </h2>
+              <p>
+                เหมาะกับคนที่ต้องการโปรเจกต์แปลเป็นไฟล์ อ่าน diff ได้ และยอมตรวจคำแปลเอง
+                ไม่ใช่บริการแปลสำเร็จรูป
+              </p>
+              <div className="cta-row">
+                <a className="btn btn-primary" href="#install">
+                  <ArrowIcon />
+                  ติดตั้ง
+                </a>
+                <a className="btn btn-ghost" href={GITHUB_URL} rel="noopener">
+                  <GitHubIcon />
+                  ดูซอร์สโค้ด
+                </a>
+              </div>
             </div>
           </div>
         </section>

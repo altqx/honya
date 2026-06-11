@@ -5,7 +5,7 @@ const FONTS_URL =
   'https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@400;500;700;900&family=Noto+Serif+JP:wght@500;600;700&family=Noto+Sans+Thai+Looped:wght@100..900&family=JetBrains+Mono:wght@400;500;700&family=Noto+Sans+Symbols+2&display=swap'
 
 const FAVICON =
-  "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%23F3EFE6'/%3E%3Ccircle cx='32' cy='32' r='17' fill='none' stroke='%233A5078' stroke-width='3'/%3E%3Cpath d='M32 15 a17 17 0 0 1 0 34 a11 17 0 0 0 0 -34' fill='%233A5078'/%3E%3C/svg%3E"
+  "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='15' fill='%232C3C5A'/%3E%3Ccircle cx='32' cy='32' r='17' fill='%23B08A4A'/%3E%3Cpath d='M32 15 a17 17 0 0 1 0 34 a11 17 0 0 0 0 -34 Z' fill='%23F3EFE6'/%3E%3C/svg%3E"
 
 export const Route = createRootRoute({
   head: () => ({

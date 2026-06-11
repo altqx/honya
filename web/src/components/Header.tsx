@@ -2,7 +2,7 @@ import { Link } from '@tanstack/react-router'
 import { Brand } from './Brand'
 import { GitHubIcon } from './icons'
 import { useScrolled } from '../hooks/useScrolled'
-import { GITHUB_URL } from '../data/site'
+import { GITHUB_URL, VERSION } from '../data/site'
 
 /**
  * Sticky site header. On the home page the section links are in-page anchors;
@@ -16,7 +16,16 @@ export function Header({ page }: { page: 'home' | 'changelog' }) {
     <header className={`site${scrolled ? ' scrolled' : ''}`} id="top">
       <nav className="nav" aria-label="เมนูหลัก">
         <Brand />
+        <span className="nav-edge" aria-hidden="true">
+          <span className="ja" lang="ja">
+            JA → TH
+          </span>{' '}
+          翻訳
+        </span>
         <div className="nav-links">
+          <Link className="nav-ver" to="/changelog" aria-label={`เวอร์ชัน ${VERSION}`}>
+            {VERSION}
+          </Link>
           <a className="lnk" href={`${base}#what`}>
             คืออะไร
           </a>
