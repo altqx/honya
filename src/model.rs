@@ -16,6 +16,9 @@ pub struct Project {
     pub dir: PathBuf,
     /// Display title from PROJECT.md (falls back to id).
     pub title: String,
+    /// Thai title, empty until set.
+    #[serde(default)]
+    pub title_th: String,
     #[serde(default)]
     pub created: Option<DateTime<Utc>>,
     #[serde(default)]
@@ -1145,6 +1148,7 @@ mod progress_tests {
             id: "p".into(),
             dir: PathBuf::from("/tmp/p"),
             title: "p".into(),
+            title_th: String::new(),
             created: None,
             touched: None,
             volumes: volumes

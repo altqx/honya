@@ -1,9 +1,6 @@
-//! Translate a volume synopsis (เรื่องย่อ) with the Translator agent.
+//! One-off Translator calls for synopsis and title fields.
 //!
-//! Reuses the Translator's system prompt + strict-JSON schema but feeds a single
-//! free-standing block instead of a chapter chunk: no continuity, no reference
-//! context. `temperature` rises with each reroll so the user gets a genuinely
-//! different take rather than the same sampling.
+//! No continuity/reference context; rerolls raise temperature for variety.
 
 use crate::agents::prompts::TRANSLATOR_SYSTEM;
 use crate::llm::client::{LlmClient, LlmError, Result};
@@ -11,8 +8,7 @@ use crate::llm::structured::{chat_structured, translator_schema};
 use crate::llm::{ChatRequest, Message, Usage};
 use crate::model::TranslatorOut;
 
-/// Map a reroll attempt (0-based) to a sampling temperature: the first roll is
-/// conservative, each reroll loosens up so the alternatives actually diverge.
+/// Map a reroll attempt to a capped sampling temperature.
 pub fn reroll_temperature(attempt: u32) -> f32 {
     match attempt {
         0 => 0.3,
@@ -22,8 +18,7 @@ pub fn reroll_temperature(attempt: u32) -> f32 {
     }
 }
 
-/// Translate `raw` source synopsis text into Thai. Returns the Thai string plus
-/// token `Usage`. `temperature` controls reroll variety (see [`reroll_temperature`]).
+/// Translate source synopsis text into Thai.
 pub async fn translate_synopsis(
     client: &dyn LlmClient,
     model: &str,
@@ -47,12 +42,51 @@ pub async fn translate_synopsis(
     let (out, usage) =
         chat_structured::<TranslatorOut>(client, req, "translation_result", translator_schema(), 2)
             .await?;
-    // An empty synopsis (cut-off/empty completion) must fail, not silently persist.
+    // Treat cut-off or empty completions as failures.
     let thai = out.translated_text.trim().to_string();
     if thai.is_empty() {
         return Err(LlmError::Api {
             status: 0,
             message: "translator returned an empty synopsis".to_string(),
+        });
+    }
+    Ok((thai, usage))
+}
+
+/// Translate a novel title into one Thai line.
+pub async fn translate_title(
+    client: &dyn LlmClient,
+    model: &str,
+    raw: &str,
+    temperature: f32,
+) -> Result<(String, Usage)> {
+    let user = format!(
+        "<<NOVEL_TITLE_JP: นี่คือชื่อเรื่องของไลท์โนเวล แปลเป็นชื่อภาษาไทยที่เป็นธรรมชาติและน่าสนใจ \
+         คงความหมายและอารมณ์ของต้นฉบับ ตอบเป็นชื่อเรื่องบรรทัดเดียว ไม่ต้องอธิบาย>>\n\
+         {raw}\n\
+         <<END_NOVEL_TITLE_JP>>",
+        raw = raw.trim(),
+    );
+
+    let req = ChatRequest {
+        model: model.to_string(),
+        messages: vec![Message::system(TRANSLATOR_SYSTEM), Message::user(user)],
+        temperature: Some(temperature),
+        ..ChatRequest::default()
+    };
+
+    let (out, usage) =
+        chat_structured::<TranslatorOut>(client, req, "translation_result", translator_schema(), 2)
+            .await?;
+    let thai = out
+        .translated_text
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if thai.is_empty() {
+        return Err(LlmError::Api {
+            status: 0,
+            message: "translator returned an empty title".to_string(),
         });
     }
     Ok((thai, usage))
@@ -67,9 +101,18 @@ mod tests {
     fn reroll_temperature_rises_then_caps() {
         assert!(reroll_temperature(0) < reroll_temperature(1));
         assert!(reroll_temperature(1) < reroll_temperature(2));
-        // Saturates at 0.9 for any further reroll.
         assert_eq!(reroll_temperature(3), reroll_temperature(9));
         assert!(reroll_temperature(9) <= 0.9);
+    }
+
+    #[tokio::test]
+    async fn translate_title_returns_single_line_thai() {
+        let client = MockClient::new("เงาแห่ง\nราตรี");
+        let (th, usage) = translate_title(&client, "honya/mock", "夜の影", 0.3)
+            .await
+            .unwrap();
+        assert_eq!(th, "เงาแห่ง ราตรี");
+        assert!(usage.total_tokens > 0);
     }
 
     #[tokio::test]

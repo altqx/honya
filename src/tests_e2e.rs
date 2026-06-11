@@ -53,6 +53,7 @@ fn reader_note_overlay_saves_line_annotation() {
             id: "novel".to_string(),
             dir: dir.clone(),
             title: "Novel".to_string(),
+            title_th: String::new(),
             created: None,
             touched: None,
             volumes: vec![Volume {
@@ -169,6 +170,7 @@ fn project_l_key_is_not_shadowed_by_activity_log() {
         id: "novel".to_string(),
         dir: dir.clone(),
         title: "Novel".to_string(),
+        title_th: String::new(),
         created: None,
         touched: None,
         volumes: vec![Volume {
@@ -622,6 +624,7 @@ fn onboarding_shows_welcome_on_first_run_only() {
         id: "x".into(),
         dir: PathBuf::from("/tmp/honya-x"),
         title: "X".into(),
+        title_th: String::new(),
         created: None,
         touched: None,
         volumes: vec![],
@@ -713,6 +716,7 @@ fn shelf_delete_confirm_removes_project() {
         id: "re-zero".into(),
         dir: dir.clone(),
         title: "Re:Zero".into(),
+        title_th: String::new(),
         created: None,
         touched: None,
         volumes: vec![],
@@ -982,6 +986,7 @@ fn all_done_checkpoint_is_cleared_without_prompting() {
         id: "novel".to_string(),
         dir: project_dir.clone(),
         title: "Novel".to_string(),
+        title_th: String::new(),
         created: None,
         touched: None,
         volumes: vec![Volume {
@@ -1118,6 +1123,7 @@ async fn qa_overlay_gathers_and_navigates() {
         id: "novel".to_string(),
         dir: dir.clone(),
         title: "Novel".to_string(),
+        title_th: String::new(),
         created: None,
         touched: None,
         volumes: vec![Volume {
@@ -1229,6 +1235,7 @@ fn qa_collect_continuity_and_key_edges() {
             id: "novel".to_string(),
             dir: dir.clone(),
             title: "Novel".to_string(),
+            title_th: String::new(),
             created: None,
             touched: None,
             volumes: vec![Volume {
@@ -1718,6 +1725,7 @@ fn pipeline_events_route_to_the_running_volume() {
         id: "novel".to_string(),
         dir: dir.clone(),
         title: "Novel".to_string(),
+        title_th: String::new(),
         created: None,
         touched: None,
         volumes: vec![

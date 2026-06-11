@@ -81,14 +81,24 @@ pub enum Action {
         synopsis_raw: String,
         synopsis_th: String,
     },
-    /// Translate a volume synopsis with the Translator agent; `attempt` rises on
-    /// each reroll to vary the sampling temperature. Result returns as an AppEvent.
+    /// Translator round-trip for synopsis rerolls.
     TranslateSynopsis {
         raw: String,
         attempt: u32,
     },
     /// Persist the active volume's synopsis (standalone editor accept).
     SaveSynopsis {
+        raw: String,
+        th: String,
+    },
+    /// Translator round-trip for title rerolls.
+    TranslateProjectTitle {
+        raw: String,
+        attempt: u32,
+    },
+    /// Persist PROJECT.md title fields; `id` is the slug.
+    SaveProjectTitle {
+        id: String,
         raw: String,
         th: String,
     },
@@ -697,14 +707,15 @@ impl App {
                     self.push_log(LogLevel::Warn, format!("export: {w}"));
                 }
             }
+            // The title editor reuses the synopsis result events.
             AppEvent::SynopsisTranslated { text } => {
                 self.overlay.set_synopsis_result(Ok(text.clone()));
-                self.toast = Some(Toast::info("synopsis translated"));
+                self.toast = Some(Toast::info("translation ready"));
             }
             AppEvent::SynopsisFailed { msg } => {
                 self.overlay.set_synopsis_result(Err(msg.clone()));
-                self.push_log(LogLevel::Error, format!("synopsis: {msg}"));
-                self.toast = Some(Toast::error(format!("synopsis: {msg}")));
+                self.push_log(LogLevel::Error, format!("translate: {msg}"));
+                self.toast = Some(Toast::error(format!("translate: {msg}")));
             }
             AppEvent::CharacterUpserted { thai_name, .. } => {
                 self.toast = Some(Toast::info(format!("character → {thai_name}")));
@@ -1352,6 +1363,12 @@ impl App {
             }
             Action::SaveSynopsis { raw, th } => {
                 self.save_synopsis(raw, th);
+            }
+            Action::TranslateProjectTitle { raw, attempt } => {
+                self.translate_project_title(raw, attempt);
+            }
+            Action::SaveProjectTitle { id, raw, th } => {
+                self.save_project_title(id, raw, th);
             }
             Action::SaveReaderNote {
                 chapter,
@@ -2331,7 +2348,12 @@ impl App {
 
         let root = project.dir.clone();
         let project_id = project.id.clone();
-        let title = project.title.clone();
+        // Exports should use the translated title when available.
+        let title = if project.title_th.trim().is_empty() {
+            project.title.clone()
+        } else {
+            project.title_th.clone()
+        };
         let vol_label = volume.label.clone();
         let chapters = volume.chapters.clone();
         let tx = self.tx.clone();
@@ -2357,12 +2379,8 @@ impl App {
         });
     }
 
-    /// Spawn a background Translator round-trip for a volume synopsis. Uses the
-    /// active project's client when one is open, else builds from config (the
-    /// import wizard runs from the Shelf with no project open yet).
-    fn translate_synopsis(&mut self, raw: String, attempt: u32) {
-        // Prefer the active project's translator model; fall back to config (the
-        // import wizard runs from the Shelf with no project open yet).
+    /// Client/model pair for one-off editor translations; failures notify the editor.
+    fn editor_translator(&mut self) -> Option<(Arc<dyn LlmClient>, String)> {
         let model = self
             .active
             .as_ref()
@@ -2373,17 +2391,44 @@ impl App {
             None => match crate::build_client(&self.cfg) {
                 Ok(c) => c,
                 Err(e) => {
-                    // No client → report failure so the editor leaves Translating.
                     self.tx
                         .send(AppEvent::SynopsisFailed { msg: e.to_string() });
-                    return;
+                    return None;
                 }
             },
+        };
+        Some((client, model))
+    }
+
+    fn translate_synopsis(&mut self, raw: String, attempt: u32) {
+        let Some((client, model)) = self.editor_translator() else {
+            return;
         };
         let temperature = crate::agents::synopsis::reroll_temperature(attempt);
         let tx = self.tx.clone();
         tokio::spawn(async move {
             match crate::agents::synopsis::translate_synopsis(
+                client.as_ref(),
+                &model,
+                &raw,
+                temperature,
+            )
+            .await
+            {
+                Ok((text, _usage)) => tx.send(AppEvent::SynopsisTranslated { text }),
+                Err(e) => tx.send(AppEvent::SynopsisFailed { msg: e.to_string() }),
+            }
+        });
+    }
+
+    fn translate_project_title(&mut self, raw: String, attempt: u32) {
+        let Some((client, model)) = self.editor_translator() else {
+            return;
+        };
+        let temperature = crate::agents::synopsis::reroll_temperature(attempt);
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            match crate::agents::synopsis::translate_title(
                 client.as_ref(),
                 &model,
                 &raw,
@@ -2535,6 +2580,42 @@ impl App {
             }
         }
         self.overlay = Overlay::None;
+    }
+
+    /// Persist title edits without changing the project slug.
+    fn save_project_title(&mut self, id: String, raw: String, th: String) {
+        self.overlay = Overlay::None;
+        let raw = raw.trim().to_string();
+        if raw.is_empty() {
+            self.toast = Some(Toast::warn("empty name ignored"));
+            return;
+        }
+        let Some(dir) = self
+            .projects
+            .iter()
+            .find(|p| p.id == id)
+            .map(|p| p.dir.clone())
+        else {
+            self.toast = Some(Toast::warn(format!("project “{id}” not found")));
+            return;
+        };
+        let ws = Workspace::new(dir, 1);
+        match crate::workspace::scaffold::set_title(&ws, &raw, &th) {
+            Ok(()) => {
+                if let Some(p) = self.projects.iter_mut().find(|p| p.id == id) {
+                    p.title = raw.clone();
+                    p.title_th = th.trim().to_string();
+                }
+                if let Some(active) = self.active.as_mut()
+                    && active.project.id == id
+                {
+                    active.project.title = raw;
+                    active.project.title_th = th.trim().to_string();
+                }
+                self.toast = Some(Toast::info("project name saved"));
+            }
+            Err(e) => self.toast = Some(Toast::error(format!("rename failed: {e}"))),
+        }
     }
 
     /// Persist a Reader proofreading annotation and refresh the inline note cache.

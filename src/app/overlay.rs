@@ -52,6 +52,8 @@ pub struct SynopsisState {
     pub error: String,
     /// Reroll counter — drives rising translation temperature.
     pub attempt: u32,
+    /// False when Enter should submit instead of inserting a newline.
+    pub multiline: bool,
 }
 
 impl SynopsisState {
@@ -68,6 +70,14 @@ impl SynopsisState {
             phase,
             error: String::new(),
             attempt: 0,
+            multiline: true,
+        }
+    }
+
+    pub fn new_single_line(raw: String, th: String) -> Self {
+        Self {
+            multiline: false,
+            ..Self::new(raw, th)
         }
     }
 }
@@ -99,7 +109,7 @@ fn handle_synopsis_keys(st: &mut SynopsisState, key: KeyEvent) -> SynKey {
         SynPhase::Editing => {
             let opts = EditOpts {
                 numeric_only: false,
-                multiline: true,
+                multiline: st.multiline,
             };
             if input::handle(&mut st.raw, &mut st.cursor, key, opts) != Edited::Ignored {
                 return SynKey::None;
@@ -114,9 +124,17 @@ fn handle_synopsis_keys(st: &mut SynopsisState, key: KeyEvent) -> SynKey {
                         SynKey::Translate
                     }
                 }
-                KeyCode::Enter => {
+                KeyCode::Enter if st.multiline => {
                     input::insert_char(&mut st.raw, &mut st.cursor, '\n');
                     SynKey::None
+                }
+                KeyCode::Enter => {
+                    if st.raw.trim().is_empty() {
+                        SynKey::None
+                    } else {
+                        st.phase = SynPhase::Translating;
+                        SynKey::Translate
+                    }
                 }
                 _ => SynKey::None,
             }
@@ -148,6 +166,13 @@ fn handle_synopsis_keys(st: &mut SynopsisState, key: KeyEvent) -> SynKey {
 pub struct SynopsisEditState {
     pub vol: u32,
     pub title: String,
+    pub syn: SynopsisState,
+}
+
+/// Project title editor state; `id` is the stable project slug.
+#[derive(Debug, Clone)]
+pub struct TitleEditState {
+    pub id: String,
     pub syn: SynopsisState,
 }
 
@@ -722,6 +747,7 @@ pub enum Overlay {
     Modal(Dialog),
     /// Standalone volume-synopsis editor (re-opened from the Project screen).
     Synopsis(SynopsisEditState),
+    ProjectTitle(TitleEditState),
     /// Translation QA inbox — per-chapter issue counts + navigable findings, opened
     /// from the Project or Reader tab (Enter jumps to the chapter in the Reader).
     Qa(QaState),
@@ -795,6 +821,13 @@ impl Overlay {
             vol,
             title,
             syn: SynopsisState::new(raw, th),
+        })
+    }
+
+    pub fn project_title_edit(id: String, title: String, title_th: String) -> Self {
+        Overlay::ProjectTitle(TitleEditState {
+            id,
+            syn: SynopsisState::new_single_line(title, title_th),
         })
     }
 
@@ -945,6 +978,7 @@ impl Overlay {
         let st = match self {
             Overlay::Import(s) if s.step == 3 => &mut s.syn,
             Overlay::Synopsis(s) => &mut s.syn,
+            Overlay::ProjectTitle(s) => &mut s.syn,
             _ => return,
         };
         if st.phase != SynPhase::Translating {
@@ -971,6 +1005,7 @@ impl Overlay {
                 st.step == 1 || (st.step == 3 && st.syn.phase == SynPhase::Editing)
             }
             Overlay::Synopsis(st) => st.syn.phase == SynPhase::Editing,
+            Overlay::ProjectTitle(st) => st.syn.phase == SynPhase::Editing,
             Overlay::ReaderNote(_) => true,
             Overlay::ReaderSearch(_) => true, // query field
             Overlay::ReaderJump(_) => true,   // filter field
@@ -990,6 +1025,7 @@ impl Overlay {
             Overlay::Palette(_) => self.handle_palette_key(key),
             Overlay::Modal(_) => self.handle_modal_key(key),
             Overlay::Synopsis(_) => self.handle_synopsis_overlay_key(key),
+            Overlay::ProjectTitle(_) => self.handle_project_title_key(key),
             Overlay::Qa(_) => self.handle_qa_key(key),
             Overlay::ReaderNote(_) => self.handle_reader_note_key(key),
             Overlay::ReaderSearch(_) => self.handle_reader_search_key(key),
@@ -1077,6 +1113,7 @@ impl Overlay {
                 centered_modal(64, if dlg.alternate.is_some() { 11 } else { 9 }, area)
             }
             Overlay::Synopsis(_) => centered_modal(76, 24, area),
+            Overlay::ProjectTitle(_) => centered_modal(72, 16, area),
             Overlay::Qa(_) => centered_pct(80, 80, area),
             Overlay::ReaderNote(_) => centered_modal(72, 14, area),
             Overlay::ReaderSearch(_) => centered_modal(64, 7, area),
@@ -1792,7 +1829,25 @@ impl Overlay {
                 raw: st.syn.raw.clone(),
                 th: st.syn.th.clone(),
             },
-            // Skip/back leave the stored synopsis untouched.
+            SynKey::Skip | SynKey::Back => Action::CloseOverlay,
+        }
+    }
+
+    fn handle_project_title_key(&mut self, key: KeyEvent) -> Action {
+        let Overlay::ProjectTitle(st) = self else {
+            return Action::None;
+        };
+        match handle_synopsis_keys(&mut st.syn, key) {
+            SynKey::None => Action::None,
+            SynKey::Translate => Action::TranslateProjectTitle {
+                raw: st.syn.raw.clone(),
+                attempt: st.syn.attempt,
+            },
+            SynKey::Accept => Action::SaveProjectTitle {
+                id: st.id.clone(),
+                raw: st.syn.raw.clone(),
+                th: st.syn.th.clone(),
+            },
             SynKey::Skip | SynKey::Back => Action::CloseOverlay,
         }
     }
@@ -1813,6 +1868,7 @@ impl Overlay {
                 _ => &[("Esc", "close")],
             },
             Overlay::Synopsis(st) => synopsis_hints(&st.syn, false),
+            Overlay::ProjectTitle(st) => title_hints(&st.syn),
             Overlay::Settings(_) => &[("Tab", "field"), ("type", "edit"), ("Esc/↵", "close")],
             Overlay::Theme(_) => &[("jk/↑↓", "preview"), ("↵", "apply"), ("Esc", "revert")],
             Overlay::Palette(_) => &[
@@ -1881,6 +1937,7 @@ impl Overlay {
             Overlay::About => self.render_about(f, area, theme, frame),
             Overlay::Modal(dlg) => self.render_modal(f, area, theme, dlg),
             Overlay::Synopsis(st) => self.render_synopsis(f, area, theme, st),
+            Overlay::ProjectTitle(st) => self.render_project_title(f, area, theme, st),
             Overlay::Qa(st) => self.render_qa(f, area, theme, st),
             Overlay::ReaderNote(st) => self.render_reader_note(f, area, theme, st),
             Overlay::ReaderSearch(st) => self.render_reader_search(f, area, theme, st),
@@ -2045,6 +2102,27 @@ impl Overlay {
         let inner = block.inner(modal);
         f.render_widget(block, modal);
         render_synopsis_body(f, inner, theme, &st.syn, "บันทึก");
+    }
+
+    fn render_project_title(&self, f: &mut Frame, area: Rect, theme: &Theme, st: &TitleEditState) {
+        let modal = centered_modal(72, 16, area);
+        f.render_widget(Clear, modal);
+        let title = thai_display_safe(&format!("ชื่อเรื่อง — {}", truncate_cols(&st.id, 40)));
+        let block = self.modal_block(&title, theme);
+        let inner = block.inner(modal);
+        f.render_widget(block, modal);
+        render_editor_body(
+            f,
+            inner,
+            theme,
+            &st.syn,
+            "บันทึก",
+            &EditorLabels {
+                label: "  ชื่อเรื่องต้นฉบับ — แปลเป็นชื่อไทยได้ด้วย Translator agent",
+                placeholder: "พิมพ์ชื่อเรื่อง…",
+                input_rows: 3,
+            },
+        );
     }
 
     fn render_reader_note(&self, f: &mut Frame, area: Rect, theme: &Theme, st: &ReaderNoteState) {
@@ -3104,6 +3182,7 @@ impl Overlay {
                     ("h / l", "collapse · expand / focus"),
                     ("e", "edit context (Lexicon)"),
                     ("y", "volume synopsis (translate/reroll)"),
+                    ("R", "project name (translate/reroll)"),
                     ("V", "add volume (import wizard)"),
                     ("Q", "QA review (flagged issues)"),
                 ],
@@ -3722,8 +3801,33 @@ fn synopsis_hints(st: &SynopsisState, wizard: bool) -> &'static [(&'static str, 
     }
 }
 
-/// Render the synopsis editor body (raw input box, status line, translation) into
-/// `area`. Shared verbatim by the import wizard's step 3 and `render_synopsis`.
+fn title_hints(st: &SynopsisState) -> &'static [(&'static str, &'static str)] {
+    match st.phase {
+        SynPhase::Editing => {
+            if st.raw.trim().is_empty() {
+                &[("type", "name"), ("Esc", "cancel")]
+            } else {
+                &[("type", "name"), ("Tab/↵", "translate"), ("Esc", "cancel")]
+            }
+        }
+        SynPhase::Translating => &[("Esc", "cancel"), ("…", "translating")],
+        SynPhase::Done => &[
+            ("↵", "save"),
+            ("r", "reroll"),
+            ("e", "edit"),
+            ("s", "close"),
+        ],
+        SynPhase::Failed => &[("r", "retry"), ("e", "edit"), ("s", "close")],
+    }
+}
+
+struct EditorLabels {
+    label: &'static str,
+    placeholder: &'static str,
+    input_rows: u16,
+}
+
+/// Render the synopsis editor body used by import and standalone edit.
 fn render_synopsis_body(
     f: &mut Frame,
     area: Rect,
@@ -3731,20 +3835,43 @@ fn render_synopsis_body(
     st: &SynopsisState,
     accept_label: &str,
 ) {
+    render_editor_body(
+        f,
+        area,
+        theme,
+        st,
+        accept_label,
+        &EditorLabels {
+            label: "  เรื่องย่อเล่ม (ไม่บังคับ) — AI ใช้เป็นบริบทตอนแปล",
+            placeholder: "พิมพ์หรือวางเรื่องย่อภาษาต้นฉบับ… (เว้นว่างแล้วกด Tab เพื่อข้าม)",
+            input_rows: 9,
+        },
+    );
+}
+
+/// Shared edit/translate/accept body for synopsis and title editors.
+fn render_editor_body(
+    f: &mut Frame,
+    area: Rect,
+    theme: &Theme,
+    st: &SynopsisState,
+    accept_label: &str,
+    labels: &EditorLabels,
+) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1), // label
-            Constraint::Length(9), // raw input box (incl. border)
-            Constraint::Length(1), // status line
-            Constraint::Length(1), // divider
-            Constraint::Min(0),    // translation / error
+            Constraint::Length(1),
+            Constraint::Length(labels.input_rows),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(0),
         ])
         .split(area);
 
     f.render_widget(
         Paragraph::new(Span::styled(
-            thai_display_safe("  เรื่องย่อเล่ม (ไม่บังคับ) — AI ใช้เป็นบริบทตอนแปล"),
+            thai_display_safe(labels.label),
             Style::default().fg(theme.ink_soft),
         ))
         .style(Style::default().bg(theme.bg_panel)),
@@ -3766,7 +3893,7 @@ fn render_synopsis_body(
     if st.raw.is_empty() {
         text_lines.push(Line::from(vec![
             Span::styled(
-                thai_display_safe("พิมพ์หรือวางเรื่องย่อภาษาต้นฉบับ… (เว้นว่างแล้วกด Tab เพื่อข้าม)"),
+                thai_display_safe(labels.placeholder),
                 Style::default().fg(theme.ink_faint),
             ),
             if editing {
@@ -3816,9 +3943,14 @@ fn render_synopsis_body(
         SynPhase::Editing => Span::styled(
             thai_display_safe(&if st.raw.trim().is_empty() {
                 "  ยังไม่มีข้อความ — Tab ข้ามขั้นตอนนี้ · Esc กลับ".to_string()
-            } else {
+            } else if st.multiline {
                 format!(
                     "  {} ตัวอักษร · Tab แปล · Enter ขึ้นบรรทัดใหม่ · Esc กลับ",
+                    st.raw.chars().count()
+                )
+            } else {
+                format!(
+                    "  {} ตัวอักษร · Tab/Enter แปล · Esc กลับ",
                     st.raw.chars().count()
                 )
             }),
@@ -3977,6 +4109,49 @@ mod tests {
             vec![(PathBuf::from("cursed_blade_v03.epub"), 2_345_678)],
             projects,
         ))
+    }
+
+    #[test]
+    fn project_title_editor_translates_then_saves() {
+        let mut ov = Overlay::project_title_edit("novel".into(), "夜の影".into(), String::new());
+
+        let act = ov.handle_key(key(KeyCode::Enter));
+        match act {
+            Action::TranslateProjectTitle { ref raw, attempt } => {
+                assert_eq!(raw, "夜の影");
+                assert_eq!(attempt, 0);
+            }
+            other => panic!("expected TranslateProjectTitle, got {other:?}"),
+        }
+        if let Overlay::ProjectTitle(st) = &ov {
+            assert_eq!(st.syn.phase, SynPhase::Translating);
+            assert!(
+                !st.syn.raw.contains('\n'),
+                "Enter must not insert a newline"
+            );
+        } else {
+            panic!("overlay changed variant");
+        }
+
+        ov.set_synopsis_result(Ok("เงาแห่งราตรี".into()));
+        match ov.handle_key(key(KeyCode::Enter)) {
+            Action::SaveProjectTitle { id, raw, th } => {
+                assert_eq!(id, "novel");
+                assert_eq!(raw, "夜の影");
+                assert_eq!(th, "เงาแห่งราตรี");
+            }
+            other => panic!("expected SaveProjectTitle, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn project_title_editor_seeds_done_from_stored_translation() {
+        let ov = Overlay::project_title_edit("novel".into(), "夜の影".into(), "เงาแห่งราตรี".into());
+        let Overlay::ProjectTitle(st) = &ov else {
+            panic!("wrong variant");
+        };
+        assert_eq!(st.syn.phase, SynPhase::Done);
+        assert!(!st.syn.multiline);
     }
 
     /// An empty name no longer fails silently: Enter stays on the step and shows

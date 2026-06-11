@@ -267,6 +267,11 @@ impl ProjectScreen {
                     active.project.title.clone(),
                 ))
             }
+            KeyCode::Char('R') => Action::show_overlay(Overlay::project_title_edit(
+                active.project.id.clone(),
+                active.project.title.clone(),
+                active.project.title_th.clone(),
+            )),
             KeyCode::Char('V') => Action::AddVolume,
             KeyCode::Char('x') => {
                 let vol = self.selected_volume(active).unwrap_or(active.vol);
@@ -441,8 +446,13 @@ impl ProjectScreen {
 
         // Title line: 棚 + project title (left), active volume + count (right).
         let prefix = " 棚  ";
+        let title_src = if active.project.title_th.trim().is_empty() {
+            active.project.title.clone()
+        } else {
+            format!("{} · {}", active.project.title, active.project.title_th)
+        };
         let title = truncate_cols(
-            &thai_display_safe(&active.project.title),
+            &thai_display_safe(&title_src),
             (area.width as usize).saturating_sub(34).max(10),
         );
         let nvols = active.project.volumes.len();
@@ -740,6 +750,7 @@ impl ProjectScreen {
             ("h/l", "tree/focus"),
             ("e", "edit ctx"),
             ("y", "synopsis"),
+            ("R", "rename"),
             ("Q", "QA"),
         ]
     }
@@ -1005,6 +1016,7 @@ mod tests {
                 id: "novel".to_string(),
                 dir: dir.clone(),
                 title: "Novel".to_string(),
+                title_th: String::new(),
                 created: None,
                 touched: None,
                 volumes: vec![Volume {

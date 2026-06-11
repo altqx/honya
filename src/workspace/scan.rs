@@ -50,11 +50,13 @@ pub fn scan_one_project(dir: &Path) -> Option<Project> {
     let volumes = scan_volumes(dir);
     let (created, touched) = dir_times(dir);
     let title = read_project_title(dir).unwrap_or_else(|| id.clone());
+    let title_th = super::scaffold::read_title_th(dir);
 
     Some(Project {
         id,
         dir: dir.to_path_buf(),
         title,
+        title_th,
         created,
         touched,
         volumes,

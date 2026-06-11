@@ -16,6 +16,9 @@ use crate::workspace::{characters, glossary, volume};
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct ProjectMeta {
     title: String,
+    /// Thai title, empty until set.
+    #[serde(default)]
+    title_th: String,
     created: String,
     models: ModelSet,
     /// One-line synopsis (free text, human-editable above the block too).
@@ -34,6 +37,53 @@ struct StyleMeta {
 
 /// Markdown bullet whose value [`sync_status`] rewrites in STYLE.md / PROJECT.md.
 const STATUS_LINE_PREFIX: &str = "- **สถานะ / Status:**";
+
+const TITLE_TH_LINE_PREFIX: &str = "- **ชื่อไทย / Thai title:**";
+
+/// Rewrite PROJECT.md title fields while preserving unrelated body/data.
+pub fn set_title(ws: &Workspace, title: &str, title_th: &str) -> std::io::Result<()> {
+    let path = ws.project_md();
+    let title = title.trim();
+    let title_th = title_th.trim();
+
+    let mut meta: ProjectMeta = data_block::read_data_block(&path);
+    meta.title = title.to_string();
+    meta.title_th = title_th.to_string();
+
+    let body = data_block::read_body(&path);
+    let mut heading_rewritten = false;
+    let mut lines: Vec<String> = Vec::new();
+    for line in body.lines() {
+        if !heading_rewritten && line.trim_start().starts_with("# ") {
+            heading_rewritten = true;
+            lines.push(format!("# {title}"));
+            if !title_th.is_empty() {
+                lines.push(format!("{TITLE_TH_LINE_PREFIX} {title_th}"));
+            }
+            continue;
+        }
+        if line.trim_start().starts_with(TITLE_TH_LINE_PREFIX) {
+            continue;
+        }
+        lines.push(line.to_string());
+    }
+    if !heading_rewritten {
+        // Preserve hand-edited files with no heading.
+        let mut head = vec![format!("# {title}")];
+        if !title_th.is_empty() {
+            head.push(format!("{TITLE_TH_LINE_PREFIX} {title_th}"));
+        }
+        head.extend(lines);
+        lines = head;
+    }
+
+    data_block::write_with_data(&path, &lines.join("\n"), &meta)
+}
+
+pub fn read_title_th(project_dir: &Path) -> String {
+    let meta: ProjectMeta = data_block::read_data_block(&project_dir.join("PROJECT.md"));
+    meta.title_th
+}
 
 /// Replace the value of the "สถานะ / Status:" bullet, preserving every other line
 /// (appended style notes, the synopsis, etc.). Returns the body unchanged when no
@@ -108,6 +158,7 @@ pub fn create_project(
     if !ws.project_md().exists() {
         let project_meta = ProjectMeta {
             title: title.to_string(),
+            title_th: String::new(),
             created: date.clone(),
             models: models.clone(),
             synopsis: String::new(),
@@ -277,6 +328,31 @@ mod status_tests {
         assert_eq!(pmeta.title, "Test");
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn set_title_rewrites_heading_and_thai_bullet() {
+        let root = temp_root("title");
+        let _ = std::fs::remove_dir_all(&root);
+        let ws = Workspace::new(root.clone(), 1);
+        create_project(&root, "陰の実力者", &ModelSet::default(), 1).unwrap();
+
+        set_title(&ws, "陰の実力者になりたくて", "อยากเป็นผู้อยู่เบื้องหลังตัวจริง").unwrap();
+
+        let text = std::fs::read_to_string(ws.project_md()).unwrap();
+        assert!(text.contains("# 陰の実力者になりたくて"));
+        assert!(text.contains("ชื่อไทย / Thai title:** อยากเป็นผู้อยู่เบื้องหลังตัวจริง"));
+        assert!(text.contains("สถานะ / Status:**"));
+        let meta: ProjectMeta = data_block::read_data_block(&ws.project_md());
+        assert_eq!(meta.title, "陰の実力者になりたくて");
+        assert_eq!(meta.title_th, "อยากเป็นผู้อยู่เบื้องหลังตัวจริง");
+        assert_eq!(read_title_th(&root), "อยากเป็นผู้อยู่เบื้องหลังตัวจริง");
+
+        set_title(&ws, "新タイトル", "").unwrap();
+        let text = std::fs::read_to_string(ws.project_md()).unwrap();
+        assert!(text.contains("# 新タイトル"));
+        assert!(!text.contains("ชื่อไทย / Thai title:"));
+        assert_eq!(read_title_th(&root), "");
     }
 
     #[test]

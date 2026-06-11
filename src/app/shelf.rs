@@ -116,10 +116,10 @@ impl ShelfScreen {
             }
             KeyCode::Char('R') => {
                 if let Some(p) = projects.get(sel) {
-                    Action::show_overlay(Overlay::confirm(
-                        "Rename",
-                        format!("Rename {} — edit PROJECT.md title on disk.", p.title),
-                        Action::None,
+                    Action::show_overlay(Overlay::project_title_edit(
+                        p.id.clone(),
+                        p.title.clone(),
+                        p.title_th.clone(),
                     ))
                 } else {
                     Action::None
@@ -376,7 +376,12 @@ fn project_row(p: &Project, selected: bool, name_w: usize, theme: &Theme) -> Lis
         Style::default().fg(theme.ink).bg(row_bg)
     };
 
-    let name = truncate_cols(&thai_display_safe(&p.title), name_w);
+    let name_src = if p.title_th.trim().is_empty() {
+        p.title.clone()
+    } else {
+        format!("{} · {}", p.title, p.title_th)
+    };
+    let name = truncate_cols(&thai_display_safe(&name_src), name_w);
     let name_padded = pad_to_cols(&name, name_w);
 
     let spans = vec![
@@ -521,6 +526,7 @@ mod tests {
             id: id.to_string(),
             dir: std::env::temp_dir().join(id),
             title: id.to_string(),
+            title_th: String::new(),
             created: None,
             touched: None,
             volumes: Vec::new(),
