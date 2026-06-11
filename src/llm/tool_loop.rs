@@ -128,6 +128,7 @@ mod tests {
             cost_details: Some(CostDetails {
                 upstream_inference_cost: upstream,
             }),
+            ..Usage::default()
         }
     }
 
@@ -135,6 +136,7 @@ mod tests {
         ChatResponse {
             id: None,
             model: None,
+            service_tier: None,
             usage: Some(u),
             choices: vec![Choice {
                 index: 0,
@@ -159,6 +161,7 @@ mod tests {
         ChatResponse {
             id: None,
             model: None,
+            service_tier: None,
             usage: Some(u),
             choices: vec![Choice {
                 index: 0,

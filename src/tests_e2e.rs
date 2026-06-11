@@ -1639,7 +1639,9 @@ async fn partial_translator_stream_is_salvaged_as_needs_review() {
                     total_tokens: 15,
                     cost: 0.001,
                     cost_details: None,
+                    ..Default::default()
                 }),
+                service_tier: None,
             })
         }
     }

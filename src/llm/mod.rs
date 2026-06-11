@@ -176,6 +176,45 @@ pub struct JsonSchemaSpec {
     pub schema: serde_json::Value,
 }
 
+/// The tier that actually served a request, echoed back by OpenRouter as a
+/// top-level `service_tier` response field. A `flex`/`priority` ask silently
+/// falls back to `default` (standard billing) on providers without tier
+/// support, so this echo is the only signal that the requested discount or
+/// speed-up really applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServedTier {
+    Default,
+    Flex,
+    Priority,
+}
+
+impl ServedTier {
+    /// Whether this served tier is the one the request asked for.
+    pub fn satisfies(self, requested: crate::model::ServiceTier) -> bool {
+        use crate::model::ServiceTier;
+        matches!(
+            (self, requested),
+            (ServedTier::Flex, ServiceTier::Flex)
+                | (ServedTier::Priority, ServiceTier::Priority)
+        )
+    }
+}
+
+/// Deserialize the `service_tier` echo leniently: `null`, a missing field, or an
+/// unknown tier name all become `None` rather than failing the response parse.
+fn de_served_tier<'de, D>(deserializer: D) -> std::result::Result<Option<ServedTier>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Option::<String>::deserialize(deserializer)?;
+    Ok(raw.as_deref().and_then(|s| match s {
+        "default" => Some(ServedTier::Default),
+        "flex" => Some(ServedTier::Flex),
+        "priority" => Some(ServedTier::Priority),
+        _ => None,
+    }))
+}
+
 /// Body of a `/chat/completions` response.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ChatResponse {
@@ -186,6 +225,10 @@ pub struct ChatResponse {
     pub choices: Vec<Choice>,
     #[serde(default)]
     pub usage: Option<Usage>,
+    /// Tier that actually served the request; `None` when the provider doesn't
+    /// support (or doesn't report) service tiers.
+    #[serde(default, deserialize_with = "de_served_tier")]
+    pub service_tier: Option<ServedTier>,
 }
 
 /// One completion choice.
@@ -258,6 +301,11 @@ pub struct Usage {
     pub cost: f64,
     #[serde(default)]
     pub cost_details: Option<CostDetails>,
+    /// The tier that actually served the call. The client copies the response's
+    /// top-level `service_tier` echo in here so it travels with the usage record
+    /// every agent already returns (the Messages API also nests it here directly).
+    #[serde(default, rename = "service_tier", deserialize_with = "de_served_tier")]
+    pub served_tier: Option<ServedTier>,
 }
 
 /// The `usage.cost_details` breakdown OpenRouter returns alongside `cost`.
@@ -301,6 +349,7 @@ impl Usage {
                 upstream_inference_cost: upstream,
             });
         }
+        self.served_tier = self.served_tier.or(other.served_tier);
     }
 }
 
@@ -370,6 +419,7 @@ mod usage_tests {
             cost_details: Some(CostDetails {
                 upstream_inference_cost: 2.0,
             }),
+            ..Usage::default()
         });
         acc.add(&Usage {
             prompt_tokens: 4,
@@ -379,6 +429,7 @@ mod usage_tests {
             cost_details: Some(CostDetails {
                 upstream_inference_cost: 3.0,
             }),
+            ..Usage::default()
         });
         assert_eq!(acc.total_tokens, 25);
         assert!(approx(acc.cost, 0.75));
@@ -406,5 +457,52 @@ mod service_tier_tests {
         };
         let json = serde_json::to_value(req).unwrap();
         assert_eq!(json["service_tier"], "priority");
+    }
+
+    fn response_with_tier(tier: &str) -> String {
+        format!(
+            r#"{{"choices":[{{"index":0,"message":{{"role":"assistant","content":"ok"}},"finish_reason":"stop"}}],"service_tier":{tier}}}"#
+        )
+    }
+
+    #[test]
+    fn served_tier_parses_from_response_echo() {
+        let resp: ChatResponse =
+            serde_json::from_str(&response_with_tier(r#""flex""#)).unwrap();
+        assert_eq!(resp.service_tier, Some(ServedTier::Flex));
+        let resp: ChatResponse =
+            serde_json::from_str(&response_with_tier(r#""default""#)).unwrap();
+        assert_eq!(resp.service_tier, Some(ServedTier::Default));
+    }
+
+    #[test]
+    fn served_tier_tolerates_null_and_unknown_values() {
+        let resp: ChatResponse = serde_json::from_str(&response_with_tier("null")).unwrap();
+        assert_eq!(resp.service_tier, None);
+        let resp: ChatResponse =
+            serde_json::from_str(&response_with_tier(r#""scale""#)).unwrap();
+        assert_eq!(resp.service_tier, None);
+    }
+
+    #[test]
+    fn served_tier_satisfies_only_the_matching_request() {
+        assert!(ServedTier::Flex.satisfies(ServiceTier::Flex));
+        assert!(ServedTier::Priority.satisfies(ServiceTier::Priority));
+        assert!(!ServedTier::Default.satisfies(ServiceTier::Flex));
+        assert!(!ServedTier::Flex.satisfies(ServiceTier::Priority));
+    }
+
+    #[test]
+    fn add_keeps_first_served_tier() {
+        let mut acc = Usage::default();
+        acc.add(&Usage {
+            served_tier: Some(ServedTier::Flex),
+            ..Usage::default()
+        });
+        acc.add(&Usage {
+            served_tier: Some(ServedTier::Default),
+            ..Usage::default()
+        });
+        assert_eq!(acc.served_tier, Some(ServedTier::Flex));
     }
 }

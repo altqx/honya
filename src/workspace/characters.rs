@@ -168,22 +168,29 @@ pub fn remove(ws: &Workspace, id: &str) -> std::io::Result<()> {
     data_block::write_with_data(&ws.characters_md(), &body, &block)
 }
 
-/// Query by case-insensitive substring `query` (id/jp_name/thai_name/romaji)
-/// and/or exact `id`; both `None` returns all.
+/// Query by case/whitespace-insensitive substring `query` (id/jp_name/thai_name/
+/// romaji/aliases) and/or `id`; both absent (or blank — LLM callers routinely send
+/// `""` for params they don't use) returns all. An `id` with no exact hit degrades
+/// to a name needle, since models often put the surface name in `id`.
 pub fn get(ws: &Workspace, query: Option<&str>, id: Option<&str>) -> Vec<Character> {
     let chars = load(ws);
-    let q = query.map(|s| s.trim().to_lowercase());
-    let q = q.filter(|s| !s.is_empty());
+    let id = id.map(str::trim).filter(|s| !s.is_empty());
+    let q = query.map(str::trim).filter(|s| !s.is_empty());
+
+    if let Some(want) = id {
+        let exact: Vec<Character> = chars.iter().filter(|c| c.id == want).cloned().collect();
+        if !exact.is_empty() {
+            return exact;
+        }
+    }
+
+    let needles: Vec<&str> = id.into_iter().chain(q).collect();
+    if needles.is_empty() {
+        return chars;
+    }
     chars
         .into_iter()
-        .filter(|c| match id {
-            Some(want) => c.id == want,
-            None => true,
-        })
-        .filter(|c| match &q {
-            Some(needle) => character_matches(c, needle),
-            None => true,
-        })
+        .filter(|c| needles.iter().any(|n| character_matches(c, n)))
         .collect()
 }
 
@@ -355,14 +362,19 @@ fn fnv1a(s: &str) -> u32 {
 }
 
 fn character_matches(c: &Character, needle: &str) -> bool {
+    // Strip spaces/separators on both sides so "桐島 朱夏" finds "桐島朱夏".
+    let needle = norm_name(needle).to_lowercase();
+    if needle.is_empty() {
+        return false;
+    }
     let mut hay = vec![
-        c.id.to_lowercase(),
-        c.jp_name.to_lowercase(),
-        c.thai_name.to_lowercase(),
-        c.romaji.as_deref().unwrap_or("").to_lowercase(),
+        norm_name(&c.id).to_lowercase(),
+        norm_name(&c.jp_name).to_lowercase(),
+        norm_name(&c.thai_name).to_lowercase(),
+        norm_name(c.romaji.as_deref().unwrap_or("")).to_lowercase(),
     ];
-    hay.extend(c.aliases.iter().map(|a| a.to_lowercase()));
-    hay.iter().any(|h| h.contains(needle))
+    hay.extend(c.aliases.iter().map(|a| norm_name(a).to_lowercase()));
+    hay.iter().any(|h| h.contains(&needle))
 }
 
 // ---- Deduplication helpers -------------------------------------------------
@@ -831,6 +843,44 @@ mod tests {
         let yuu = find(&chars, "yuu").unwrap();
         assert_eq!(yuu.aliases, vec!["勇".to_string()], "aliases preserved");
         assert_eq!(yuu.notes.as_deref(), Some("28 ปี"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// LLM callers send `""` for params they don't use — a blank id/query must not
+    /// filter everything out (the "read 0 character(s)" bug).
+    #[test]
+    fn get_ignores_blank_id_and_query() {
+        let (base, ws) = temp_ws("get_blank");
+        upsert(&ws, ch("yuu", "有月勇", "อาริทสึกิ ยู", Some("Aritsuki Yuu"))).unwrap();
+        upsert(&ws, ch("miya", "みや", "มิยะ", Some("Miya"))).unwrap();
+
+        assert_eq!(get(&ws, Some(""), Some("")).len(), 2);
+        assert_eq!(get(&ws, Some("勇"), Some("  ")).len(), 1);
+        assert_eq!(get(&ws, None, None).len(), 2);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A name passed as `id` with no exact id hit degrades to a substring match.
+    #[test]
+    fn get_id_falls_back_to_name_match() {
+        let (base, ws) = temp_ws("get_id_fallback");
+        upsert(&ws, ch("yuu", "有月勇", "อาริทสึกิ ยู", Some("Aritsuki Yuu"))).unwrap();
+
+        let hits = get(&ws, None, Some("有月勇"));
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, "yuu");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Queries with spaces/separators match stored names without them (桐島 朱夏 → 桐島朱夏).
+    #[test]
+    fn get_query_is_whitespace_insensitive() {
+        let (base, ws) = temp_ws("get_spaced");
+        upsert(&ws, ch("shuka", "桐島朱夏", "คิริชิมะ ชูคะ", Some("Kirishima Shuka"))).unwrap();
+
+        assert_eq!(get(&ws, Some("桐島 朱夏"), None).len(), 1);
+        assert_eq!(get(&ws, Some("kirishima shuka"), None).len(), 1);
+        assert_eq!(get(&ws, Some("ชูคะ"), None).len(), 1);
         let _ = std::fs::remove_dir_all(&base);
     }
 

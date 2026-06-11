@@ -10,7 +10,7 @@
 //!     discoveries land in CHARACTERS.md / GLOSSARY.md / VOLUME.md. On exhausting
 //!     retries the chunk is committed with a review-needed marker.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
@@ -29,7 +29,7 @@ use crate::llm::tool_loop::run_tool_loop;
 use crate::llm::{ChatRequest, Message, Tool, Usage};
 use crate::model::{
     AgentRole, AppConfig, AppEvent, ChapterStatus, ChunkState, EventTx, GlossaryTerm, LogLevel,
-    ModelSet, ReviewVerdict, ReviewerOut, TokenUsage, TranslatorOut, UsageStats,
+    ModelSet, ReviewVerdict, ReviewerOut, ServiceTier, TokenUsage, TranslatorOut, UsageStats,
 };
 use crate::workspace::{Workspace, characters, data_block, glossary, translation, volume};
 
@@ -1091,6 +1091,8 @@ fn stats_from_usage(u: &Usage) -> UsageStats {
 struct Acc {
     run: UsageStats,
     chapter: UsageStats,
+    /// Models whose served service tier has already been reported this run.
+    tier_noted: HashSet<String>,
 }
 
 impl Acc {
@@ -1106,6 +1108,35 @@ impl Acc {
         self.run.tool_calls = self.run.tool_calls.saturating_add(n);
         self.chapter.tool_calls = self.chapter.tool_calls.saturating_add(n);
     }
+}
+
+/// Report, once per model per run, whether the configured `service_tier` was
+/// actually honored. OpenRouter bills whichever tier really served the request,
+/// and a flex/priority ask silently falls back to the standard tier on models
+/// without tier support — without this echo check the user believes the flex
+/// discount (or priority speed-up) is in effect when it isn't.
+fn note_served_tier(ctx: &PipelineCtx, acc: &mut Acc, model: &str, usage: &Usage) {
+    let Some(requested) = ctx.cfg.service_tier else {
+        return;
+    };
+    if !acc.tier_noted.insert(model.to_string()) {
+        return;
+    }
+    let tier = match requested {
+        ServiceTier::Flex => "flex",
+        ServiceTier::Priority => "priority",
+    };
+    let (level, msg) = match usage.served_tier {
+        Some(served) if served.satisfies(requested) => (
+            LogLevel::Info,
+            format!("service tier {tier} active on {model}"),
+        ),
+        _ => (
+            LogLevel::Warn,
+            format!("service tier {tier} not applied on {model} — billed at the standard rate"),
+        ),
+    };
+    ctx.tx.send(AppEvent::Log { level, msg });
 }
 
 /// Translate → review one chunk, retrying up to `cfg.max_attempts`. On approval
@@ -1298,6 +1329,7 @@ async fn process_chunk(
         }
         let tok = to_tokens(&t_usage);
         acc.fold(&t_usage);
+        note_served_tier(ctx, acc, &ctx.models.translator, &t_usage);
         ctx.tx.send(AppEvent::TranslatorReturned {
             chapter,
             chunk: chunk.index,
@@ -1424,6 +1456,7 @@ async fn process_chunk(
         };
         wd.ping();
         acc.fold(&r_usage);
+        note_served_tier(ctx, acc, &ctx.models.reviewer, &r_usage);
         ctx.tx.send(AppEvent::UsageUpdate {
             run: acc.run,
             chapter: acc.chapter,
@@ -1492,6 +1525,7 @@ async fn process_chunk(
             match orch {
                 Ok((o_usage, n_tool_calls)) => {
                     acc.fold(&o_usage);
+                    note_served_tier(ctx, acc, &ctx.models.orchestrator, &o_usage);
                     acc.add_tool_calls(n_tool_calls as u32);
                     ctx.tx.send(AppEvent::UsageUpdate {
                         run: acc.run,
@@ -1892,7 +1926,9 @@ mod tests {
                     total_tokens: 2,
                     cost: 0.0,
                     cost_details: None,
+                    ..Default::default()
                 }),
+                service_tier: None,
             })
         }
     }
@@ -1949,7 +1985,9 @@ mod tests {
                     total_tokens: 2,
                     cost: 0.0,
                     cost_details: None,
+                    ..Default::default()
                 }),
+                service_tier: None,
             })
         }
     }
@@ -2102,6 +2140,97 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// Delegates to `CountingClient` but stamps a served tier onto the usage,
+    /// mimicking the OpenRouter `service_tier` response echo.
+    struct TierEchoClient {
+        inner: CountingClient,
+        tier: Option<crate::llm::ServedTier>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::llm::client::LlmClient for TierEchoClient {
+        async fn chat(
+            &self,
+            req: &crate::llm::ChatRequest,
+        ) -> crate::llm::client::Result<crate::llm::ChatResponse> {
+            let mut resp = self.inner.chat(req).await?;
+            if let Some(u) = resp.usage.as_mut() {
+                u.served_tier = self.tier;
+            }
+            Ok(resp)
+        }
+    }
+
+    async fn run_with_tier_echo(
+        tag: &str,
+        served: Option<crate::llm::ServedTier>,
+    ) -> Vec<(LogLevel, String)> {
+        let (base, ws) = temp_ws(tag);
+        let raw = "一文目。\n\n二文目。\n\n三文目。\n\n四文目。";
+        translation::write_raw(&ws, 1, raw).unwrap();
+
+        let cfg = crate::model::AppConfig {
+            chunk_target_tokens: 4,
+            chunk_hard_cap_tokens: 8,
+            service_tier: Some(ServiceTier::Flex),
+            ..crate::model::AppConfig::default()
+        };
+        let chunks = chunk_chapter(raw, cfg.chunk_target_tokens, cfg.chunk_hard_cap_tokens);
+        assert!(chunks.len() >= 2, "need several chunks to prove per-model dedup");
+
+        let client = std::sync::Arc::new(TierEchoClient {
+            inner: CountingClient::default(),
+            tier: served,
+        });
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = PipelineCtx {
+            client: client as std::sync::Arc<dyn crate::llm::client::LlmClient>,
+            ws,
+            models: crate::model::ModelSet::default(),
+            cfg,
+            tx: crate::model::EventTx(tx),
+            ctl: RunControl::new(),
+            queue: ChapterQueue::new(vec![]),
+        };
+        run_pipeline(ctx, vec![1]).await.expect("run_pipeline");
+
+        let mut tier_logs = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            if let AppEvent::Log { level, msg } = ev
+                && msg.starts_with("service tier")
+            {
+                tier_logs.push((level, msg));
+            }
+        }
+        let _ = std::fs::remove_dir_all(&base);
+        tier_logs
+    }
+
+    #[tokio::test]
+    async fn service_tier_fallback_warns_once_per_model() {
+        let logs = run_with_tier_echo("tier_fallback", None).await;
+        // One notice per model (translator/reviewer/orchestrator), not per chunk.
+        assert_eq!(logs.len(), 3, "{logs:?}");
+        assert!(
+            logs.iter().all(|(level, msg)| matches!(level, LogLevel::Warn)
+                && msg.contains("flex not applied")
+                && msg.contains("standard rate")),
+            "{logs:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn service_tier_match_confirms_once_per_model() {
+        let logs = run_with_tier_echo("tier_match", Some(crate::llm::ServedTier::Flex)).await;
+        assert_eq!(logs.len(), 3, "{logs:?}");
+        assert!(
+            logs.iter()
+                .all(|(level, msg)| matches!(level, LogLevel::Info)
+                    && msg.contains("flex active")),
+            "{logs:?}"
+        );
+    }
+
     /// The reference context injected per chunk must scope to terms/characters the
     /// chunk actually uses — otherwise it balloons with the whole accumulated
     /// roster as a volume progresses.
@@ -2226,7 +2355,9 @@ mod tests {
                     total_tokens: 2,
                     cost: 0.0,
                     cost_details: None,
+                    ..Default::default()
                 }),
+                service_tier: None,
             })
         }
     }

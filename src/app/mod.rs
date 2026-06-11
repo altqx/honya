@@ -2496,6 +2496,16 @@ impl App {
             Ok(()) => self.toast = Some(Toast::info("settings saved")),
             Err(e) => self.toast = Some(Toast::error(format!("save failed: {e}"))),
         }
+        if tier_changed {
+            self.push_log(
+                LogLevel::Info,
+                format!(
+                    "service tier → {} ({})",
+                    crate::model::ServiceTier::label(self.cfg.service_tier),
+                    crate::model::ServiceTier::desc(self.cfg.service_tier)
+                ),
+            );
+        }
         // A channel switch should take effect now, not at the next launch: kick
         // off the same background update pass that runs at startup.
         if channel_changed {

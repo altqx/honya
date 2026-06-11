@@ -449,6 +449,7 @@ mod tests {
                 id: None,
                 model: None,
                 usage: None,
+                service_tier: None,
                 choices: vec![Choice {
                     index: 0,
                     message: self.message.clone(),

@@ -374,6 +374,15 @@ impl ServiceTier {
             Some(ServiceTier::Priority) => None,
         }
     }
+
+    /// One-line trade-off hint shown under the Settings line.
+    pub fn desc(this: Option<Self>) -> &'static str {
+        match this {
+            None => "requests use each provider's standard tier",
+            Some(ServiceTier::Flex) => "~50% cheaper, slower; standard rate if model lacks tiers",
+            Some(ServiceTier::Priority) => "faster, costs more; standard rate if model lacks tiers",
+        }
+    }
 }
 
 /// Global, persisted app configuration.

@@ -2950,6 +2950,10 @@ impl Overlay {
             ),
             Span::styled("   Ctrl-Y to cycle", Style::default().fg(theme.ink_faint)),
         ]));
+        lines.push(Line::from(Span::styled(
+            format!("      ↳ {}", ServiceTier::desc(st.service_tier)),
+            Style::default().fg(theme.ink_faint),
+        )));
         lines.push(Line::raw(""));
         let footer = if st.api_key_env {
             "   Key from HONYA_API_KEY / OPENROUTER_API_KEY · ↵ save · Esc close"

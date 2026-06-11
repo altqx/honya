@@ -151,7 +151,7 @@ impl OpenRouterClient {
         }
 
         let raw = resp.text().await?;
-        let parsed: ChatResponse =
+        let mut parsed: ChatResponse =
             serde_json::from_str(&raw).map_err(|source| LlmError::Parse {
                 target: "ChatResponse",
                 source,
@@ -160,6 +160,14 @@ impl OpenRouterClient {
 
         if parsed.choices.is_empty() {
             return Err(LlmError::EmptyChoices);
+        }
+
+        // Carry the top-level service-tier echo on the usage record, which is the
+        // only part of the response the agents pass back up to the pipeline.
+        if let Some(usage) = parsed.usage.as_mut()
+            && usage.served_tier.is_none()
+        {
+            usage.served_tier = parsed.service_tier;
         }
 
         Ok(parsed)
@@ -277,6 +285,8 @@ struct ChatStreamChunk {
     choices: Vec<StreamChoice>,
     #[serde(default)]
     usage: Option<Usage>,
+    #[serde(default, deserialize_with = "super::de_served_tier")]
+    service_tier: Option<super::ServedTier>,
     #[serde(default)]
     error: Option<StreamError>,
 }
@@ -312,10 +322,17 @@ struct StreamResponse {
     model: Option<String>,
     role: Option<String>,
     finish_reason: Option<String>,
+    service_tier: Option<super::ServedTier>,
 }
 
 impl StreamResponse {
     fn into_response(self) -> ChatResponse {
+        let mut usage = self.usage;
+        if let Some(u) = usage.as_mut()
+            && u.served_tier.is_none()
+        {
+            u.served_tier = self.service_tier;
+        }
         ChatResponse {
             id: self.id,
             model: self.model,
@@ -328,7 +345,8 @@ impl StreamResponse {
                 },
                 finish_reason: self.finish_reason,
             }],
-            usage: self.usage,
+            usage,
+            service_tier: self.service_tier,
         }
     }
 }
@@ -370,6 +388,9 @@ fn handle_sse_line(
     }
     if chunk.usage.is_some() {
         stream_resp.usage = chunk.usage;
+    }
+    if chunk.service_tier.is_some() {
+        stream_resp.service_tier = chunk.service_tier;
     }
 
     for choice in chunk.choices {
@@ -423,7 +444,7 @@ mod tests {
         )
         .unwrap();
         handle_sse_line(
-            br#"data: {"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3,"cost":0.004}}"#,
+            br#"data: {"choices":[],"service_tier":"flex","usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3,"cost":0.004}}"#,
             &mut on_delta,
             &mut stream_resp,
         )
@@ -435,6 +456,13 @@ mod tests {
         assert_eq!(stream_resp.model.as_deref(), Some("test/model"));
         assert_eq!(stream_resp.role.as_deref(), Some("assistant"));
         assert_eq!(stream_resp.usage.expect("final usage").total_tokens, 3);
+
+        let resp = stream_resp.into_response();
+        assert_eq!(resp.service_tier, Some(crate::llm::ServedTier::Flex));
+        assert_eq!(
+            resp.usage.expect("usage").served_tier,
+            Some(crate::llm::ServedTier::Flex)
+        );
     }
 
     fn client_with_tier(service_tier: Option<ServiceTier>) -> OpenRouterClient {

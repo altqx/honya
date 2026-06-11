@@ -56,7 +56,9 @@ impl MockClient {
                 cost_details: Some(CostDetails {
                     upstream_inference_cost: 0.01,
                 }),
+                ..Usage::default()
             }),
+            service_tier: None,
         }
     }
 }
