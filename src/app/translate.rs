@@ -13,7 +13,9 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
-use crate::model::{AgentRole, AppEvent, ChapterKind, ChapterStatus, ReviewVerdict, UsageStats};
+use crate::model::{
+    AgentRole, AppEvent, ChapterKind, ChapterStatus, ReviewVerdict, ServiceTier, UsageStats,
+};
 use crate::theme::{self, Theme, agent_badge, agent_spinner_frame, spinner_frame, status_glyph};
 use crate::ui::mouse::{MouseGesture, MouseInput};
 use crate::ui::text::{col_width, pad_to_cols, truncate_cols};
@@ -566,26 +568,83 @@ impl TranslateScreen {
         };
     }
 
-    pub fn render(&mut self, f: &mut Frame, area: Rect, frame: u64, theme: &Theme) {
-        let rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(9), Constraint::Min(6)])
-            .split(area);
+    pub fn render(
+        &mut self,
+        f: &mut Frame,
+        area: Rect,
+        frame: u64,
+        theme: &Theme,
+        service_tier: Option<ServiceTier>,
+    ) {
+        // A configured tier gets a one-line speed/cost disclaimer between the
+        // pipeline header and the body, so the trade-off is visible mid-run, not
+        // only back in Settings.
+        let rows = if service_tier.is_some() {
+            Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(9),
+                    Constraint::Length(1),
+                    Constraint::Min(6),
+                ])
+                .split(area)
+        } else {
+            Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(9), Constraint::Min(6)])
+                .split(area)
+        };
 
         self.render_pipeline(f, rows[0], frame, theme);
 
+        let body = if let Some(tier) = service_tier {
+            self.render_tier_disclaimer(f, rows[1], tier, theme);
+            rows[2]
+        } else {
+            rows[1]
+        };
+
         // Hide the queue on narrow terminals so the preview stays usable.
-        if !self.queue.is_empty() && rows[1].width >= 56 {
+        if !self.queue.is_empty() && body.width >= 56 {
             let cols = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Min(40), Constraint::Length(34)])
-                .split(rows[1]);
+                .split(body);
             self.render_preview(f, cols[0], theme);
             self.render_queue(f, cols[1], theme);
         } else {
             self.queue_area = Rect::default();
-            self.render_preview(f, rows[1], theme);
+            self.render_preview(f, body, theme);
         }
+    }
+
+    /// One-line, full-width banner naming the active OpenRouter tier and its
+    /// speed/cost trade-off (flex = cheaper/slower, priority = faster/pricier).
+    fn render_tier_disclaimer(&self, f: &mut Frame, area: Rect, tier: ServiceTier, theme: &Theme) {
+        if area.height == 0 {
+            return;
+        }
+        let (label, color) = match tier {
+            ServiceTier::Flex => ("Flex", theme.status_warn),
+            ServiceTier::Priority => ("Priority", theme.accent),
+        };
+        let head = format!(" ⚑ {label} tier");
+        let desc_budget = (area.width as usize).saturating_sub(col_width(&head));
+        let desc = truncate_cols(
+            &format!(" · {}", ServiceTier::desc(Some(tier))),
+            desc_budget,
+        );
+        let line = Line::from(vec![
+            Span::styled(
+                head,
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(desc, Style::default().fg(theme.ink_faint)),
+        ]);
+        f.render_widget(
+            Paragraph::new(line).style(Style::default().bg(theme.bg_panel)),
+            area,
+        );
     }
 
     fn render_queue(&mut self, f: &mut Frame, area: Rect, theme: &Theme) {
@@ -1174,15 +1233,18 @@ mod queue_panel_tests {
     #[test]
     fn renders_panel_at_several_widths_without_panic() {
         let theme = crate::model::ThemeId::default().build();
+        let tiers = [None, Some(ServiceTier::Flex), Some(ServiceTier::Priority)];
         for (w, h) in [(90u16, 24u16), (60, 16), (120, 40)] {
-            let mut screen = TranslateScreen::new();
-            screen.phase = RunPhase::Running;
-            screen.queue_focused = true;
-            screen.queue_sel = 1;
-            screen.set_queue(rows());
-            let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
-            term.draw(|f| screen.render(f, f.area(), 0, &theme))
-                .unwrap();
+            for tier in tiers {
+                let mut screen = TranslateScreen::new();
+                screen.phase = RunPhase::Running;
+                screen.queue_focused = true;
+                screen.queue_sel = 1;
+                screen.set_queue(rows());
+                let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+                term.draw(|f| screen.render(f, f.area(), 0, &theme, tier))
+                    .unwrap();
+            }
         }
     }
 

@@ -2900,7 +2900,10 @@ impl App {
             Screen::Project => self
                 .project
                 .render(f, body, self.active.as_ref(), &self.theme),
-            Screen::Translate => self.translate.render(f, body, self.frame, &self.theme),
+            Screen::Translate => {
+                self.translate
+                    .render(f, body, self.frame, &self.theme, self.cfg.service_tier)
+            }
             Screen::Reader => self.reader.render(f, body, &self.theme),
             Screen::Lexicon => self.lexicon.render(
                 f,

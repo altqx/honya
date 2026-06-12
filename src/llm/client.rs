@@ -89,6 +89,27 @@ impl LlmError {
     pub fn is_transient_stream_error(&self) -> bool {
         matches!(self, LlmError::Api { status: 0, .. }) && !self.is_content_policy_block()
     }
+
+    /// True for a fault a verbatim replay might clear — the classifier the
+    /// transport-level retry loop uses. Excludes deterministic failures (other
+    /// `4xx`, content-policy blocks, empty/parse results). Absorbing these here
+    /// keeps the flex tier's frequent transient faults from each burning a
+    /// per-chunk pipeline attempt.
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            LlmError::RateLimited { .. } | LlmError::Transport(_) => true,
+            LlmError::Api { status: 0, .. } => self.is_transient_stream_error(),
+            LlmError::Api { status, .. } => {
+                matches!(
+                    status,
+                    408 | 425 | 429 | 500 | 502 | 503 | 504 | 520..=524 | 529
+                )
+            }
+            LlmError::EmptyChoices | LlmError::EmptyContent { .. } | LlmError::Parse { .. } => {
+                false
+            }
+        }
+    }
 }
 
 /// LLM-layer result alias. Shadows `std::result::Result` within `crate::llm::*`.
@@ -127,6 +148,34 @@ impl ClientConfig {
     fn endpoint(&self) -> String {
         let base = self.base_url.trim_end_matches('/');
         format!("{base}/chat/completions")
+    }
+
+    /// Send attempts (initial + retries) per chat call. Flex runs on spare,
+    /// deprioritized capacity and faults far more often, so it gets a deeper budget.
+    fn max_send_attempts(&self) -> u32 {
+        match self.service_tier {
+            Some(ServiceTier::Flex) => 5,
+            _ => 3,
+        }
+    }
+}
+
+/// Backoff before the `retry`-th retry (1-based): exponential from 1s, capped at
+/// 20s. A `Retry-After` hint wins but is still capped, so one chunk can't stall
+/// the run for minutes on a single rate-limit reset.
+fn retry_backoff(retry: u32, retry_after: Option<u64>) -> Duration {
+    const MAX_BACKOFF: u64 = 20;
+    let secs = match retry_after {
+        Some(hint) => hint.min(MAX_BACKOFF),
+        None => (1u64 << (retry.saturating_sub(1)).min(5)).min(MAX_BACKOFF),
+    };
+    Duration::from_secs(secs)
+}
+
+fn retry_after_hint(err: &LlmError) -> Option<u64> {
+    match err {
+        LlmError::RateLimited { retry_after, .. } => Some(*retry_after),
+        _ => None,
     }
 }
 
@@ -299,13 +348,16 @@ impl OpenRouterClient {
 #[async_trait]
 impl LlmClient for OpenRouterClient {
     async fn chat(&self, req: &ChatRequest) -> Result<ChatResponse> {
-        match self.send_once(req).await {
-            // One automatic retry on a polite (<=30s) rate-limit hint.
-            Err(LlmError::RateLimited { retry_after, .. }) if retry_after <= 30 => {
-                tokio::time::sleep(Duration::from_secs(retry_after)).await;
-                self.send_once(req).await
+        let max = self.cfg.max_send_attempts();
+        let mut retry = 0u32;
+        loop {
+            match self.send_once(req).await {
+                Err(e) if retry + 1 < max && e.is_retryable() => {
+                    retry += 1;
+                    tokio::time::sleep(retry_backoff(retry, retry_after_hint(&e))).await;
+                }
+                other => return other,
             }
-            other => other,
         }
     }
 
@@ -322,18 +374,20 @@ impl LlmClient for OpenRouterClient {
             emitted.store(true, Ordering::Relaxed);
             on_delta(delta);
         };
-        match self.send_stream_once(req, &mut tracked).await {
-            // One automatic retry on a polite (<=30s) rate-limit hint.
-            Err(LlmError::RateLimited { retry_after, .. }) if retry_after <= 30 => {
-                tokio::time::sleep(Duration::from_secs(retry_after)).await;
-                self.send_stream_once(req, &mut tracked).await
+        let max = self.cfg.max_send_attempts();
+        let mut retry = 0u32;
+        loop {
+            match self.send_stream_once(req, &mut tracked).await {
+                // Only retry while nothing has reached the caller: replaying after
+                // partial output would double-feed the field-stream parser.
+                Err(e)
+                    if retry + 1 < max && e.is_retryable() && !emitted.load(Ordering::Relaxed) =>
+                {
+                    retry += 1;
+                    tokio::time::sleep(retry_backoff(retry, retry_after_hint(&e))).await;
+                }
+                other => return other,
             }
-            // One automatic retry on a transient SSE-injected error, but only if the
-            // stream hadn't emitted anything yet (otherwise we'd replay partial text).
-            Err(e) if e.is_transient_stream_error() && !emitted.load(Ordering::Relaxed) => {
-                self.send_stream_once(req, &mut tracked).await
-            }
-            other => other,
         }
     }
 }
@@ -711,5 +765,95 @@ mod tests {
         let client = client_with_tier(None);
         let json = body_json(&client, &ChatRequest::new("m", vec![]));
         assert!(json.get("service_tier").is_none());
+    }
+
+    #[test]
+    fn transient_faults_are_retryable() {
+        for status in [408, 425, 429, 500, 502, 503, 504, 520, 524, 529] {
+            assert!(
+                LlmError::Api {
+                    status,
+                    message: "x".into(),
+                }
+                .is_retryable(),
+                "status {status} should be retryable"
+            );
+        }
+        assert!(
+            LlmError::RateLimited {
+                retry_after: 99,
+                message: "x".into(),
+            }
+            .is_retryable()
+        );
+        assert!(
+            LlmError::Api {
+                status: 0,
+                message: "JSON error injected into SSE stream".into(),
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn deterministic_faults_are_not_retryable() {
+        // 4xx client errors, content-policy blocks, and empty/parse failures
+        // will never clear on a verbatim replay.
+        for status in [400, 401, 403, 404, 422] {
+            assert!(
+                !LlmError::Api {
+                    status,
+                    message: "x".into(),
+                }
+                .is_retryable(),
+                "status {status} should not be retryable"
+            );
+        }
+        assert!(
+            !LlmError::Api {
+                status: 0,
+                message: "PROHIBITED_CONTENT".into(),
+            }
+            .is_retryable(),
+            "content-policy block must route to the pipeline, not a verbatim replay"
+        );
+        assert!(!LlmError::EmptyChoices.is_retryable());
+        assert!(
+            !LlmError::EmptyContent {
+                target: "translator",
+                finish_reason: "length".into(),
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn flex_tier_gets_a_deeper_retry_budget() {
+        assert_eq!(
+            client_with_tier(Some(ServiceTier::Flex))
+                .cfg
+                .max_send_attempts(),
+            5
+        );
+        assert_eq!(
+            client_with_tier(Some(ServiceTier::Priority))
+                .cfg
+                .max_send_attempts(),
+            3
+        );
+        assert_eq!(client_with_tier(None).cfg.max_send_attempts(), 3);
+    }
+
+    #[test]
+    fn backoff_is_exponential_capped_and_honors_retry_after() {
+        // Exponential from 1s, doubling, capped at 20s.
+        assert_eq!(retry_backoff(1, None), Duration::from_secs(1));
+        assert_eq!(retry_backoff(2, None), Duration::from_secs(2));
+        assert_eq!(retry_backoff(3, None), Duration::from_secs(4));
+        assert_eq!(retry_backoff(4, None), Duration::from_secs(8));
+        assert_eq!(retry_backoff(9, None), Duration::from_secs(20));
+        // A server hint takes precedence but is still capped.
+        assert_eq!(retry_backoff(1, Some(3)), Duration::from_secs(3));
+        assert_eq!(retry_backoff(1, Some(600)), Duration::from_secs(20));
     }
 }
