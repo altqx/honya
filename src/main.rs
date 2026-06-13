@@ -11,6 +11,7 @@ mod error;
 mod export;
 mod llm;
 mod model;
+mod remote;
 mod theme;
 mod ui;
 mod update;
@@ -66,6 +67,8 @@ async fn main() -> anyhow::Result<()> {
 
     // Best-effort update handling; honors HONYA_NO_UPDATE_CHECK and never blocks startup.
     update::spawn_background_update(app.tx.clone(), app.cfg.update_mode, app.cfg.release_channel);
+
+    app.init_remote();
 
     // Restore the terminal before panic output; normal teardown does not run on panic.
     let prev_hook = std::panic::take_hook();

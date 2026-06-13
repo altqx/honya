@@ -470,6 +470,19 @@ pub struct AppConfig {
     /// continuity notes for the QA inbox.
     #[serde(default = "default_true")]
     pub coherence_check: bool,
+    /// Holds the relay `device_token` secret, so config.json's 0600 handling matters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<RemoteAccount>,
+    #[serde(default)]
+    pub remote_enabled: bool,
+}
+
+/// Linked GitHub identity and relay credentials.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteAccount {
+    pub github_login: String,
+    pub device_id: String,
+    pub device_token: String,
 }
 
 /// Serde default for opt-in-by-default booleans (so older configs enable them).
@@ -511,6 +524,8 @@ impl Default for AppConfig {
             service_tier: None,
             prepass_extract: true,
             coherence_check: true,
+            account: None,
+            remote_enabled: false,
         }
     }
 }
@@ -1207,6 +1222,25 @@ pub enum AppEvent {
         paths: Vec<PathBuf>,
         warnings: Vec<String>,
     },
+
+    RemoteAuthCode {
+        user_code: String,
+        verification_uri: String,
+    },
+    RemoteAuthPending,
+    RemotePaired {
+        login: String,
+        device_id: String,
+        device_token: String,
+    },
+    RemoteAuthError {
+        msg: String,
+    },
+    RemoteStatus {
+        state: crate::remote::protocol::RemoteState,
+        watchers: u32,
+    },
+    RemoteCommand(crate::remote::protocol::RemoteCommand),
 }
 
 /// Clonable sender handle background tasks use to talk to the UI.

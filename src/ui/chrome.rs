@@ -53,7 +53,14 @@ impl StatusTally {
 /// Render the top header row: left breadcrumb, right
 /// `●done ◐working ○pending ✗failed  NN%`. The breadcrumb is truncated to
 /// whatever space the tally leaves so the two halves never collide.
-pub fn render_header(f: &mut Frame, area: Rect, crumb: &str, tally: &StatusTally, theme: &Theme) {
+pub fn render_header(
+    f: &mut Frame,
+    area: Rect,
+    crumb: &str,
+    tally: &StatusTally,
+    remote: (crate::remote::protocol::RemoteState, u32),
+    theme: &Theme,
+) {
     if area.width == 0 {
         return;
     }
@@ -66,6 +73,26 @@ pub fn render_header(f: &mut Frame, area: Rect, crumb: &str, tally: &StatusTally
 
     let pct = tally.percent();
     let mut right: Vec<Span> = Vec::new();
+
+    {
+        use crate::remote::protocol::RemoteState;
+        let (state, watchers) = remote;
+        if state != RemoteState::Disconnected {
+            let color = match state {
+                RemoteState::Connected => theme.status_done,
+                RemoteState::Connecting | RemoteState::Pairing => theme.status_working,
+                RemoteState::Error => theme.status_failed,
+                RemoteState::Disconnected => theme.ink_faint,
+            };
+            let label = if watchers > 0 {
+                format!("⇄{watchers}")
+            } else {
+                "⇄".to_string()
+            };
+            right.push(Span::styled(label, Style::default().fg(color)));
+            right.push(Span::styled("   ", Style::default().fg(theme.ink_faint)));
+        }
+    }
     let push_stat = |spans: &mut Vec<Span>, glyph: char, count: u32, color| {
         spans.push(Span::styled(
             format!("{glyph}{count}"),

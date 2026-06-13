@@ -238,6 +238,14 @@ pub enum Action {
     SaveTheme(ThemeId),
     /// Abandon the picker: restore the previously-saved theme, close.
     CancelTheme,
+    /// Begin GitHub sign-in (Device Flow) to link this app to an account.
+    StartRemoteLogin,
+    /// Connect the web remote-control relay (requires a linked account).
+    EnableRemote,
+    /// Disconnect the relay and stop sharing this session.
+    DisableRemote,
+    /// Sign out: disconnect and forget the linked account.
+    RemoteLogout,
     /// Boxed to break the `Action → Overlay → Dialog → Action` size cycle.
     ShowOverlay(Box<Overlay>),
     CloseOverlay,
@@ -357,6 +365,14 @@ pub struct App {
     last_skeleton: Option<Skeleton>,
     tab_zones: Vec<(Rect, Screen)>,
     last_click: Option<(std::time::Instant, u16, u16)>,
+
+    /// Outbound feed to the relay task while remote is connected.
+    remote_out: Option<tokio::sync::mpsc::UnboundedSender<crate::remote::protocol::RemoteOutbound>>,
+    /// Kill-switch for the relay task when the channel is not enough.
+    remote_kill: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    remote_state: crate::remote::protocol::RemoteState,
+    remote_watchers: u32,
+    remote_auth_code: Option<(String, String)>,
 }
 
 /// Accumulates one chapter's run facts between `ChapterStarted` and its terminal
@@ -417,6 +433,18 @@ impl App {
             last_skeleton: None,
             tab_zones: Vec::new(),
             last_click: None,
+            remote_out: None,
+            remote_kill: None,
+            remote_state: crate::remote::protocol::RemoteState::Disconnected,
+            remote_watchers: 0,
+            remote_auth_code: None,
+        }
+    }
+
+    /// Kept out of `App::new` so tests never spawn a network task.
+    pub fn init_remote(&mut self) {
+        if self.cfg.remote_enabled && self.cfg.account.is_some() {
+            self.apply(Action::EnableRemote);
         }
     }
 
@@ -741,6 +769,253 @@ impl App {
             }
             AppEvent::ContinuityFlag { severity, note, .. } => {
                 self.push_log(LogLevel::Warn, format!("[{severity}] {note}"));
+            }
+            AppEvent::RemoteAuthCode {
+                user_code,
+                verification_uri,
+            } => {
+                self.remote_auth_code = Some((user_code.clone(), verification_uri.clone()));
+                self.toast = Some(Toast::info(format!(
+                    "GitHub: enter {user_code} at {verification_uri}"
+                )));
+                self.push_log(
+                    LogLevel::Info,
+                    format!("GitHub sign-in: code {user_code} → {verification_uri}"),
+                );
+                self.sync_settings_remote();
+            }
+            AppEvent::RemoteAuthPending => {}
+            AppEvent::RemotePaired {
+                login,
+                device_id,
+                device_token,
+            } => {
+                self.cfg.account = Some(crate::model::RemoteAccount {
+                    github_login: login.clone(),
+                    device_id: device_id.clone(),
+                    device_token: device_token.clone(),
+                });
+                self.remote_auth_code = None;
+                self.remote_state = crate::remote::protocol::RemoteState::Disconnected;
+                let _ = crate::config::save(&self.cfg);
+                self.toast = Some(Toast::info(format!("signed in as @{login}")));
+                self.push_log(LogLevel::Info, format!("GitHub account linked: @{login}"));
+                self.apply(Action::EnableRemote);
+            }
+            AppEvent::RemoteAuthError { msg } => {
+                self.remote_auth_code = None;
+                self.remote_state = crate::remote::protocol::RemoteState::Disconnected;
+                self.toast = Some(Toast::error(format!("GitHub sign-in: {msg}")));
+                self.push_log(LogLevel::Warn, format!("GitHub sign-in failed: {msg}"));
+                self.sync_settings_remote();
+            }
+            AppEvent::RemoteStatus { state, watchers } => {
+                let was_watchers = self.remote_watchers;
+                self.remote_state = *state;
+                self.remote_watchers = *watchers;
+                // Re-seed the relay cache for a newly-opened dashboard.
+                if matches!(state, crate::remote::protocol::RemoteState::Connected)
+                    && *watchers >= was_watchers
+                {
+                    self.push_remote_snapshot();
+                }
+                self.sync_settings_remote();
+            }
+            AppEvent::RemoteCommand(cmd) => {
+                let action = Self::map_remote_command(cmd.clone());
+                self.apply(action);
+            }
+            _ => {}
+        }
+
+        // Project after local state is folded so browsers mirror the TUI.
+        if self.remote_out.is_some() {
+            self.project_and_send_remote(&ev);
+        }
+    }
+
+    fn push_remote_snapshot(&self) {
+        if let Some(out) = &self.remote_out {
+            let _ = out.send(crate::remote::protocol::RemoteOutbound::Snapshot(
+                self.remote_snapshot(),
+            ));
+        }
+    }
+
+    fn remote_snapshot(&self) -> crate::remote::protocol::RemoteSnapshot {
+        use crate::remote::protocol::{LogLine, RemoteSnapshot};
+        let (running, pending) = self.remote_queue();
+        let paused = self
+            .run_ctl
+            .as_ref()
+            .map(|c| c.is_paused())
+            .unwrap_or(false);
+        let (run, chapter) = self.translate.usage_snapshots();
+        let log_tail = self
+            .log
+            .iter()
+            .rev()
+            .take(40)
+            .rev()
+            .map(|(level, msg)| LogLine {
+                level: remote_log_level(*level).into(),
+                msg: msg.clone(),
+            })
+            .collect();
+        RemoteSnapshot {
+            app_version: crate::update::version_string(),
+            project: self.active.as_ref().map(|a| a.project.title.clone()),
+            vol: self.active.as_ref().map(|a| a.vol),
+            run_active: self.run_active,
+            paused,
+            running,
+            queue: pending.clone(),
+            tally: self.remote_tally(),
+            usage_run: run,
+            usage_chapter: chapter,
+            log_tail,
+        }
+    }
+
+    fn remote_queue(
+        &self,
+    ) -> (
+        Option<crate::remote::protocol::ChapterId>,
+        Vec<crate::remote::protocol::ChapterId>,
+    ) {
+        use crate::remote::protocol::ChapterId;
+        match self.run_queue.as_ref() {
+            Some(q) => {
+                let (running, pending) = q.snapshot();
+                let running = running.map(|(vol, ch)| ChapterId { vol, ch });
+                let pending = pending
+                    .into_iter()
+                    .map(|(vol, ch)| ChapterId { vol, ch })
+                    .collect();
+                (running, pending)
+            }
+            None => (None, Vec::new()),
+        }
+    }
+
+    fn remote_tally(&self) -> crate::remote::protocol::TallySnapshot {
+        let t = self.tally();
+        crate::remote::protocol::TallySnapshot {
+            done: t.done,
+            working: t.working,
+            pending: t.pending,
+            failed: t.failed,
+            total: t.done + t.working + t.pending + t.failed,
+        }
+    }
+
+    fn project_and_send_remote(&self, ev: &AppEvent) {
+        use crate::remote::protocol::{LogLine, RemoteDelta as D, RemoteOutbound as O};
+        let Some(out) = &self.remote_out else {
+            return;
+        };
+        let send = |d: D| {
+            let _ = out.send(O::Delta(d));
+        };
+        match ev {
+            AppEvent::QueueChanged => {
+                let (running, pending) = self.remote_queue();
+                send(D::Queue { running, pending });
+            }
+            AppEvent::ChapterStarted { chapter } => {
+                let (running, pending) = self.remote_queue();
+                send(D::Queue { running, pending });
+                send(D::Chapter {
+                    chapter: *chapter,
+                    status: "translating".into(),
+                });
+                send(D::Tally(self.remote_tally()));
+            }
+            AppEvent::ChapterStateChanged { chapter, state } => {
+                send(D::Chapter {
+                    chapter: *chapter,
+                    status: remote_chapter_status(*state).into(),
+                });
+                send(D::Tally(self.remote_tally()));
+            }
+            AppEvent::ChapterCompleted { chapter } => {
+                send(D::Chapter {
+                    chapter: *chapter,
+                    status: "done".into(),
+                });
+                send(D::Tally(self.remote_tally()));
+            }
+            AppEvent::ChapterFailed { chapter, .. } => {
+                send(D::Chapter {
+                    chapter: *chapter,
+                    status: "failed".into(),
+                });
+                send(D::Tally(self.remote_tally()));
+            }
+            AppEvent::ChunkStarted {
+                chapter,
+                chunk,
+                total,
+                ..
+            } => send(D::Chunk {
+                chapter: *chapter,
+                chunk: *chunk,
+                total: *total,
+                state: "translating".into(),
+            }),
+            AppEvent::ChunkStateChanged {
+                chapter,
+                chunk,
+                state,
+            } => send(D::Chunk {
+                chapter: *chapter,
+                chunk: *chunk,
+                total: 0,
+                state: remote_chunk_state(*state).into(),
+            }),
+            AppEvent::StreamDelta {
+                chapter,
+                chunk,
+                role,
+                delta,
+            } => send(D::Stream {
+                chapter: *chapter,
+                chunk: *chunk,
+                role: remote_agent_role(*role).into(),
+                delta: delta.clone(),
+            }),
+            AppEvent::UsageUpdate { run, chapter } => send(D::Usage {
+                run: run.into(),
+                chapter: chapter.into(),
+            }),
+            AppEvent::Log { level, msg } => send(D::Log(LogLine {
+                level: remote_log_level(*level).into(),
+                msg: msg.clone(),
+            })),
+            AppEvent::Error { context, msg } => send(D::Log(LogLine {
+                level: "error".into(),
+                msg: format!("{context}: {msg}"),
+            })),
+            AppEvent::PipelineFinished {
+                chapters_done,
+                chapters_failed,
+                chapters_need_review,
+                stopped,
+                ..
+            } => {
+                send(D::RunFinished {
+                    done: *chapters_done,
+                    failed: *chapters_failed,
+                    need_review: *chapters_need_review,
+                    stopped: *stopped,
+                });
+                send(D::Tally(self.remote_tally()));
+            }
+            // These state flags need a fresh snapshot, not a single delta.
+            AppEvent::PipelinePaused
+            | AppEvent::PipelineResumed
+            | AppEvent::VolumeStarted { .. } => {
+                let _ = out.send(O::Snapshot(self.remote_snapshot()));
             }
             _ => {}
         }
@@ -1312,6 +1587,7 @@ impl App {
                     Overlay::ReaderJump(_) => self.build_jump_overlay(),
                     other => other,
                 };
+                self.sync_settings_remote();
             }
             Action::CloseOverlay => {
                 self.overlay = Overlay::None;
@@ -1553,6 +1829,96 @@ impl App {
                 self.theme = self.cfg.theme.build();
                 self.overlay = Overlay::None;
             }
+            Action::StartRemoteLogin => self.start_remote_login(),
+            Action::EnableRemote => self.enable_remote(),
+            Action::DisableRemote => self.disable_remote(),
+            Action::RemoteLogout => self.remote_logout(),
+        }
+    }
+
+    fn start_remote_login(&mut self) {
+        if !crate::remote::github_login_configured() {
+            self.toast = Some(Toast::warn("GitHub sign-in isn't configured in this build"));
+            return;
+        }
+        if matches!(self.remote_state, crate::remote::protocol::RemoteState::Pairing) {
+            return;
+        }
+        self.remote_state = crate::remote::protocol::RemoteState::Pairing;
+        self.remote_auth_code = None;
+        crate::remote::auth::spawn_device_login(self.tx.clone());
+        self.toast = Some(Toast::info("starting GitHub sign-in …"));
+        self.sync_settings_remote();
+    }
+
+    fn enable_remote(&mut self) {
+        let Some(account) = self.cfg.account.clone() else {
+            self.toast = Some(Toast::warn("sign in with GitHub first"));
+            return;
+        };
+        if self.remote_out.is_some() {
+            return;
+        }
+        let (out_tx, out_rx) = tokio::sync::mpsc::unbounded_channel();
+        let kill = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        self.remote_out = Some(out_tx);
+        self.remote_kill = Some(kill.clone());
+        self.cfg.remote_enabled = true;
+        let _ = crate::config::save(&self.cfg);
+        crate::remote::relay::spawn_relay(self.tx.clone(), account.device_token, out_rx, kill);
+        self.push_log(LogLevel::Info, "remote control enabled".into());
+        self.sync_settings_remote();
+    }
+
+    fn disable_remote(&mut self) {
+        if let Some(kill) = self.remote_kill.take() {
+            kill.store(false, std::sync::atomic::Ordering::Relaxed);
+        }
+        self.remote_out = None;
+        self.remote_watchers = 0;
+        self.remote_state = crate::remote::protocol::RemoteState::Disconnected;
+        if self.cfg.remote_enabled {
+            self.cfg.remote_enabled = false;
+            let _ = crate::config::save(&self.cfg);
+        }
+        self.sync_settings_remote();
+    }
+
+    fn remote_logout(&mut self) {
+        self.disable_remote();
+        self.cfg.account = None;
+        self.remote_auth_code = None;
+        let _ = crate::config::save(&self.cfg);
+        self.toast = Some(Toast::info("signed out of GitHub"));
+        self.sync_settings_remote();
+    }
+
+    fn sync_settings_remote(&mut self) {
+        let login = self.cfg.account.as_ref().map(|a| a.github_login.clone());
+        let enabled = self.cfg.remote_enabled;
+        let state = self.remote_state;
+        let watchers = self.remote_watchers;
+        let code = self.remote_auth_code.clone();
+        if let self::overlay::Overlay::Settings(st) = &mut self.overlay {
+            st.account_login = login;
+            st.remote_enabled = enabled;
+            st.remote_state = state;
+            st.remote_watchers = watchers;
+            st.remote_auth_code = code;
+        }
+    }
+
+    /// Browser commands reuse the same mutation funnel as keystrokes.
+    fn map_remote_command(cmd: crate::remote::protocol::RemoteCommand) -> Action {
+        use crate::remote::protocol::RemoteCommand as Rc;
+        match cmd {
+            Rc::Pause => Action::PauseRun,
+            Rc::Stop => Action::StopRun,
+            Rc::StartProject => Action::BeginProjectTranslation,
+            Rc::Enqueue { vol, chapters } => Action::EnqueueChapters { vol, chapters },
+            Rc::QueueMoveUp { vol, ch } => Action::QueueMoveUp { vol, ch },
+            Rc::QueueMoveDown { vol, ch } => Action::QueueMoveDown { vol, ch },
+            Rc::Dequeue { vol, ch } => Action::DequeueChapter { vol, ch },
         }
     }
 
@@ -2857,7 +3223,14 @@ impl App {
 
         let crumb = self.crumb();
         let tally = self.tally();
-        chrome::render_header(f, sk.header, &crumb, &tally, &self.theme);
+        chrome::render_header(
+            f,
+            sk.header,
+            &crumb,
+            &tally,
+            (self.remote_state, self.remote_watchers),
+            &self.theme,
+        );
 
         self.tab_zones = chrome::render_tabbar(
             f,
@@ -3045,6 +3418,53 @@ impl App {
             Screen::Reader => self.reader.hints(),
             Screen::Lexicon => self.lexicon.hints(),
         }
+    }
+}
+
+// Wire strings are relay protocol values, not display copy.
+fn remote_chapter_status(s: ChapterStatus) -> &'static str {
+    match s {
+        ChapterStatus::Pending => "pending",
+        ChapterStatus::Chunking => "chunking",
+        ChapterStatus::Translating => "translating",
+        ChapterStatus::Reviewing => "reviewing",
+        ChapterStatus::Appended => "appended",
+        ChapterStatus::Done => "done",
+        ChapterStatus::NeedsReview => "needs_review",
+        ChapterStatus::Failed => "failed",
+        ChapterStatus::Paused => "paused",
+        ChapterStatus::Partial => "partial",
+    }
+}
+
+fn remote_chunk_state(s: crate::model::ChunkState) -> &'static str {
+    use crate::model::ChunkState as C;
+    match s {
+        C::Queued => "queued",
+        C::Translating => "translating",
+        C::Reviewing => "reviewing",
+        C::Rejected => "rejected",
+        C::Approved => "approved",
+        C::Committed => "committed",
+        C::NeedsReview => "needs_review",
+    }
+}
+
+fn remote_agent_role(r: crate::model::AgentRole) -> &'static str {
+    use crate::model::AgentRole as R;
+    match r {
+        R::Orchestrator => "orchestrator",
+        R::Translator => "translator",
+        R::Reviewer => "reviewer",
+    }
+}
+
+fn remote_log_level(l: LogLevel) -> &'static str {
+    match l {
+        LogLevel::Trace => "trace",
+        LogLevel::Info => "info",
+        LogLevel::Warn => "warn",
+        LogLevel::Error => "error",
     }
 }
 
@@ -3856,5 +4276,81 @@ mod completeness_tests {
         translation::write_raw(&ws, 1, "   ").unwrap();
         assert!(chapter_complete_on_disk(&ws, 1, &AppConfig::default()));
         let _ = std::fs::remove_dir_all(&base);
+    }
+}
+
+#[cfg(test)]
+mod remote_tests {
+    use super::*;
+    use crate::agents::pipeline::RunControl;
+    use crate::remote::protocol::{RemoteCommand, RemoteDelta, RemoteOutbound};
+
+    fn app() -> App {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        App::new(EventTx(tx), AppConfig::default())
+    }
+
+    #[test]
+    fn remote_commands_map_to_existing_actions() {
+        use RemoteCommand as C;
+        assert!(matches!(App::map_remote_command(C::Pause), Action::PauseRun));
+        assert!(matches!(App::map_remote_command(C::Stop), Action::StopRun));
+        assert!(matches!(
+            App::map_remote_command(C::StartProject),
+            Action::BeginProjectTranslation
+        ));
+        assert!(matches!(
+            App::map_remote_command(C::Enqueue { vol: 2, chapters: vec![3] }),
+            Action::EnqueueChapters { vol: 2, .. }
+        ));
+        assert!(matches!(
+            App::map_remote_command(C::Dequeue { vol: 1, ch: 4 }),
+            Action::DequeueChapter { vol: 1, ch: 4 }
+        ));
+    }
+
+    #[test]
+    fn remote_pause_toggles_run_control_like_a_keystroke() {
+        let mut app = app();
+        let ctl = RunControl::new();
+        app.run_ctl = Some(ctl.clone());
+        app.run_active = true;
+        assert!(!ctl.is_paused());
+        app.on_app_event(AppEvent::RemoteCommand(RemoteCommand::Pause));
+        assert!(ctl.is_paused(), "remote pause must toggle RunControl");
+    }
+
+    #[test]
+    fn events_project_to_relay_deltas_when_connected() {
+        let mut app = app();
+        let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel::<RemoteOutbound>();
+        app.remote_out = Some(out_tx);
+
+        app.on_app_event(AppEvent::Log {
+            level: LogLevel::Info,
+            msg: "hello".into(),
+        });
+
+        let mut saw_log = false;
+        while let Ok(msg) = out_rx.try_recv() {
+            if let RemoteOutbound::Delta(RemoteDelta::Log(line)) = msg
+                && line.msg == "hello"
+                && line.level == "info"
+            {
+                saw_log = true;
+            }
+        }
+        assert!(saw_log, "a Log event should project a Log delta");
+    }
+
+    #[test]
+    fn no_projection_when_disconnected() {
+        let mut app = app();
+        assert!(app.remote_out.is_none());
+        app.on_app_event(AppEvent::Log {
+            level: LogLevel::Warn,
+            msg: "x".into(),
+        });
+        assert!(app.log.iter().any(|(_, m)| m == "x"));
     }
 }

@@ -34,6 +34,12 @@ reqwest = { version = "0.13", default-features = false, features = [
 ] } # NOTE: feature is "rustls", NOT "rustls-tls"
 futures = "0.3" # FutureExt::fuse, StreamExt::next for select!
 async-trait = "0.1" # dyn-compatible async LlmClient / ToolExecutor traits
+tokio-tungstenite = { version = "0.24", default-features = false, features = [
+  "connect",
+  "rustls-tls-webpki-roots",
+] } # WebSocket client for the remote-control relay. NOTE: webpki-roots variant to
+    # match reqwest's "rustls" (bundled CA roots) choice — NOT "native-tls", NOT
+    # "rustls-tls-native-roots"; keeps a single rustls/webpki-roots in the tree.
 
 # --- serialization ---
 serde = { version = "1", features = ["derive"] }

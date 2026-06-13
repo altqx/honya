@@ -376,6 +376,11 @@ pub struct SettingsState {
     /// Caret byte-offset into the focused (non-secret) field. The API-key field
     /// is masked, so it edits at the end and ignores this.
     pub cursor: usize,
+    pub account_login: Option<String>,
+    pub remote_enabled: bool,
+    pub remote_state: crate::remote::protocol::RemoteState,
+    pub remote_watchers: u32,
+    pub remote_auth_code: Option<(String, String)>,
 }
 
 impl SettingsState {
@@ -395,6 +400,11 @@ impl SettingsState {
             max_chapter_retranslates: cfg.max_chapter_retranslates.to_string(),
             field: 0,
             cursor: 0,
+            account_login: cfg.account.as_ref().map(|a| a.github_login.clone()),
+            remote_enabled: cfg.remote_enabled,
+            remote_state: crate::remote::protocol::RemoteState::Disconnected,
+            remote_watchers: 0,
+            remote_auth_code: None,
         };
         st.focus(field.min(SETTINGS_FIELDS - 1));
         st
@@ -946,6 +956,11 @@ impl Overlay {
             max_chapter_retranslates: String::new(),
             field: field.min(SETTINGS_FIELDS - 1),
             cursor: 0,
+            account_login: None,
+            remote_enabled: false,
+            remote_state: crate::remote::protocol::RemoteState::Disconnected,
+            remote_watchers: 0,
+            remote_auth_code: None,
         })
     }
 
@@ -1600,6 +1615,29 @@ impl Overlay {
             KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 st.service_tier = ServiceTier::cycled(st.service_tier);
                 Action::None
+            }
+            KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if st.account_login.is_some() {
+                    Action::None
+                } else {
+                    Action::StartRemoteLogin
+                }
+            }
+            KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if st.account_login.is_none() {
+                    Action::StartRemoteLogin
+                } else if st.remote_enabled {
+                    Action::DisableRemote
+                } else {
+                    Action::EnableRemote
+                }
+            }
+            KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if st.account_login.is_some() {
+                    Action::RemoteLogout
+                } else {
+                    Action::None
+                }
             }
             KeyCode::Enter => Action::SaveSettings {
                 base_url: st.base_url.clone(),
@@ -2950,7 +2988,7 @@ impl Overlay {
         cfg: &AppConfig,
         st: &SettingsState,
     ) {
-        let modal = centered_modal(72, 26, area);
+        let modal = centered_modal(72, 32, area);
         f.render_widget(Clear, modal);
         let block = self.modal_block("Settings", theme);
         let inner = block.inner(modal);
@@ -3100,6 +3138,67 @@ impl Overlay {
             format!("      ↳ {}", ServiceTier::desc(st.service_tier)),
             Style::default().fg(theme.ink_faint),
         )));
+
+        lines.push(Line::raw(""));
+        lines.push(Line::from(Span::styled(
+            "   ── Account / Remote control ───────────────",
+            Style::default().fg(theme.ink_faint),
+        )));
+        match (&st.account_login, &st.remote_auth_code) {
+            (None, Some((code, uri))) => {
+                lines.push(Line::from(vec![
+                    Span::styled("   GitHub             ", Style::default().fg(theme.ink_faint)),
+                    Span::styled(code.clone(), Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)),
+                ]));
+                lines.push(Line::from(Span::styled(
+                    format!("      ↳ enter it at {uri}"),
+                    Style::default().fg(theme.ink_faint),
+                )));
+            }
+            (None, None) => {
+                lines.push(Line::from(vec![
+                    Span::styled("   GitHub             ", Style::default().fg(theme.ink_faint)),
+                    Span::styled("not signed in", Style::default().fg(theme.ink_soft)),
+                    Span::styled("   Ctrl-A to sign in", Style::default().fg(theme.ink_faint)),
+                ]));
+            }
+            (Some(login), _) => {
+                lines.push(Line::from(vec![
+                    Span::styled("   GitHub             ", Style::default().fg(theme.ink_faint)),
+                    Span::styled(format!("@{login}"), Style::default().fg(theme.status_done)),
+                    Span::styled("   Ctrl-O sign out", Style::default().fg(theme.ink_faint)),
+                ]));
+                let (state_label, state_color) = if st.remote_enabled {
+                    (st.remote_state.label(), match st.remote_state {
+                        crate::remote::protocol::RemoteState::Connected => theme.status_done,
+                        crate::remote::protocol::RemoteState::Error => theme.status_failed,
+                        _ => theme.status_working,
+                    })
+                } else {
+                    ("disabled", theme.ink_soft)
+                };
+                lines.push(Line::from(vec![
+                    Span::styled("   Remote link        ", Style::default().fg(theme.ink_faint)),
+                    Span::styled(state_label.to_string(), Style::default().fg(state_color)),
+                    Span::styled("   Ctrl-R to toggle", Style::default().fg(theme.ink_faint)),
+                ]));
+                if st.remote_enabled
+                    && matches!(st.remote_state, crate::remote::protocol::RemoteState::Connected)
+                {
+                    let watchers = st.remote_watchers;
+                    let note = if watchers == 0 {
+                        "      ↳ no dashboards watching · open honya.altqx.com/app".to_string()
+                    } else {
+                        format!("      ↳ {watchers} dashboard(s) watching this session")
+                    };
+                    lines.push(Line::from(Span::styled(
+                        note,
+                        Style::default().fg(theme.ink_faint),
+                    )));
+                }
+            }
+        }
+
         lines.push(Line::raw(""));
         let footer = if st.api_key_env {
             "   Key from HONYA_API_KEY / OPENROUTER_API_KEY · ↵ save · Esc close"

@@ -114,6 +114,15 @@ impl TranslateScreen {
         }
     }
 
+    pub fn usage_snapshots(
+        &self,
+    ) -> (
+        crate::remote::protocol::UsageSnapshot,
+        crate::remote::protocol::UsageSnapshot,
+    ) {
+        ((&self.run).into(), (&self.chapter).into())
+    }
+
     pub fn set_queue(&mut self, rows: Vec<QueueRow>) {
         self.queue = rows;
         let pending = self.pending_count();

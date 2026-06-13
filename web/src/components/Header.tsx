@@ -47,6 +47,9 @@ export function Header({ page }: { page: 'home' | 'changelog' }) {
           >
             {page === 'changelog' ? 'บันทึกการเปลี่ยนแปลง' : 'บันทึก'}
           </Link>
+          <Link className="lnk" to="/app">
+            รีโมต
+          </Link>
           <a className="nav-cta" href={GITHUB_URL} rel="noopener">
             <GitHubIcon />
             GitHub

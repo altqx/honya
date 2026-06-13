@@ -14,7 +14,8 @@ const config = defineConfig({
     tailwindcss(),
     tanstackStart({
       prerender: { enabled: true, crawlLinks: true },
-      pages: [{ path: '/' }, { path: '/changelog' }],
+      // Only the dashboard shell prerenders; live session pages fetch client-side.
+      pages: [{ path: '/' }, { path: '/changelog' }, { path: '/app' }],
     }),
     viteReact(),
   ],
