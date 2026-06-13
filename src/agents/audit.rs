@@ -9,8 +9,18 @@ use crate::model::{GlossaryTerm, TermPolicy};
 use crate::workspace::glossary;
 
 static HTML_TAG: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"</?[A-Za-z][A-Za-z0-9:-]*(?:\s+[^<>\n]{0,160})?>")
-        .expect("html-tag regex is valid")
+    Regex::new(
+        r"(?ix)
+        </?
+        (?: a|abbr|b|big|blockquote|br|center|code|del|div|em|font
+          | h[1-6]|hr|i|img|image|ins|kbd|li|mark|ol|p|pre|q|rp|rt|ruby
+          | s|samp|small|span|strike|strong|sub|sup|svg
+          | table|tbody|td|tfoot|th|thead|tr|tt|u|ul|var|wbr )
+        \b
+        (?:\s+[^<>\n]{0,160})?
+        \s*/?>",
+    )
+    .expect("html-tag regex is valid")
 });
 
 static MARKDOWN_IMAGE: Lazy<Regex> =

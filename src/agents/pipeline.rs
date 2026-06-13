@@ -1591,6 +1591,7 @@ async fn process_chunk(
                     &audit_findings,
                     &advisory,
                     &prev_thai,
+                    review_attempt,
                 )
                 .await
                 {

@@ -19,6 +19,7 @@ pub async fn review_chunk(
     audit_findings: &[String],
     advisory_findings: &[String],
     prev_thai: &[String],
+    attempt: u32,
 ) -> Result<(ReviewerOut, Usage)> {
     let user = build_reviewer_user(
         source_jp,
@@ -29,14 +30,22 @@ pub async fn review_chunk(
         prev_thai,
     );
 
+    let mut messages = vec![Message::system(REVIEWER_SYSTEM), Message::user(user)];
+    if attempt > 1 {
+        messages.push(Message::user(
+            "Your previous reply was not a valid review_result (it was missing the required \
+             \"status\" field). Respond with ONLY a JSON object of the exact form \
+             {\"status\":\"approve\"|\"reject\",\"feedback\":[...]} and nothing else. \
+             feedback MUST be empty when status is \"approve\".",
+        ));
+    }
+
     let req = ChatRequest {
         model: model.to_string(),
-        messages: vec![Message::system(REVIEWER_SYSTEM), Message::user(user)],
-        temperature: Some(0.0),
+        temperature: Some(if attempt > 1 { 0.4 } else { 0.0 }),
+        messages,
         ..ChatRequest::default()
     };
 
-    // retries=0: the pipeline owns the Reviewer retry surface (like translator.rs);
-    // re-sending an identical temp=0 request would just re-hit the same result.
     chat_structured::<ReviewerOut>(client, req, "review_result", reviewer_schema(), 0).await
 }
