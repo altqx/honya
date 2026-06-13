@@ -84,9 +84,8 @@ async fn run_relay(
     });
 }
 
-type Ws = tokio_tungstenite::WebSocketStream<
-    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
->;
+type Ws =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 async fn connect(url: &str, device_token: &str) -> anyhow::Result<Ws> {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;

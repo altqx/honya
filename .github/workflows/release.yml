@@ -96,3 +96,4 @@ jobs:
           ref: refs/tags/${{ inputs.tag || github.ref_name }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HONYA_GITHUB_CLIENT_ID: ${{ vars.HONYA_GITHUB_CLIENT_ID }}

@@ -71,9 +71,7 @@ fn parse_token_poll(body: &serde_json::Value) -> TokenPoll {
                 .unwrap_or(5);
             TokenPoll::SlowDown(extra)
         }
-        Some("expired_token") => {
-            TokenPoll::Failed("the sign-in code expired — try again".into())
-        }
+        Some("expired_token") => TokenPoll::Failed("the sign-in code expired — try again".into()),
         Some("access_denied") => TokenPoll::Failed("sign-in was cancelled".into()),
         Some(other) => TokenPoll::Failed(other.replace('_', " ")),
         None => TokenPoll::Failed("unexpected response from GitHub".into()),
@@ -129,7 +127,10 @@ async fn request_device_code(client: &reqwest::Client) -> Result<DeviceCode, Str
         .await
         .map_err(|e| format!("could not reach GitHub: {e}"))?;
     if !resp.status().is_success() {
-        return Err(format!("GitHub returned {} starting sign-in", resp.status()));
+        return Err(format!(
+            "GitHub returned {} starting sign-in",
+            resp.status()
+        ));
     }
     resp.json::<DeviceCode>()
         .await
@@ -200,10 +201,7 @@ async fn register_device(
         .await
         .map_err(|e| format!("could not reach the honya relay: {e}"))?;
     if !resp.status().is_success() {
-        return Err(format!(
-            "relay rejected sign-in ({})",
-            resp.status()
-        ));
+        return Err(format!("relay rejected sign-in ({})", resp.status()));
     }
     resp.json::<RegisterResponse>()
         .await

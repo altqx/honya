@@ -9,11 +9,10 @@ pub mod relay;
 
 /// Public GitHub OAuth App client id; Device Flow uses no client secret.
 /// CI bakes in the real value, while the placeholder keeps local builds working.
-pub const GITHUB_CLIENT_ID: &str =
-    match option_env!("HONYA_GITHUB_CLIENT_ID") {
-        Some(id) => id,
-        None => "Iv1.honya-placeholder",
-    };
+pub const GITHUB_CLIENT_ID: &str = match option_env!("HONYA_GITHUB_CLIENT_ID") {
+    Some(id) => id,
+    None => "Ov23li8xAEUqrNraq98z",
+};
 
 /// Relay backend base URL, overridable at build time for staging.
 pub const RELAY_BASE: &str = match option_env!("HONYA_RELAY_BASE") {
@@ -30,7 +29,10 @@ pub fn relay_ws_url() -> String {
     let ws = base
         .strip_prefix("https://")
         .map(|rest| format!("wss://{rest}"))
-        .or_else(|| base.strip_prefix("http://").map(|rest| format!("ws://{rest}")))
+        .or_else(|| {
+            base.strip_prefix("http://")
+                .map(|rest| format!("ws://{rest}"))
+        })
         .unwrap_or_else(|| base.to_string());
     format!("{ws}/relay")
 }

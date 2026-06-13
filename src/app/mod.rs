@@ -1841,7 +1841,10 @@ impl App {
             self.toast = Some(Toast::warn("GitHub sign-in isn't configured in this build"));
             return;
         }
-        if matches!(self.remote_state, crate::remote::protocol::RemoteState::Pairing) {
+        if matches!(
+            self.remote_state,
+            crate::remote::protocol::RemoteState::Pairing
+        ) {
             return;
         }
         self.remote_state = crate::remote::protocol::RemoteState::Pairing;
@@ -4293,14 +4296,20 @@ mod remote_tests {
     #[test]
     fn remote_commands_map_to_existing_actions() {
         use RemoteCommand as C;
-        assert!(matches!(App::map_remote_command(C::Pause), Action::PauseRun));
+        assert!(matches!(
+            App::map_remote_command(C::Pause),
+            Action::PauseRun
+        ));
         assert!(matches!(App::map_remote_command(C::Stop), Action::StopRun));
         assert!(matches!(
             App::map_remote_command(C::StartProject),
             Action::BeginProjectTranslation
         ));
         assert!(matches!(
-            App::map_remote_command(C::Enqueue { vol: 2, chapters: vec![3] }),
+            App::map_remote_command(C::Enqueue {
+                vol: 2,
+                chapters: vec![3]
+            }),
             Action::EnqueueChapters { vol: 2, .. }
         ));
         assert!(matches!(

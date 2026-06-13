@@ -3147,8 +3147,16 @@ impl Overlay {
         match (&st.account_login, &st.remote_auth_code) {
             (None, Some((code, uri))) => {
                 lines.push(Line::from(vec![
-                    Span::styled("   GitHub             ", Style::default().fg(theme.ink_faint)),
-                    Span::styled(code.clone(), Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        "   GitHub             ",
+                        Style::default().fg(theme.ink_faint),
+                    ),
+                    Span::styled(
+                        code.clone(),
+                        Style::default()
+                            .fg(theme.accent)
+                            .add_modifier(Modifier::BOLD),
+                    ),
                 ]));
                 lines.push(Line::from(Span::styled(
                     format!("      ↳ enter it at {uri}"),
@@ -3157,33 +3165,48 @@ impl Overlay {
             }
             (None, None) => {
                 lines.push(Line::from(vec![
-                    Span::styled("   GitHub             ", Style::default().fg(theme.ink_faint)),
+                    Span::styled(
+                        "   GitHub             ",
+                        Style::default().fg(theme.ink_faint),
+                    ),
                     Span::styled("not signed in", Style::default().fg(theme.ink_soft)),
                     Span::styled("   Ctrl-A to sign in", Style::default().fg(theme.ink_faint)),
                 ]));
             }
             (Some(login), _) => {
                 lines.push(Line::from(vec![
-                    Span::styled("   GitHub             ", Style::default().fg(theme.ink_faint)),
+                    Span::styled(
+                        "   GitHub             ",
+                        Style::default().fg(theme.ink_faint),
+                    ),
                     Span::styled(format!("@{login}"), Style::default().fg(theme.status_done)),
                     Span::styled("   Ctrl-O sign out", Style::default().fg(theme.ink_faint)),
                 ]));
                 let (state_label, state_color) = if st.remote_enabled {
-                    (st.remote_state.label(), match st.remote_state {
-                        crate::remote::protocol::RemoteState::Connected => theme.status_done,
-                        crate::remote::protocol::RemoteState::Error => theme.status_failed,
-                        _ => theme.status_working,
-                    })
+                    (
+                        st.remote_state.label(),
+                        match st.remote_state {
+                            crate::remote::protocol::RemoteState::Connected => theme.status_done,
+                            crate::remote::protocol::RemoteState::Error => theme.status_failed,
+                            _ => theme.status_working,
+                        },
+                    )
                 } else {
                     ("disabled", theme.ink_soft)
                 };
                 lines.push(Line::from(vec![
-                    Span::styled("   Remote link        ", Style::default().fg(theme.ink_faint)),
+                    Span::styled(
+                        "   Remote link        ",
+                        Style::default().fg(theme.ink_faint),
+                    ),
                     Span::styled(state_label.to_string(), Style::default().fg(state_color)),
                     Span::styled("   Ctrl-R to toggle", Style::default().fg(theme.ink_faint)),
                 ]));
                 if st.remote_enabled
-                    && matches!(st.remote_state, crate::remote::protocol::RemoteState::Connected)
+                    && matches!(
+                        st.remote_state,
+                        crate::remote::protocol::RemoteState::Connected
+                    )
                 {
                     let watchers = st.remote_watchers;
                     let note = if watchers == 0 {
