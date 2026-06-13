@@ -1,6 +1,6 @@
 export const SITE_URL = 'https://honya.altqx.com'
 export const GITHUB_URL = 'https://github.com/altqx/honya'
-export const VERSION = 'v0.2.6'
+export const VERSION = 'v0.3.0'
 
 export const RELAY_URL = 'https://api.honya.altqx.com'
 
