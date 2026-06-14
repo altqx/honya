@@ -834,8 +834,13 @@ impl App {
                 self.sync_settings_remote();
             }
             AppEvent::RemoteCommand(cmd) => {
+                use crate::remote::protocol::RemoteCommand as Rc;
+                let needs_snapshot = matches!(cmd, Rc::OpenProject { .. } | Rc::SetVolume { .. });
                 let action = Self::map_remote_command(cmd.clone());
                 self.apply(action);
+                if needs_snapshot {
+                    self.push_remote_snapshot();
+                }
             }
             _ => {}
         }
@@ -1162,10 +1167,15 @@ impl App {
                 });
                 send(D::Tally(self.remote_tally()));
             }
-            // These state flags need a fresh snapshot, not a single delta.
+            // Cast/glossary changed — refresh the lexicon view wholesale. Fires
+            // during the Orchestrator's metadata turn; cheap (small files).
+            AppEvent::CharacterUpserted { .. } | AppEvent::GlossaryUpserted { .. } => {
+                send(D::Lexicon(self.remote_lexicon()));
+            }
             AppEvent::PipelinePaused
             | AppEvent::PipelineResumed
-            | AppEvent::VolumeStarted { .. } => {
+            | AppEvent::VolumeStarted { .. }
+            | AppEvent::VolumeRecapUpdated { .. } => {
                 let _ = out.send(O::Snapshot(self.remote_snapshot()));
             }
             _ => {}
@@ -2136,6 +2146,8 @@ impl App {
             Rc::QueueMoveUp { vol, ch } => Action::QueueMoveUp { vol, ch },
             Rc::QueueMoveDown { vol, ch } => Action::QueueMoveDown { vol, ch },
             Rc::Dequeue { vol, ch } => Action::DequeueChapter { vol, ch },
+            Rc::OpenProject { id } => Action::OpenProject(id),
+            Rc::SetVolume { vol } => Action::SetActiveVolume { vol },
         }
     }
 
@@ -3676,6 +3688,16 @@ fn remote_agent_role(r: crate::model::AgentRole) -> &'static str {
     }
 }
 
+fn remote_term_policy(p: crate::model::TermPolicy) -> &'static str {
+    use crate::model::TermPolicy as P;
+    match p {
+        P::HardLocked => "hard_locked",
+        P::Preferred => "preferred",
+        P::Forbidden => "forbidden",
+        P::ContextDependent => "context_dependent",
+    }
+}
+
 fn remote_log_level(l: LogLevel) -> &'static str {
     match l {
         LogLevel::Trace => "trace",
@@ -4529,6 +4551,14 @@ mod remote_tests {
         assert!(matches!(
             App::map_remote_command(C::Dequeue { vol: 1, ch: 4 }),
             Action::DequeueChapter { vol: 1, ch: 4 }
+        ));
+        assert!(matches!(
+            App::map_remote_command(C::SetVolume { vol: 3 }),
+            Action::SetActiveVolume { vol: 3 }
+        ));
+        assert!(matches!(
+            App::map_remote_command(C::OpenProject { id: "re-zero".into() }),
+            Action::OpenProject(id) if id == "re-zero"
         ));
     }
 
