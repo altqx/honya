@@ -68,7 +68,7 @@ impl Screen {
     }
 }
 
-/// Everything a screen / overlay can ask the App to do; `apply` is the single mutation funnel.
+/// Screen and overlay requests handled by `apply`.
 #[derive(Debug, Clone)]
 pub enum Action {
     None,
@@ -246,6 +246,10 @@ pub enum Action {
     DisableRemote,
     /// Sign out: disconnect and forget the linked account.
     RemoteLogout,
+    /// Open the pending GitHub auth URL.
+    OpenAuthUrl,
+    /// Copy the pending GitHub auth code via OSC-52.
+    CopyAuthCode,
     /// Boxed to break the `Action → Overlay → Dialog → Action` size cycle.
     ShowOverlay(Box<Overlay>),
     CloseOverlay,
@@ -372,7 +376,9 @@ pub struct App {
     remote_kill: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     remote_state: crate::remote::protocol::RemoteState,
     remote_watchers: u32,
-    remote_auth_code: Option<(String, String)>,
+    remote_auth_code: Option<crate::model::AuthCodePrompt>,
+    /// Dashboard label for the live remote session.
+    session_label: Option<String>,
 }
 
 /// Accumulates one chapter's run facts between `ChapterStarted` and its terminal
@@ -438,12 +444,13 @@ impl App {
             remote_state: crate::remote::protocol::RemoteState::Disconnected,
             remote_watchers: 0,
             remote_auth_code: None,
+            session_label: None,
         }
     }
 
     /// Kept out of `App::new` so tests never spawn a network task.
-    pub fn init_remote(&mut self) {
-        if self.cfg.remote_enabled && self.cfg.account.is_some() {
+    pub fn init_remote(&mut self, opt_in: bool) {
+        if opt_in && self.cfg.account.is_some() {
             self.apply(Action::EnableRemote);
         }
     }
@@ -773,10 +780,15 @@ impl App {
             AppEvent::RemoteAuthCode {
                 user_code,
                 verification_uri,
+                verification_uri_complete,
             } => {
-                self.remote_auth_code = Some((user_code.clone(), verification_uri.clone()));
+                self.remote_auth_code = Some(crate::model::AuthCodePrompt {
+                    code: user_code.clone(),
+                    uri: verification_uri.clone(),
+                    uri_complete: verification_uri_complete.clone(),
+                });
                 self.toast = Some(Toast::info(format!(
-                    "GitHub: enter {user_code} at {verification_uri}"
+                    "GitHub: enter {user_code} at {verification_uri} · Ctrl-B open · Ctrl-K copy"
                 )));
                 self.push_log(
                     LogLevel::Info,
@@ -1865,6 +1877,39 @@ impl App {
             Action::EnableRemote => self.enable_remote(),
             Action::DisableRemote => self.disable_remote(),
             Action::RemoteLogout => self.remote_logout(),
+            Action::OpenAuthUrl => self.open_auth_url(),
+            Action::CopyAuthCode => self.copy_auth_code(),
+        }
+    }
+
+    fn open_auth_url(&mut self) {
+        let Some(prompt) = self.remote_auth_code.as_ref() else {
+            return;
+        };
+        let target = if prompt.uri_complete.is_empty() {
+            prompt.uri.clone()
+        } else {
+            prompt.uri_complete.clone()
+        };
+        match crate::remote::open_url(&target) {
+            Ok(()) => self.toast = Some(Toast::info("opened GitHub in your browser")),
+            Err(_) => {
+                self.toast = Some(Toast::warn(
+                    "couldn't open a browser — copy the code instead",
+                ))
+            }
+        }
+    }
+
+    fn copy_auth_code(&mut self) {
+        let Some(prompt) = self.remote_auth_code.as_ref() else {
+            return;
+        };
+        let code = prompt.code.clone();
+        // OSC-52 cannot be confirmed, so the code stays visible.
+        match crate::remote::copy_to_clipboard(&code) {
+            Ok(()) => self.toast = Some(Toast::info(format!("copied {code} — paste at GitHub"))),
+            Err(_) => self.toast = Some(Toast::warn("couldn't copy — type the code shown")),
         }
     }
 
@@ -1894,15 +1939,40 @@ impl App {
         if self.remote_out.is_some() {
             return;
         }
+        // Fresh per launch, so parallel local sessions stay distinct.
+        let session_id = crate::remote::new_session_id();
+        let label = self.remote_session_label();
         let (out_tx, out_rx) = tokio::sync::mpsc::unbounded_channel();
         let kill = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
         self.remote_out = Some(out_tx);
         self.remote_kill = Some(kill.clone());
-        self.cfg.remote_enabled = true;
-        let _ = crate::config::save(&self.cfg);
-        crate::remote::relay::spawn_relay(self.tx.clone(), account.device_token, out_rx, kill);
+        self.session_label = Some(label.clone());
+        crate::remote::relay::spawn_relay(
+            self.tx.clone(),
+            account.device_token,
+            session_id,
+            label,
+            out_rx,
+            kill,
+        );
         self.push_log(LogLevel::Info, "remote control enabled".into());
         self.sync_settings_remote();
+    }
+
+    /// Dashboard label: project volume or shelf cwd, suffixed with the host.
+    fn remote_session_label(&self) -> String {
+        let host = crate::remote::auth::device_label();
+        let base = match self.active.as_ref() {
+            Some(active) => format!("{} · Vol.{:02}", active.project.title, active.vol),
+            None => {
+                let cwd = std::env::current_dir()
+                    .ok()
+                    .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+                    .unwrap_or_else(|| "honya".into());
+                format!("shelf {cwd}")
+            }
+        };
+        format!("{base} · {host}")
     }
 
     fn disable_remote(&mut self) {
@@ -1912,10 +1982,7 @@ impl App {
         self.remote_out = None;
         self.remote_watchers = 0;
         self.remote_state = crate::remote::protocol::RemoteState::Disconnected;
-        if self.cfg.remote_enabled {
-            self.cfg.remote_enabled = false;
-            let _ = crate::config::save(&self.cfg);
-        }
+        self.session_label = None;
         self.sync_settings_remote();
     }
 
@@ -1930,16 +1997,19 @@ impl App {
 
     fn sync_settings_remote(&mut self) {
         let login = self.cfg.account.as_ref().map(|a| a.github_login.clone());
-        let enabled = self.cfg.remote_enabled;
+        // Enabled means a live relay feed, not persisted config.
+        let enabled = self.remote_out.is_some();
         let state = self.remote_state;
         let watchers = self.remote_watchers;
         let code = self.remote_auth_code.clone();
+        let session_label = self.session_label.clone();
         if let self::overlay::Overlay::Settings(st) = &mut self.overlay {
             st.account_login = login;
             st.remote_enabled = enabled;
             st.remote_state = state;
             st.remote_watchers = watchers;
             st.remote_auth_code = code;
+            st.session_label = session_label;
         }
     }
 

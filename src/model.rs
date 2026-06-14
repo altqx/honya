@@ -471,10 +471,9 @@ pub struct AppConfig {
     #[serde(default = "default_true")]
     pub coherence_check: bool,
     /// Holds the relay `device_token` secret, so config.json's 0600 handling matters.
+    /// Remote enablement is per-session, not persisted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<RemoteAccount>,
-    #[serde(default)]
-    pub remote_enabled: bool,
 }
 
 /// Linked GitHub identity and relay credentials.
@@ -483,6 +482,14 @@ pub struct RemoteAccount {
     pub github_login: String,
     pub device_id: String,
     pub device_token: String,
+}
+
+/// Pending GitHub device-flow prompt shown while sign-in is in flight.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthCodePrompt {
+    pub code: String,
+    pub uri: String,
+    pub uri_complete: String,
 }
 
 /// Serde default for opt-in-by-default booleans (so older configs enable them).
@@ -525,13 +532,11 @@ impl Default for AppConfig {
             prepass_extract: true,
             coherence_check: true,
             account: None,
-            remote_enabled: false,
         }
     }
 }
 
-/// Translator strict-schema output ("translation_result"): brief `thought_process` plus
-/// `translated_text`; discovery arrays let the Orchestrator persist new entities via tools.
+/// Translator strict-schema output for `translation_result`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TranslatorOut {
     pub thought_process: ThoughtProcess,
@@ -550,7 +555,7 @@ pub struct TranslatorOut {
     pub continuity_notes: Vec<String>,
 }
 
-/// Concise pre-translation analysis. Spec rule: never draft the translation here (token thrift).
+/// Concise pre-translation analysis; never draft the translation here.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ThoughtProcess {
     /// อารมณ์ / ความสัมพันธ์ / การเลือกสรรพนาม.
@@ -1226,6 +1231,8 @@ pub enum AppEvent {
     RemoteAuthCode {
         user_code: String,
         verification_uri: String,
+        /// GitHub's code-prefilled URL, if provided.
+        verification_uri_complete: String,
     },
     RemoteAuthPending,
     RemotePaired {

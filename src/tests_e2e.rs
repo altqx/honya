@@ -361,6 +361,7 @@ fn settings_api_key_field_edits_and_respects_env_override() {
         remote_state: crate::remote::protocol::RemoteState::Disconnected,
         remote_watchers: 0,
         remote_auth_code: None,
+        session_label: None,
     });
     for c in "sk-or-1".chars() {
         ov.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::empty()));
@@ -391,6 +392,7 @@ fn settings_api_key_field_edits_and_respects_env_override() {
         remote_state: crate::remote::protocol::RemoteState::Disconnected,
         remote_watchers: 0,
         remote_auth_code: None,
+        session_label: None,
     });
     ov.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::empty()));
     ov.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::empty()));
@@ -437,6 +439,7 @@ fn settings_ctrl_u_toggles_update_mode_and_saves_it() {
         remote_state: crate::remote::protocol::RemoteState::Disconnected,
         remote_watchers: 0,
         remote_auth_code: None,
+        session_label: None,
     });
 
     // Ctrl-U flips Auto → Notify without typing into the focused field.
@@ -483,6 +486,7 @@ fn settings_ctrl_g_toggles_release_channel_and_saves_it() {
         remote_state: crate::remote::protocol::RemoteState::Disconnected,
         remote_watchers: 0,
         remote_auth_code: None,
+        session_label: None,
     });
 
     ov.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL));
@@ -532,6 +536,7 @@ fn settings_retries_field_is_digit_only_and_clamped() {
             remote_state: crate::remote::protocol::RemoteState::Disconnected,
             remote_watchers: 0,
             remote_auth_code: None,
+            session_label: None,
         })
     };
 
@@ -628,6 +633,7 @@ fn settings_field_caret_inserts_mid_value() {
         remote_state: crate::remote::protocol::RemoteState::Disconnected,
         remote_watchers: 0,
         remote_auth_code: None,
+        session_label: None,
     });
     // Caret after 't', insert the missing 't' → "http".
     ov.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::empty()));

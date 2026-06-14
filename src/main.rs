@@ -68,7 +68,10 @@ async fn main() -> anyhow::Result<()> {
     // Best-effort update handling; honors HONYA_NO_UPDATE_CHECK and never blocks startup.
     update::spawn_background_update(app.tx.clone(), app.cfg.update_mode, app.cfg.release_channel);
 
-    app.init_remote();
+    // Remote startup is opt-in so local sessions do not auto-collide.
+    let remote_opt_in =
+        std::env::args().any(|a| a == "--remote") || config::env_truthy("HONYA_REMOTE");
+    app.init_remote(remote_opt_in);
 
     // Restore the terminal before panic output; normal teardown does not run on panic.
     let prev_hook = std::panic::take_hook();
@@ -126,7 +129,7 @@ async fn run(
     Ok(())
 }
 
-/// Build the live OpenRouter client; errors only if the key is gone or the HTTP stack fails.
+/// Build the live OpenRouter client.
 pub fn build_client(cfg: &AppConfig) -> anyhow::Result<Arc<dyn LlmClient>> {
     let api_key = config::resolve_api_key(cfg).ok_or_else(|| {
         anyhow::anyhow!(
@@ -144,6 +147,7 @@ fn print_help() {
     println!("honya 本屋 — AI-assisted Japanese → Thai light-novel translation\n");
     println!("USAGE:");
     println!("    honya             Launch the TUI in the current directory");
+    println!("    honya --remote    Launch and enable web remote control for this session");
     println!(
         "    honya update      Update honya to the latest release (aliases: self-update, upgrade)"
     );
@@ -159,6 +163,9 @@ fn print_help() {
     println!("    HONYA_API_KEY / OPENROUTER_API_KEY   OpenRouter key (overrides saved config)");
     println!(
         "    HONYA_NO_UPDATE_CHECK                Disable the startup update check / auto-update"
+    );
+    println!(
+        "    HONYA_REMOTE                         Enable web remote control for this session (= --remote)"
     );
     println!(
         "    HONYA_SESSION_FILE                   Override the crash-recovery checkpoint path"

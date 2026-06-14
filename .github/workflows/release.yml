@@ -1,7 +1,7 @@
 name: release
 
 # Build cross-platform release binaries and attach them to the GitHub Release.
-# Asset convention (must match install.sh + install.ps1 in the honya-relay repo's
+# Asset convention (must match install.sh + install.ps1
 # web/public exactly — that's where the install scripts now live):
 #   honya-<target>.tar.gz   (Unix executable `honya`)
 #   honya-<target>.zip      (Windows executable `honya.exe`)

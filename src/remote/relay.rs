@@ -11,7 +11,7 @@ use futures::{SinkExt, StreamExt};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio_tungstenite::tungstenite::Message;
 
-use super::{relay_ws_url, user_agent};
+use super::{session_ws_url, user_agent};
 use crate::model::{AppEvent, EventTx, LogLevel};
 use crate::remote::protocol::{Inbound, RemoteOutbound, RemoteState, decode_inbound};
 
@@ -21,21 +21,26 @@ const MAX_BACKOFF_SECS: u64 = 30;
 pub fn spawn_relay(
     tx: EventTx,
     device_token: String,
+    session_id: String,
+    label: String,
     out_rx: UnboundedReceiver<RemoteOutbound>,
     enabled: Arc<AtomicBool>,
 ) {
     tokio::spawn(async move {
-        run_relay(tx, device_token, out_rx, enabled).await;
+        run_relay(tx, device_token, session_id, label, out_rx, enabled).await;
     });
 }
 
 async fn run_relay(
     tx: EventTx,
     device_token: String,
+    session_id: String,
+    label: String,
     mut out_rx: UnboundedReceiver<RemoteOutbound>,
     enabled: Arc<AtomicBool>,
 ) {
-    let url = relay_ws_url();
+    // Reconnects reuse the same relay session.
+    let url = session_ws_url(&session_id, &label);
     let mut backoff = 1u64;
     loop {
         if !enabled.load(Ordering::Relaxed) {

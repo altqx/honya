@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use super::{GITHUB_CLIENT_ID, RELAY_BASE, user_agent};
+use super::{GITHUB_CLIENT_ID, RELAY_BASE, enc, user_agent};
 use crate::model::{AppEvent, EventTx};
 
 const DEVICE_CODE_URL: &str = "https://github.com/login/device/code";
@@ -19,6 +19,9 @@ struct DeviceCode {
     device_code: String,
     user_code: String,
     verification_uri: String,
+    /// GitHub's code-prefilled verification URL, if provided.
+    #[serde(default)]
+    verification_uri_complete: String,
     #[serde(default = "default_interval")]
     interval: u64,
     #[serde(default)]
@@ -27,20 +30,6 @@ struct DeviceCode {
 
 fn default_interval() -> u64 {
     5
-}
-
-/// `reqwest` is built without serde_urlencoded, so these URLs are assembled here.
-fn enc(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char)
-            }
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,6 +89,7 @@ async fn run_device_login(tx: &EventTx) -> Result<(), String> {
     tx.send(AppEvent::RemoteAuthCode {
         user_code: dc.user_code.clone(),
         verification_uri: dc.verification_uri.clone(),
+        verification_uri_complete: dc.verification_uri_complete.clone(),
     });
 
     let github_token = poll_for_token(&client, tx, &dc).await?;
@@ -208,7 +198,7 @@ async fn register_device(
         .map_err(|e| format!("unexpected relay response: {e}"))
 }
 
-fn device_label() -> String {
+pub(crate) fn device_label() -> String {
     std::env::var("HOSTNAME")
         .ok()
         .or_else(|| std::env::var("COMPUTERNAME").ok())
@@ -254,5 +244,21 @@ mod tests {
         let dc: DeviceCode = serde_json::from_value(v).unwrap();
         assert_eq!(dc.user_code, "ABCD-1234");
         assert_eq!(dc.interval, 5);
+        assert_eq!(dc.verification_uri_complete, "");
+    }
+
+    #[test]
+    fn device_code_keeps_complete_uri_when_present() {
+        let v = serde_json::json!({
+            "device_code": "dc",
+            "user_code": "ABCD-1234",
+            "verification_uri": "https://github.com/login/device",
+            "verification_uri_complete": "https://github.com/login/device?user_code=ABCD-1234"
+        });
+        let dc: DeviceCode = serde_json::from_value(v).unwrap();
+        assert_eq!(
+            dc.verification_uri_complete,
+            "https://github.com/login/device?user_code=ABCD-1234"
+        );
     }
 }

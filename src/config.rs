@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use crate::model::AppConfig;
 
-/// The honya config directory: `$XDG_CONFIG_HOME/honya`, Windows app data, then `~/.config/honya`.
+/// Resolve honya's config directory.
 pub fn config_dir() -> PathBuf {
     if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
         let xdg = PathBuf::from(xdg);
@@ -91,4 +91,36 @@ pub fn api_key_from_env() -> Option<String> {
         }
     }
     None
+}
+
+/// Truthiness helper for opt-in env flags.
+pub fn env_truthy(name: &str) -> bool {
+    std::env::var(name)
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::env_truthy;
+
+    #[test]
+    fn env_truthy_reads_common_forms() {
+        // SAFETY: single-threaded test; restore by removing the var afterward.
+        for (val, want) in [("1", true), ("TRUE", true), ("yes", true), ("On", true)] {
+            unsafe { std::env::set_var("HONYA_TEST_TRUTHY", val) };
+            assert_eq!(env_truthy("HONYA_TEST_TRUTHY"), want, "value={val}");
+        }
+        for val in ["0", "false", "", "nope"] {
+            unsafe { std::env::set_var("HONYA_TEST_TRUTHY", val) };
+            assert!(!env_truthy("HONYA_TEST_TRUTHY"), "value={val}");
+        }
+        unsafe { std::env::remove_var("HONYA_TEST_TRUTHY") };
+        assert!(!env_truthy("HONYA_TEST_TRUTHY"));
+    }
 }

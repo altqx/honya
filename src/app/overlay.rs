@@ -380,7 +380,9 @@ pub struct SettingsState {
     pub remote_enabled: bool,
     pub remote_state: crate::remote::protocol::RemoteState,
     pub remote_watchers: u32,
-    pub remote_auth_code: Option<(String, String)>,
+    pub remote_auth_code: Option<crate::model::AuthCodePrompt>,
+    /// Dashboard label for the live remote session.
+    pub session_label: Option<String>,
 }
 
 impl SettingsState {
@@ -401,10 +403,12 @@ impl SettingsState {
             field: 0,
             cursor: 0,
             account_login: cfg.account.as_ref().map(|a| a.github_login.clone()),
-            remote_enabled: cfg.remote_enabled,
+            // App syncs live remote values after opening Settings.
+            remote_enabled: false,
             remote_state: crate::remote::protocol::RemoteState::Disconnected,
             remote_watchers: 0,
             remote_auth_code: None,
+            session_label: None,
         };
         st.focus(field.min(SETTINGS_FIELDS - 1));
         st
@@ -961,6 +965,7 @@ impl Overlay {
             remote_state: crate::remote::protocol::RemoteState::Disconnected,
             remote_watchers: 0,
             remote_auth_code: None,
+            session_label: None,
         })
     }
 
@@ -1635,6 +1640,21 @@ impl Overlay {
             KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 if st.account_login.is_some() {
                     Action::RemoteLogout
+                } else {
+                    Action::None
+                }
+            }
+            // Ctrl-modified so focused text fields do not swallow sign-in helpers.
+            KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if st.remote_auth_code.is_some() {
+                    Action::OpenAuthUrl
+                } else {
+                    Action::None
+                }
+            }
+            KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if st.remote_auth_code.is_some() {
+                    Action::CopyAuthCode
                 } else {
                     Action::None
                 }
@@ -3145,21 +3165,25 @@ impl Overlay {
             Style::default().fg(theme.ink_faint),
         )));
         match (&st.account_login, &st.remote_auth_code) {
-            (None, Some((code, uri))) => {
+            (_, Some(prompt)) => {
                 lines.push(Line::from(vec![
                     Span::styled(
                         "   GitHub             ",
                         Style::default().fg(theme.ink_faint),
                     ),
                     Span::styled(
-                        code.clone(),
+                        prompt.code.clone(),
                         Style::default()
                             .fg(theme.accent)
                             .add_modifier(Modifier::BOLD),
                     ),
                 ]));
                 lines.push(Line::from(Span::styled(
-                    format!("      ↳ enter it at {uri}"),
+                    format!("      ↳ enter it at {}", prompt.uri),
+                    Style::default().fg(theme.ink_faint),
+                )));
+                lines.push(Line::from(Span::styled(
+                    "      ↳ Ctrl-B open in browser · Ctrl-K copy code".to_string(),
                     Style::default().fg(theme.ink_faint),
                 )));
             }
@@ -3202,6 +3226,12 @@ impl Overlay {
                     Span::styled(state_label.to_string(), Style::default().fg(state_color)),
                     Span::styled("   Ctrl-R to toggle", Style::default().fg(theme.ink_faint)),
                 ]));
+                if let Some(label) = st.session_label.as_ref().filter(|_| st.remote_enabled) {
+                    lines.push(Line::from(Span::styled(
+                        format!("      ↳ this session: {label}"),
+                        Style::default().fg(theme.ink_faint),
+                    )));
+                }
                 if st.remote_enabled
                     && matches!(
                         st.remote_state,
