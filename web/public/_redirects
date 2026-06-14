@@ -1,5 +1,0 @@
-# Cloudflare Pages — redirects/rewrites
-# Docs: https://developers.cloudflare.com/pages/configuration/redirects/
-
-# Let `curl https://honya.altqx.com/install` serve the script (200 rewrite).
-/install   /install.sh   200

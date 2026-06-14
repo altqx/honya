@@ -21,18 +21,22 @@ Version is the single source of truth in `Cargo.toml`; CI auto-tags on version c
 
 Prefer self-explanatory code (clear names, small functions) over comments. **Default to no comment.** Don't narrate what the code already says, restate a name, or label obvious blocks. Add a comment only when the *why* is genuinely non-obvious — a subtle invariant, a non-local consequence, a workaround, or a deliberate trade-off — and when you do, keep it to a line or two. When in doubt, leave it out.
 
-## Changelog — only on an explicit version bump
+## Website + changelog live in the private `honya-relay` repo
 
-**Do not** touch the web changelog (`web/src/data/changelog.ts`) for ordinary feature/fix work. Update it **only** when I explicitly tell you to bump the version — never edit a release entry that has already shipped. The changelog page (`web/src/routes/changelog.tsx`) renders that data, newest-first, at `https://honya.altqx.com/changelog`.
+The homepage and the `/app` remote dashboard (a TanStack Start app prerendered to
+static HTML for Cloudflare Pages) used to live here under `web/`. They were **moved
+to the private `altqx/honya-relay` repo** (`web/` there) so the site/dashboard
+source stays private — this repo now ships only the Rust app/crate. The install
+scripts served at `honya.altqx.com/install.sh` / `install.ps1` live there too
+(`web/public/`); keep the release asset names below in sync with them.
 
-When I ask you to bump the version:
-- Bump `version` in `Cargo.toml` (the single source of truth; CI auto-tags on the change).
-- Prepend a **new** release object to the top of the `RELEASES` array in `web/src/data/changelog.ts` for the new version (entries are newest-first), and move the `badge: 'latest'` marker there (drop it from the previous latest). Never add changes to an already-released entry — the new work goes in the new version.
-- Add one `{ tag, html }` per user-noticeable change, using the right tag: `'add'` (เพิ่ม) for features, `'chg'` (ปรับปรุง) for changes/improvements, `'fix'` (แก้ไข) for bug fixes. The `html` string may contain inline `<code>` / `<b>` (rendered verbatim).
-- Write entries in **Thai** to match the Thai-localized site, but keep code identifiers, key names, file formats, agent names, and commands as-is in `<code>` (same translate-vs-keep rules as the rest of `web/`). Keep them concise and user-facing — describe the behavior, not the implementation.
-- Also bump `VERSION` in `web/src/data/site.ts` — it feeds the "เวอร์ชันล่าสุด" pill at the top of the changelog page.
-
-The homepage (`web/`) is a **TanStack Start** app (React 19 + Tailwind v4) prerendered to static HTML for Cloudflare Pages; see `web/README.md`. `web/public/` now holds only `install.sh` / `install.ps1` / `_headers` / `_redirects` (copied into the build output verbatim).
+When I ask you to **bump the version**:
+- Bump `version` in `Cargo.toml` here (the single source of truth; CI auto-tags on
+  the change, which also publishes to crates.io).
+- Update the changelog in the **honya-relay** repo: prepend a new release object to
+  `web/src/data/changelog.ts`, move `badge: 'latest'`, bump `VERSION` in
+  `web/src/data/site.ts`. See that repo's `CLAUDE.md` for the entry format (Thai,
+  `add`/`chg`/`fix` tags). Do this only on an explicit bump.
 
 ## Architecture
 
@@ -71,12 +75,12 @@ The three agents (`translator.rs`, `reviewer.rs`, plus the Orchestrator metadata
 
 ### Remote control & GitHub accounts (`src/remote/`)
 
-Optional feature: sign in with GitHub (OAuth **Device Flow** — no browser redirect in the terminal) to link this app instance to an account on the Cloudflare relay backend (the **separate private `honya-relay` repo** — a Worker + Durable Object + D1, not in this tree), then live-monitor and control a translation session from the web dashboard (`web/` `/app`). Two `tokio::spawn`'d background tasks, both modeled on `update.rs` (own a short-lived client, never touch `App`, report only via `EventTx`):
+Optional feature: sign in with GitHub (OAuth **Device Flow** — no browser redirect in the terminal) to link this app instance to an account on the Cloudflare relay backend (the **separate private `honya-relay` repo** — a Worker + Durable Object + D1, not in this tree), then live-monitor and control a translation session from the web dashboard (the `web/` `/app` route, which also lives in the `honya-relay` repo). Two `tokio::spawn`'d background tasks, both modeled on `update.rs` (own a short-lived client, never touch `App`, report only via `EventTx`):
 
 - `auth.rs` — device-flow sign-in → `POST {RELAY_BASE}/device/register` → a long-lived `device_token` persisted in `AppConfig.account` (a secret, hence config.json's 0600 mode matters).
 - `relay.rs` — persistent `wss://…/relay` link: pushes serialized state OUTbound, receives commands INbound. Auto-reconnects with capped backoff; disabled by dropping the outbound sender + flipping a shared `Arc<AtomicBool>` (same shape as `RunControl`).
 
-The contract stays intact two ways: (1) **outbound** — `App.on_app_event` folds each event into state as usual, then `project_and_send_remote` pushes a *serializable projection* (`protocol::RemoteSnapshot`/`RemoteDelta`) down an `Option<UnboundedSender<RemoteOutbound>>` on `App`; the relay task only serializes and ships it. (2) **inbound** — a browser command arrives as `AppEvent::RemoteCommand`, and `map_remote_command` turns it into an **existing** `Action` (`PauseRun`, `EnqueueChapters`, …) routed through the same `apply()` funnel as a keystroke — so a remote command adds zero new mutation logic. `protocol.rs` is the pure-serde wire contract shared with the `honya-relay` backend and `web/`; keep all three in lockstep (the source-of-truth `PROTOCOL.md` lives in the `honya-relay` repo). The Settings overlay grows an "Account / Remote" section (Ctrl-A sign in · Ctrl-R toggle · Ctrl-O sign out); the header shows a `⇄` glyph + watcher count when connected. `GITHUB_CLIENT_ID`/`RELAY_BASE` are baked at build time via `option_env!` (like `HONYA_BUILD_COMMIT`).
+The contract stays intact two ways: (1) **outbound** — `App.on_app_event` folds each event into state as usual, then `project_and_send_remote` pushes a *serializable projection* (`protocol::RemoteSnapshot`/`RemoteDelta`) down an `Option<UnboundedSender<RemoteOutbound>>` on `App`; the relay task only serializes and ships it. (2) **inbound** — a browser command arrives as `AppEvent::RemoteCommand`, and `map_remote_command` turns it into an **existing** `Action` (`PauseRun`, `EnqueueChapters`, …) routed through the same `apply()` funnel as a keystroke — so a remote command adds zero new mutation logic. `protocol.rs` is the pure-serde wire contract shared with the `honya-relay` backend and its `web/` dashboard; keep all three in lockstep (the source-of-truth `PROTOCOL.md` lives in the `honya-relay` repo). The Settings overlay grows an "Account / Remote" section (Ctrl-A sign in · Ctrl-R toggle · Ctrl-O sign out); the header shows a `⇄` glyph + watcher count when connected. `GITHUB_CLIENT_ID`/`RELAY_BASE` are baked at build time via `option_env!` (like `HONYA_BUILD_COMMIT`).
 
 ### Workspace & the data-block convention (`src/workspace/`)
 

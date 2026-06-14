@@ -1,5 +1,0 @@
-name = "honya"
-compatibility_date = "2026-06-01"
-# TanStack Start prerenders every route to static HTML here; install.sh,
-# install.ps1, _headers and _redirects (from web/public) are copied in too.
-pages_build_output_dir = ".output/public"
