@@ -79,6 +79,80 @@ pub struct RemoteChapter {
     pub status: String,
 }
 
+/// One project on the shelf, projected so the dashboard can switch the open
+/// project remotely. `active` marks the one currently open in the app.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteProject {
+    pub id: String,
+    pub title: String,
+    #[serde(default)]
+    pub title_th: String,
+    pub volumes: u32,
+    pub chapters: u32,
+    pub done: u32,
+    pub active: bool,
+}
+
+/// One volume of the open project, projected for the volume switcher + recap.
+/// `recap` / `synopsis_th` are only populated for the *active* volume (a single
+/// disk read); other volumes carry the counts and label only.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteVolume {
+    pub number: u32,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub synopsis_th: String,
+    #[serde(default)]
+    pub recap: String,
+    pub done: u32,
+    pub total: u32,
+    pub active: bool,
+}
+
+/// A cast member, projected for the dashboard's lexicon view.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteCharacter {
+    pub jp_name: String,
+    pub thai_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub romaji: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gender: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub honorific: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_seen_chapter: Option<u32>,
+}
+
+/// A glossary term, projected for the dashboard's lexicon view. `policy` is the
+/// effective terminology policy label (`hard_locked` / `preferred` / `forbidden`
+/// / `context_dependent`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteTerm {
+    pub jp_term: String,
+    pub thai_term: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub romaji: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gloss: Option<String>,
+    pub policy: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_seen_chapter: Option<u32>,
+}
+
+/// The open project's cast + glossary, projected together so the dashboard's
+/// lexicon view can refresh in one delta.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteLexicon {
+    pub characters: Vec<RemoteCharacter>,
+    pub glossary: Vec<RemoteTerm>,
+}
+
 /// Full state cached by the relay for newly-opened dashboards.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RemoteSnapshot {
@@ -98,6 +172,16 @@ pub struct RemoteSnapshot {
     /// of only the chapters it has since seen `chapter` deltas for.
     #[serde(default)]
     pub chapters: Vec<RemoteChapter>,
+    /// Every project on the shelf, so the dashboard can switch the open project.
+    #[serde(default)]
+    pub projects: Vec<RemoteProject>,
+    /// The open project's volumes (counts + active-volume recap). Empty when no
+    /// project is open.
+    #[serde(default)]
+    pub volumes: Vec<RemoteVolume>,
+    /// The open project's cast + glossary.
+    #[serde(default)]
+    pub lexicon: RemoteLexicon,
 }
 
 /// Incremental update projected from a single [`crate::model::AppEvent`].
@@ -129,6 +213,9 @@ pub enum RemoteDelta {
         chapter: UsageSnapshot,
     },
     Tally(TallySnapshot),
+    /// The cast/glossary changed (Orchestrator upsert). Carries the full refreshed
+    /// lexicon so the dashboard can replace its view wholesale.
+    Lexicon(RemoteLexicon),
     Log(LogLine),
     RunFinished {
         done: u32,
@@ -145,10 +232,30 @@ pub enum RemoteCommand {
     Pause,
     Stop,
     StartProject,
-    Enqueue { vol: u32, chapters: Vec<u32> },
-    QueueMoveUp { vol: u32, ch: u32 },
-    QueueMoveDown { vol: u32, ch: u32 },
-    Dequeue { vol: u32, ch: u32 },
+    Enqueue {
+        vol: u32,
+        chapters: Vec<u32>,
+    },
+    QueueMoveUp {
+        vol: u32,
+        ch: u32,
+    },
+    QueueMoveDown {
+        vol: u32,
+        ch: u32,
+    },
+    Dequeue {
+        vol: u32,
+        ch: u32,
+    },
+    /// Open a different project from the shelf (by slug/id).
+    OpenProject {
+        id: String,
+    },
+    /// Switch the open project's active volume.
+    SetVolume {
+        vol: u32,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -221,6 +328,39 @@ mod tests {
                 kind: "prose".into(),
                 status: "translating".into(),
             }],
+            projects: vec![RemoteProject {
+                id: "some-ln".into(),
+                title: "Some LN".into(),
+                title_th: "ไลท์โนเวลบางเล่ม".into(),
+                volumes: 2,
+                chapters: 20,
+                done: 7,
+                active: true,
+            }],
+            volumes: vec![RemoteVolume {
+                number: 1,
+                label: Some("黎明".into()),
+                synopsis_th: "เรื่องย่อ".into(),
+                recap: "สรุปจนถึงตอนนี้".into(),
+                done: 2,
+                total: 5,
+                active: true,
+            }],
+            lexicon: RemoteLexicon {
+                characters: vec![RemoteCharacter {
+                    jp_name: "鈴".into(),
+                    thai_name: "ริน".into(),
+                    romaji: Some("Rin".into()),
+                    first_seen_chapter: Some(1),
+                    ..Default::default()
+                }],
+                glossary: vec![RemoteTerm {
+                    jp_term: "魔法".into(),
+                    thai_term: "เวทมนตร์".into(),
+                    policy: "preferred".into(),
+                    ..Default::default()
+                }],
+            },
         };
         let out = RemoteOutbound::Snapshot(snap.clone());
         let wire = out.encode();
@@ -270,6 +410,27 @@ mod tests {
                     vol: 1,
                     chapters: vec![4, 5]
                 }
+            }
+        );
+    }
+
+    #[test]
+    fn inbound_open_project_and_set_volume_decode() {
+        let o = decode_inbound(r#"{"type":"command","data":{"op":"open_project","id":"re-zero"}}"#)
+            .unwrap();
+        assert_eq!(
+            o,
+            Inbound::Command {
+                data: RemoteCommand::OpenProject {
+                    id: "re-zero".into()
+                }
+            }
+        );
+        let v = decode_inbound(r#"{"type":"command","data":{"op":"set_volume","vol":3}}"#).unwrap();
+        assert_eq!(
+            v,
+            Inbound::Command {
+                data: RemoteCommand::SetVolume { vol: 3 }
             }
         );
     }

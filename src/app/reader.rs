@@ -152,9 +152,9 @@ impl ReaderScreen {
         self.th_scroll = 0;
         self.diff_mode = false;
         self.ja = std::fs::read_to_string(ws.raw(chapter))
-            .unwrap_or_else(|_| "（原文がまだありません — raw not found）".to_string());
+            .unwrap_or_else(|_| "(raw not found)".to_string());
         let th = std::fs::read_to_string(ws.translated(chapter))
-            .unwrap_or_else(|_| "（ยังไม่มีคำแปล — not translated yet）".to_string());
+            .unwrap_or_else(|_| "(not translated yet)".to_string());
         // Decompose Thai SARA AM so it never lands as a width-2 single cell that
         // desyncs the terminal and smears ำ across the screen on the next redraw.
         self.th = crate::ui::text::thai_display_safe(&th);
@@ -503,7 +503,7 @@ impl ReaderScreen {
                     f,
                     body,
                     theme,
-                    "日本語 (raw)",
+                    "Japanese (raw)",
                     &self.ja,
                     theme.ja_text,
                     self.scroll,
@@ -518,7 +518,7 @@ impl ReaderScreen {
                     f,
                     body,
                     theme,
-                    "ไทย (translated)",
+                    "Thai (translated)",
                     &self.th,
                     theme.th_text,
                     self.effective_th_scroll(),
@@ -537,7 +537,7 @@ impl ReaderScreen {
                     f,
                     cols[0],
                     theme,
-                    "日本語 (raw)",
+                    "Japanese (raw)",
                     &self.ja,
                     theme.ja_text,
                     self.scroll,
@@ -548,7 +548,7 @@ impl ReaderScreen {
                     f,
                     cols[1],
                     theme,
-                    "ไทย (translated)",
+                    "Thai (translated)",
                     &self.th,
                     theme.th_text,
                     self.effective_th_scroll(),
@@ -867,7 +867,7 @@ impl ReaderScreen {
             f,
             cols[0],
             theme,
-            &format!("เก่า/old · {}", cmp.old_label),
+            &format!("old · {}", cmp.old_label),
             &cmp.old_th,
             &cmp.line.old_changed,
             false,
@@ -876,7 +876,7 @@ impl ReaderScreen {
             f,
             cols[1],
             theme,
-            &format!("ใหม่/new · {}", cmp.new_label),
+            &format!("new · {}", cmp.new_label),
             &cmp.new_th,
             &cmp.line.new_changed,
             true,

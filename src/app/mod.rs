@@ -887,6 +887,118 @@ impl App {
             usage_chapter: chapter,
             log_tail,
             chapters: self.remote_chapter_roster(),
+            projects: self.remote_projects(),
+            volumes: self.remote_volumes(),
+            lexicon: self.remote_lexicon(),
+        }
+    }
+
+    fn remote_projects(&self) -> Vec<crate::remote::protocol::RemoteProject> {
+        use crate::remote::protocol::RemoteProject;
+        let active_id = self.active.as_ref().map(|a| a.project.id.as_str());
+        self.projects
+            .iter()
+            .map(|p| {
+                let mut chapters = 0u32;
+                let mut done = 0u32;
+                for v in &p.volumes {
+                    for ch in &v.chapters {
+                        chapters += 1;
+                        if ch.status == ChapterStatus::Done {
+                            done += 1;
+                        }
+                    }
+                }
+                RemoteProject {
+                    id: p.id.clone(),
+                    title: p.title.clone(),
+                    title_th: p.title_th.clone(),
+                    volumes: p.volumes.len() as u32,
+                    chapters,
+                    done,
+                    active: active_id == Some(p.id.as_str()),
+                }
+            })
+            .collect()
+    }
+
+    fn remote_volumes(&self) -> Vec<crate::remote::protocol::RemoteVolume> {
+        use crate::remote::protocol::RemoteVolume;
+        let Some(active) = self.active.as_ref() else {
+            return Vec::new();
+        };
+        // The active volume's recap/synopsis is one disk read against the live
+        // workspace; other volumes carry counts + label only.
+        let vd = crate::workspace::volume::load(&active.workspace);
+        active
+            .project
+            .volumes
+            .iter()
+            .map(|v| {
+                let total = v.chapters.len() as u32;
+                let done = v
+                    .chapters
+                    .iter()
+                    .filter(|c| c.status == ChapterStatus::Done)
+                    .count() as u32;
+                let is_active = v.number == active.vol;
+                RemoteVolume {
+                    number: v.number,
+                    label: v.label.clone(),
+                    synopsis_th: if is_active {
+                        vd.synopsis_th.clone()
+                    } else {
+                        String::new()
+                    },
+                    recap: if is_active {
+                        vd.running_recap.clone()
+                    } else {
+                        String::new()
+                    },
+                    done,
+                    total,
+                    active: is_active,
+                }
+            })
+            .collect()
+    }
+
+    fn remote_lexicon(&self) -> crate::remote::protocol::RemoteLexicon {
+        use crate::remote::protocol::{RemoteCharacter, RemoteLexicon, RemoteTerm};
+        let Some(active) = self.active.as_ref() else {
+            return RemoteLexicon::default();
+        };
+        let ws = &active.workspace;
+        let characters = crate::workspace::characters::load(ws)
+            .into_iter()
+            .map(|c| RemoteCharacter {
+                jp_name: c.jp_name,
+                thai_name: c.thai_name,
+                romaji: c.romaji,
+                gender: c.gender,
+                honorific: c.honorific,
+                notes: c.notes,
+                first_seen_chapter: c.first_seen_chapter,
+            })
+            .collect();
+        let glossary = crate::workspace::glossary::load(ws)
+            .into_iter()
+            .map(|t| {
+                let policy = remote_term_policy(crate::workspace::glossary::effective_policy(&t));
+                RemoteTerm {
+                    jp_term: t.jp_term,
+                    thai_term: t.thai_term,
+                    romaji: t.romaji,
+                    category: t.category,
+                    gloss: t.gloss,
+                    policy: policy.into(),
+                    first_seen_chapter: t.first_seen_chapter,
+                }
+            })
+            .collect();
+        RemoteLexicon {
+            characters,
+            glossary,
         }
     }
 

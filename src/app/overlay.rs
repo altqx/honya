@@ -516,31 +516,31 @@ impl PaletteState {
     fn new() -> Self {
         let items = vec![
             PaletteItem {
-                label: "Getting started 入門",
+                label: "Getting started",
                 action: Action::show_overlay(Overlay::welcome_placeholder()),
             },
             PaletteItem {
-                label: "Go: Shelf 書架",
+                label: "Go: Shelf",
                 action: Action::Goto(Screen::Shelf),
             },
             PaletteItem {
-                label: "Go: Project 棚",
+                label: "Go: Project",
                 action: Action::Goto(Screen::Project),
             },
             PaletteItem {
-                label: "Go: Translate 訳",
+                label: "Go: Translate",
                 action: Action::Goto(Screen::Translate),
             },
             PaletteItem {
-                label: "Translate whole project 全",
+                label: "Translate whole project",
                 action: Action::StartProjectTranslation,
             },
             PaletteItem {
-                label: "Go: Reader 読",
+                label: "Go: Reader",
                 action: Action::Goto(Screen::Reader),
             },
             PaletteItem {
-                label: "Go: Lexicon 辞",
+                label: "Go: Lexicon",
                 action: Action::Goto(Screen::Lexicon),
             },
             PaletteItem {
@@ -548,7 +548,7 @@ impl PaletteState {
                 action: Action::show_overlay(Overlay::settings_placeholder()),
             },
             PaletteItem {
-                label: "Theme 配色",
+                label: "Theme",
                 action: Action::show_overlay(Overlay::theme_placeholder()),
             },
             PaletteItem {
@@ -556,11 +556,11 @@ impl PaletteState {
                 action: Action::show_overlay(Overlay::Help(0)),
             },
             PaletteItem {
-                label: "About 本屋",
+                label: "About",
                 action: Action::show_overlay(Overlay::About),
             },
             PaletteItem {
-                label: "QA review レビュー",
+                label: "QA review",
                 action: Action::show_overlay(Overlay::qa_placeholder()),
             },
             PaletteItem {
@@ -1431,7 +1431,7 @@ impl Overlay {
                     }
                     KeyCode::Enter | KeyCode::Tab => {
                         if st.name.trim().is_empty() {
-                            st.note = Some("ใส่ชื่อโปรเจกต์ก่อน · a project name is required");
+                            st.note = Some("a project name is required");
                         } else {
                             st.note = None;
                             // A changed name invalidates any earlier translation.
@@ -2690,7 +2690,9 @@ impl Overlay {
         let faint = Style::default().fg(theme.ink_faint);
         let mut lines = vec![
             Line::from(Span::styled(
-                thai_display_safe("  ตั้งชื่อภาษาไทยให้นิยาย (ไม่บังคับ) — ใช้ตอน export และหน้า Shelf"),
+                thai_display_safe(
+                    "  Give your novel a Thai title (optional) — Use this during export and on the Shelf page.",
+                ),
                 Style::default().fg(theme.ink_soft),
             )),
             Line::raw(""),
@@ -2705,7 +2707,7 @@ impl Overlay {
             Line::from(vec![
                 Span::styled("  Thai      ", faint),
                 if syn.th.trim().is_empty() {
-                    Span::styled(thai_display_safe("(ยังไม่มีชื่อไทย)"), faint)
+                    Span::styled(thai_display_safe("(no Thai title yet.)"), faint)
                 } else {
                     Span::styled(
                         thai_display_safe(syn.th.trim()),
@@ -2719,19 +2721,19 @@ impl Overlay {
         ];
         match syn.phase {
             SynPhase::Translating => lines.push(Line::from(Span::styled(
-                thai_display_safe("  ◐ กำลังแปลด้วย Translator agent … (Esc ยกเลิก)"),
+                thai_display_safe("  ◐ Translator agent is working … (Esc to cancel)"),
                 Style::default().fg(theme.status_working),
             ))),
             SynPhase::Done => lines.push(Line::from(Span::styled(
                 thai_display_safe(&format!(
-                    "  ✓ แปลแล้ว (รอบ {}) — Enter ใช้ชื่อนี้ · r แปลใหม่ · s ไม่ใช้ · Esc กลับ",
+                    "  ✓ translated (round {}) — Enter use · r reroll · s skip · Esc cancel",
                     syn.attempt + 1
                 )),
                 Style::default().fg(theme.status_done),
             ))),
             SynPhase::Failed => {
                 lines.push(Line::from(Span::styled(
-                    thai_display_safe("  ✗ แปลไม่สำเร็จ — r ลองใหม่ · s ข้าม · Esc กลับ"),
+                    thai_display_safe("  ✗ failed — r reroll · s skip · Esc cancel"),
                     Style::default().fg(theme.status_failed),
                 )));
                 lines.push(Line::from(Span::styled(
@@ -2740,7 +2742,7 @@ impl Overlay {
                 )));
             }
             SynPhase::Editing => lines.push(Line::from(Span::styled(
-                thai_display_safe("  Tab/Enter แปลชื่อเรื่องเป็นไทย · s ข้าม · Esc กลับ"),
+                thai_display_safe("  Tab/Enter translate title to Thai · s skip · Esc cancel"),
                 faint,
             ))),
         }
