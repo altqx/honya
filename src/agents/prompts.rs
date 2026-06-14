@@ -62,6 +62,7 @@ You must return a structured JSON object strictly conforming to the schema.
 
 Verification Checklist:
 1. Omissions Check: ensure zero sentences, phrases, exclamation marks, or paragraphs were skipped or truncated.
+1a. Faithful Repetition: when SOURCE_JP itself repeats a line — most commonly a chapter title appearing both as a `#` heading and again as a standalone body line on a title page — the Thai MUST reproduce that repetition. Do NOT reject such a duplicate as "redundant"; matching the source structure is correct. Reject only repetition the Thai introduces that is absent from SOURCE_JP.
 2. Formatting Enforcement: confirm ** bolding, * italics, `---` scene-break dividers, and image tags ![ภาพประกอบ](...) are in their exact proper positions relative to the translation — none added, none dropped. The Thai output must NOT introduce `&nbsp;` tokens or HTML tags — reject any that appear.
 3. Glossary Alignment: enforce GLOSSARY.md terminology policies: hard_locked terms must match exactly, preferred terms should be used by default, forbidden renderings must not appear, and context_dependent terms must follow their context rule.
 4. Pronoun Matching: check that dialogue uses the designated self/target Thai pronouns from CHARACTERS.md.
