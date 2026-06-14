@@ -67,6 +67,18 @@ pub struct LogLine {
     pub msg: String,
 }
 
+/// One chapter in the active project's roster, projected for the dashboard's
+/// chapter board. `kind` is `"prose" | "image" | "empty"`; `status` uses the
+/// same vocabulary as the `chapter` delta.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteChapter {
+    pub vol: u32,
+    pub ch: u32,
+    pub title: String,
+    pub kind: String,
+    pub status: String,
+}
+
 /// Full state cached by the relay for newly-opened dashboards.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RemoteSnapshot {
@@ -81,6 +93,11 @@ pub struct RemoteSnapshot {
     pub usage_run: UsageSnapshot,
     pub usage_chapter: UsageSnapshot,
     pub log_tail: Vec<LogLine>,
+    /// Full chapter roster across every volume, ascending. Empty when no project
+    /// is open. Lets the dashboard render the whole board on first paint instead
+    /// of only the chapters it has since seen `chapter` deltas for.
+    #[serde(default)]
+    pub chapters: Vec<RemoteChapter>,
 }
 
 /// Incremental update projected from a single [`crate::model::AppEvent`].
@@ -196,6 +213,13 @@ mod tests {
             log_tail: vec![LogLine {
                 level: "info".into(),
                 msg: "chapter 2 done".into(),
+            }],
+            chapters: vec![RemoteChapter {
+                vol: 1,
+                ch: 3,
+                title: "第三章".into(),
+                kind: "prose".into(),
+                status: "translating".into(),
             }],
         };
         let out = RemoteOutbound::Snapshot(snap.clone());

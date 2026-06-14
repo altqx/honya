@@ -874,7 +874,34 @@ impl App {
             usage_run: run,
             usage_chapter: chapter,
             log_tail,
+            chapters: self.remote_chapter_roster(),
         }
+    }
+
+    fn remote_chapter_roster(&self) -> Vec<crate::remote::protocol::RemoteChapter> {
+        use crate::model::ChapterKind;
+        use crate::remote::protocol::RemoteChapter;
+        let Some(active) = self.active.as_ref() else {
+            return Vec::new();
+        };
+        let mut roster = Vec::new();
+        for vol in &active.project.volumes {
+            for ch in &vol.chapters {
+                let kind = match ch.kind {
+                    ChapterKind::Prose => "prose",
+                    ChapterKind::ImageOnly => "image",
+                    ChapterKind::Empty => "empty",
+                };
+                roster.push(RemoteChapter {
+                    vol: vol.number,
+                    ch: ch.number,
+                    title: ch.title.clone(),
+                    kind: kind.into(),
+                    status: remote_chapter_status(ch.status).into(),
+                });
+            }
+        }
+        roster
     }
 
     fn remote_queue(
@@ -1680,7 +1707,12 @@ impl App {
                 if self.is_live_run() {
                     self.enqueue_live(vol, chapters);
                 } else {
-                    // Idle: start a fresh run (the continue/restart prompt applies).
+                    // Idle: a run starts on the active volume, so honor the
+                    // requested volume first (no-op if it is already active or
+                    // absent). Without this an enqueue for another volume — now
+                    // reachable from the dashboard's chapter board — would
+                    // silently translate the active volume instead.
+                    self.set_active_volume(vol);
                     self.request_translation(chapters);
                 }
             }
