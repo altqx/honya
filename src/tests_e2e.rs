@@ -1934,8 +1934,19 @@ fn whole_volume_translate_requeues_legacy_partial_chapter() {
 }
 
 #[test]
-fn refine_tab_captures_then_releases_on_esc() {
+fn refine_tab_gated_without_project() {
+    // No project open: the Refine tab is reachable but does not capture, so a
+    // single-letter global like `q` still quits.
     let mut app = fresh_app();
+    app.on_key(KeyEvent::new(KeyCode::Char('6'), KeyModifiers::empty()));
+    assert_eq!(app.screen, Screen::Refine);
+    app.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::empty()));
+    assert!(!app.running, "q quits — Refine does not capture without a project");
+}
+
+#[test]
+fn refine_tab_captures_then_releases_on_esc() {
+    let mut app = refine_app_with_project("refine_capture");
     app.on_key(KeyEvent::new(KeyCode::Char('6'), KeyModifiers::empty()));
     assert_eq!(app.screen, Screen::Refine);
 
@@ -1945,12 +1956,14 @@ fn refine_tab_captures_then_releases_on_esc() {
     app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
     app.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::empty()));
     assert!(!app.running, "q quits once the input is unfocused");
+    let _ = std::fs::remove_dir_all(app.active.as_ref().unwrap().project.dir.clone());
 }
 
-#[test]
-fn refine_submit_pushes_user_turn() {
+#[tokio::test]
+async fn refine_submit_pushes_user_turn() {
     use crate::app::refine::TurnRole;
-    let mut app = fresh_app();
+    // tokio runtime: submitting spawns the background agent task.
+    let mut app = refine_app_with_project("refine_submit");
     app.on_key(KeyEvent::new(KeyCode::Char('6'), KeyModifiers::empty()));
     for ch in "hello".chars() {
         app.on_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::empty()));
@@ -1959,6 +1972,7 @@ fn refine_submit_pushes_user_turn() {
     assert_eq!(app.refine.conversation.len(), 1);
     assert_eq!(app.refine.conversation[0].role, TurnRole::User);
     assert_eq!(app.refine.conversation[0].text, "hello");
+    let _ = std::fs::remove_dir_all(app.active.as_ref().unwrap().project.dir.clone());
 }
 
 #[test]
@@ -1992,7 +2006,7 @@ fn refine_stream_events_fold_into_transcript() {
 #[test]
 fn refine_slash_clear_resets_conversation() {
     use crate::model::AppEvent;
-    let mut app = fresh_app();
+    let mut app = refine_app_with_project("refine_clear");
     app.on_key(KeyEvent::new(KeyCode::Char('6'), KeyModifiers::empty()));
     app.on_app_event(AppEvent::RefineDelta {
         delta: "draft".to_string(),
@@ -2009,11 +2023,28 @@ fn refine_slash_clear_resets_conversation() {
         app.refine.conversation.is_empty(),
         "/clear empties the transcript"
     );
+    let _ = std::fs::remove_dir_all(app.active.as_ref().unwrap().project.dir.clone());
 }
 
 #[test]
 fn refine_renders_at_several_widths() {
+    // No project: the Refine tab shows the "open a project" placeholder and does
+    // not capture input (digits/q etc. stay global).
     let mut app = fresh_app();
+    app.screen = Screen::Refine;
+    assert!(
+        !app.refine.is_capturing() || app.active.is_none(),
+        "Refine must not capture without a project"
+    );
+    app.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::empty()));
+    assert!(!app.running, "globals still work on the gated Refine tab");
+    for w in [24u16, 40, 80, 132] {
+        let mut term = Terminal::new(TestBackend::new(w, 24)).unwrap();
+        term.draw(|f| app.render(f)).unwrap();
+    }
+
+    // With a project: the chat UI renders and captures input.
+    let mut app = refine_app_with_project("refine_widths");
     app.screen = Screen::Refine;
     for ch in "@v1/c1 tighten this".chars() {
         app.on_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::empty()));
@@ -2022,6 +2053,54 @@ fn refine_renders_at_several_widths() {
         let mut term = Terminal::new(TestBackend::new(w, 24)).unwrap();
         term.draw(|f| app.render(f)).unwrap();
     }
+    let _ = std::fs::remove_dir_all(app.active.as_ref().unwrap().project.dir.clone());
+}
+
+/// Build an `App` with a minimal one-volume, one-chapter active project in a temp dir.
+fn refine_app_with_project(tag: &str) -> App {
+    use crate::model::{Chapter, ChapterKind, ChapterStatus, Project, UsageStats, Volume};
+    use crate::workspace::Workspace;
+
+    let dir = std::env::temp_dir().join(format!("honya_{tag}_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let ws = Workspace::new(dir.clone(), 1);
+    let chapter = Chapter {
+        number: 1,
+        title: "ch1".to_string(),
+        kind: ChapterKind::Prose,
+        status: ChapterStatus::Pending,
+        source_segments: 1,
+        total_chunks: 0,
+        committed_chunks: 0,
+        skipped_chunks: 0,
+        last_run: None,
+        usage: UsageStats::default(),
+    };
+    let active = ActiveProject {
+        project: Project {
+            id: "novel".to_string(),
+            dir: dir.clone(),
+            title: "Novel".to_string(),
+            title_th: String::new(),
+            created: None,
+            touched: None,
+            volumes: vec![Volume {
+                number: 1,
+                dir: dir.join("Vol_01"),
+                label: None,
+                chapters: vec![chapter],
+            }],
+            models: None,
+        },
+        workspace: ws,
+        client: Some(Arc::new(crate::llm::mock::MockClient::default())
+            as Arc<dyn crate::llm::client::LlmClient>),
+        models: ModelSet::default(),
+        vol: 1,
+    };
+    let mut app = fresh_app();
+    app.active = Some(active);
+    app
 }
 
 #[test]

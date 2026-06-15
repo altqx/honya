@@ -2011,6 +2011,7 @@ impl App {
             Screen::Lexicon => self
                 .lexicon
                 .handle_mouse(m, self.active.as_ref().map(|a| &a.workspace)),
+            Screen::Refine if self.active.is_none() => Action::None,
             Screen::Refine => self.refine.handle_mouse(m),
         }
     }
@@ -2081,7 +2082,10 @@ impl App {
     /// True when a focused screen text field should swallow single-letter globals.
     fn screen_is_capturing(&self) -> bool {
         (matches!(self.screen, Screen::Lexicon) && self.lexicon.is_capturing())
-            || (matches!(self.screen, Screen::Refine) && self.refine.is_capturing())
+            // Refine only captures (and only works) when a project is open.
+            || (matches!(self.screen, Screen::Refine)
+                && self.active.is_some()
+                && self.refine.is_capturing())
     }
 
     fn route_to_screen(&mut self, k: KeyEvent) -> Action {
@@ -2093,6 +2097,8 @@ impl App {
             Screen::Lexicon => self
                 .lexicon
                 .handle_key(k, self.active.as_ref().map(|a| &a.workspace)),
+            // Refine is per-project: ignore keys until a project is open.
+            Screen::Refine if self.active.is_none() => Action::None,
             Screen::Refine => self
                 .refine
                 .handle_key(k, self.active.as_ref().map(|a| &a.project)),
@@ -4041,7 +4047,10 @@ impl App {
                 self.active.as_ref().map(|a| &a.workspace),
                 &self.theme,
             ),
-            Screen::Refine => self.refine.render(f, body, self.frame, &self.theme),
+            Screen::Refine => {
+                self.refine
+                    .render(f, body, self.frame, self.active.is_some(), &self.theme)
+            }
         }
     }
 

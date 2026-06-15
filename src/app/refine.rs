@@ -5,7 +5,7 @@ use std::hash::{Hash, Hasher};
 
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
@@ -633,7 +633,11 @@ impl RefineScreen {
         }
     }
 
-    pub fn render(&mut self, f: &mut Frame, area: Rect, frame: u64, theme: &Theme) {
+    pub fn render(&mut self, f: &mut Frame, area: Rect, frame: u64, has_project: bool, theme: &Theme) {
+        if !has_project {
+            self.render_no_project(f, area, theme);
+            return;
+        }
         let rows = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(3), Constraint::Length(3)])
@@ -645,6 +649,40 @@ impl RefineScreen {
         } else {
             self.render_popup(f, area, rows[1].y, theme);
         }
+    }
+
+    /// Placeholder shown on the Refine tab when no project is open. Refine is
+    /// per-project, so there is nothing to chat about until one is opened.
+    fn render_no_project(&self, f: &mut Frame, area: Rect, theme: &Theme) {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_set(theme::hairline_set())
+            .border_style(Style::default().fg(theme.rule))
+            .title(Span::styled(
+                " 推 Refine ",
+                Style::default().fg(theme.ink_soft),
+            ))
+            .style(Style::default().bg(theme.bg_panel));
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+        let lines = vec![
+            Line::raw(""),
+            Line::from(Span::styled(
+                "Open a project to use Refine.",
+                Style::default().fg(theme.ink_soft),
+            )),
+            Line::raw(""),
+            Line::from(Span::styled(
+                "Refine is per-project — pick a book on 書架 Shelf (1), then come back.",
+                Style::default().fg(theme.ink_faint),
+            )),
+        ];
+        f.render_widget(
+            Paragraph::new(lines)
+                .alignment(Alignment::Center)
+                .style(Style::default().bg(theme.bg_panel)),
+            inner,
+        );
     }
 
     fn render_session_picker(&self, f: &mut Frame, area: Rect, theme: &Theme) {
