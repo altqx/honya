@@ -15,14 +15,15 @@ use crate::model::AgentRole;
 use crate::theme::{self, Theme};
 use crate::ui::text::{col_width, thai_display_safe};
 
-/// The five tabs, in `Screen` order — the order is load-bearing (digit routing
+/// The six tabs, in `Screen` order — the order is load-bearing (digit routing
 /// and the tab bar both depend on it).
-const TAB_SCREENS: [Screen; 5] = [
+const TAB_SCREENS: [Screen; 6] = [
     Screen::Shelf,
     Screen::Project,
     Screen::Translate,
     Screen::Reader,
     Screen::Lexicon,
+    Screen::Refine,
 ];
 
 /// Aggregate chapter counts shown in the header's right-aligned tally.
@@ -181,6 +182,7 @@ pub fn render_tabbar(
         format!("3 {translate_glyph} Translate"),
         "4 読 Reader".to_string(),
         "5 辞 Lexicon".to_string(),
+        "6 推 Refine".to_string(),
     ];
 
     let mut spans: Vec<Span> = Vec::with_capacity(titles.len() * 4);
@@ -348,13 +350,14 @@ mod tests {
         .unwrap();
 
         // One zone per tab, in Screen order, non-overlapping and left-to-right.
-        assert_eq!(zones.len(), 5);
+        assert_eq!(zones.len(), 6);
         let order = [
             Screen::Shelf,
             Screen::Project,
             Screen::Translate,
             Screen::Reader,
             Screen::Lexicon,
+            Screen::Refine,
         ];
         for (i, (rect, screen)) in zones.iter().enumerate() {
             assert_eq!(*screen, order[i]);

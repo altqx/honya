@@ -1,4 +1,4 @@
-//! The live OpenRouter HTTP client, the `LlmClient` trait, and the crate-shared `LlmError`.
+//! OpenRouter client, `LlmClient`, and `LlmError`.
 //!
 //! The `Result<T>` alias here shadows `std::result::Result` within `crate::llm::*`.
 
@@ -12,7 +12,7 @@ use serde::Deserialize;
 
 use crate::model::{AppConfig, ServiceTier};
 
-use super::{ChatRequest, ChatResponse, Choice, ResponseMessage, Usage};
+use super::{ChatRequest, ChatResponse, Choice, FunctionCall, ResponseMessage, ToolCall, Usage};
 
 /// All failure modes of the LLM layer.
 #[derive(thiserror::Error, Debug)]
@@ -424,6 +424,28 @@ struct StreamDeltaMessage {
     role: Option<String>,
     #[serde(default)]
     content: Option<String>,
+    /// Tool calls arrive as indexed deltas: the first fragment for an index carries
+    /// `id` + `function.name`, later fragments append `function.arguments` text.
+    #[serde(default)]
+    tool_calls: Option<Vec<StreamToolCallDelta>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StreamToolCallDelta {
+    #[serde(default)]
+    index: usize,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    function: Option<StreamFnDelta>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StreamFnDelta {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    arguments: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -431,9 +453,18 @@ struct StreamError {
     message: String,
 }
 
+/// One streamed tool call being accumulated across delta fragments.
+#[derive(Debug, Default, Clone)]
+struct StreamToolAcc {
+    id: String,
+    name: String,
+    arguments: String,
+}
+
 #[derive(Debug, Default)]
 struct StreamResponse {
     content: String,
+    tool_calls: Vec<StreamToolAcc>,
     usage: Option<Usage>,
     id: Option<String>,
     model: Option<String>,
@@ -450,6 +481,32 @@ impl StreamResponse {
         {
             u.served_tier = self.service_tier;
         }
+        // Reassemble accumulated tool-call fragments into whole calls.
+        let calls: Vec<ToolCall> = self
+            .tool_calls
+            .into_iter()
+            .enumerate()
+            .filter(|(_, a)| !a.name.is_empty() || !a.id.is_empty())
+            .map(|(i, a)| ToolCall {
+                id: if a.id.is_empty() {
+                    format!("call_{i}")
+                } else {
+                    a.id
+                },
+                kind: "function".to_string(),
+                function: FunctionCall {
+                    name: a.name,
+                    arguments: if a.arguments.is_empty() {
+                        "{}".to_string()
+                    } else {
+                        a.arguments
+                    },
+                },
+            })
+            .collect();
+        let tool_calls = (!calls.is_empty()).then_some(calls);
+        // Keep `content` null when empty (the wire contract for a tool-call turn).
+        let content = (!self.content.is_empty()).then_some(self.content);
         ChatResponse {
             id: self.id,
             model: self.model,
@@ -457,8 +514,8 @@ impl StreamResponse {
                 index: 0,
                 message: ResponseMessage {
                     role: self.role,
-                    content: Some(self.content),
-                    tool_calls: None,
+                    content,
+                    tool_calls,
                 },
                 finish_reason: self.finish_reason,
             }],
@@ -529,6 +586,27 @@ fn handle_sse_line(
         {
             stream_resp.content.push_str(&delta);
             on_delta(&delta);
+        }
+        if let Some(deltas) = choice.delta.tool_calls {
+            for tc in deltas {
+                if stream_resp.tool_calls.len() <= tc.index {
+                    stream_resp
+                        .tool_calls
+                        .resize(tc.index + 1, StreamToolAcc::default());
+                }
+                let acc = &mut stream_resp.tool_calls[tc.index];
+                if let Some(id) = tc.id.filter(|s| !s.is_empty()) {
+                    acc.id = id;
+                }
+                if let Some(f) = tc.function {
+                    if let Some(name) = f.name.filter(|s| !s.is_empty()) {
+                        acc.name = name;
+                    }
+                    if let Some(args) = f.arguments {
+                        acc.arguments.push_str(&args);
+                    }
+                }
+            }
         }
     }
 
@@ -618,6 +696,30 @@ mod tests {
             resp.usage.expect("usage").served_tier,
             Some(crate::llm::ServedTier::Flex)
         );
+    }
+
+    #[test]
+    fn sse_stream_accumulates_tool_calls() {
+        let mut sink = |_: &str| {};
+        let mut sr = StreamResponse::default();
+        let lines: [&[u8]; 4] = [
+            br#"data: {"choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","function":{"name":"upsert_character","arguments":"{\"jp_"}}]}}]}"#,
+            br#"data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"name\":\"yuu\"}"}}]}}]}"#,
+            br#"data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}"#,
+            b"data: [DONE]",
+        ];
+        for l in lines {
+            handle_sse_line(l, &mut sink, &mut sr).unwrap();
+        }
+        let resp = sr.into_response();
+        let msg = &resp.choices[0].message;
+        let calls = msg.tool_calls.as_ref().expect("tool calls preserved");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "call_1");
+        assert_eq!(calls[0].function.name, "upsert_character");
+        assert_eq!(calls[0].function.arguments, r#"{"jp_name":"yuu"}"#);
+        // A tool-call turn carries no visible text → content is null.
+        assert!(msg.content.is_none());
     }
 
     fn client_with_tier(service_tier: Option<ServiceTier>) -> OpenRouterClient {

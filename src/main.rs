@@ -1,6 +1,9 @@
 //! honya 本屋 — a Ratatui TUI for AI-assisted Japanese→Thai light-novel translation.
 //! Owns config load, terminal lifecycle, and async event fan-in.
 
+// Needed for the refine agent's large `json!` tool schema.
+#![recursion_limit = "256"]
+
 mod agents;
 mod app;
 mod cleanse;

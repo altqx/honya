@@ -1932,3 +1932,182 @@ fn whole_volume_translate_requeues_legacy_partial_chapter() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn refine_tab_captures_then_releases_on_esc() {
+    let mut app = fresh_app();
+    app.on_key(KeyEvent::new(KeyCode::Char('6'), KeyModifiers::empty()));
+    assert_eq!(app.screen, Screen::Refine);
+
+    app.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::empty()));
+    assert!(app.running, "q must be swallowed by the focused chat input");
+
+    app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
+    app.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::empty()));
+    assert!(!app.running, "q quits once the input is unfocused");
+}
+
+#[test]
+fn refine_submit_pushes_user_turn() {
+    use crate::app::refine::TurnRole;
+    let mut app = fresh_app();
+    app.on_key(KeyEvent::new(KeyCode::Char('6'), KeyModifiers::empty()));
+    for ch in "hello".chars() {
+        app.on_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::empty()));
+    }
+    app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+    assert_eq!(app.refine.conversation.len(), 1);
+    assert_eq!(app.refine.conversation[0].role, TurnRole::User);
+    assert_eq!(app.refine.conversation[0].text, "hello");
+}
+
+#[test]
+fn refine_stream_events_fold_into_transcript() {
+    use crate::app::refine::TurnRole;
+    use crate::model::AppEvent;
+    let mut app = fresh_app();
+
+    app.on_app_event(AppEvent::RefineDelta {
+        delta: "Hel".to_string(),
+    });
+    app.on_app_event(AppEvent::RefineDelta {
+        delta: "lo".to_string(),
+    });
+    assert_eq!(app.refine.conversation.len(), 1);
+    assert_eq!(app.refine.conversation[0].role, TurnRole::Assistant);
+    assert_eq!(app.refine.conversation[0].text, "Hello");
+    assert!(app.refine.conversation[0].streaming);
+
+    app.on_app_event(AppEvent::RefineMessageDone);
+    assert!(!app.refine.conversation[0].streaming);
+
+    app.on_app_event(AppEvent::RefineToolInvoked {
+        tool: "upsert_character".to_string(),
+        summary: "Yuu".to_string(),
+    });
+    let last = app.refine.conversation.last().unwrap();
+    assert_eq!(last.role, TurnRole::Tool);
+}
+
+#[test]
+fn refine_slash_clear_resets_conversation() {
+    use crate::model::AppEvent;
+    let mut app = fresh_app();
+    app.on_key(KeyEvent::new(KeyCode::Char('6'), KeyModifiers::empty()));
+    app.on_app_event(AppEvent::RefineDelta {
+        delta: "draft".to_string(),
+    });
+    assert_eq!(app.refine.conversation.len(), 1);
+
+    // First Enter accepts the slash popup; second submits `/clear`.
+    for ch in "/clear".chars() {
+        app.on_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::empty()));
+    }
+    app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+    app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+    assert!(
+        app.refine.conversation.is_empty(),
+        "/clear empties the transcript"
+    );
+}
+
+#[test]
+fn refine_renders_at_several_widths() {
+    let mut app = fresh_app();
+    app.screen = Screen::Refine;
+    for ch in "@v1/c1 tighten this".chars() {
+        app.on_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::empty()));
+    }
+    for w in [24u16, 40, 80, 132] {
+        let mut term = Terminal::new(TestBackend::new(w, 24)).unwrap();
+        term.draw(|f| app.render(f)).unwrap();
+    }
+}
+
+#[test]
+fn refine_undo_restores_prior_chapter_text() {
+    use crate::model::{
+        AppEvent, Chapter, ChapterKind, ChapterStatus, Project, UsageStats, Volume,
+    };
+    use crate::workspace::Workspace;
+
+    let dir = std::env::temp_dir().join(format!("honya_refine_undo_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let ws = Workspace::new(dir.clone(), 1);
+    std::fs::create_dir_all(ws.translated(1).parent().unwrap()).unwrap();
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        crate::workspace::translation::append_chunk(&ws, 1, 0, "ข้อความเดิม")
+            .await
+            .unwrap();
+    });
+    let (etx, _erx) = tokio::sync::mpsc::unbounded_channel();
+    let etx = EventTx(etx);
+    rt.block_on(async {
+        let r = crate::agents::refine::dispatch_refine_tool(
+            &dir,
+            1,
+            &etx,
+            "replace_chapter_text",
+            r#"{"ch":1,"new_text":"ข้อความใหม่"}"#,
+        )
+        .await;
+        assert!(r.ok, "{}", r.message);
+    });
+
+    let chapter = Chapter {
+        number: 1,
+        title: "ch1".to_string(),
+        kind: ChapterKind::Prose,
+        status: ChapterStatus::Done,
+        source_segments: 1,
+        total_chunks: 1,
+        committed_chunks: 1,
+        skipped_chunks: 0,
+        last_run: None,
+        usage: UsageStats::default(),
+    };
+    let active = ActiveProject {
+        project: Project {
+            id: "novel".to_string(),
+            dir: dir.clone(),
+            title: "Novel".to_string(),
+            title_th: String::new(),
+            created: None,
+            touched: None,
+            volumes: vec![Volume {
+                number: 1,
+                dir: dir.join("Vol_01"),
+                label: None,
+                chapters: vec![chapter],
+            }],
+            models: None,
+        },
+        workspace: ws.clone(),
+        client: Some(Arc::new(crate::llm::mock::MockClient::default())
+            as Arc<dyn crate::llm::client::LlmClient>),
+        models: ModelSet::default(),
+        vol: 1,
+    };
+
+    let mut app = fresh_app();
+    app.active = Some(active);
+    app.screen = Screen::Refine;
+    app.on_app_event(AppEvent::RefineChapterEdited { vol: 1, ch: 1 });
+
+    for ch in "/undo".chars() {
+        app.on_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::empty()));
+    }
+    app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty())); // accept popup
+    app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty())); // submit /undo
+
+    let now = std::fs::read_to_string(ws.translated(1)).unwrap();
+    assert!(
+        now.contains("ข้อความเดิม"),
+        "undo restored the prior text: {now}"
+    );
+    assert!(!now.contains("ข้อความใหม่"), "the edit was rolled back");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

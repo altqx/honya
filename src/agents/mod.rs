@@ -11,6 +11,7 @@ pub mod continuity;
 pub mod pipeline;
 pub mod prepass;
 pub mod prompts;
+pub mod refine;
 pub mod reviewer;
 pub mod synopsis;
 pub mod tokenize;

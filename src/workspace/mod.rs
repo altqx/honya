@@ -8,6 +8,7 @@ pub mod characters;
 pub mod data_block;
 pub mod glossary;
 pub(crate) mod kana;
+pub mod refine_session;
 pub mod sample;
 pub mod scaffold;
 pub mod scan;

@@ -266,12 +266,18 @@ pub enum ChunkState {
     NeedsReview, // committed unreviewed after exhausting attempts (flagged in-file)
 }
 
-/// The three model ids used by the pipeline.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelSet {
     pub orchestrator: String,
     pub translator: String,
     pub reviewer: String,
+    /// Default keeps older configs loadable.
+    #[serde(default = "default_refine_model")]
+    pub refine: String,
+}
+
+fn default_refine_model() -> String {
+    "openai/gpt-5.5".to_string()
 }
 
 impl Default for ModelSet {
@@ -280,6 +286,7 @@ impl Default for ModelSet {
             orchestrator: "google/gemini-3.5-flash".into(),
             translator: "google/gemini-3-flash-preview".into(),
             reviewer: "google/gemini-3.1-flash-lite".into(),
+            refine: default_refine_model(),
         }
     }
 }
@@ -1248,6 +1255,41 @@ pub enum AppEvent {
         watchers: u32,
     },
     RemoteCommand(crate::remote::protocol::RemoteCommand),
+
+    // Refine chat agent (src/agents/refine.rs -> UI).
+    RefineDelta {
+        delta: String,
+    },
+    RefineMessageDone,
+    RefineToolInvoked {
+        tool: String,
+        summary: String,
+    },
+    RefineEditApplied {
+        kind: String,
+        summary: String,
+    },
+    /// Drives `/undo`, `/diff`, and one coalesced project re-scan.
+    RefineChapterEdited {
+        vol: u32,
+        ch: u32,
+    },
+    RefineError {
+        msg: String,
+    },
+    /// `session` lets App drop updates from a stale agent.
+    RefineThreadUpdated {
+        session: String,
+        messages: Vec<crate::llm::Message>,
+    },
+    RefineRequest(RefineRequest),
+}
+
+/// Heavier Refine operations routed back through `App`.
+#[derive(Debug, Clone)]
+pub enum RefineRequest {
+    Retranslate { vol: u32, chapters: Vec<u32> },
+    RefineChapter { vol: u32, ch: u32, feedback: String },
 }
 
 /// Clonable sender handle background tasks use to talk to the UI.

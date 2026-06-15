@@ -143,9 +143,19 @@ impl ReaderScreen {
         self.chunk_cfg = (target.max(1), hard_cap.max(target.max(1)));
     }
 
-    /// Load raw/ (JA) + translated/ (TH) for a chapter. Kept synchronous to match
-    /// the locked signature; uses std::fs directly (the async helpers wrap the
-    /// same files but `load` is called from the synchronous render/apply path).
+    /// Enter the rerun diff view (old vs new Thai).
+    pub fn enter_diff(&mut self) {
+        self.diff_mode = true;
+    }
+
+    /// Reload only if the Reader is already showing `chapter`.
+    pub fn reload_if_showing(&mut self, ws: &Workspace, chapter: u32) {
+        if self.chapter == chapter {
+            self.load(ws, chapter);
+        }
+    }
+
+    /// Load raw/ (JA) + translated/ (TH) for a chapter.
     pub fn load(&mut self, ws: &Workspace, chapter: u32) {
         self.chapter = chapter;
         self.scroll = 0;
@@ -388,7 +398,6 @@ impl ReaderScreen {
                 // keep it a no-op here so the build never depends on a clipboard dep.
                 Action::None
             }
-            // ---- navigation & search ----
             KeyCode::Char('/') => {
                 if self.chapter == 0 {
                     Action::None
@@ -849,8 +858,7 @@ impl ReaderScreen {
         f.render_widget(para, inner);
     }
 
-    /// Side-by-side rerun diff: archived old Thai (left) vs the live new Thai
-    /// (right), changed lines tinted, with a one-line cost / QA / glossary summary.
+    /// Rerun diff: archived old Thai vs live new Thai.
     fn render_diff(&self, f: &mut Frame, area: Rect, theme: &Theme) {
         let Some(cmp) = self.compare.as_ref() else {
             return;

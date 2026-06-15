@@ -8,6 +8,7 @@ pub mod overlay;
 pub mod project;
 pub mod qa;
 pub mod reader;
+pub mod refine;
 pub mod shelf;
 pub mod translate;
 
@@ -40,11 +41,11 @@ use self::lexicon::LexiconScreen;
 use self::overlay::{JumpKind, JumpTarget, Overlay};
 use self::project::ProjectScreen;
 use self::reader::ReaderScreen;
+use self::refine::RefineScreen;
 use self::shelf::ShelfScreen;
 use self::translate::{QueueRow, TranslateScreen};
 
-// ui::chrome imports `Screen`, so the variant names and ORDER are load-bearing.
-/// The five primary tabs (1-5).
+// ui::chrome imports `Screen`, so the variant names and order are load-bearing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
     Shelf,
@@ -52,10 +53,10 @@ pub enum Screen {
     Translate,
     Reader,
     Lexicon,
+    Refine,
 }
 
 impl Screen {
-    /// Map a `1`..=`5` digit to its screen.
     pub fn from_digit(d: char) -> Option<Screen> {
         match d {
             '1' => Some(Screen::Shelf),
@@ -63,6 +64,7 @@ impl Screen {
             '3' => Some(Screen::Translate),
             '4' => Some(Screen::Reader),
             '5' => Some(Screen::Lexicon),
+            '6' => Some(Screen::Refine),
             _ => None,
         }
     }
@@ -250,6 +252,28 @@ pub enum Action {
     OpenAuthUrl,
     /// Copy the pending GitHub auth code via OSC-52.
     CopyAuthCode,
+    RefineSubmit {
+        text: String,
+    },
+    RefineCancel,
+    RefineClear,
+    RefineOpenSessions,
+    RefineNewSession,
+    RefineSwitchSession {
+        id: String,
+    },
+    RefineDeleteSession {
+        id: String,
+    },
+    RefineRenameSession {
+        title: String,
+    },
+    /// Empty `model` reports the current one.
+    RefineSetModel {
+        model: String,
+    },
+    RefineUndo,
+    RefineOpenDiff,
     /// Boxed to break the `Action → Overlay → Dialog → Action` size cycle.
     ShowOverlay(Box<Overlay>),
     CloseOverlay,
@@ -293,20 +317,14 @@ impl Toast {
 pub struct ActiveProject {
     pub project: Project,
     pub workspace: Workspace,
-    /// The LLM client, built lazily: `None` when no API key is configured yet, so a
-    /// project can still be opened and browsed offline (Reader / Lexicon). Built /
-    /// cached on demand by `App::ensure_active_client` when a run needs it.
+    /// Built lazily so projects can still open offline.
     pub client: Option<Arc<dyn LlmClient>>,
     pub models: ModelSet,
-    /// The active volume number — the one `workspace` resolves and that runs
-    /// translate against. Set when the project is opened (and honored on resume,
-    /// so a checkpoint's volume is respected rather than silently defaulting to
-    /// the first volume).
+    /// Volume `workspace` resolves and translation runs target.
     pub vol: u32,
 }
 
 impl ActiveProject {
-    /// The active volume number.
     fn active_vol(&self) -> u32 {
         self.vol
     }
@@ -327,6 +345,7 @@ pub struct App {
     pub translate: TranslateScreen,
     pub reader: ReaderScreen,
     pub lexicon: LexiconScreen,
+    pub refine: RefineScreen,
     pub toast: Option<Toast>,
     /// True while a pipeline run is live (drives the tab-3 spinner badge).
     pub run_active: bool,
@@ -379,6 +398,15 @@ pub struct App {
     remote_auth_code: Option<crate::model::AuthCodePrompt>,
     /// Dashboard label for the live remote session.
     session_label: Option<String>,
+
+    /// Long-lived Refine agent task, spawned lazily on first submit.
+    refine_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::agents::refine::RefineControl>>,
+    refine_cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+    refine_sessions: Vec<crate::workspace::refine_session::SessionMeta>,
+    refine_session_id: String,
+    /// Last Refine-edited chapter `(vol, ch)`, for `/undo` and `/diff`.
+    refine_last_edit: Option<(u32, u32)>,
+    refine_dirty: bool,
 }
 
 /// Accumulates one chapter's run facts between `ChapterStarted` and its terminal
@@ -423,6 +451,7 @@ impl App {
             translate: TranslateScreen::new(),
             reader,
             lexicon: LexiconScreen::new(),
+            refine: RefineScreen::new(),
             toast: None,
             run_active: false,
             export_active: false,
@@ -445,6 +474,12 @@ impl App {
             remote_watchers: 0,
             remote_auth_code: None,
             session_label: None,
+            refine_tx: None,
+            refine_cancel: None,
+            refine_sessions: Vec::new(),
+            refine_session_id: String::new(),
+            refine_last_edit: None,
+            refine_dirty: false,
         }
     }
 
@@ -511,6 +546,7 @@ impl App {
     pub fn on_app_event(&mut self, ev: AppEvent) {
         // Translate screen observes everything so its live panel stays current off-tab.
         self.translate.on_app_event(&ev);
+        self.refine.on_app_event(&ev);
 
         match &ev {
             AppEvent::ChapterStarted { chapter } => {
@@ -842,12 +878,344 @@ impl App {
                     self.push_remote_snapshot();
                 }
             }
+            AppEvent::RefineThreadUpdated { session, messages } => {
+                self.persist_refine_thread(session.clone(), messages.clone());
+            }
+            AppEvent::RefineChapterEdited { vol, ch } => {
+                self.refine_last_edit = Some((*vol, *ch));
+                self.refine_dirty = true;
+                if matches!(self.screen, Screen::Reader)
+                    && self.active.as_ref().map(|a| a.vol) == Some(*vol)
+                {
+                    let ws = Workspace::new(self.refine_root().unwrap_or_default(), *vol);
+                    self.reader.reload_if_showing(&ws, *ch);
+                }
+            }
+            AppEvent::RefineMessageDone if self.refine_dirty => {
+                self.refine_dirty = false;
+                self.refresh_active_project();
+            }
+            AppEvent::RefineRequest(req) => {
+                self.handle_refine_request(req.clone());
+            }
             _ => {}
         }
 
         // Project after local state is folded so browsers mirror the TUI.
         if self.remote_out.is_some() {
             self.project_and_send_remote(&ev);
+        }
+    }
+
+    /// Forward a submitted chat message, spawning the agent lazily.
+    fn refine_submit(&mut self, text: String) {
+        if self.active.is_none() {
+            self.toast = Some(Toast::warn("open a project first to use Refine"));
+            return;
+        }
+        if !self.ensure_refine_agent() {
+            return;
+        }
+        if let Some(tx) = &self.refine_tx {
+            let _ = tx.send(crate::agents::refine::RefineControl::Submit(
+                crate::agents::refine::UserTurn { text },
+            ));
+        }
+    }
+
+    fn ensure_refine_agent(&mut self) -> bool {
+        if self.refine_tx.is_some() {
+            return true;
+        }
+        let Some(client) = self.ensure_active_client() else {
+            self.toast = Some(Toast::warn(
+                "no API key — add one in Settings (Ctrl-,) to use Refine",
+            ));
+            return false;
+        };
+        let Some(active) = self.active.as_ref() else {
+            return false;
+        };
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = crate::agents::refine::RefineCtx {
+            client,
+            root: active.project.dir.clone(),
+            default_vol: active.vol,
+            model: active.models.refine.clone(),
+            tx: self.tx.clone(),
+            cancel: cancel.clone(),
+            session_id: self.refine_session_id.clone(),
+        };
+        tokio::spawn(async move {
+            crate::agents::refine::run_refine_agent(ctx, rx).await;
+        });
+        self.refine_tx = Some(tx);
+        self.refine_cancel = Some(cancel);
+        true
+    }
+
+    fn refine_cancel(&mut self) {
+        if let Some(c) = &self.refine_cancel {
+            c.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        self.refine.cancel();
+    }
+
+    /// Reset the conversation and stop any in-flight turn at the next round.
+    fn refine_clear(&mut self) {
+        if let Some(c) = &self.refine_cancel {
+            c.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        self.refine.clear();
+        if let Some(tx) = &self.refine_tx {
+            let _ = tx.send(crate::agents::refine::RefineControl::Clear);
+        }
+    }
+
+    /// Tear down the agent; late thread updates are session-guarded.
+    fn teardown_refine(&mut self) {
+        if let Some(c) = &self.refine_cancel {
+            c.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        if let Some(tx) = self.refine_tx.take() {
+            let _ = tx.send(crate::agents::refine::RefineControl::Shutdown);
+        }
+        self.refine_cancel = None;
+        self.refine.clear();
+        self.refine_sessions.clear();
+        self.refine_session_id.clear();
+    }
+
+    fn refine_root(&self) -> Option<PathBuf> {
+        self.active.as_ref().map(|a| a.project.dir.clone())
+    }
+
+    /// Load the most recent session without spawning the agent.
+    fn load_refine_sessions(&mut self) {
+        let Some(root) = self.refine_root() else {
+            return;
+        };
+        let sessions = crate::workspace::refine_session::list(&root);
+        let id = sessions
+            .first()
+            .map(|s| s.id.clone())
+            .unwrap_or_else(crate::workspace::refine_session::new_id);
+        let turns = crate::workspace::refine_session::load(&root, &id)
+            .map(|s| refine::display_turns(&s.messages))
+            .unwrap_or_default();
+        self.refine.load_turns(turns, id.clone());
+        self.refine_session_id = id;
+        self.refine_sessions = sessions;
+    }
+
+    fn refresh_refine_sessions(&mut self) {
+        if let Some(root) = self.refine_root() {
+            self.refine_sessions = crate::workspace::refine_session::list(&root);
+        }
+    }
+
+    /// Drop stale updates so switched sessions cannot be overwritten.
+    fn persist_refine_thread(&mut self, session: String, messages: Vec<crate::llm::Message>) {
+        use crate::workspace::refine_session::{self as rs, RefineSession};
+        if session.is_empty() || session != self.refine_session_id {
+            return;
+        }
+        let Some(root) = self.refine_root() else {
+            return;
+        };
+        let model = self
+            .active
+            .as_ref()
+            .map(|a| a.models.refine.clone())
+            .unwrap_or_default();
+        let mut saved = rs::load(&root, &session)
+            .unwrap_or_else(|| RefineSession::new(session.clone(), model.clone()));
+        saved.messages = messages;
+        saved.model = model;
+        saved.updated = chrono::Utc::now();
+        if saved.title.trim().is_empty() {
+            saved.title = refine_session_title(&saved.messages);
+        }
+        if let Err(e) = rs::save(&root, &saved) {
+            self.push_log(
+                LogLevel::Warn,
+                format!("could not save refine session: {e}"),
+            );
+        }
+        // Avoid a directory scan on every streamed turn; the picker refreshes lazily.
+    }
+
+    fn refine_new_session(&mut self) {
+        let id = crate::workspace::refine_session::new_id();
+        self.refine.load_turns(Vec::new(), id.clone());
+        self.refine_session_id = id.clone();
+        if let Some(tx) = &self.refine_tx {
+            let _ = tx.send(crate::agents::refine::RefineControl::SwitchSession(id));
+        }
+        self.refresh_refine_sessions();
+    }
+
+    fn refine_switch_session(&mut self, id: String) {
+        let Some(root) = self.refine_root() else {
+            return;
+        };
+        let turns = crate::workspace::refine_session::load(&root, &id)
+            .map(|s| refine::display_turns(&s.messages))
+            .unwrap_or_default();
+        self.refine.load_turns(turns, id.clone());
+        self.refine_session_id = id.clone();
+        if let Some(tx) = &self.refine_tx {
+            let _ = tx.send(crate::agents::refine::RefineControl::SwitchSession(id));
+        }
+    }
+
+    fn refine_delete_session(&mut self, id: String) {
+        let Some(root) = self.refine_root() else {
+            return;
+        };
+        if id.is_empty() {
+            return;
+        }
+        let _ = crate::workspace::refine_session::delete(&root, &id);
+        if id == self.refine_session_id {
+            let next = crate::workspace::refine_session::list(&root)
+                .into_iter()
+                .find(|s| s.id != id)
+                .map(|s| s.id);
+            match next {
+                Some(next_id) => self.refine_switch_session(next_id),
+                None => self.refine_new_session(),
+            }
+        }
+        self.refresh_refine_sessions();
+        if self.refine.picker_open() {
+            self.refine
+                .open_picker(self.refine_sessions.clone(), self.refine_session_id.clone());
+        }
+    }
+
+    fn refine_rename_session(&mut self, title: String) {
+        use crate::workspace::refine_session::{self as rs, RefineSession};
+        let Some(root) = self.refine_root() else {
+            return;
+        };
+        let id = self.refine_session_id.clone();
+        let model = self
+            .active
+            .as_ref()
+            .map(|a| a.models.refine.clone())
+            .unwrap_or_default();
+        let mut session =
+            rs::load(&root, &id).unwrap_or_else(|| RefineSession::new(id.clone(), model));
+        session.title = title;
+        session.updated = chrono::Utc::now();
+        if let Err(e) = rs::save(&root, &session) {
+            self.push_log(
+                LogLevel::Warn,
+                format!("could not rename refine session: {e}"),
+            );
+        }
+        self.refresh_refine_sessions();
+    }
+
+    fn refine_set_model(&mut self, model: String) {
+        let model = model.trim().to_string();
+        if model.is_empty() {
+            let cur = self
+                .active
+                .as_ref()
+                .map(|a| a.models.refine.clone())
+                .unwrap_or_else(|| self.cfg.models.refine.clone());
+            self.toast = Some(Toast::info(format!("refine model: {cur}")));
+            return;
+        }
+        if let Some(active) = self.active.as_mut() {
+            active.models.refine = model.clone();
+        }
+        self.cfg.models.refine = model.clone();
+        if let Err(e) = crate::config::save(&self.cfg) {
+            self.push_log(
+                LogLevel::Warn,
+                format!("could not persist refine model: {e}"),
+            );
+        }
+        if let Some(tx) = &self.refine_tx {
+            let _ = tx.send(crate::agents::refine::RefineControl::SetModel(
+                model.clone(),
+            ));
+        }
+        self.toast = Some(Toast::info(format!("refine model set to {model}")));
+    }
+
+    /// Restore the latest archived prior version from `reruns/`.
+    fn refine_undo(&mut self) {
+        let Some((vol, ch)) = self.refine_last_edit else {
+            self.toast = Some(Toast::warn("nothing to undo"));
+            return;
+        };
+        let Some(root) = self.refine_root() else {
+            return;
+        };
+        let ws = Workspace::new(root, vol);
+        let newest = crate::workspace::volume::chapter_runs(&ws, ch)
+            .into_iter()
+            .filter_map(|r| r.archived)
+            .max();
+        let Some(rel) = newest else {
+            self.toast = Some(Toast::warn("no archived version to restore"));
+            return;
+        };
+        match std::fs::read_to_string(ws.vol_rel(&rel)) {
+            Ok(content) => {
+                if let Err(e) = std::fs::write(ws.translated(ch), content) {
+                    self.toast = Some(Toast::error(format!("undo failed: {e}")));
+                    return;
+                }
+                self.refine_last_edit = None;
+                self.refresh_active_project();
+                if matches!(self.screen, Screen::Reader) {
+                    self.reader.load(&ws, ch);
+                }
+                self.toast = Some(Toast::info(format!(
+                    "restored the previous version of vol {vol} ch {ch}"
+                )));
+            }
+            Err(e) => self.toast = Some(Toast::error(format!("undo failed: {e}"))),
+        }
+    }
+
+    fn refine_open_diff(&mut self) {
+        let Some((vol, ch)) = self.refine_last_edit else {
+            self.toast = Some(Toast::warn("no recent edit to diff"));
+            return;
+        };
+        self.set_active_volume(vol);
+        self.apply(Action::OpenChapter { chapter: ch });
+        self.reader.enter_diff();
+    }
+
+    /// Keep heavier spawns in `App`; the agent only emits requests.
+    fn handle_refine_request(&mut self, req: crate::model::RefineRequest) {
+        use crate::model::RefineRequest as R;
+        match req {
+            R::Retranslate { vol, chapters } => {
+                self.set_active_volume(vol);
+                self.apply(Action::RestartTranslation { chapters });
+            }
+            R::RefineChapter { vol, ch, feedback } => {
+                if let Some(active) = self.active.as_ref() {
+                    let ws = Workspace::new(active.project.dir.clone(), vol);
+                    if let Err(e) = crate::workspace::style::append_note(&ws, &feedback) {
+                        self.push_log(
+                            LogLevel::Warn,
+                            format!("could not record refine feedback: {e}"),
+                        );
+                    }
+                }
+                self.set_active_volume(vol);
+                self.apply(Action::RestartTranslation { chapters: vec![ch] });
+            }
         }
     }
 
@@ -1257,8 +1625,7 @@ impl App {
         }
     }
 
-    /// Start assembling a per-chapter run record (snapshot the glossary so we can
-    /// report what this run adds / changes). Called on `ChapterStarted`.
+    /// Snapshot glossary state for the chapter's finished run record.
     fn begin_pending_chapter_run(&mut self, chapter: u32) {
         // Bind the workspace to the running volume, not `active.workspace`, which can
         // drift if the user navigates to another volume mid-run (auto-follow).
@@ -1626,6 +1993,7 @@ impl App {
             Screen::Lexicon => self
                 .lexicon
                 .handle_mouse(m, self.active.as_ref().map(|a| &a.workspace)),
+            Screen::Refine => self.refine.handle_mouse(m),
         }
     }
 
@@ -1658,7 +2026,7 @@ impl App {
 
         // 3) Global keys (only when nothing is capturing input).
         match k.code {
-            KeyCode::Char(d @ '1'..='5') => {
+            KeyCode::Char(d @ '1'..='6') => {
                 if let Some(s) = Screen::from_digit(d) {
                     return Action::Goto(s);
                 }
@@ -1694,7 +2062,8 @@ impl App {
 
     /// True when a focused screen text field should swallow single-letter globals.
     fn screen_is_capturing(&self) -> bool {
-        matches!(self.screen, Screen::Lexicon) && self.lexicon.is_capturing()
+        (matches!(self.screen, Screen::Lexicon) && self.lexicon.is_capturing())
+            || (matches!(self.screen, Screen::Refine) && self.refine.is_capturing())
     }
 
     fn route_to_screen(&mut self, k: KeyEvent) -> Action {
@@ -1706,6 +2075,9 @@ impl App {
             Screen::Lexicon => self
                 .lexicon
                 .handle_key(k, self.active.as_ref().map(|a| &a.workspace)),
+            Screen::Refine => self
+                .refine
+                .handle_key(k, self.active.as_ref().map(|a| &a.project)),
         }
     }
 
@@ -1715,7 +2087,8 @@ impl App {
             Screen::Project => Screen::Translate,
             Screen::Translate => Screen::Reader,
             Screen::Reader => Screen::Lexicon,
-            Screen::Lexicon => Screen::Shelf,
+            Screen::Lexicon => Screen::Refine,
+            Screen::Refine => Screen::Shelf,
         }
     }
 
@@ -1752,6 +2125,41 @@ impl App {
             }
             Action::CloseOverlay => {
                 self.overlay = Overlay::None;
+            }
+            Action::RefineSubmit { text } => {
+                self.refine_submit(text);
+            }
+            Action::RefineCancel => {
+                self.refine_cancel();
+            }
+            Action::RefineClear => {
+                self.refine_clear();
+            }
+            Action::RefineOpenSessions => {
+                self.refresh_refine_sessions();
+                self.refine
+                    .open_picker(self.refine_sessions.clone(), self.refine_session_id.clone());
+            }
+            Action::RefineNewSession => {
+                self.refine_new_session();
+            }
+            Action::RefineSwitchSession { id } => {
+                self.refine_switch_session(id);
+            }
+            Action::RefineDeleteSession { id } => {
+                self.refine_delete_session(id);
+            }
+            Action::RefineRenameSession { title } => {
+                self.refine_rename_session(title);
+            }
+            Action::RefineSetModel { model } => {
+                self.refine_set_model(model);
+            }
+            Action::RefineUndo => {
+                self.refine_undo();
+            }
+            Action::RefineOpenDiff => {
+                self.refine_open_diff();
             }
             Action::OpenProject(id) => {
                 self.open_project(id);
@@ -2166,6 +2574,9 @@ impl App {
     /// Switch the active volume without resetting screens. Called while the Project
     /// cursor crosses volume boundaries, so it must stay cheap.
     fn set_active_volume(&mut self, vol: u32) {
+        // The refine agent is intentionally cross-volume (its tools take a `vol`),
+        // so a volume change here does NOT tear it down — that would wipe the chat
+        // on every Project-cursor crossing.
         if let Some(active) = self.active.as_mut()
             && active.vol != vol
             && active.project.volumes.iter().any(|v| v.number == vol)
@@ -2243,6 +2654,8 @@ impl App {
     /// Open `project` on `vol`, reset per-project screens, and land on Project.
     /// Missing keys disable translation only; browsing still works.
     fn activate_project(&mut self, project: Project, vol: u32) -> bool {
+        // The refine agent is bound to the previous project root + volume.
+        self.teardown_refine();
         let models = project
             .models
             .clone()
@@ -2261,6 +2674,7 @@ impl App {
         });
         self.lexicon.reset();
         self.project = ProjectScreen::new();
+        self.load_refine_sessions();
         self.screen = Screen::Project;
         // Clear stale "draft" status from projects finished in another session.
         self.persist_project_status();
@@ -3330,6 +3744,23 @@ impl App {
         self.shelf.rescan(&working_root());
     }
 
+    /// Re-scan only the active project from disk (after a refine edit changed a
+    /// chapter), updating its in-memory status without disturbing the volume/client.
+    fn refresh_active_project(&mut self) {
+        let Some(dir) = self.active.as_ref().map(|a| a.project.dir.clone()) else {
+            return;
+        };
+        let Some(fresh) = crate::workspace::scan::scan_one_project(&dir) else {
+            return;
+        };
+        if let Some(slot) = self.projects.iter_mut().find(|p| p.dir == dir) {
+            *slot = fresh.clone();
+        }
+        if let Some(active) = self.active.as_mut() {
+            active.project = fresh;
+        }
+    }
+
     /// Gather the active volume's QA report and wrap it in the QA overlay. With no
     /// project open (palette path) the overlay still shows, with an empty report and
     /// a "no project" header, so the user gets feedback rather than a silent no-op.
@@ -3513,6 +3944,7 @@ impl App {
                 self.active.as_ref().map(|a| &a.workspace),
                 &self.theme,
             ),
+            Screen::Refine => self.refine.render(f, body, self.frame, &self.theme),
         }
     }
 
@@ -3646,8 +4078,28 @@ impl App {
             Screen::Translate => self.translate.hints(),
             Screen::Reader => self.reader.hints(),
             Screen::Lexicon => self.lexicon.hints(),
+            Screen::Refine => self.refine.hints(),
         }
     }
+}
+
+/// Title from the first user message, with the scope hint stripped.
+fn refine_session_title(messages: &[crate::llm::Message]) -> String {
+    for m in messages {
+        if matches!(m.role, crate::llm::Role::User)
+            && let Some(content) = &m.content
+        {
+            let head = content
+                .split_once("\n\n(In scope:")
+                .map(|(h, _)| h)
+                .unwrap_or(content);
+            let line = head.lines().next().unwrap_or("").trim();
+            if !line.is_empty() {
+                return line.chars().take(48).collect();
+            }
+        }
+    }
+    "(untitled)".to_string()
 }
 
 // Wire strings are relay protocol values, not display copy.
