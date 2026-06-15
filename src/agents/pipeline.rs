@@ -1962,11 +1962,19 @@ async fn run_coherence_sweep(
         );
         ctx.tx.send(AppEvent::ContinuityFlag {
             chapter,
-            severity,
+            severity: severity.clone(),
             kind: "coherence".to_string(),
             note: note_text.to_string(),
         });
         recorded += 1;
+
+        // Pin a named drift only when one correct form is clear.
+        if let Some(msg) = reconcile_coherence_issue(&ctx.ws, issue) {
+            ctx.tx.send(AppEvent::Log {
+                level: LogLevel::Info,
+                msg: format!("coherence sweep: chapter {chapter} {msg}"),
+            });
+        }
     }
     if recorded > 0 {
         ctx.tx.send(AppEvent::Log {
@@ -1976,6 +1984,60 @@ async fn run_coherence_sweep(
             ),
         });
     }
+}
+
+/// Pin a named drift without creating characters or overwriting protected terms.
+/// Returns a short log message when a roster entry changed.
+fn reconcile_coherence_issue(ws: &Workspace, issue: &coherence::CoherenceIssue) -> Option<String> {
+    let sev = issue.severity.trim().to_lowercase();
+    if sev != "warning" && sev != "conflict" {
+        return None;
+    }
+    let jp = issue.resolve_jp.trim();
+    let th = issue.resolve_canonical_th.trim();
+    if jp.is_empty() || th.is_empty() {
+        return None;
+    }
+    match issue.resolve_kind.trim() {
+        "term" => {
+            let term = GlossaryTerm {
+                jp_term: jp.to_string(),
+                thai_term: th.to_string(),
+                romaji: None,
+                category: None,
+                gloss: Some("canonical rendering pinned by the coherence sweep".to_string()),
+                policy: Some(crate::model::TermPolicy::Preferred),
+                forbidden_thai: Vec::new(),
+                context_rule: None,
+                protected: None,
+                do_not_translate: None,
+                first_seen_chapter: None,
+            };
+            match glossary::upsert_from_orchestrator(ws, term) {
+                Ok(glossary::GlossaryUpsertOutcome::Protected { .. }) | Err(_) => None,
+                Ok(_) => Some(format!("pinned term {jp} → {th} (preferred)")),
+            }
+        }
+        "character" => {
+            // Do not create a character from a coherence note.
+            let mut existing = characters::get(ws, Some(jp), None)
+                .into_iter()
+                .find(|c| character_matches_surface(c, jp))?;
+            if existing.thai_name.trim() == th {
+                return None;
+            }
+            existing.thai_name = th.to_string();
+            characters::upsert(ws, existing).ok()?;
+            Some(format!("standardized character {jp} → {th}"))
+        }
+        _ => None,
+    }
+}
+
+/// JP name or alias match.
+fn character_matches_surface(c: &crate::model::Character, jp: &str) -> bool {
+    let jp = jp.trim();
+    c.jp_name.trim() == jp || c.aliases.iter().any(|a| a.trim() == jp)
 }
 
 /// Strip honya bookkeeping (chunk-index comments, the review-needed marker/banner)

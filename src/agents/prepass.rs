@@ -103,12 +103,16 @@ pub async fn run_prepass(
     let (out, usage) =
         chat_structured::<PrepassOut>(client, req, "prepass_result", prepass_schema(), 1).await?;
 
+    // Preserve earlier-volume renderings; the prepass may only enrich the roster.
+    let existing_chars = characters::load(ws);
+    let existing_terms = glossary::load(ws);
+
     let mut characters_added = 0usize;
     for c in &out.characters {
         if c.jp_name.trim().is_empty() {
             continue;
         }
-        let character = Character {
+        let mut character = Character {
             id: String::new(),
             jp_name: c.jp_name.trim().to_string(),
             thai_name: c.thai_name.trim().to_string(),
@@ -126,6 +130,17 @@ pub async fn run_prepass(
             notes: non_empty(&c.notes),
             first_seen_chapter: None,
         };
+        // Blank thai_name so upsert preserves the existing rendering.
+        if existing_chars
+            .iter()
+            .any(|e| character_surface_eq(e, &character.jp_name))
+            && existing_chars
+                .iter()
+                .filter(|e| character_surface_eq(e, &character.jp_name))
+                .any(|e| !e.thai_name.trim().is_empty())
+        {
+            character.thai_name = String::new();
+        }
         // Best-effort: a single bad row must not sink the whole seed.
         if characters::upsert(ws, character).is_ok() {
             characters_added += 1;
@@ -135,6 +150,13 @@ pub async fn run_prepass(
     let mut terms_added = 0usize;
     for t in &out.terms {
         if t.jp_term.trim().is_empty() {
+            continue;
+        }
+        // Earlier-volume terms keep their rendering.
+        if existing_terms
+            .iter()
+            .any(|e| e.jp_term.trim() == t.jp_term.trim())
+        {
             continue;
         }
         // Seeded unprotected (effective policy = preferred) so the Orchestrator can
@@ -178,6 +200,12 @@ pub async fn run_prepass(
         examples: examples_added,
         usage,
     }))
+}
+
+/// JP name or alias match.
+fn character_surface_eq(c: &Character, jp: &str) -> bool {
+    let jp = jp.trim();
+    c.jp_name.trim() == jp || c.aliases.iter().any(|a| a.trim() == jp)
 }
 
 fn non_empty(s: &str) -> Option<String> {

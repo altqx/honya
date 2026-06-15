@@ -28,6 +28,13 @@ pub struct CoherenceOut {
 pub struct CoherenceIssue {
     pub severity: String,
     pub note: String,
+    /// Structured fix hint; empty unless one canonical Thai form is clear.
+    #[serde(default)]
+    pub resolve_kind: String,
+    #[serde(default)]
+    pub resolve_jp: String,
+    #[serde(default)]
+    pub resolve_canonical_th: String,
 }
 
 /// Run the coherence sweep over one assembled chapter's Thai. `reference_ctx` is the

@@ -5,6 +5,7 @@
 use std::path::PathBuf;
 
 pub mod characters;
+pub mod consistency;
 pub mod data_block;
 pub mod glossary;
 pub(crate) mod kana;

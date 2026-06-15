@@ -112,6 +112,17 @@ pub enum Action {
         line: u32,
         note: String,
     },
+    /// Open the chunk editor from raw on-disk Thai.
+    OpenReaderEdit {
+        chapter: u32,
+        chunk: u32,
+    },
+    /// Save edited chunk prose and clear its review flag.
+    SaveReaderEdit {
+        chapter: u32,
+        chunk: u32,
+        text: String,
+    },
     OpenProject(String),
     /// Switch the open project's active volume (the one Reader / Translate / synopsis
     /// / QA resolve against). Emitted by the Project tree as the cursor moves between
@@ -2276,6 +2287,16 @@ impl App {
             } => {
                 self.save_reader_note(chapter, line, note);
             }
+            Action::OpenReaderEdit { chapter, chunk } => {
+                self.open_reader_edit(chapter, chunk);
+            }
+            Action::SaveReaderEdit {
+                chapter,
+                chunk,
+                text,
+            } => {
+                self.save_reader_edit(chapter, chunk, text);
+            }
             Action::StartTranslation { chapters } => {
                 self.request_translation(chapters);
             }
@@ -3839,6 +3860,48 @@ impl App {
                 self.toast = Some(Toast::info(format!("note saved · ch {chapter:03} L{line}")));
             }
             Err(e) => self.toast = Some(Toast::error(format!("note save failed: {e}"))),
+        }
+    }
+
+    /// Seed the editor from raw Thai so display-decomposed SARA AM is never persisted.
+    fn open_reader_edit(&mut self, chapter: u32, chunk: u32) {
+        let Some(active) = self.active.as_ref() else {
+            self.toast = Some(Toast::warn("no project open"));
+            return;
+        };
+        let raw = std::fs::read_to_string(active.workspace.translated(chapter)).unwrap_or_default();
+        match crate::workspace::translation::chunk_prose_in(&raw, chunk) {
+            Some(prose) => self.overlay = Overlay::reader_edit(chapter, chunk, prose),
+            None => self.toast = Some(Toast::warn("couldn't load that chunk to edit")),
+        }
+    }
+
+    /// Save edited prose, clear any review flag, and refresh Reader/project status.
+    fn save_reader_edit(&mut self, chapter: u32, chunk: u32, text: String) {
+        self.overlay = Overlay::None;
+        let Some(active) = self.active.as_ref() else {
+            self.toast = Some(Toast::warn("no project open"));
+            return;
+        };
+        let workspace = active.workspace.clone();
+        let path = workspace.translated(chapter);
+        let existing = std::fs::read_to_string(&path).unwrap_or_default();
+        let Some(updated) =
+            crate::workspace::translation::replace_chunk_body(&existing, chunk, text.trim_end())
+        else {
+            self.toast = Some(Toast::warn("couldn't locate that chunk to save"));
+            return;
+        };
+        match crate::workspace::data_block::atomic_write(&path, &updated) {
+            Ok(()) => {
+                self.reader.reload_if_showing(&workspace, chapter);
+                self.refresh_active_project();
+                self.toast = Some(Toast::info(format!(
+                    "saved edit · ch {chapter:03} · chunk {}",
+                    chunk + 1
+                )));
+            }
+            Err(e) => self.toast = Some(Toast::error(format!("edit save failed: {e}"))),
         }
     }
 

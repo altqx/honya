@@ -109,7 +109,9 @@ Look for:
 - A glossary/term rendering that drifts between occurrences.
 - A relationship/register that flips inconsistently (e.g. suddenly formal then casual with the same person for no reason).
 
-Return a strict JSON object matching the schema: a list of `issues`, each with a `severity` ("info" | "warning" | "conflict") and a concise `note` naming the inconsistency and where it appears (quote the differing Thai forms). Use "conflict" only for clear contradictions, "warning" for likely drift, "info" for minor stylistic notes. Return an EMPTY list when the chapter is internally consistent — do not invent problems. Do not re-translate or critique single-chunk quality; only flag chapter-wide inconsistency."#;
+Return a strict JSON object matching the schema: a list of `issues`, each with a `severity` ("info" | "warning" | "conflict") and a concise `note` naming the inconsistency and where it appears (quote the differing Thai forms). Use "conflict" only for clear contradictions, "warning" for likely drift, "info" for minor stylistic notes. Return an EMPTY list when the chapter is internally consistent — do not invent problems. Do not re-translate or critique single-chunk quality; only flag chapter-wide inconsistency.
+
+When a drift is about a NAME or a glossary TERM and you can identify the single correct Thai rendering it should be standardized to (the dominant/correct form, consistent with the REFERENCE data), also fill the resolution fields so the system can lock it for later chapters: set `resolve_kind` to "character" for a person's name or "term" for a world/glossary term, `resolve_jp` to the Japanese form (the name/term as written in the source), and `resolve_canonical_th` to the one Thai rendering everything should use. Leave all three empty ("") for self-pronoun/POV shifts, register drift, or whenever you cannot pick a single correct rendering — never guess one."#;
 
 /// Build the Reviewer user message: the raw Japanese source paired with the
 /// Translator's Thai output, clearly delimited so the model can diff them.

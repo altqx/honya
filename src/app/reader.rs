@@ -443,6 +443,8 @@ impl ReaderScreen {
                 self.show_source();
                 Action::None
             }
+            KeyCode::Char('i') => self.inspect_overlay(),
+            KeyCode::Char('e') => self.edit_overlay(),
             KeyCode::Char('m') => {
                 if self.chapter == 0 {
                     Action::None
@@ -745,6 +747,53 @@ impl ReaderScreen {
             self.layout_mode = MODE_SPLIT;
             self.sync = false;
             self.scroll = line.min(u16::MAX as usize) as u16;
+        }
+    }
+
+    /// Chunk under the cursor, from Thai chunk markers.
+    fn current_chunk(&self) -> Option<u32> {
+        th_chunk_at_line(&self.th, self.effective_th_scroll() as usize)
+    }
+
+    /// Source chunk text, re-chunked with the pipeline settings.
+    fn source_for_chunk(&self, chunk: u32) -> Option<String> {
+        let chunks =
+            crate::agents::chunk::chunk_chapter(&self.ja, self.chunk_cfg.0, self.chunk_cfg.1);
+        chunks.get(chunk as usize).map(|c| c.text.clone())
+    }
+
+    /// Show source, Thai, and active review note for the cursor chunk.
+    fn inspect_overlay(&self) -> Action {
+        if self.chapter == 0 {
+            return Action::None;
+        }
+        let Some(chunk) = self.current_chunk() else {
+            return Action::None;
+        };
+        let source_jp = self.source_for_chunk(chunk).unwrap_or_default();
+        let thai = crate::workspace::translation::chunk_prose_in(&self.th, chunk).unwrap_or_default();
+        let review = crate::workspace::translation::chunk_review_reason_in(&self.th, chunk);
+        Action::show_overlay(Overlay::reader_inspect(
+            self.chapter,
+            chunk,
+            source_jp,
+            thai,
+            review,
+        ))
+    }
+
+    /// Request an editor seeded App-side from composed on-disk Thai.
+    /// Avoids editing `self.th`, which is display-decomposed for the terminal.
+    fn edit_overlay(&self) -> Action {
+        if self.chapter == 0 {
+            return Action::None;
+        }
+        match self.current_chunk() {
+            Some(chunk) => Action::OpenReaderEdit {
+                chapter: self.chapter,
+                chunk,
+            },
+            None => Action::None,
         }
     }
 
@@ -1107,6 +1156,8 @@ impl ReaderScreen {
             ("g", "jump"),
             ("r", "review"),
             ("s", "source"),
+            ("i", "inspect"),
+            ("e", "edit"),
             ("m", "mark"),
             ("n", "note"),
             ("G", "hilite"),

@@ -636,6 +636,27 @@ pub struct ReaderNoteState {
     pub cursor: usize,
 }
 
+/// Chunk proofreading popover: source, Thai, and active reviewer note.
+#[derive(Debug, Clone)]
+pub struct ReaderInspectState {
+    pub chapter: u32,
+    pub chunk: u32,
+    pub source_jp: String,
+    pub thai: String,
+    pub review: Option<String>,
+    pub scroll: u16,
+}
+
+/// Editor for one translated chunk; saving clears any review-needed flag.
+#[derive(Debug, Clone)]
+pub struct ReaderEditState {
+    pub chapter: u32,
+    pub chunk: u32,
+    pub text: String,
+    /// Caret byte-offset into `text`.
+    pub cursor: usize,
+}
+
 /// Reader global-search input: a single text field. On commit the App hands the
 /// query to the Reader, which finds matches across both the JA and TH panes.
 #[derive(Debug, Clone)]
@@ -772,6 +793,10 @@ pub enum Overlay {
     Qa(QaState),
     /// Reader proofreading note editor, anchored to a translated line.
     ReaderNote(ReaderNoteState),
+    /// Read-only source‖Thai‖reviewer-note popover for the current chunk.
+    ReaderInspect(ReaderInspectState),
+    /// In-place editor for the current chunk's Thai prose.
+    ReaderEdit(ReaderEditState),
     /// Reader global search across both panes (JA + TH).
     ReaderSearch(ReaderSearchState),
     /// Reader jump/outline picker (chapters · sections · bookmarks).
@@ -863,6 +888,33 @@ impl Overlay {
         Overlay::ReaderSearch(ReaderSearchState {
             query: String::new(),
             cursor: 0,
+        })
+    }
+
+    pub fn reader_inspect(
+        chapter: u32,
+        chunk: u32,
+        source_jp: String,
+        thai: String,
+        review: Option<String>,
+    ) -> Self {
+        Overlay::ReaderInspect(ReaderInspectState {
+            chapter,
+            chunk,
+            source_jp,
+            thai,
+            review,
+            scroll: 0,
+        })
+    }
+
+    pub fn reader_edit(chapter: u32, chunk: u32, text: String) -> Self {
+        let cursor = text.len();
+        Overlay::ReaderEdit(ReaderEditState {
+            chapter,
+            chunk,
+            text,
+            cursor,
         })
     }
 
@@ -1033,6 +1085,7 @@ impl Overlay {
             Overlay::Synopsis(st) => st.syn.phase == SynPhase::Editing,
             Overlay::ProjectTitle(st) => st.syn.phase == SynPhase::Editing,
             Overlay::ReaderNote(_) => true,
+            Overlay::ReaderEdit(_) => true,
             Overlay::ReaderSearch(_) => true, // query field
             Overlay::ReaderJump(_) => true,   // filter field
             Overlay::Settings(_) => true,     // always editing a field
@@ -1054,6 +1107,8 @@ impl Overlay {
             Overlay::ProjectTitle(_) => self.handle_project_title_key(key),
             Overlay::Qa(_) => self.handle_qa_key(key),
             Overlay::ReaderNote(_) => self.handle_reader_note_key(key),
+            Overlay::ReaderInspect(_) => self.handle_reader_inspect_key(key),
+            Overlay::ReaderEdit(_) => self.handle_reader_edit_key(key),
             Overlay::ReaderSearch(_) => self.handle_reader_search_key(key),
             Overlay::ReaderJump(_) => self.handle_reader_jump_key(key),
             Overlay::Export(_) => self.handle_export_key(key),
@@ -1142,6 +1197,8 @@ impl Overlay {
             Overlay::ProjectTitle(_) => centered_modal(72, 16, area),
             Overlay::Qa(_) => centered_pct(80, 80, area),
             Overlay::ReaderNote(_) => centered_modal(72, 14, area),
+            Overlay::ReaderInspect(_) => centered_pct(82, 80, area),
+            Overlay::ReaderEdit(_) => centered_pct(82, 75, area),
             Overlay::ReaderSearch(_) => centered_modal(64, 7, area),
             Overlay::ReaderJump(_) => centered_modal(72, 24, area),
             Overlay::Export(_) => centered_modal(66, 15, area),
@@ -1881,6 +1938,59 @@ impl Overlay {
         }
     }
 
+    fn handle_reader_inspect_key(&mut self, key: KeyEvent) -> Action {
+        let Overlay::ReaderInspect(st) = self else {
+            return Action::None;
+        };
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => Action::CloseOverlay,
+            KeyCode::Char('j') | KeyCode::Down => {
+                st.scroll = st.scroll.saturating_add(1);
+                Action::None
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                st.scroll = st.scroll.saturating_sub(1);
+                Action::None
+            }
+            // Jump into the editor for this chunk; the App re-seeds it from the raw
+            // on-disk Thai (composed), not the display-decomposed popover text.
+            KeyCode::Char('e') => {
+                let (chapter, chunk) = (st.chapter, st.chunk);
+                *self = Overlay::None;
+                Action::OpenReaderEdit { chapter, chunk }
+            }
+            _ => Action::None,
+        }
+    }
+
+    fn handle_reader_edit_key(&mut self, key: KeyEvent) -> Action {
+        let Overlay::ReaderEdit(st) = self else {
+            return Action::None;
+        };
+        let opts = EditOpts {
+            numeric_only: false,
+            multiline: true,
+        };
+        if input::handle(&mut st.text, &mut st.cursor, key, opts) != Edited::Ignored {
+            return Action::None;
+        }
+        match key.code {
+            KeyCode::Esc => Action::CloseOverlay,
+            KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                Action::SaveReaderEdit {
+                    chapter: st.chapter,
+                    chunk: st.chunk,
+                    text: st.text.clone(),
+                }
+            }
+            KeyCode::Enter => {
+                input::insert_char(&mut st.text, &mut st.cursor, '\n');
+                Action::None
+            }
+            _ => Action::None,
+        }
+    }
+
     fn handle_reader_search_key(&mut self, key: KeyEvent) -> Action {
         let Overlay::ReaderSearch(st) = self else {
             return Action::None;
@@ -2026,6 +2136,12 @@ impl Overlay {
             Overlay::About => &[("Esc/↵", "close")],
             Overlay::Qa(_) => &[("jk", "move"), ("↵", "jump to chapter"), ("Esc", "close")],
             Overlay::ReaderNote(_) => &[("type", "note"), ("↵", "save"), ("Esc", "cancel")],
+            Overlay::ReaderInspect(_) => {
+                &[("jk", "scroll"), ("e", "edit Thai"), ("Esc/q", "close")]
+            }
+            Overlay::ReaderEdit(_) => {
+                &[("type", "edit"), ("↵", "newline"), ("^S", "save"), ("Esc", "cancel")]
+            }
             Overlay::ReaderSearch(_) => &[("type", "query"), ("↵", "search"), ("Esc", "cancel")],
             Overlay::ReaderJump(_) => &[
                 ("type", "filter"),
@@ -2084,6 +2200,8 @@ impl Overlay {
             Overlay::ProjectTitle(st) => self.render_project_title(f, area, theme, st),
             Overlay::Qa(st) => self.render_qa(f, area, theme, st),
             Overlay::ReaderNote(st) => self.render_reader_note(f, area, theme, st),
+            Overlay::ReaderInspect(st) => self.render_reader_inspect(f, area, theme, st),
+            Overlay::ReaderEdit(st) => self.render_reader_edit(f, area, theme, st),
             Overlay::ReaderSearch(st) => self.render_reader_search(f, area, theme, st),
             Overlay::ReaderJump(st) => self.render_reader_jump(f, area, theme, st),
             Overlay::Export(st) => self.render_export(f, area, theme, st),
@@ -2358,6 +2476,102 @@ impl Overlay {
         f.render_widget(
             Paragraph::new(examples).style(Style::default().bg(theme.bg_panel)),
             rows[4],
+        );
+    }
+
+    fn render_reader_inspect(
+        &self,
+        f: &mut Frame,
+        area: Rect,
+        theme: &Theme,
+        st: &ReaderInspectState,
+    ) {
+        let modal = centered_pct(82, 80, area);
+        f.render_widget(Clear, modal);
+        let title = format!("Inspect · ch {:03} · chunk {}", st.chapter, st.chunk + 1);
+        let block = self.modal_block(&title, theme);
+        let inner = block.inner(modal);
+        f.render_widget(block, modal);
+
+        let head = |s: &str, c: ratatui::style::Color| {
+            Line::from(Span::styled(
+                s.to_string(),
+                Style::default().fg(c).add_modifier(Modifier::BOLD),
+            ))
+        };
+        let mut lines: Vec<Line> = Vec::new();
+        lines.push(head("ญี่ปุ่น · source", theme.accent));
+        for l in st.source_jp.lines() {
+            lines.push(Line::from(Span::styled(
+                l.to_string(),
+                Style::default().fg(theme.ja_text),
+            )));
+        }
+        lines.push(Line::raw(""));
+        lines.push(head("ไทย · translation", theme.accent));
+        for l in st.thai.lines() {
+            lines.push(Line::from(Span::styled(
+                l.to_string(),
+                Style::default().fg(theme.th_text),
+            )));
+        }
+        if let Some(r) = &st.review {
+            lines.push(Line::raw(""));
+            lines.push(head("ผู้ตรวจ · reviewer", theme.status_warn));
+            let note = if r.trim().is_empty() {
+                "flagged for review (no reason recorded)"
+            } else {
+                r.as_str()
+            };
+            lines.push(Line::from(Span::styled(
+                note.to_string(),
+                Style::default().fg(theme.ink_soft),
+            )));
+        }
+
+        f.render_widget(
+            Paragraph::new(lines)
+                .wrap(Wrap { trim: false })
+                .scroll((st.scroll, 0))
+                .style(Style::default().bg(theme.bg_panel)),
+            inner,
+        );
+    }
+
+    fn render_reader_edit(&self, f: &mut Frame, area: Rect, theme: &Theme, st: &ReaderEditState) {
+        let modal = centered_pct(82, 75, area);
+        f.render_widget(Clear, modal);
+        let title = format!("Edit Thai · ch {:03} · chunk {}", st.chapter, st.chunk + 1);
+        let block = self.modal_block(&title, theme);
+        let inner = block.inner(modal);
+        f.render_widget(block, modal);
+
+        // Keep the buffer composed; decompose only the rendered preview.
+        let (before, after) = st.text.split_at(st.cursor.min(st.text.len()));
+        let mut body = String::with_capacity(st.text.len() + 1);
+        body.push_str(before);
+        body.push('▏');
+        body.push_str(after);
+        let body = crate::ui::text::thai_display_safe(&body);
+
+        let mut lines: Vec<Line> = body
+            .lines()
+            .map(|l| Line::from(Span::styled(l.to_string(), Style::default().fg(theme.th_text))))
+            .collect();
+        if body.ends_with('\n') {
+            lines.push(Line::raw(""));
+        }
+        lines.push(Line::raw(""));
+        lines.push(Line::from(Span::styled(
+            "^S save · Enter newline · Esc cancel — saving clears this chunk's review flag",
+            Style::default().fg(theme.ink_faint),
+        )));
+
+        f.render_widget(
+            Paragraph::new(lines)
+                .wrap(Wrap { trim: false })
+                .style(Style::default().bg(theme.bg_inset)),
+            inner,
         );
     }
 
@@ -3523,6 +3737,7 @@ impl Overlay {
                     ("G", "toggle glossary highlight"),
                     ("r", "next [REVIEW NEEDED] in chapter"),
                     ("s", "show source for this TH chunk"),
+                    ("i / e", "inspect chunk (JP‖TH‖review) · edit Thai"),
                     ("m", "toggle bookmark at this line"),
                     ("n / N", "add note · show/hide notes"),
                     ("d / y", "rerun diff · copy visible Thai"),
@@ -4362,6 +4577,7 @@ fn qa_visual(issue: &qa::QaIssue, theme: &Theme) -> (&'static str, ratatui::styl
         QaKind::Continuity {
             severity: Severity::Warning,
         } => ("‖", theme.status_warn, "warning".to_string()),
+        QaKind::Consistency => ("≠", theme.status_warn, "consistency".to_string()),
     }
 }
 
@@ -4371,6 +4587,7 @@ fn qa_default_detail(issue: &qa::QaIssue) -> &'static str {
         qa::QaKind::ChapterFailed => "translation failed — see activity log",
         qa::QaKind::ReviewChunk { .. } => "committed without passing review",
         qa::QaKind::Continuity { .. } => "continuity note",
+        qa::QaKind::Consistency => "roster rendering differs across volumes",
     }
 }
 

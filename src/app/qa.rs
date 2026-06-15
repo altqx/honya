@@ -24,6 +24,8 @@ pub enum QaKind {
     ChapterFailed,
     /// A continuity note the Orchestrator flagged (warning or conflict).
     Continuity { severity: Severity },
+    /// Project-wide roster rendering drift, not chapter-anchored.
+    Consistency,
 }
 
 /// One QA finding, navigable to `chapter` (None = a note not anchored to a chapter).
@@ -128,6 +130,18 @@ pub fn collect(active: &ActiveProject) -> QaReport {
             title,
             kind: QaKind::Continuity { severity },
             detail: note.note.clone(),
+        });
+    }
+
+    // Shared rosters can drift across volumes; surface that in QA.
+    let chars = crate::workspace::characters::load(&active.workspace);
+    let terms = crate::workspace::glossary::load(&active.workspace);
+    for issue in crate::workspace::consistency::roster_consistency(&chars, &terms) {
+        report.issues.push(QaIssue {
+            chapter: None,
+            title: String::new(),
+            kind: QaKind::Consistency,
+            detail: issue.detail,
         });
     }
 

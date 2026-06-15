@@ -506,7 +506,10 @@ pub fn coherence_schema() -> serde_json::Value {
                     "required": ["severity", "note"],
                     "properties": {
                         "severity": { "type": "string", "enum": ["info", "warning", "conflict"] },
-                        "note": { "type": "string" }
+                        "note": { "type": "string" },
+                        "resolve_kind": { "type": "string", "enum": ["term", "character", ""] },
+                        "resolve_jp": { "type": "string" },
+                        "resolve_canonical_th": { "type": "string" }
                     }
                 }
             }

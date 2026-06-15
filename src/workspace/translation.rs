@@ -143,6 +143,43 @@ pub fn chunk_marker_line_in(text: &str, chunk: u32) -> Option<u32> {
         .map(|i| i as u32)
 }
 
+/// Readable Thai prose for `chunk`, with honya markers and review banner stripped.
+/// Returns `None` when the chunk marker is absent.
+pub fn chunk_prose_in(text: &str, chunk: u32) -> Option<String> {
+    chunk_block_ranges(text)
+        .into_iter()
+        .find(|(idx, _, _)| *idx == chunk)
+        .map(|(_, start, end)| export_prose(&text[start..end]))
+}
+
+/// Active review reason for `chunk`; `Some("")` means flagged with no reason line.
+pub fn chunk_review_reason_in(text: &str, chunk: u32) -> Option<String> {
+    chunk_block_ranges(text)
+        .into_iter()
+        .find(|(idx, _, _)| *idx == chunk)
+        .filter(|(_, start, end)| text[*start..*end].contains(REVIEW_NEEDED_MARKER))
+        .map(|(_, start, end)| extract_review_reason(&text[start..end]))
+}
+
+/// Replace one chunk's prose and clear any review-needed banner/marker.
+/// Returns `None` when the chunk marker is absent.
+pub fn replace_chunk_body(text: &str, chunk: u32, new_prose: &str) -> Option<String> {
+    let (_, start, end) = chunk_block_ranges(text)
+        .into_iter()
+        .find(|(idx, _, _)| *idx == chunk)?;
+    let marker = chunk_marker(chunk);
+    let mut block = String::with_capacity(marker.len() + new_prose.len() + 4);
+    block.push_str(&marker);
+    block.push('\n');
+    block.push_str(new_prose.trim_end_matches('\n'));
+    block.push_str("\n\n");
+    let mut out = String::with_capacity(text.len() - (end - start) + block.len());
+    out.push_str(&text[..start]);
+    out.push_str(&block);
+    out.push_str(&text[end..]);
+    Some(out)
+}
+
 /// Return the indices of review-needed chunks that were *skipped*: committed with
 /// the flag but no usable Thai (only the marker + `[REVIEW NEEDED]` banner). A
 /// chapter with any of these is partially translated, not merely unreviewed. We
@@ -432,6 +469,35 @@ fn ensure_parent(path: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chunk_prose_and_review_reason_and_replace() {
+        let text = format!(
+            "{total}\n\n{m0}\nสวัสดีชาวโลก\n\n{m1}\n{rn}\n> ⚠️ **[REVIEW NEEDED]** chunk 2\n>\n> เหตุผลจากผู้ตรวจ: meaning drift\n\nบรรทัดที่สอง\n",
+            total = total_marker(2),
+            m0 = chunk_marker(0),
+            m1 = chunk_marker(1),
+            rn = REVIEW_NEEDED_MARKER,
+        );
+
+        assert_eq!(chunk_prose_in(&text, 0).as_deref(), Some("สวัสดีชาวโลก"));
+        assert_eq!(chunk_prose_in(&text, 1).as_deref(), Some("บรรทัดที่สอง"));
+        assert_eq!(chunk_prose_in(&text, 9), None);
+
+        assert_eq!(chunk_review_reason_in(&text, 0), None);
+        assert_eq!(
+            chunk_review_reason_in(&text, 1).as_deref(),
+            Some("meaning drift")
+        );
+
+        let updated = replace_chunk_body(&text, 1, "แก้ไขแล้ว").expect("chunk present");
+        assert!(updated.contains(&chunk_marker(1)));
+        assert!(!updated.contains(REVIEW_NEEDED_MARKER));
+        assert!(!updated.contains("[REVIEW NEEDED]"));
+        assert!(updated.contains("แก้ไขแล้ว"));
+        assert!(updated.contains("สวัสดีชาวโลก"));
+        assert_eq!(chunk_review_reason_in(&updated, 1), None);
+    }
 
     fn temp_ws(tag: &str) -> (std::path::PathBuf, Workspace) {
         let base = std::env::temp_dir().join(format!("honya_tr_{tag}_{}", std::process::id()));
