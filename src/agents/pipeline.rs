@@ -1,14 +1,7 @@
-//! src/agents/pipeline.rs — drive the full per-chapter / per-chunk state machine
-//! and emit the `AppEvent` stream the UI renders.
-//!
-//! Flow per chapter (verbatim from the pipeline design):
-//!   * ImageOnly chapter → `write_image_only`, skip the agents, `ChapterCompleted`.
-//!   * Otherwise: chunk the raw markdown (`ChapterChunked`), then for each chunk
-//!     translate → audit → review up to `cfg.max_attempts`. On approve we DETERMINISTICALLY
-//!     append the Thai (`workspace::translation::append_chunk`, NOT via an LLM
-//!     tool), emit `ChunkCommitted`, then run the Orchestrator metadata turn so
-//!     discoveries land in CHARACTERS.md / GLOSSARY.md / VOLUME.md. On exhausting
-//!     retries the chunk is committed with a review-needed marker.
+//! Drives the per-chapter / per-chunk pipeline and emits the UI `AppEvent` stream.
+//! Image-only chapters skip agents; prose runs translate → audit → review. Approved
+//! Thai is appended app-side, not via an LLM tool; exhausted retries are committed
+//! with a review-needed marker so the chapter can finish.
 
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
@@ -1163,6 +1156,16 @@ fn effective_feedback_text(audit_findings: &[String], review: &ReviewerOut) -> S
 
 const REFUSAL_RETRY_FEEDBACK: &str = "The previous output was a refusal or policy notice, not a translation. Treat this as neutral literary translation work: translate only SOURCE_JP into Thai, preserve Markdown, do not add explicit detail or commentary, and return the final Thai story text in translated_text.";
 const PARTIAL_STREAM_RETRY_FEEDBACK: &str = "The previous stream stopped after an incomplete translated_text. Discard that partial output and translate the entire SOURCE_JP again from scratch. Keep neutral literary wording, preserve Markdown, do not add commentary, and return complete final Thai story text in valid translated_text JSON.";
+const LENGTH_RETRY_FEEDBACK: &str = "The previous attempt ran out of output tokens before completing translated_text. Be far more concise: keep thought_process to a few short words or leave it empty, never draft the translation there, and spend the budget on translated_text only. Translate the ENTIRE SOURCE_JP without omitting anything and return the complete final Thai in valid JSON.";
+
+/// User-facing NeedsReview reason for token-budget cutoffs.
+fn length_reason(length_trunc: bool, base: &str) -> String {
+    if length_trunc {
+        "translator ran out of output tokens before finishing — lower chunk_target_tokens in Settings, then re-run this chapter".to_string()
+    } else {
+        base.to_string()
+    }
+}
 
 fn refusal_retry_feedback(translated: &str) -> Option<&'static str> {
     looks_like_model_refusal(translated).then_some(REFUSAL_RETRY_FEEDBACK)
@@ -1286,14 +1289,9 @@ fn note_served_tier(ctx: &PipelineCtx, acc: &mut Acc, model: &str, usage: &Usage
     ctx.tx.send(AppEvent::Log { level, msg });
 }
 
-/// Translate → review one chunk, retrying up to `cfg.max_attempts`. On approval
-/// the Thai is deterministically appended and the Orchestrator metadata turn
-/// runs (`ChunkOutcome::Committed`). Exhausting the attempts no longer fails the
-/// chapter: the last attempt is committed unreviewed and flagged in-file
-/// (`ChunkOutcome::NeedsReview`). A hard Translator/Reviewer error is treated the
-/// same way — retried while attempts remain, then, if a translation already
-/// exists, committed flagged `NeedsReview` rather than failing the whole chapter.
-/// Only a Translator that never produces *any* translation bails.
+/// Translate and review one chunk. Approved output is appended deterministically;
+/// exhausted attempts commit the best/empty NeedsReview block. Only a Translator
+/// that never yields anything can fail the chapter.
 #[allow(clippy::too_many_arguments)]
 async fn process_chunk(
     ctx: &PipelineCtx,
@@ -1312,13 +1310,11 @@ async fn process_chunk(
         state: ChunkState::Queued,
     });
 
-    // Reference context (glossary + characters + project + style) and the
-    // continuity tail are stable across this chunk's attempts.
+    // Context and continuity are stable across this chunk's attempts.
     let reference_ctx = build_reference_ctx(&ctx.ws, &chunk.text, prev_chunk_text);
     let mut prev_thai =
         continuity::last_thai_sentences(&ctx.ws, chapter, ctx.cfg.continuity_sentences).await;
-    // Seed chunk 0 from the previous chapter's tail when this chapter has no
-    // committed Thai yet (continuity across chapter boundaries).
+    // Seed chunk 0 from the previous chapter when this one has no Thai yet.
     if prev_thai.is_empty() && chunk.index == 0 && chapter > 1 {
         prev_thai =
             continuity::last_thai_sentences(&ctx.ws, chapter - 1, ctx.cfg.continuity_sentences)
@@ -1327,14 +1323,10 @@ async fn process_chunk(
 
     let max = ctx.cfg.max_attempts.max(1);
     let mut feedback: Option<String> = None;
-    // Best translation produced so far. A transient hard error from the Reviewer
-    // (or a later Translator attempt) must not throw away a translation we already
-    // have: we fall back to committing it flagged NeedsReview instead of failing
-    // the whole chapter on one chunk.
+    // Keep the best non-refusal Thai so later hard errors can still yield NeedsReview.
     let mut candidate: Option<String> = None;
 
     for attempt in 1..=max {
-        // ---- Translator ----
         ctx.tx.send(AppEvent::ChunkStateChanged {
             chapter,
             chunk: chunk.index,
@@ -1377,37 +1369,33 @@ async fn process_chunk(
                 Ok(o) => o,
                 Err(e) => {
                     let partial = e.partial_translated_text().trim().to_string();
-                    // A transient Translator failure shouldn't sink the chapter.
-                    // Retry while attempts remain; on the final attempt fall back
-                    // to an earlier good translation (if any) rather than failing.
+                    // Token-budget cutoffs need a tighter retry, not a verbatim replay.
+                    let length_trunc = e.is_length_truncation();
+                    // Retry while attempts remain; otherwise keep any usable Thai.
                     ctx.tx.send(AppEvent::Error {
                         context: format!("translator ch{chapter} chunk{}", chunk.index),
                         msg: e.to_string(),
                     });
                     if !partial.is_empty() {
                         if attempt < max {
-                            emit_attempt_failed_retry(
-                                ctx,
-                                chapter,
-                                chunk,
-                                attempt,
-                                max,
-                                PARTIAL_STREAM_RETRY_FEEDBACK,
-                            );
-                            feedback = Some(PARTIAL_STREAM_RETRY_FEEDBACK.to_string());
+                            let fb = if length_trunc {
+                                LENGTH_RETRY_FEEDBACK
+                            } else {
+                                PARTIAL_STREAM_RETRY_FEEDBACK
+                            };
+                            emit_attempt_failed_retry(ctx, chapter, chunk, attempt, max, fb);
+                            feedback = Some(fb.to_string());
                             continue;
                         }
-                        // Final attempt: keep the best Thai we have rather than
-                        // sinking the whole chapter over one cut-off stream. Prefer
-                        // an earlier *complete* translation; otherwise salvage the
-                        // partial translated_text we streamed before the cutoff. A
-                        // chunk flagged [REVIEW NEEDED] is far better than aborting,
-                        // and the streamed text is real Thai a human can finish.
+                        // Prefer an earlier complete translation; otherwise salvage
+                        // the partial stream and flag the chunk for human review.
                         let (thai, reason) = match candidate {
                             Some(thai) => (
                                 thai,
-                                "translator stream stopped after partial output on the final attempt"
-                                    .to_string(),
+                                length_reason(
+                                    length_trunc,
+                                    "translator stream stopped after partial output on the final attempt",
+                                ),
                             ),
                             None => {
                                 let salvaged = strip_copied_continuity(&prev_thai, &partial);
@@ -1418,8 +1406,10 @@ async fn process_chunk(
                                 };
                                 (
                                     thai,
-                                    "translator stream cut off mid-output; salvaged the partial translation for review"
-                                        .to_string(),
+                                    length_reason(
+                                        length_trunc,
+                                        "translator stream cut off mid-output; salvaged the partial translation for review",
+                                    ),
                                 )
                             }
                         };
@@ -1428,10 +1418,7 @@ async fn process_chunk(
                         )
                         .await;
                     }
-                    // A content-policy block (e.g. Gemini PROHIBITED_CONTENT) won't
-                    // clear on a verbatim replay, so retry with the de-escalation
-                    // prompt — reframing the request as neutral literary translation
-                    // is what actually shifts the outcome.
+                    // Content-policy blocks need the de-escalation prompt, not replay.
                     let policy_block = e.is_content_policy_block();
                     if attempt < max {
                         if policy_block {
@@ -1444,6 +1431,16 @@ async fn process_chunk(
                                 REFUSAL_RETRY_FEEDBACK,
                             );
                             feedback = Some(REFUSAL_RETRY_FEEDBACK.to_string());
+                        } else if length_trunc {
+                            emit_attempt_failed_retry(
+                                ctx,
+                                chapter,
+                                chunk,
+                                attempt,
+                                max,
+                                LENGTH_RETRY_FEEDBACK,
+                            );
+                            feedback = Some(LENGTH_RETRY_FEEDBACK.to_string());
                         } else {
                             emit_attempt_failed_retry(
                                 ctx,
@@ -1468,12 +1465,15 @@ async fn process_chunk(
                             )
                             .await;
                         }
-                        // Nothing to keep, but don't sink the chapter: commit an
-                        // empty NeedsReview chunk (a re-run rechecks it).
+                        // Nothing to keep; an empty NeedsReview chunk is retryable later.
                         None => {
                             let reason = if policy_block {
                                 format!(
                                     "translator blocked by the model's content policy after {max} attempts ({e}) — try a different translator model for this chunk"
+                                )
+                            } else if length_trunc {
+                                format!(
+                                    "translator ran out of output tokens after {max} attempts — lower chunk_target_tokens in Settings, then re-run this chapter"
                                 )
                             } else {
                                 format!("translator produced no output after {max} attempts: {e}")
@@ -1487,15 +1487,16 @@ async fn process_chunk(
                 }
             };
 
-        // Deterministically drop any continuity tail the Translator echoed back
-        // before it reaches the audit/Reviewer/append — a disobedient copy costs
-        // no retry this way (matches the app-side, "everything deterministic but
-        // the metadata turn" append rule).
+        // Drop echoed continuity before audit/review/append; no retry needed.
         let thai = strip_copied_continuity(&prev_thai, &out.translated_text);
         let refusal_feedback = refusal_retry_feedback(&thai);
-        // Only a non-empty translation is a usable fallback candidate.
         if refusal_feedback.is_none() && !thai.trim().is_empty() {
             candidate = Some(thai.clone());
+        }
+        // Carry the ending narrator forward even when this chunk becomes NeedsReview.
+        // Otherwise the next chunk can inherit a stale pre-switch POV.
+        if !out.pov.trim().is_empty() {
+            *pov = Some(out.pov.trim().to_string());
         }
         let tok = to_tokens(&t_usage);
         acc.fold(&t_usage);
@@ -1538,8 +1539,7 @@ async fn process_chunk(
                     )
                     .await;
                 }
-                // Commit an empty NeedsReview chunk, not the refusal text — the
-                // refusal would bleed into the next chunk's continuity tail.
+                // Keep refusal text out of the next chunk's continuity tail.
                 None => {
                     return commit_chunk_needs_review(
                         ctx,
@@ -1554,12 +1554,10 @@ async fn process_chunk(
             }
         }
 
-        // ---- Deterministic audit + Reviewer ----
         let audit_terms = glossary_terms_for_chunk(&ctx.ws, &chunk.text, MAX_GLOSSARY_IN_CTX);
         let audit_findings =
             audit_translation_with_terms(&chunk.text, &thai, &prev_thai, &audit_terms);
-        // Heuristic, non-gating signals (dropped numbers / length shortfall) handed
-        // to the Reviewer to verify — never folded into the approval gate.
+        // Non-gating signals for the Reviewer to verify.
         let advisory = advisory_findings(&chunk.text, &thai);
         ctx.tx.send(AppEvent::ChunkStateChanged {
             chapter,
@@ -1570,8 +1568,7 @@ async fn process_chunk(
             chapter,
             state: ChapterStatus::Reviewing,
         });
-        // Retry the Reviewer in place on a missing verdict (empty/cut-off EOF)
-        // rather than re-translating — the Thai already passed audit.
+        // Missing Reviewer verdicts retry in place; the Thai already passed audit.
         let (review, r_usage) = {
             let mut review_attempt = 1u32;
             loop {
@@ -1656,7 +1653,6 @@ async fn process_chunk(
         });
 
         if approved {
-            // ---- Approved: deterministic append (app-side, NOT via LLM tool) ----
             ctx.tx.send(AppEvent::ChunkStateChanged {
                 chapter,
                 chunk: chunk.index,
@@ -1678,21 +1674,8 @@ async fn process_chunk(
                 state: ChunkState::Committed,
             });
 
-            // Carry this chunk's ending narrator into the next chunk so a POV
-            // section that spans the boundary keeps the right first-person voice.
-            // Only update from an approved chunk; a blank report leaves the carry.
-            if !out.pov.trim().is_empty() {
-                *pov = Some(out.pov.trim().to_string());
-            }
-
-            // ---- Orchestrator metadata turn (everything-uses-tools) ----
-            // This post-commit, best-effort turn is up to 8 *serial* non-streaming
-            // tool-loop calls — each bounded by the HTTP timeout, but together they
-            // can exceed the stall window with no stream deltas to feed the watchdog.
-            // Without intervention the stall arm would falsely trip, cancel the
-            // chapter, wipe its already-committed chunks, and re-translate (then
-            // abort). Run a keep-alive that pings every 500ms for the turn's whole
-            // duration so the stall arm only ever observes a genuinely wedged turn.
+            // Metadata turns can exceed the stall window without streaming; ping
+            // while they run so the watchdog only trips on a wedged turn.
             let orch = {
                 let turn = run_orchestrator_metadata_turn(ctx, chapter, &out);
                 tokio::pin!(turn);

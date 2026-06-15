@@ -138,7 +138,9 @@ pub fn audit_translation_with_terms(
 
     let translated_jp_chars = japanese_char_count(translated);
     let translated_chars = translated.chars().filter(|ch| !ch.is_whitespace()).count();
-    if translated_jp_chars >= 30 && translated_jp_chars * 5 >= translated_chars {
+    // Residual JP above ~1/6 of output usually means a half-translated chunk.
+    // The floor avoids tripping on one retained name or term.
+    if translated_jp_chars >= 24 && translated_jp_chars * 6 >= translated_chars {
         findings.push(
             "translated_text still contains substantial untranslated Japanese; translate remaining Japanese prose while preserving locked names/terms"
                 .to_string(),
@@ -156,14 +158,8 @@ pub fn audit_translation_with_terms(
     findings
 }
 
-/// Heuristic, *advisory* checks surfaced to the Reviewer as soft signals — NOT
-/// part of the hard mechanical gate (`audit_translation_with_terms`), because a
-/// false positive must never force-reject a good translation. The Reviewer is told
-/// these may be wrong and to verify against the source before acting.
-///
-/// Covers two classes of silent error the structural audit misses: dropped
-/// multi-digit numbers (ages, years, room/quantity figures) and gross length
-/// shortfalls that suggest summarization/truncation.
+/// Soft Reviewer signals, not hard gates; false positives must never force reject.
+/// Catches dropped multi-digit numbers and severe length shortfalls.
 pub fn advisory_findings(source_jp: &str, thai: &str) -> Vec<String> {
     let source = source_jp.trim();
     let translated = thai.trim();
@@ -172,9 +168,7 @@ pub fn advisory_findings(source_jp: &str, thai: &str) -> Vec<String> {
         return findings;
     }
 
-    // Numeral fidelity: every multi-digit number written with digits in the source
-    // should survive into the translation. Single digits are skipped — Thai often
-    // spells small counts out (3人 → สามคน), which would be a false positive.
+    // Multi-digit source numbers should survive; single digits are often spelled out.
     let translated_numbers = digit_runs(translated);
     let mut reported: Vec<String> = Vec::new();
     for num in digit_runs(source) {
@@ -189,21 +183,16 @@ pub fn advisory_findings(source_jp: &str, thai: &str) -> Vec<String> {
         }
     }
 
-    // Length-shortfall: Thai prose normally runs LONGER than the Japanese source, so
-    // a translation far shorter than the source is a strong omission smell. Bounded
-    // to substantial chunks to avoid noise on short dialogue beats.
     let jp = japanese_char_count(source);
     let th = thai_char_count(translated);
-    if jp >= 80 && th * 2 < jp {
+    // Thai under ~3/4 of the source length is an omission smell on substantial chunks.
+    if jp >= 80 && th * 4 < jp * 3 {
         findings.push(format!(
             "translation looks much shorter than the source ({th} Thai chars vs {jp} Japanese chars); verify no sentences or details were omitted"
         ));
     }
 
-    // Stray Han/CJK glyphs absent from the source: ADVISORY only, not a hard gate.
-    // Kanji is Japanese, so these may be a legitimately-retained proper name or
-    // term carried over from earlier context — only the Reviewer, with the full
-    // source, can tell that apart from a corrupted single-character artifact.
+    // Advisory only: the Reviewer decides whether stray Han is a name or corruption.
     if let Some(glyphs) = glyphs_absent_from_source(source, translated, is_cjk_ideograph) {
         findings.push(format!(
             "translated_text contains Han/CJK characters ({glyphs}) not present in this source chunk; if they are a deliberately retained name/term keep them, otherwise they are stray corruption — verify against the source and re-render in Thai"

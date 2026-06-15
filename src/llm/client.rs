@@ -90,6 +90,14 @@ impl LlmError {
         matches!(self, LlmError::Api { status: 0, .. }) && !self.is_content_policy_block()
     }
 
+    /// True for a no-content `finish_reason=length`; replaying usually fails the same way.
+    pub fn is_length_truncation(&self) -> bool {
+        matches!(
+            self,
+            LlmError::EmptyContent { finish_reason, .. } if finish_reason == "length"
+        )
+    }
+
     /// True for a fault a verbatim replay might clear — the classifier the
     /// transport-level retry loop uses. Excludes deterministic failures (other
     /// `4xx`, content-policy blocks, empty/parse results). Absorbing these here

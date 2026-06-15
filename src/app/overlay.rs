@@ -1832,13 +1832,21 @@ impl Overlay {
                 Action::None
             }
             KeyCode::Enter => {
-                // Unanchored notes have no chapter target.
                 let target = match self {
-                    Overlay::Qa(st) => st.report.issues.get(st.sel).and_then(|i| i.chapter),
+                    Overlay::Qa(st) => st
+                        .report
+                        .issues
+                        .get(st.sel)
+                        .and_then(|i| i.chapter.map(|ch| (ch, i.kind.clone()))),
                     _ => None,
                 };
                 match target {
-                    Some(chapter) => {
+                    // Flagged chunks jump to the review-needed passage.
+                    Some((chapter, qa::QaKind::ReviewChunk { chunk })) => {
+                        *self = Overlay::None;
+                        Action::OpenChapterAtChunk { chapter, chunk }
+                    }
+                    Some((chapter, _)) => {
                         *self = Overlay::None;
                         Action::OpenChapter { chapter }
                     }
@@ -3497,6 +3505,10 @@ impl Overlay {
                     ("p / s", "pause · stop"),
                     ("f", "toggle follow-streaming"),
                     ("c", "cycle focused agent"),
+                    ("g", "focus the run queue"),
+                    ("J / K", "move queued chapter down · up"),
+                    ("S", "sort the queue"),
+                    ("x", "remove queued chapter"),
                     ("↵", "open result in Reader"),
                 ],
             ),
@@ -3523,6 +3535,17 @@ impl Overlay {
                     ("Tab", "Glossary↔Characters↔Style"),
                     ("↵ / e / n", "edit · edit · new"),
                     ("d / /", "delete · search"),
+                ],
+            ),
+            (
+                "Refine 精",
+                &[
+                    ("↵", "send message · run slash command"),
+                    ("@", "mention a chapter / character / term"),
+                    ("/new /sessions", "new conversation · switch"),
+                    ("/undo /diff", "restore · diff last chapter edit"),
+                    ("/model", "set the refine model"),
+                    ("/cancel", "stop the in-flight reply"),
                 ],
             ),
         ];

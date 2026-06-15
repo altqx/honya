@@ -143,6 +143,17 @@ pub enum Action {
         chapter: u32,
         line: u32,
     },
+    OpenChapterAtChunk {
+        chapter: u32,
+        chunk: u32,
+    },
+    ReaderStepChapter {
+        forward: bool,
+    },
+    ReaderCopy {
+        text: String,
+        lines: usize,
+    },
     /// Run a Reader global search across both panes for `query`.
     ReaderSearch {
         query: String,
@@ -911,6 +922,13 @@ impl App {
     fn refine_submit(&mut self, text: String) {
         if self.active.is_none() {
             self.toast = Some(Toast::warn("open a project first to use Refine"));
+            return;
+        }
+        // Refine and the pipeline write the same data blocks; concurrent turns lose updates.
+        if self.run_active {
+            self.toast = Some(Toast::warn(
+                "a translation run is active — pause or stop it before using Refine",
+            ));
             return;
         }
         if !self.ensure_refine_agent() {
@@ -2198,6 +2216,16 @@ impl App {
                     self.reader.scroll_to_line(line);
                 }
             }
+            Action::OpenChapterAtChunk { chapter, chunk } => {
+                self.open_chapter(chapter);
+                if matches!(self.screen, Screen::Reader) && self.reader.current_chapter() == chapter
+                {
+                    self.reader.scroll_to_chunk(chunk);
+                }
+            }
+            Action::ReaderStepChapter { forward } => {
+                self.step_reader_chapter(forward);
+            }
             Action::ReaderSearch { query } => {
                 let count = self.reader.run_search(&query);
                 self.toast = Some(if count == 0 {
@@ -2409,6 +2437,17 @@ impl App {
             Action::RemoteLogout => self.remote_logout(),
             Action::OpenAuthUrl => self.open_auth_url(),
             Action::CopyAuthCode => self.copy_auth_code(),
+            Action::ReaderCopy { text, lines } => {
+                // OSC-52 has no reliable success signal, so always toast.
+                match crate::remote::copy_to_clipboard(&text) {
+                    Ok(()) => {
+                        self.toast = Some(Toast::info(format!("copied {lines} lines of Thai")))
+                    }
+                    Err(_) => {
+                        self.toast = Some(Toast::warn("couldn't copy — terminal blocked clipboard"))
+                    }
+                }
+            }
         }
     }
 
@@ -2761,6 +2800,64 @@ impl App {
             self.screen = Screen::Reader;
         } else {
             self.toast = Some(Toast::warn("no project open"));
+        }
+    }
+
+    /// Step the Reader one chapter, crossing volume boundaries when needed.
+    fn step_reader_chapter(&mut self, forward: bool) {
+        let cur = self.reader.current_chapter();
+        let Some(active) = self.active.as_ref() else {
+            self.toast = Some(Toast::warn("no project open"));
+            return;
+        };
+        let vol = active.active_vol();
+        let vol_max = active
+            .project
+            .volumes
+            .iter()
+            .find(|v| v.number == vol)
+            .map(|v| v.chapters.iter().map(|c| c.number).max().unwrap_or(0))
+            .unwrap_or(0);
+
+        let next = if forward {
+            cur + 1
+        } else {
+            cur.saturating_sub(1)
+        };
+        if next >= 1 && next <= vol_max {
+            self.open_chapter(next);
+            return;
+        }
+
+        let mut vols: Vec<u32> = active.project.volumes.iter().map(|v| v.number).collect();
+        vols.sort_unstable();
+        let adj = vols.iter().position(|&n| n == vol).and_then(|i| {
+            if forward {
+                vols.get(i + 1).copied()
+            } else {
+                i.checked_sub(1).and_then(|j| vols.get(j).copied())
+            }
+        });
+        let target = adj.and_then(|adj_vol| {
+            active
+                .project
+                .volumes
+                .iter()
+                .find(|v| v.number == adj_vol)
+                .and_then(|v| {
+                    let nums = v.chapters.iter().map(|c| c.number);
+                    if forward { nums.min() } else { nums.max() }
+                })
+                .map(|ch| (adj_vol, ch))
+        });
+
+        match target {
+            Some((adj_vol, ch)) => {
+                self.set_active_volume(adj_vol);
+                self.open_chapter(ch);
+                self.toast = Some(Toast::info(format!("Vol.{adj_vol:02} · chapter {ch}")));
+            }
+            None => self.toast = Some(Toast::info("no more chapters")),
         }
     }
 

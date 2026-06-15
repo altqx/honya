@@ -67,7 +67,8 @@ pub async fn record_total_chunks(ws: &Workspace, chapter: u32, total: u32) -> st
             if existing.ends_with('\n') {
                 out.push('\n');
             }
-            tokio::fs::write(&path, out).await
+            // Crash-safe write; this file is the resume substrate.
+            crate::workspace::data_block::atomic_write(&path, &out)
         }
         None => {
             if let Some(parent) = path.parent() {
@@ -133,6 +134,13 @@ pub fn review_needed_details_in(text: &str) -> Vec<(u32, String)> {
         }
     }
     out
+}
+
+/// 0-based line index of a chunk marker, in the Reader's Thai line space.
+pub fn chunk_marker_line_in(text: &str, chunk: u32) -> Option<u32> {
+    text.lines()
+        .position(|l| parse_chunk_marker(l) == Some(chunk))
+        .map(|i| i as u32)
 }
 
 /// Return the indices of review-needed chunks that were *skipped*: committed with

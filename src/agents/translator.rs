@@ -25,6 +25,11 @@ impl TranslatorStreamError {
     pub fn is_content_policy_block(&self) -> bool {
         self.source.is_content_policy_block()
     }
+
+    /// True for `finish_reason=length`, which needs a tighten-output retry.
+    pub fn is_length_truncation(&self) -> bool {
+        self.source.is_length_truncation()
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

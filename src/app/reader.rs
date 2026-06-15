@@ -345,19 +345,19 @@ impl ReaderScreen {
                 Action::None
             }
             KeyCode::Char('[') => {
-                // Previous chapter: the App owns the workspace, so signal via
-                // OpenChapter with the decremented number (App reloads us).
-                if self.chapter > 1 {
-                    Action::OpenChapter {
-                        chapter: self.chapter - 1,
-                    }
-                } else {
+                if self.chapter == 0 {
                     Action::None
+                } else {
+                    Action::ReaderStepChapter { forward: false }
                 }
             }
-            KeyCode::Char(']') => Action::OpenChapter {
-                chapter: self.chapter + 1,
-            },
+            KeyCode::Char(']') => {
+                if self.chapter == 0 {
+                    Action::None
+                } else {
+                    Action::ReaderStepChapter { forward: true }
+                }
+            }
             KeyCode::Char('z') => {
                 self.sync = !self.sync;
                 if self.sync {
@@ -393,10 +393,17 @@ impl ReaderScreen {
                 Action::None
             }
             KeyCode::Char('y') => {
-                // Copy is environment-dependent; we acknowledge via a no-op Action
-                // and let the App surface a toast through its normal channels. We
-                // keep it a no-op here so the build never depends on a clipboard dep.
-                Action::None
+                if self.chapter == 0 {
+                    Action::None
+                } else {
+                    let text = crate::workspace::translation::prose_only(&self.th);
+                    if text.trim().is_empty() {
+                        Action::None
+                    } else {
+                        let lines = text.lines().filter(|l| !l.trim().is_empty()).count();
+                        Action::ReaderCopy { text, lines }
+                    }
+                }
             }
             KeyCode::Char('/') => {
                 if self.chapter == 0 {
@@ -747,6 +754,13 @@ impl ReaderScreen {
         let target = line.saturating_sub(1).min(u16::MAX as u32) as u16;
         self.scroll = target;
         self.th_scroll = target;
+    }
+
+    /// Scroll to a QA-flagged chunk when its marker exists.
+    pub fn scroll_to_chunk(&mut self, chunk: u32) {
+        if let Some(line) = crate::workspace::translation::chunk_marker_line_in(&self.th, chunk) {
+            self.scroll_to_line(line);
+        }
     }
 
     #[allow(clippy::too_many_arguments)]

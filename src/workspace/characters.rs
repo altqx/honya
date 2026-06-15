@@ -39,8 +39,7 @@ pub enum CharacterUpsertOutcome {
 /// Insert or merge a character. Matching, in order: exact `id`; exact JP surface
 /// form against an existing `jp_name`/alias; an unambiguous JA surname+given pair
 /// (one name is the other with a surname prepended, corroborated by a shared romaji
-/// token). Weaker signals (ambiguous containment, same reading under different kanji)
-/// are returned as merge candidates instead of auto-merged — see [`CharacterUpsertOutcome`].
+/// token). Weaker signals return merge candidates; see [`CharacterUpsertOutcome`].
 pub fn upsert(ws: &Workspace, mut c: Character) -> std::io::Result<CharacterUpsertOutcome> {
     if c.id.trim().is_empty() {
         c.id = derive_id(&c);
@@ -275,6 +274,14 @@ pub fn render_context_blurb(chars: &[Character]) -> String {
         } else {
             c.thai_name.trim()
         });
+        if let Some(g) = c.gender.as_deref().filter(|x| !x.trim().is_empty()) {
+            let th = match g.trim() {
+                "male" => "ชาย",
+                "female" => "หญิง",
+                other => other,
+            };
+            s.push_str(&format!(" [เพศ: {th}]"));
+        }
         if let Some(h) = c.honorific.as_deref().filter(|x| !x.trim().is_empty()) {
             s.push_str(&format!(" [คำลงท้าย: {}]", h.trim()));
         }
@@ -731,7 +738,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// Bare given name recorded first, full name later → canonical flips to the fuller name.
+    /// Bare name first; later full name becomes canonical.
     #[test]
     fn auto_merge_adopts_fuller_name() {
         let (base, ws) = temp_ws("fuller");
@@ -747,7 +754,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// Two distinct people sharing a given name → bare form is ambiguous → suggest, don't merge.
+    /// Shared given name across two people is ambiguous, so suggest only.
     #[test]
     fn ambiguous_suffix_is_suggest_only() {
         let (base, ws) = temp_ws("ambiguous");
@@ -774,7 +781,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// Same reading on both channels but different kanji (みや/未夜) → suggest-only, never auto-merge.
+    /// Same reading but different kanji suggests only.
     #[test]
     fn reading_match_is_suggest_only() {
         let (base, ws) = temp_ws("reading");
