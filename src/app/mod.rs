@@ -853,9 +853,9 @@ impl App {
 
     fn push_remote_snapshot(&self) {
         if let Some(out) = &self.remote_out {
-            let _ = out.send(crate::remote::protocol::RemoteOutbound::Snapshot(
+            let _ = out.send(crate::remote::protocol::RemoteOutbound::Snapshot(Box::new(
                 self.remote_snapshot(),
-            ));
+            )));
         }
     }
 
@@ -1176,7 +1176,7 @@ impl App {
             | AppEvent::PipelineResumed
             | AppEvent::VolumeStarted { .. }
             | AppEvent::VolumeRecapUpdated { .. } => {
-                let _ = out.send(O::Snapshot(self.remote_snapshot()));
+                let _ = out.send(O::Snapshot(Box::new(self.remote_snapshot())));
             }
             _ => {}
         }

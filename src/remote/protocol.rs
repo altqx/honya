@@ -260,7 +260,9 @@ pub enum RemoteCommand {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum RemoteOutbound {
-    Snapshot(RemoteSnapshot),
+    // Boxed: the snapshot (full roster + lexicon + projects) dwarfs a delta, and
+    // deltas are by far the hotter variant on the channel.
+    Snapshot(Box<RemoteSnapshot>),
     Delta(RemoteDelta),
 }
 
@@ -362,7 +364,7 @@ mod tests {
                 }],
             },
         };
-        let out = RemoteOutbound::Snapshot(snap.clone());
+        let out = RemoteOutbound::Snapshot(Box::new(snap.clone()));
         let wire = out.encode();
         let v: serde_json::Value = serde_json::from_str(&wire).unwrap();
         assert_eq!(v["type"], "snapshot");
@@ -382,6 +384,33 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&wire).unwrap();
         assert_eq!(v["type"], "delta");
         assert_eq!(v["data"]["kind"], "stream");
+        let back: RemoteDelta = serde_json::from_value(v["data"].clone()).unwrap();
+        assert_eq!(back, d);
+    }
+
+    /// The lexicon delta is an internally-tagged newtype variant — its struct
+    /// fields must flatten alongside `kind` (the web reads `characters`/`glossary`
+    /// straight off `data`), not nest under a wrapper key.
+    #[test]
+    fn lexicon_delta_flattens_alongside_kind() {
+        let d = RemoteDelta::Lexicon(RemoteLexicon {
+            characters: vec![RemoteCharacter {
+                jp_name: "鈴".into(),
+                thai_name: "ริน".into(),
+                ..Default::default()
+            }],
+            glossary: vec![RemoteTerm {
+                jp_term: "魔法".into(),
+                thai_term: "เวทมนตร์".into(),
+                policy: "preferred".into(),
+                ..Default::default()
+            }],
+        });
+        let wire = RemoteOutbound::Delta(d.clone()).encode();
+        let v: serde_json::Value = serde_json::from_str(&wire).unwrap();
+        assert_eq!(v["data"]["kind"], "lexicon");
+        assert_eq!(v["data"]["characters"][0]["thai_name"], "ริน");
+        assert_eq!(v["data"]["glossary"][0]["policy"], "preferred");
         let back: RemoteDelta = serde_json::from_value(v["data"].clone()).unwrap();
         assert_eq!(back, d);
     }
