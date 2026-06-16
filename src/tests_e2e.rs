@@ -2056,6 +2056,43 @@ fn refine_renders_at_several_widths() {
     let _ = std::fs::remove_dir_all(app.active.as_ref().unwrap().project.dir.clone());
 }
 
+#[test]
+fn refine_renders_plan_and_reasoning_without_panic() {
+    use crate::model::{AppEvent, PlanStep, PlanStepStatus};
+    let mut app = refine_app_with_project("refine_plan");
+    app.screen = Screen::Refine;
+
+    app.on_app_event(AppEvent::RefinePlanUpdated {
+        steps: vec![
+            PlanStep {
+                step: "read v1/c1".to_string(),
+                status: PlanStepStatus::Completed,
+            },
+            PlanStep {
+                step: "tighten the dialogue".to_string(),
+                status: PlanStepStatus::InProgress,
+            },
+            PlanStep {
+                step: "update the glossary".to_string(),
+                status: PlanStepStatus::Pending,
+            },
+        ],
+    });
+    app.on_app_event(AppEvent::RefineReasoning {
+        delta: "the term ดาบ is inconsistent across chunks".to_string(),
+    });
+    app.on_app_event(AppEvent::RefineDelta {
+        delta: "Fixed the term in two places.".to_string(),
+    });
+    app.on_app_event(AppEvent::RefineMessageDone);
+
+    for w in [24u16, 40, 80, 132] {
+        let mut term = Terminal::new(TestBackend::new(w, 24)).unwrap();
+        term.draw(|f| app.render(f)).unwrap();
+    }
+    let _ = std::fs::remove_dir_all(app.active.as_ref().unwrap().project.dir.clone());
+}
+
 /// Build an `App` with a minimal one-volume, one-chapter active project in a temp dir.
 fn refine_app_with_project(tag: &str) -> App {
     use crate::model::{Chapter, ChapterKind, ChapterStatus, Project, UsageStats, Volume};

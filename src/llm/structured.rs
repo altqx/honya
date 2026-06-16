@@ -86,7 +86,10 @@ where
 
     for _ in 0..=retries {
         let mut field_stream = JsonStringFieldStream::new(field_name);
-        let mut raw_delta = |delta: &str| {
+        let mut raw_delta = |delta: crate::llm::StreamDelta| {
+            let crate::llm::StreamDelta::Content(delta) = delta else {
+                return; // structured outputs ignore reasoning fragments
+            };
             let field_delta = field_stream.push(delta);
             if !field_delta.is_empty() {
                 streamed_any = true;
@@ -361,7 +364,7 @@ pub fn strip_fences(s: &str) -> &str {
     inner.trim()
 }
 
-/// Strict `translation_result` schema (verbatim from `agent_prompts.md`) → `model::TranslatorOut`.
+/// Strict `translation_result` schema for `model::TranslatorOut`.
 pub fn translator_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
@@ -418,7 +421,7 @@ pub fn translator_schema() -> serde_json::Value {
     })
 }
 
-/// Strict `review_result` schema (verbatim from `agent_prompts.md`) → `model::ReviewerOut`.
+/// Strict `review_result` schema for `model::ReviewerOut`.
 pub fn reviewer_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",

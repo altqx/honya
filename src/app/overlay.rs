@@ -3757,6 +3757,7 @@ impl Overlay {
                 &[
                     ("↵", "send message · run slash command"),
                     ("@", "mention a chapter / character / term"),
+                    ("⌃R", "expand / collapse reasoning + tool details"),
                     ("/new /sessions", "new conversation · switch"),
                     ("/undo /diff", "restore · diff last chapter edit"),
                     ("/model", "set the refine model"),

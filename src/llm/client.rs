@@ -187,6 +187,13 @@ fn retry_after_hint(err: &LlmError) -> Option<u64> {
     }
 }
 
+/// A streamed fragment: visible answer text or provider-surfaced reasoning.
+#[derive(Debug, Clone, Copy)]
+pub enum StreamDelta<'a> {
+    Content(&'a str),
+    Reasoning(&'a str),
+}
+
 /// The single capability every backend (live or mock) exposes: one chat call.
 #[async_trait]
 pub trait LlmClient: Send + Sync {
@@ -195,7 +202,7 @@ pub trait LlmClient: Send + Sync {
     async fn chat_stream(
         &self,
         req: &ChatRequest,
-        on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
+        on_delta: &mut (dyn for<'a> FnMut(StreamDelta<'a>) + Send),
     ) -> Result<ChatResponse> {
         let resp = self.chat(req).await?;
         let content = resp
@@ -204,7 +211,7 @@ pub trait LlmClient: Send + Sync {
             .and_then(|choice| choice.message.content.clone())
             .unwrap_or_default();
         if !content.is_empty() {
-            on_delta(&content);
+            on_delta(StreamDelta::Content(&content));
         }
         Ok(resp)
     }
@@ -282,7 +289,7 @@ impl OpenRouterClient {
     async fn send_stream_once(
         &self,
         req: &ChatRequest,
-        on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
+        on_delta: &mut (dyn for<'a> FnMut(StreamDelta<'a>) + Send),
     ) -> Result<ChatResponse> {
         let mut stream_req = req.clone();
         stream_req.stream = Some(true);
@@ -372,13 +379,13 @@ impl LlmClient for OpenRouterClient {
     async fn chat_stream(
         &self,
         req: &ChatRequest,
-        on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
+        on_delta: &mut (dyn for<'a> FnMut(StreamDelta<'a>) + Send),
     ) -> Result<ChatResponse> {
         // Track whether any delta reached the caller: a stream error after partial
         // output can't be replayed here without double-feeding the field-stream
         // parser, so that case is left to the pipeline (the partial-stream path).
         let emitted = std::sync::atomic::AtomicBool::new(false);
-        let mut tracked = |delta: &str| {
+        let mut tracked = |delta: StreamDelta| {
             emitted.store(true, Ordering::Relaxed);
             on_delta(delta);
         };
@@ -432,6 +439,9 @@ struct StreamDeltaMessage {
     role: Option<String>,
     #[serde(default)]
     content: Option<String>,
+    /// Provider reasoning; OpenRouter uses `reasoning`, some upstreams use the alias.
+    #[serde(default, alias = "reasoning_content")]
+    reasoning: Option<String>,
     /// Tool calls arrive as indexed deltas: the first fragment for an index carries
     /// `id` + `function.name`, later fragments append `function.arguments` text.
     #[serde(default)]
@@ -535,7 +545,7 @@ impl StreamResponse {
 
 fn handle_sse_line(
     line: &[u8],
-    on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
+    on_delta: &mut (dyn for<'a> FnMut(StreamDelta<'a>) + Send),
     stream_resp: &mut StreamResponse,
 ) -> Result<()> {
     let line = String::from_utf8_lossy(line);
@@ -589,11 +599,16 @@ fn handle_sse_line(
             }
             stream_resp.finish_reason = Some(next_finish_reason);
         }
+        if let Some(reasoning) = choice.delta.reasoning
+            && !reasoning.is_empty()
+        {
+            on_delta(StreamDelta::Reasoning(&reasoning));
+        }
         if let Some(delta) = choice.delta.content
             && !delta.is_empty()
         {
             stream_resp.content.push_str(&delta);
-            on_delta(&delta);
+            on_delta(StreamDelta::Content(&delta));
         }
         if let Some(deltas) = choice.delta.tool_calls {
             for tc in deltas {
@@ -675,9 +690,19 @@ mod tests {
     #[test]
     fn sse_line_appends_content_and_final_usage() {
         let mut seen = String::new();
-        let mut on_delta = |delta: &str| seen.push_str(delta);
+        let mut reasoning = String::new();
+        let mut on_delta = |delta: StreamDelta| match delta {
+            StreamDelta::Content(s) => seen.push_str(s),
+            StreamDelta::Reasoning(s) => reasoning.push_str(s),
+        };
         let mut stream_resp = StreamResponse::default();
 
+        handle_sse_line(
+            br#"data: {"choices":[{"index":0,"delta":{"role":"assistant","reasoning":"hmm "}}]}"#,
+            &mut on_delta,
+            &mut stream_resp,
+        )
+        .unwrap();
         handle_sse_line(
             br#"data: {"id":"cmpl_1","model":"test/model","choices":[{"index":0,"delta":{"role":"assistant","content":"abc"},"finish_reason":null}],"usage":null}"#,
             &mut on_delta,
@@ -692,6 +717,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(seen, "abc");
+        assert_eq!(reasoning, "hmm ", "reasoning deltas surface separately");
+        assert_eq!(stream_resp.content, "abc", "reasoning is not mixed into content");
         assert_eq!(stream_resp.content, "abc");
         assert_eq!(stream_resp.id.as_deref(), Some("cmpl_1"));
         assert_eq!(stream_resp.model.as_deref(), Some("test/model"));
@@ -708,7 +735,7 @@ mod tests {
 
     #[test]
     fn sse_stream_accumulates_tool_calls() {
-        let mut sink = |_: &str| {};
+        let mut sink = |_: StreamDelta| {};
         let mut sr = StreamResponse::default();
         let lines: [&[u8]; 4] = [
             br#"data: {"choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","function":{"name":"upsert_character","arguments":"{\"jp_"}}]}}]}"#,

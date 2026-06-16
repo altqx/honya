@@ -15,8 +15,8 @@ use crate::llm::client::LlmClient;
 use crate::llm::tool_loop::ToolExecutor;
 use crate::llm::{ChatRequest, Message, Role, Tool};
 use crate::model::{
-    AppEvent, Character, EventTx, GlossaryTerm, RefineRequest, Relationship, StyleExample,
-    TermPolicy, ToolResult,
+    AppEvent, Character, ContinuityNote, EventTx, GlossaryTerm, PlanStep, RefineRequest,
+    Relationship, StyleExample, TermPolicy, ToolResult,
 };
 use crate::workspace::{Workspace, characters, glossary, style, translation, volume};
 
@@ -37,13 +37,58 @@ pub fn refine_tools_schema() -> serde_json::Value {
         }},
         {"type":"function","function":{
             "name":"read_chapter",
-            "description":"Read a chapter's Japanese source and/or its current Thai translation (prose only). Use before editing so you work from the real text.",
+            "description":"Read a chapter's Japanese source and/or its current Thai translation (prose only). The Thai is returned with `N│ ` line-number prefixes and a total line count; long chapters are windowed (use offset/limit to page). NEVER copy the `N│ ` prefix into an edit. Read before editing so you work from the real text.",
             "parameters":{"type":"object","additionalProperties":false,"required":["ch"],
                 "properties":{
                     "vol":{"type":"integer","description":"Volume number; defaults to the active volume."},
                     "ch":{"type":"integer"},
                     "include_jp":{"type":"boolean","description":"Include the Japanese source (default true)."},
-                    "include_th":{"type":"boolean","description":"Include the Thai translation (default true)."}
+                    "include_th":{"type":"boolean","description":"Include the Thai translation (default true)."},
+                    "offset":{"type":"integer","description":"1-based first Thai line to return (default 1)."},
+                    "limit":{"type":"integer","description":"Max Thai lines to return (default 400)."}
+                }}
+        }},
+        {"type":"function","function":{
+            "name":"grep_chapter",
+            "description":"Find a substring inside one chapter and return matching lines with their line numbers, so you can locate the exact text to pass to edit_chapter. Searches the Thai translation by default.",
+            "parameters":{"type":"object","additionalProperties":false,"required":["ch","query"],
+                "properties":{
+                    "vol":{"type":"integer"},
+                    "ch":{"type":"integer"},
+                    "query":{"type":"string"},
+                    "side":{"type":"string","enum":["th","jp","both"],"description":"Which text to search (default th)."},
+                    "ignore_case":{"type":"boolean","description":"Case-insensitive match (default true)."}
+                }}
+        }},
+        {"type":"function","function":{
+            "name":"read_meta",
+            "description":"Read the project/volume metadata you can edit: style notes, the running recap, the synopsis, chapter summaries, continuity notes, and the project title. Use before editing any of them.",
+            "parameters":{"type":"object","additionalProperties":false,
+                "properties":{
+                    "vol":{"type":"integer"},
+                    "kind":{"type":"string","enum":["all","style","recap","synopsis","summaries","notes","project"],"description":"What to read (default all)."}
+                }}
+        }},
+        {"type":"function","function":{
+            "name":"list_flagged_chunks",
+            "description":"List chunks still flagged [REVIEW NEEDED] (auto-translation that did not pass QA) with the reviewer's reason, for a chapter, a volume, or the whole project. Use to find exactly what needs fixing, then edit_chapter or refine_chapter_with_feedback those spots.",
+            "parameters":{"type":"object","additionalProperties":false,
+                "properties":{
+                    "vol":{"type":"integer","description":"Restrict to one volume; omit for the whole project."},
+                    "ch":{"type":"integer","description":"Restrict to one chapter (uses vol, else the active volume)."}
+                }}
+        }},
+        {"type":"function","function":{
+            "name":"update_plan",
+            "description":"Record your working plan as a short checklist the user sees live. Call it for any multi-step or multi-chapter task, then call it again to update status as you progress: keep exactly one step in_progress, flip finished steps to completed, and add steps you discover. Each call REPLACES the whole list. Skip it for a single trivial edit.",
+            "parameters":{"type":"object","additionalProperties":false,"required":["steps"],
+                "properties":{
+                    "steps":{"type":"array","items":{"type":"object","additionalProperties":false,
+                        "required":["step"],
+                        "properties":{
+                            "step":{"type":"string"},
+                            "status":{"type":"string","enum":["pending","in_progress","completed"]}
+                        }}}
                 }}
         }},
         {"type":"function","function":{
@@ -153,24 +198,61 @@ pub fn refine_tools_schema() -> serde_json::Value {
                 "properties":{"vol":{"type":"integer"},"jp":{"type":"string"},"th":{"type":"string"},"note":{"type":"string"}}}
         }},
         {"type":"function","function":{
+            "name":"add_continuity_note",
+            "description":"Record a continuity observation in VOLUME.md (name/gender drift, term inconsistency, plot or tone concern) for later reference — without changing chapter text.",
+            "parameters":{"type":"object","additionalProperties":false,"required":["severity","note"],
+                "properties":{
+                    "vol":{"type":"integer"},
+                    "severity":{"type":"string","enum":["info","warning","conflict"]},
+                    "note":{"type":"string"},
+                    "chapter":{"type":"integer"},
+                    "kind":{"type":"string","enum":["name","gender","term","plot","tone","other"]}
+                }}
+        }},
+        {"type":"function","function":{
             "name":"replace_chapter_text",
-            "description":"Replace a chapter's ENTIRE Thai translation with new_text. The prior version is archived first (reversible via /undo and the Reader diff). Use for a full rewrite; for a small edit prefer find_replace_in_chapter.",
+            "description":"Replace a chapter's ENTIRE Thai translation with new_text. The prior version is archived first (reversible via /undo and the Reader diff). Use for a full rewrite; for a small edit prefer edit_chapter.",
             "parameters":{"type":"object","additionalProperties":false,"required":["ch","new_text"],
                 "properties":{"vol":{"type":"integer"},"ch":{"type":"integer"},"new_text":{"type":"string"}}}
         }},
         {"type":"function","function":{
-            "name":"find_replace_in_chapter",
-            "description":"Replace occurrences of `find` with `replace` in a chapter's Thai. The prior version is archived first. Set all=true to replace every occurrence (default: first only).",
-            "parameters":{"type":"object","additionalProperties":false,"required":["ch","find","replace"],
+            "name":"edit_chapter",
+            "description":"Surgically replace an exact snippet of a chapter's Thai. `old` must match the file EXACTLY (verbatim from read_chapter, without the `N│ ` line-number prefix) and be UNIQUE — if it appears more than once the edit fails; pass a longer surrounding snippet or set replace_all=true. The prior version is archived first (reversible via /undo and the Reader diff). This is the preferred tool for any targeted wording fix.",
+            "parameters":{"type":"object","additionalProperties":false,"required":["ch","old","new"],
                 "properties":{
                     "vol":{"type":"integer"},"ch":{"type":"integer"},
+                    "old":{"type":"string","description":"Exact text to replace."},
+                    "new":{"type":"string","description":"Replacement text."},
+                    "replace_all":{"type":"boolean","description":"Replace every occurrence (default: require a unique match)."}
+                }}
+        }},
+        {"type":"function","function":{
+            "name":"multi_edit_chapter",
+            "description":"Apply several exact edits to ONE chapter's Thai in a single atomic call (edits run in order; each `old` must match — unique unless replace_all). If any edit fails, nothing is written. The prior version is archived once. Prefer this over many edit_chapter calls on the same chapter.",
+            "parameters":{"type":"object","additionalProperties":false,"required":["ch","edits"],
+                "properties":{
+                    "vol":{"type":"integer"},"ch":{"type":"integer"},
+                    "edits":{"type":"array","items":{"type":"object","additionalProperties":false,
+                        "required":["old","new"],
+                        "properties":{
+                            "old":{"type":"string"},"new":{"type":"string"},
+                            "replace_all":{"type":"boolean"}
+                        }}}
+                }}
+        }},
+        {"type":"function","function":{
+            "name":"replace_across_project",
+            "description":"Project-wide consistency fix: replace an exact Thai string in EVERY chapter (or one volume) — e.g. standardizing a name or term rendering. Set dry_run=true first to preview which chapters and how many matches WITHOUT changing anything, then run for real. Each modified chapter is archived (per-chapter Reader diff). Afterwards update the matching glossary/character entry so future translation stays consistent.",
+            "parameters":{"type":"object","additionalProperties":false,"required":["find","replace"],
+                "properties":{
+                    "vol":{"type":"integer","description":"Restrict to one volume; omit for the whole project."},
                     "find":{"type":"string"},"replace":{"type":"string"},
-                    "all":{"type":"boolean"}
+                    "dry_run":{"type":"boolean","description":"Preview match counts only; write nothing (default false)."}
                 }}
         }},
         {"type":"function","function":{
             "name":"retranslate_chapter",
-            "description":"Re-run the full Translator→Reviewer pipeline on whole chapters (a fresh, high-quality regeneration). Use this for 'redo this chapter properly'; for a small targeted fix prefer find_replace_in_chapter. The current translation is archived first.",
+            "description":"Re-run the full Translator→Reviewer pipeline on whole chapters (a fresh, high-quality regeneration). Use this for 'redo this chapter properly'; for a small targeted fix prefer edit_chapter. The current translation is archived first.",
             "parameters":{"type":"object","additionalProperties":false,"required":["chapters"],
                 "properties":{
                     "vol":{"type":"integer"},
@@ -188,7 +270,7 @@ pub fn refine_tools_schema() -> serde_json::Value {
     ])
 }
 
-const MAX_TOOL_ROUNDS: usize = 16;
+const MAX_TOOL_ROUNDS: usize = 40;
 
 pub struct RefineCtx {
     pub client: Arc<dyn LlmClient>,
@@ -221,19 +303,37 @@ fn seed_messages(root: &Path, id: &str) -> Vec<Message> {
 }
 
 fn refine_system_prompt() -> String {
-    "You are honya's Refine agent, an expert assistant for a Japanese→Thai light-novel \
-translation project. You help the user read, fix, and refine anything in the project: \
-any volume or chapter's Thai translation, the character roster, the glossary, the style \
-guide, the volume recap/synopsis, and chapter summaries.\n\n\
-Tools let you read and edit the project on disk. Always read the relevant text (read_chapter, \
-read_lexicon, search_project) before you change it, so you edit the real content. Edits are \
-applied immediately and are reversible (chapter-text edits archive the prior version), so be \
-precise and surgical: for a small wording fix use find_replace_in_chapter; only use \
-replace_chapter_text for a full rewrite you have actually produced. Keep Thai natural and \
-consistent with the established glossary and character voices.\n\n\
-Tools without an explicit `vol` act on the active volume. When the user tags a chapter like \
-@v1/c3, operate on that chapter. Reply concisely in the user's language, and after making \
-edits briefly say what you changed."
+    r#"You are honya's Refine agent — an autonomous, expert engineering assistant for a Japanese→Thai light-novel translation project, working through a chat tab inside the honya TUI. You read, fix, and refine anything in the project: any volume or chapter's Thai translation, the character roster, the glossary, the style guide, the volume recap/synopsis, and chapter summaries. Your tools read and write the project on disk; treat the on-disk files as the single source of truth.
+
+# Tone and style
+Be concise, direct, and grounded — the user reads your replies in a terminal pane. Skip preamble ("Great question!", "Sure, I can help") and filler. Lead with the result. Don't restate the user's request back to them or narrate routine tool calls ("Now I'll read the chapter"); just do the work and report what you found or changed. Match the user's language (reply in Thai if they write Thai). When you finish, give a short summary of what changed (which chapters/files, what edits) — a couple of sentences or a tight bullet list, not an essay. Reference chapters as `vN/cM`.
+
+Your replies are rendered as Markdown, so format them for a terminal: short paragraphs, `-` bullet lists for multiple points, **bold** for the key takeaway, `inline code` for terms/filenames/Thai snippets you are discussing, and fenced code blocks for any longer before/after text. Don't paste an entire chapter back to the user; quote only the lines that changed.
+
+# Autonomy and persistence
+Keep working until the user's request is fully resolved before yielding the turn. Do not stop at a plan or ask for confirmation when the next step is obvious and reversible — gather the context you need and make the change. Only stop early to ask the user when you are genuinely blocked: the request is ambiguous in a way that changes the outcome, or an action is destructive and irreversible. Don't guess about file contents — read them. If you say you will do something, do it in the same turn.
+
+# Workflow
+1. Understand the request and its scope. The user may tag targets with `@` (e.g. `@v1/c3`, `@glossary`, `@characters`, `@style`, `@recap`); a scope hint is appended to their message. Tools without an explicit `vol` act on the active volume.
+2. Gather context BEFORE editing. Use list_volumes / list_chapters to learn structure, read_chapter to see real text, grep_chapter to locate exact strings, search_project to find a term across chapters, read_lexicon and read_meta to check established names/terminology/style, and list_flagged_chunks to find spots that failed QA ([REVIEW NEEDED]). Issue independent read-only calls together rather than one at a time.
+3. For any multi-step or multi-chapter task, call update_plan to lay out the steps, then keep it current: mark exactly one step in_progress as you work it, flip it to completed when done, and add steps you discover. Skip the plan for a single trivial edit.
+4. Make changes surgically. Prefer the smallest edit that fixes the issue:
+   - edit_chapter for a targeted wording fix (exact unique match; the safe default).
+   - multi_edit_chapter to apply several fixes to one chapter atomically in a single call.
+   - replace_across_project to standardize a name/term in EVERY chapter — run it with dry_run first to preview the blast radius, then for real, and also update the matching glossary/character entry.
+   - replace_chapter_text only for a full rewrite you have actually produced.
+   - retranslate_chapter / refine_chapter_with_feedback to regenerate a chapter through the Translator→Reviewer pipeline (heavier; for "redo this chapter properly").
+   Chapter-text edits archive the prior version automatically and are reversible (the user can /undo or view the Reader diff).
+5. Verify after editing — re-read or grep the changed region to confirm the edit landed and reads naturally; fix it if not.
+
+# Editing discipline
+- read_chapter shows Thai with `N│ ` line-number prefixes. NEVER include that prefix in edit_chapter's `old`/`new`; pass only the real text.
+- edit_chapter requires `old` to match the file EXACTLY (including punctuation and spacing) and be UNIQUE. If it is not unique, pass a longer surrounding snippet, or set replace_all to change every occurrence. Always work from text you have actually read, never from memory.
+- Keep Thai natural, idiomatic, and consistent with the established glossary policies and each character's voice/pronouns. Preserve scene-break dividers (`---`), image links, and Markdown. Don't introduce raw Japanese kana or `(furigana)` parentheticals.
+- When you fix a term or name across the project, also update the glossary/character entry so future translation stays consistent — and use search_project to catch every occurrence.
+
+# Safety
+Mature source material may appear; handle characters, terms, and text neutrally and faithfully without moralizing or censoring. Do not invent facts about the story that the source/translation does not support."#
         .to_string()
 }
 
@@ -300,10 +400,13 @@ async fn run_refine_turn(
             return;
         }
 
-        let mut on_delta = |s: &str| {
-            tx.send(AppEvent::RefineDelta {
+        let mut on_delta = |d: crate::llm::StreamDelta| match d {
+            crate::llm::StreamDelta::Content(s) => tx.send(AppEvent::RefineDelta {
                 delta: s.to_string(),
-            })
+            }),
+            crate::llm::StreamDelta::Reasoning(s) => tx.send(AppEvent::RefineReasoning {
+                delta: s.to_string(),
+            }),
         };
         let resp = match client.chat_stream(req, &mut on_delta).await {
             Ok(r) => r,
@@ -341,10 +444,13 @@ async fn run_refine_turn(
         });
 
         for call in &tool_calls {
-            tx.send(AppEvent::RefineToolInvoked {
-                tool: call.function.name.clone(),
-                summary: summarize_args(&call.function.arguments),
-            });
+            // Plan calls render in the pinned panel, not the transcript.
+            if call.function.name != "update_plan" {
+                tx.send(AppEvent::RefineToolInvoked {
+                    tool: call.function.name.clone(),
+                    summary: summarize_args(&call.function.arguments),
+                });
+            }
             let result = match tools
                 .execute(&call.function.name, &call.function.arguments)
                 .await
@@ -420,6 +526,32 @@ struct ReadChapterArgs {
     include_jp: bool,
     #[serde(default = "default_true")]
     include_th: bool,
+    #[serde(default)]
+    offset: Option<usize>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+#[derive(Deserialize)]
+struct GrepChapterArgs {
+    #[serde(default)]
+    vol: Option<u32>,
+    ch: u32,
+    query: String,
+    #[serde(default)]
+    side: Option<String>,
+    #[serde(default = "default_true")]
+    ignore_case: bool,
+}
+#[derive(Deserialize)]
+struct ReadMetaArgs {
+    #[serde(default)]
+    vol: Option<u32>,
+    #[serde(default)]
+    kind: Option<String>,
+}
+#[derive(Deserialize)]
+struct UpdatePlanArgs {
+    steps: Vec<PlanStep>,
 }
 #[derive(Deserialize)]
 struct ReadLexiconArgs {
@@ -547,14 +679,55 @@ struct ReplaceChapterArgs {
     new_text: String,
 }
 #[derive(Deserialize)]
-struct FindReplaceArgs {
+struct EditChapterArgs {
     #[serde(default)]
     vol: Option<u32>,
     ch: u32,
+    old: String,
+    new: String,
+    #[serde(default)]
+    replace_all: bool,
+}
+#[derive(Deserialize)]
+struct EditOp {
+    old: String,
+    new: String,
+    #[serde(default)]
+    replace_all: bool,
+}
+#[derive(Deserialize)]
+struct MultiEditArgs {
+    #[serde(default)]
+    vol: Option<u32>,
+    ch: u32,
+    edits: Vec<EditOp>,
+}
+#[derive(Deserialize)]
+struct ReplaceAcrossArgs {
+    #[serde(default)]
+    vol: Option<u32>,
     find: String,
     replace: String,
     #[serde(default)]
-    all: bool,
+    dry_run: bool,
+}
+#[derive(Deserialize)]
+struct ListFlaggedArgs {
+    #[serde(default)]
+    vol: Option<u32>,
+    #[serde(default)]
+    ch: Option<u32>,
+}
+#[derive(Deserialize)]
+struct AddNoteArgs {
+    #[serde(default)]
+    vol: Option<u32>,
+    severity: String,
+    note: String,
+    #[serde(default)]
+    chapter: Option<u32>,
+    #[serde(default)]
+    kind: Option<String>,
 }
 #[derive(Deserialize)]
 struct RetranslateArgs {
@@ -591,6 +764,70 @@ fn cap_to(s: &str, max: usize) -> String {
 
 fn cap(s: &str) -> String {
     cap_to(s, READ_CAP)
+}
+
+const DEFAULT_LINE_LIMIT: usize = 400;
+
+/// Return a capped, 1-based line window with the `N│ ` prefix the model must strip.
+/// Tuple is `(numbered_text, total_lines, returned_to_line)`.
+fn numbered_window(text: &str, offset: usize, limit: usize) -> (String, usize, usize) {
+    let lines: Vec<&str> = text.lines().collect();
+    let total = lines.len();
+    let start = offset.saturating_sub(1).min(total);
+    let end = start.saturating_add(limit).min(total);
+    let width = (end).max(1).to_string().len();
+    let mut out = String::new();
+    for (i, line) in lines[start..end].iter().enumerate() {
+        let n = start + i + 1;
+        out.push_str(&format!("{n:>width$}│ {line}\n"));
+    }
+    (cap(out.trim_end_matches('\n')), total, end)
+}
+
+enum EditError {
+    NotFound,
+    Ambiguous(usize),
+    Other(String),
+}
+
+impl EditError {
+    fn describe(&self) -> String {
+        match self {
+            EditError::NotFound => "no exact match found".to_string(),
+            EditError::Ambiguous(n) => {
+                format!("`old` matches {n} places — make it unique or set replace_all")
+            }
+            EditError::Other(msg) => msg.clone(),
+        }
+    }
+}
+
+/// Exact edit helper: non-empty, changed `old`; unique unless `replace_all`.
+fn apply_edit(
+    content: &str,
+    old: &str,
+    new: &str,
+    replace_all: bool,
+) -> Result<(String, usize), EditError> {
+    if old.is_empty() {
+        return Err(EditError::Other("`old` is empty".to_string()));
+    }
+    if old == new {
+        return Err(EditError::Other("`old` and `new` are identical".to_string()));
+    }
+    let count = content.matches(old).count();
+    if count == 0 {
+        return Err(EditError::NotFound);
+    }
+    if count > 1 && !replace_all {
+        return Err(EditError::Ambiguous(count));
+    }
+    let updated = if replace_all {
+        content.replace(old, new)
+    } else {
+        content.replacen(old, new, 1)
+    };
+    Ok((updated, if replace_all { count } else { 1 }))
 }
 
 /// Archives current chapter text so `/undo` and Reader diff can recover it.
@@ -701,14 +938,21 @@ pub async fn dispatch_refine_tool(
         "read_chapter" => {
             let a = parse!(ReadChapterArgs);
             let w = ws(a.vol);
+            let offset = a.offset.unwrap_or(1).max(1);
+            let limit = a.limit.unwrap_or(DEFAULT_LINE_LIMIT).clamp(1, 4000);
             let mut data = serde_json::Map::new();
             if a.include_jp {
                 let jp = std::fs::read_to_string(w.raw(a.ch)).unwrap_or_default();
                 data.insert("japanese".into(), json!(cap(&jp)));
             }
             if a.include_th {
-                let th = translation::read_translated(&w, a.ch).await;
-                data.insert("thai".into(), json!(cap(&translation::prose_only(&th))));
+                let th = translation::prose_only(&translation::read_translated(&w, a.ch).await);
+                let (numbered, total, to) = numbered_window(&th, offset, limit);
+                data.insert("thai".into(), json!(numbered));
+                data.insert("thai_total_lines".into(), json!(total));
+                data.insert("thai_from_line".into(), json!(offset.min(total.max(1))));
+                data.insert("thai_to_line".into(), json!(to));
+                data.insert("thai_truncated".into(), json!(to < total));
             }
             ToolResult::data(
                 format!(
@@ -718,6 +962,111 @@ pub async fn dispatch_refine_tool(
                 ),
                 serde_json::Value::Object(data),
             )
+        }
+
+        "grep_chapter" => {
+            let a = parse!(GrepChapterArgs);
+            let w = ws(a.vol);
+            if a.query.is_empty() {
+                return ToolResult::err("empty query");
+            }
+            let side = a.side.as_deref().unwrap_or("th");
+            let needle = if a.ignore_case {
+                a.query.to_lowercase()
+            } else {
+                a.query.clone()
+            };
+            let matches_line = |line: &str| {
+                if a.ignore_case {
+                    line.to_lowercase().contains(&needle)
+                } else {
+                    line.contains(&needle)
+                }
+            };
+            let grep = |text: &str| -> Vec<serde_json::Value> {
+                text.lines()
+                    .enumerate()
+                    .filter(|(_, l)| matches_line(l))
+                    .take(50)
+                    .map(|(i, l)| json!({"line": i + 1, "text": l}))
+                    .collect()
+            };
+            let mut data = serde_json::Map::new();
+            if matches!(side, "th" | "both") {
+                let th = translation::prose_only(&translation::read_translated(&w, a.ch).await);
+                data.insert("thai".into(), json!(grep(&th)));
+            }
+            if matches!(side, "jp" | "both") {
+                let jp = std::fs::read_to_string(w.raw(a.ch)).unwrap_or_default();
+                data.insert("japanese".into(), json!(grep(&jp)));
+            }
+            ToolResult::data(format!("grep chapter {}", a.ch), serde_json::Value::Object(data))
+        }
+
+        "read_meta" => {
+            let a = parse!(ReadMetaArgs);
+            let w = ws(a.vol);
+            let kind = a.kind.as_deref().unwrap_or("all");
+            let vd = volume::load(&w);
+            let mut data = serde_json::Map::new();
+            if matches!(kind, "all" | "style") {
+                let style_md = std::fs::read_to_string(w.style_md()).unwrap_or_default();
+                let notes = match style_md.find("<!-- honya:data") {
+                    Some(i) => style_md[..i].trim().to_string(),
+                    None => style_md.trim().to_string(),
+                };
+                data.insert("style_notes".into(), json!(cap(&notes)));
+                data.insert("style_examples".into(), json!(vd.style_examples));
+            }
+            if matches!(kind, "all" | "recap") {
+                data.insert("recap".into(), json!(vd.running_recap));
+            }
+            if matches!(kind, "all" | "synopsis") {
+                data.insert("synopsis_raw".into(), json!(vd.synopsis_raw));
+                data.insert("synopsis_th".into(), json!(vd.synopsis_th));
+            }
+            if matches!(kind, "all" | "summaries") {
+                data.insert("chapter_summaries".into(), json!(vd.chapters));
+            }
+            if matches!(kind, "all" | "notes") {
+                data.insert("continuity_notes".into(), json!(vd.notes));
+            }
+            if matches!(kind, "all" | "project") {
+                let title = crate::workspace::scan::scan_one_project(root)
+                    .map(|p| p.title)
+                    .unwrap_or_default();
+                data.insert("project_title".into(), json!(title));
+            }
+            ToolResult::data("metadata", serde_json::Value::Object(data))
+        }
+
+        "update_plan" => {
+            let a = parse!(UpdatePlanArgs);
+            let steps: Vec<PlanStep> = a
+                .steps
+                .into_iter()
+                .filter(|s| !s.step.trim().is_empty())
+                .take(20)
+                .collect();
+            if steps.is_empty() {
+                return ToolResult::err("no plan steps given");
+            }
+            tx.send(AppEvent::RefinePlanUpdated {
+                steps: steps.clone(),
+            });
+            let rendered = steps
+                .iter()
+                .map(|s| {
+                    let mark = match s.status {
+                        crate::model::PlanStepStatus::Completed => "[x]",
+                        crate::model::PlanStepStatus::InProgress => "[~]",
+                        crate::model::PlanStepStatus::Pending => "[ ]",
+                    };
+                    format!("{mark} {}", s.step.trim())
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            ToolResult::ok(format!("plan updated:\n{rendered}"))
         }
 
         "read_lexicon" => {
@@ -950,6 +1299,24 @@ pub async fn dispatch_refine_tool(
             }
         }
 
+        "add_continuity_note" => {
+            let a = parse!(AddNoteArgs);
+            let w = ws(a.vol);
+            let note = ContinuityNote {
+                chapter: a.chapter,
+                severity: a.severity.clone(),
+                kind: a.kind.clone(),
+                note: a.note.clone(),
+            };
+            match volume::add_note(&w, note) {
+                Ok(()) => {
+                    emit_edit(tx, "continuity", &format!("{} note", a.severity));
+                    ToolResult::ok("continuity note recorded".to_string())
+                }
+                Err(e) => ToolResult::err(format!("add_continuity_note failed: {e}")),
+            }
+        }
+
         "replace_chapter_text" => {
             let a = parse!(ReplaceChapterArgs);
             let w = ws(a.vol);
@@ -976,44 +1343,204 @@ pub async fn dispatch_refine_tool(
             ))
         }
 
-        "find_replace_in_chapter" => {
-            let a = parse!(FindReplaceArgs);
+        "edit_chapter" => {
+            let a = parse!(EditChapterArgs);
             let w = ws(a.vol);
             let path = w.translated(a.ch);
             let content = translation::read_translated(&w, a.ch).await;
             if content.is_empty() {
                 return ToolResult::err(format!("chapter {} has no translation yet", a.ch));
             }
-            if a.find.is_empty() || !content.contains(&a.find) {
-                return ToolResult::ok(format!(
-                    "no occurrences of the search text in chapter {}",
-                    a.ch
-                ));
-            }
+            let (updated, count) = match apply_edit(&content, &a.old, &a.new, a.replace_all) {
+                Ok(r) => r,
+                Err(EditError::NotFound) => {
+                    return ToolResult::err(format!(
+                        "could not find that exact text in chapter {}. Re-read the chapter (use grep_chapter to locate it) and pass an exact substring without the `N│ ` prefix.",
+                        a.ch
+                    ));
+                }
+                Err(EditError::Ambiguous(n)) => {
+                    return ToolResult::err(format!(
+                        "`old` matches {n} places in chapter {}; pass a longer unique snippet or set replace_all=true.",
+                        a.ch
+                    ));
+                }
+                Err(EditError::Other(msg)) => return ToolResult::err(msg),
+            };
             if let Err(e) = archive_chapter(&w, a.ch) {
                 return ToolResult::err(format!("could not archive prior version: {e}"));
             }
-            let (updated, n) = if a.all {
-                (
-                    content.replace(&a.find, &a.replace),
-                    content.matches(&a.find).count(),
-                )
-            } else {
-                (content.replacen(&a.find, &a.replace, 1), 1)
-            };
             if let Err(e) = tokio::fs::write(&path, updated).await {
                 return ToolResult::err(format!("write failed: {e}"));
             }
             emit_edit(
                 tx,
                 "chapter text",
-                &format!("chapter {}: {n} replacement(s)", a.ch),
+                &format!("chapter {}: {count} edit(s)", a.ch),
             );
             tx.send(AppEvent::RefineChapterEdited {
                 vol: a.vol.unwrap_or(default_vol),
                 ch: a.ch,
             });
-            ToolResult::ok(format!("replaced {n} occurrence(s) in chapter {}", a.ch))
+            ToolResult::ok(format!("edited chapter {}: {count} replacement(s)", a.ch))
+        }
+
+        "multi_edit_chapter" => {
+            let a = parse!(MultiEditArgs);
+            let w = ws(a.vol);
+            if a.edits.is_empty() {
+                return ToolResult::err("no edits given");
+            }
+            let path = w.translated(a.ch);
+            let mut content = translation::read_translated(&w, a.ch).await;
+            if content.is_empty() {
+                return ToolResult::err(format!("chapter {} has no translation yet", a.ch));
+            }
+            let mut total = 0usize;
+            for (i, e) in a.edits.iter().enumerate() {
+                match apply_edit(&content, &e.old, &e.new, e.replace_all) {
+                    Ok((updated, n)) => {
+                        content = updated;
+                        total += n;
+                    }
+                    Err(err) => {
+                        return ToolResult::err(format!(
+                            "edit #{} failed ({}); nothing was written",
+                            i + 1,
+                            err.describe()
+                        ));
+                    }
+                }
+            }
+            if let Err(e) = archive_chapter(&w, a.ch) {
+                return ToolResult::err(format!("could not archive prior version: {e}"));
+            }
+            if let Err(e) = tokio::fs::write(&path, content).await {
+                return ToolResult::err(format!("write failed: {e}"));
+            }
+            emit_edit(
+                tx,
+                "chapter text",
+                &format!("chapter {}: {} edit(s)", a.ch, a.edits.len()),
+            );
+            tx.send(AppEvent::RefineChapterEdited {
+                vol: a.vol.unwrap_or(default_vol),
+                ch: a.ch,
+            });
+            ToolResult::ok(format!(
+                "applied {} edit(s) ({total} replacement(s)) to chapter {}",
+                a.edits.len(),
+                a.ch
+            ))
+        }
+
+        "replace_across_project" => {
+            let a = parse!(ReplaceAcrossArgs);
+            if a.find.is_empty() {
+                return ToolResult::err("`find` is empty");
+            }
+            if a.find == a.replace {
+                return ToolResult::err("`find` and `replace` are identical");
+            }
+            let Some(project) = crate::workspace::scan::scan_one_project(root) else {
+                return ToolResult::err("could not scan the project");
+            };
+            let mut hits = Vec::new();
+            let mut total = 0usize;
+            let mut chapters_changed = 0usize;
+            for v in &project.volumes {
+                if let Some(only) = a.vol
+                    && v.number != only
+                {
+                    continue;
+                }
+                let w = Workspace::new(root.to_path_buf(), v.number);
+                for c in &v.chapters {
+                    let content = translation::read_translated(&w, c.number).await;
+                    let count = content.matches(&a.find).count();
+                    if count == 0 {
+                        continue;
+                    }
+                    total += count;
+                    chapters_changed += 1;
+                    if hits.len() < 60 {
+                        hits.push(json!({"vol": v.number, "ch": c.number, "matches": count}));
+                    }
+                    if !a.dry_run {
+                        if let Err(e) = archive_chapter(&w, c.number) {
+                            return ToolResult::err(format!(
+                                "archive failed for vol {} ch {}: {e}",
+                                v.number, c.number
+                            ));
+                        }
+                        let updated = content.replace(&a.find, &a.replace);
+                        if let Err(e) = tokio::fs::write(w.translated(c.number), updated).await {
+                            return ToolResult::err(format!(
+                                "write failed for vol {} ch {}: {e}",
+                                v.number, c.number
+                            ));
+                        }
+                        tx.send(AppEvent::RefineChapterEdited {
+                            vol: v.number,
+                            ch: c.number,
+                        });
+                    }
+                }
+            }
+            if !a.dry_run && chapters_changed > 0 {
+                emit_edit(
+                    tx,
+                    "chapter text",
+                    &format!("project replace: {total} in {chapters_changed} chapter(s)"),
+                );
+            }
+            let suffix = if a.dry_run { " (dry run)" } else { "" };
+            let verb = if a.dry_run { "would change" } else { "changed" };
+            ToolResult::data(
+                format!("{verb} {total} occurrence(s) in {chapters_changed} chapter(s){suffix}"),
+                json!({ "dry_run": a.dry_run, "total_matches": total, "chapters": hits }),
+            )
+        }
+
+        "list_flagged_chunks" => {
+            let a = parse!(ListFlaggedArgs);
+            let Some(project) = crate::workspace::scan::scan_one_project(root) else {
+                return ToolResult::err("could not scan the project");
+            };
+            // A bare `ch` scopes to the active volume; an explicit `vol` always wins.
+            let only_vol = a.vol.or(a.ch.map(|_| default_vol));
+            let mut out = Vec::new();
+            let mut total = 0usize;
+            for v in &project.volumes {
+                if let Some(only) = only_vol
+                    && v.number != only
+                {
+                    continue;
+                }
+                let w = Workspace::new(root.to_path_buf(), v.number);
+                for c in &v.chapters {
+                    if let Some(only) = a.ch
+                        && c.number != only
+                    {
+                        continue;
+                    }
+                    let content = translation::read_translated(&w, c.number).await;
+                    let flagged = translation::review_needed_details_in(&content);
+                    if flagged.is_empty() {
+                        continue;
+                    }
+                    let items: Vec<_> = flagged
+                        .iter()
+                        .map(|(idx, reason)| json!({"chunk": idx + 1, "reason": reason}))
+                        .collect();
+                    total += items.len();
+                    out.push(json!({"vol": v.number, "ch": c.number, "flagged": items}));
+                }
+            }
+            ToolResult::data(
+                format!("{total} flagged chunk(s) in {} chapter(s)", out.len()),
+                json!({ "chapters": out }),
+            )
         }
 
         "retranslate_chapter" => {
@@ -1329,8 +1856,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn find_replace_edits_prose_in_place() {
-        let root = temp_root("findrep");
+    async fn edit_chapter_replaces_all_when_flagged() {
+        let root = temp_root("editall");
         let ws = Workspace::new(root.clone(), 1);
         std::fs::create_dir_all(ws.translated(1).parent().unwrap()).unwrap();
         translation::append_chunk(&ws, 1, 0, "แมวสีดำ และ แมวสีขาว")
@@ -1343,13 +1870,224 @@ mod tests {
             &root,
             1,
             &tx,
-            "find_replace_in_chapter",
-            r#"{"ch":1,"find":"แมว","replace":"สุนัข","all":true}"#,
+            "edit_chapter",
+            r#"{"ch":1,"old":"แมว","new":"สุนัข","replace_all":true}"#,
         )
         .await;
         assert!(r.ok, "{}", r.message);
         let now = translation::prose_only(&translation::read_translated(&ws, 1).await);
         assert_eq!(now, "สุนัขสีดำ และ สุนัขสีขาว");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn edit_chapter_rejects_ambiguous_match() {
+        let root = temp_root("editambig");
+        let ws = Workspace::new(root.clone(), 1);
+        std::fs::create_dir_all(ws.translated(1).parent().unwrap()).unwrap();
+        translation::append_chunk(&ws, 1, 0, "แมว และ แมว")
+            .await
+            .unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let tx = EventTx(tx);
+
+        let r = dispatch_refine_tool(
+            &root,
+            1,
+            &tx,
+            "edit_chapter",
+            r#"{"ch":1,"old":"แมว","new":"สุนัข"}"#,
+        )
+        .await;
+        assert!(!r.ok, "ambiguous match must be rejected: {}", r.message);
+        let now = translation::prose_only(&translation::read_translated(&ws, 1).await);
+        assert_eq!(now, "แมว และ แมว");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn update_plan_emits_plan_event() {
+        let root = temp_root("plan");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let etx = EventTx(tx);
+        let r = dispatch_refine_tool(
+            &root,
+            1,
+            &etx,
+            "update_plan",
+            r#"{"steps":[{"step":"read ch1","status":"in_progress"},{"step":"fix term"}]}"#,
+        )
+        .await;
+        assert!(r.ok, "{}", r.message);
+        let mut steps = None;
+        while let Ok(ev) = rx.try_recv() {
+            if let AppEvent::RefinePlanUpdated { steps: s } = ev {
+                steps = Some(s);
+            }
+        }
+        let steps = steps.expect("a plan event was emitted");
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[0].status, crate::model::PlanStepStatus::InProgress);
+        assert_eq!(steps[1].status, crate::model::PlanStepStatus::Pending);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn scannable_project(tag: &str) -> (PathBuf, Workspace) {
+        let root = temp_root(tag);
+        std::fs::write(root.join("PROJECT.md"), "# Test\n").unwrap();
+        let ws = Workspace::new(root.clone(), 1);
+        std::fs::create_dir_all(ws.raw(1).parent().unwrap()).unwrap();
+        std::fs::write(ws.raw(1), "源文").unwrap();
+        std::fs::write(ws.raw(2), "源文二").unwrap();
+        std::fs::create_dir_all(ws.translated(1).parent().unwrap()).unwrap();
+        (root, ws)
+    }
+
+    #[tokio::test]
+    async fn multi_edit_applies_in_order_and_is_atomic() {
+        let root = temp_root("multiedit");
+        let ws = Workspace::new(root.clone(), 1);
+        std::fs::create_dir_all(ws.translated(1).parent().unwrap()).unwrap();
+        translation::append_chunk(&ws, 1, 0, "หนึ่ง สอง สาม")
+            .await
+            .unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let tx = EventTx(tx);
+
+        let r = dispatch_refine_tool(
+            &root,
+            1,
+            &tx,
+            "multi_edit_chapter",
+            r#"{"ch":1,"edits":[{"old":"หนึ่ง","new":"1"},{"old":"ไม่มี","new":"x"}]}"#,
+        )
+        .await;
+        assert!(!r.ok, "a failing edit must abort the batch");
+        assert_eq!(
+            translation::prose_only(&translation::read_translated(&ws, 1).await),
+            "หนึ่ง สอง สาม",
+            "nothing was written on failure"
+        );
+
+        let r = dispatch_refine_tool(
+            &root,
+            1,
+            &tx,
+            "multi_edit_chapter",
+            r#"{"ch":1,"edits":[{"old":"หนึ่ง","new":"1"},{"old":"สอง","new":"2"}]}"#,
+        )
+        .await;
+        assert!(r.ok, "{}", r.message);
+        assert_eq!(
+            translation::prose_only(&translation::read_translated(&ws, 1).await),
+            "1 2 สาม"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn replace_across_project_dry_run_then_writes() {
+        let (root, ws) = scannable_project("replall");
+        translation::append_chunk(&ws, 1, 0, "ดาบเก่า").await.unwrap();
+        translation::append_chunk(&ws, 2, 0, "ดาบเก่า อีกครั้ง")
+            .await
+            .unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let tx = EventTx(tx);
+
+        let r = dispatch_refine_tool(
+            &root,
+            1,
+            &tx,
+            "replace_across_project",
+            r#"{"find":"ดาบเก่า","replace":"ดาบใหม่","dry_run":true}"#,
+        )
+        .await;
+        assert!(r.ok, "{}", r.message);
+        assert_eq!(r.data.unwrap()["total_matches"], 2);
+        assert!(
+            translation::read_translated(&ws, 1).await.contains("ดาบเก่า"),
+            "dry run must not write"
+        );
+
+        let r = dispatch_refine_tool(
+            &root,
+            1,
+            &tx,
+            "replace_across_project",
+            r#"{"find":"ดาบเก่า","replace":"ดาบใหม่"}"#,
+        )
+        .await;
+        assert!(r.ok, "{}", r.message);
+        assert!(
+            translation::prose_only(&translation::read_translated(&ws, 1).await).contains("ดาบใหม่")
+        );
+        assert!(
+            translation::prose_only(&translation::read_translated(&ws, 2).await).contains("ดาบใหม่")
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn list_flagged_chunks_reports_review_needed() {
+        let (root, ws) = scannable_project("flagged");
+        translation::append_chunk(&ws, 1, 0, "ผ่าน").await.unwrap();
+        translation::append_chunk_needs_review(&ws, 1, 1, "ร่าง", 3, "meaning drift")
+            .await
+            .unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let tx = EventTx(tx);
+
+        let r = dispatch_refine_tool(&root, 1, &tx, "list_flagged_chunks", "{}").await;
+        assert!(r.ok, "{}", r.message);
+        let d = r.data.unwrap();
+        let chapters = d["chapters"].as_array().unwrap();
+        assert_eq!(chapters.len(), 1);
+        assert_eq!(chapters[0]["ch"], 1);
+        let flagged = chapters[0]["flagged"].as_array().unwrap();
+        assert_eq!(flagged[0]["chunk"], 2, "0-based idx 1 surfaces as chunk 2");
+        assert!(
+            flagged[0]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("meaning drift")
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn add_continuity_note_round_trips_through_read_meta() {
+        let root = temp_root("note");
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let tx = EventTx(tx);
+
+        let r = dispatch_refine_tool(
+            &root,
+            1,
+            &tx,
+            "add_continuity_note",
+            r#"{"severity":"warning","note":"name drift on Yuu","kind":"name","chapter":3}"#,
+        )
+        .await;
+        assert!(r.ok, "{}", r.message);
+
+        let r = dispatch_refine_tool(&root, 1, &tx, "read_meta", r#"{"kind":"notes"}"#).await;
+        assert!(r.ok, "{}", r.message);
+        let notes = r.data.unwrap()["continuity_notes"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert!(
+            notes
+                .iter()
+                .any(|n| n["note"].as_str() == Some("name drift on Yuu"))
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }

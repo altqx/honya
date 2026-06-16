@@ -1260,6 +1260,10 @@ pub enum AppEvent {
     RefineDelta {
         delta: String,
     },
+    /// Streamed reasoning shown collapsibly.
+    RefineReasoning {
+        delta: String,
+    },
     RefineMessageDone,
     RefineToolInvoked {
         tool: String,
@@ -1282,6 +1286,10 @@ pub enum AppEvent {
         session: String,
         messages: Vec<crate::llm::Message>,
     },
+    /// Current task checklist; replaces the prior plan.
+    RefinePlanUpdated {
+        steps: Vec<PlanStep>,
+    },
     RefineRequest(RefineRequest),
 }
 
@@ -1290,6 +1298,23 @@ pub enum AppEvent {
 pub enum RefineRequest {
     Retranslate { vol: u32, chapters: Vec<u32> },
     RefineChapter { vol: u32, ch: u32, feedback: String },
+}
+
+/// One Refine plan step.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanStep {
+    pub step: String,
+    #[serde(default)]
+    pub status: PlanStepStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanStepStatus {
+    #[default]
+    Pending,
+    InProgress,
+    Completed,
 }
 
 /// Clonable sender handle background tasks use to talk to the UI.

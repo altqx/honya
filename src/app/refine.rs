@@ -4,14 +4,14 @@
 use std::hash::{Hash, Hasher};
 
 use ratatui::Frame;
-use ratatui::crossterm::event::{KeyCode, KeyEvent};
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
 use crate::llm::{Message, Role};
-use crate::model::{AppEvent, Project};
+use crate::model::{AppEvent, PlanStep, PlanStepStatus, Project};
 use crate::theme::{self, Theme};
 use crate::ui::input::{self, EditOpts, Edited};
 use crate::ui::mouse::{MouseGesture, MouseInput};
@@ -137,6 +137,7 @@ enum Popup {
 pub enum TurnRole {
     User,
     Assistant,
+    Reasoning,
     Tool,
 }
 
@@ -189,7 +190,10 @@ pub fn display_turns(messages: &[Message]) -> Vec<Turn> {
                     turns.push(Turn::assistant(c.clone()));
                 }
                 for call in m.tool_calls.iter().flatten() {
-                    turns.push(Turn::tool(call.function.name.clone()));
+                    // Plan calls render in the pinned panel.
+                    if call.function.name != "update_plan" {
+                        turns.push(Turn::tool(call.function.name.clone()));
+                    }
                 }
             }
             Role::Tool | Role::System => {}
@@ -219,6 +223,10 @@ pub struct RefineScreen {
     sessions: Vec<SessionMeta>,
     picker: Option<usize>,
     active_session: String,
+    /// Live checklist from `update_plan`.
+    plan: Vec<PlanStep>,
+    /// Expands finished reasoning and tool detail; streaming reasoning is always shown.
+    expanded: bool,
     transcript_area: Rect,
     input_area: Rect,
     transcript_cache: crate::ui::markdown::RenderCache,
@@ -246,6 +254,8 @@ impl RefineScreen {
             sessions: Vec::new(),
             picker: None,
             active_session: String::new(),
+            plan: Vec::new(),
+            expanded: false,
             transcript_area: Rect::default(),
             input_area: Rect::default(),
             transcript_cache: crate::ui::markdown::RenderCache::default(),
@@ -267,6 +277,7 @@ impl RefineScreen {
         self.streaming = false;
         self.scroll = 0;
         self.follow = true;
+        self.plan.clear();
     }
 
     pub fn open_picker(&mut self, sessions: Vec<SessionMeta>, active_session: String) {
@@ -291,6 +302,7 @@ impl RefineScreen {
         self.streaming = false;
         self.scroll = 0;
         self.follow = true;
+        self.plan.clear();
     }
 
     pub fn cancel(&mut self) {
@@ -300,6 +312,11 @@ impl RefineScreen {
     pub fn handle_key(&mut self, key: KeyEvent, project: Option<&Project>) -> Action {
         if let Some(sel) = self.picker {
             return self.handle_picker_key(key, sel);
+        }
+        // Details toggle works even while the input is focused.
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('r') {
+            self.expanded = !self.expanded;
+            return Action::None;
         }
         if !self.focused {
             match key.code {
@@ -431,6 +448,7 @@ impl RefineScreen {
 
         self.follow = true;
         self.last_scope = parse_scope(&text);
+        self.plan.clear(); // a fresh request rebuilds its own plan
         self.conversation.push(Turn::user(text.clone()));
         Action::RefineSubmit { text }
     }
@@ -546,26 +564,32 @@ impl RefineScreen {
 
     pub fn on_app_event(&mut self, ev: &AppEvent) {
         match ev {
+            AppEvent::RefineReasoning { delta } => self.push_reasoning(delta),
             AppEvent::RefineDelta { delta } => self.push_delta(delta),
+            AppEvent::RefinePlanUpdated { steps } => {
+                self.plan = steps.clone();
+                self.follow = true;
+            }
             AppEvent::RefineToolInvoked { tool, summary } => {
+                self.settle_reasoning();
                 self.conversation
                     .push(Turn::tool(format!("{tool} — {summary}")));
                 self.follow = true;
             }
             AppEvent::RefineEditApplied { kind, summary } => {
+                self.settle_reasoning();
                 self.conversation
                     .push(Turn::tool(format!("{kind}: {summary}")));
                 self.follow = true;
             }
             AppEvent::RefineMessageDone => {
-                if let Some(last) = self.conversation.last_mut()
-                    && last.role == TurnRole::Assistant
-                {
+                if let Some(last) = self.conversation.last_mut() {
                     last.streaming = false;
                 }
                 self.streaming = false;
             }
             AppEvent::RefineError { msg } => {
+                self.settle_reasoning();
                 self.conversation.push(Turn::tool(format!("error: {msg}")));
                 self.streaming = false;
                 self.follow = true;
@@ -575,6 +599,7 @@ impl RefineScreen {
     }
 
     fn push_delta(&mut self, delta: &str) {
+        self.settle_reasoning();
         let need_new = !matches!(
             self.conversation.last(),
             Some(t) if t.role == TurnRole::Assistant && t.streaming
@@ -591,6 +616,35 @@ impl RefineScreen {
         }
         self.streaming = true;
         self.follow = true;
+    }
+
+    fn push_reasoning(&mut self, delta: &str) {
+        let need_new = !matches!(
+            self.conversation.last(),
+            Some(t) if t.role == TurnRole::Reasoning && t.streaming
+        );
+        if need_new {
+            self.conversation.push(Turn {
+                role: TurnRole::Reasoning,
+                text: String::new(),
+                streaming: true,
+            });
+        }
+        if let Some(last) = self.conversation.last_mut() {
+            last.text.push_str(delta);
+        }
+        self.streaming = true;
+        self.follow = true;
+    }
+
+    /// Ends streaming reasoning when answer or tool output starts.
+    fn settle_reasoning(&mut self) {
+        if let Some(last) = self.conversation.last_mut()
+            && last.role == TurnRole::Reasoning
+            && last.streaming
+        {
+            last.streaming = false;
+        }
     }
 
     fn scroll_up(&mut self, n: u16) {
@@ -626,10 +680,11 @@ impl RefineScreen {
                 ("↵", "send"),
                 ("@", "mention"),
                 ("/", "cmd"),
+                ("⌃R", "details"),
                 ("esc", "tabs"),
             ]
         } else {
-            &[("type", "focus"), ("↑↓", "scroll")]
+            &[("type", "focus"), ("↑↓", "scroll"), ("⌃R", "details")]
         }
     }
 
@@ -638,17 +693,82 @@ impl RefineScreen {
             self.render_no_project(f, area, theme);
             return;
         }
-        let rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(3), Constraint::Length(3)])
-            .split(area);
+        let input_h = 3;
+        let rows = if self.plan.is_empty() {
+            Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(3), Constraint::Length(input_h)])
+                .split(area)
+        } else {
+            let plan_h = (self.plan.len() as u16 + 2).clamp(4, 10);
+            Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Min(3),
+                    Constraint::Length(plan_h),
+                    Constraint::Length(input_h),
+                ])
+                .split(area)
+        };
         self.render_transcript(f, rows[0], frame, theme);
-        self.render_input(f, rows[1], theme);
+        let input_row = rows[rows.len() - 1];
+        if !self.plan.is_empty() {
+            self.render_plan(f, rows[1], theme);
+        }
+        self.render_input(f, input_row, theme);
         if self.picker.is_some() {
             self.render_session_picker(f, area, theme);
         } else {
-            self.render_popup(f, area, rows[1].y, theme);
+            self.render_popup(f, area, input_row.y, theme);
         }
+    }
+
+    /// Pinned `update_plan` checklist.
+    fn render_plan(&self, f: &mut Frame, area: Rect, theme: &Theme) {
+        let done = self
+            .plan
+            .iter()
+            .filter(|s| s.status == PlanStepStatus::Completed)
+            .count();
+        let title = format!(" ✓ plan · {done}/{} ", self.plan.len());
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_set(theme::hairline_set())
+            .border_style(Style::default().fg(theme.rule))
+            .title(Span::styled(title, Style::default().fg(theme.ink_soft)))
+            .style(Style::default().bg(theme.bg_panel));
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+        if inner.width == 0 || inner.height == 0 {
+            return;
+        }
+        let w = inner.width as usize;
+        let lines: Vec<Line> = self
+            .plan
+            .iter()
+            .take(inner.height as usize)
+            .map(|s| {
+                let (mark, style) = match s.status {
+                    PlanStepStatus::Completed => (
+                        "✓ ",
+                        Style::default().fg(theme.ink_faint).add_modifier(Modifier::CROSSED_OUT),
+                    ),
+                    PlanStepStatus::InProgress => (
+                        "▸ ",
+                        Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+                    ),
+                    PlanStepStatus::Pending => ("◻ ", Style::default().fg(theme.ink_soft)),
+                };
+                Line::from(Span::styled(
+                    truncate_cols(&format!("{mark}{}", s.step.trim()), w),
+                    style,
+                ))
+            })
+            .collect();
+        f.render_widget(
+            Paragraph::new(lines).style(Style::default().bg(theme.bg_panel)),
+            inner,
+        );
     }
 
     /// Placeholder shown on the Refine tab when no project is open. Refine is
@@ -806,6 +926,7 @@ impl RefineScreen {
                 .for_each(|b| b.hash(&mut h));
             width.hash(&mut h);
             fg.hash(&mut h);
+            self.expanded.hash(&mut h);
             crate::ui::markdown::theme_fingerprint(theme).hash(&mut h);
             let key = h.finish();
             self.transcript_cache
@@ -842,22 +963,66 @@ impl RefineScreen {
 
     fn transcript_markdown(&self) -> String {
         let mut out = String::new();
-        for turn in &self.conversation {
+        let mut i = 0;
+        while i < self.conversation.len() {
+            let turn = &self.conversation[i];
             match turn.role {
                 TurnRole::User => {
                     out.push_str("**› you**\n\n");
                     out.push_str(&turn.text);
+                    i += 1;
                 }
-                TurnRole::Assistant => out.push_str(&turn.text),
+                TurnRole::Assistant => {
+                    out.push_str(&turn.text);
+                    i += 1;
+                }
+                TurnRole::Reasoning => {
+                    self.push_reasoning_md(&mut out, turn);
+                    i += 1;
+                }
                 TurnRole::Tool => {
-                    out.push_str("`🔧 ");
-                    out.push_str(turn.text.trim());
-                    out.push('`');
+                    // Collapse runs so the answer stays prominent; ⌃R expands detail.
+                    let start = i;
+                    while i < self.conversation.len()
+                        && self.conversation[i].role == TurnRole::Tool
+                    {
+                        i += 1;
+                    }
+                    let run = &self.conversation[start..i];
+                    if self.expanded || run.len() == 1 {
+                        let joined = run
+                            .iter()
+                            .map(|t| format!("`🔧 {}`", t.text.trim()))
+                            .collect::<Vec<_>>()
+                            .join("\n\n");
+                        out.push_str(&joined);
+                    } else {
+                        out.push_str(&format!("`🔧 {} actions · ⌃R`", run.len()));
+                    }
                 }
             }
             out.push_str("\n\n");
         }
         out
+    }
+
+    /// Render reasoning expanded while streaming or collapsed otherwise.
+    fn push_reasoning_md(&self, out: &mut String, turn: &Turn) {
+        let body = turn.text.trim();
+        if body.is_empty() {
+            return;
+        }
+        if self.expanded || turn.streaming {
+            out.push_str("> 💭 *thinking*\n>\n");
+            for line in body.lines() {
+                out.push_str("> ");
+                out.push_str(line);
+                out.push('\n');
+            }
+        } else {
+            let lines = body.lines().count().max(1);
+            out.push_str(&format!("> 💭 *thinking — {lines} line(s); ⌃R to expand*"));
+        }
     }
 
     fn render_input(&mut self, f: &mut Frame, area: Rect, theme: &Theme) {
@@ -1114,7 +1279,7 @@ mod tests {
                     id: "c1".to_string(),
                     kind: "function".to_string(),
                     function: FunctionCall {
-                        name: "find_replace_in_chapter".to_string(),
+                        name: "edit_chapter".to_string(),
                         arguments: "{}".to_string(),
                     },
                 }]),
@@ -1129,7 +1294,7 @@ mod tests {
         assert_eq!(turns[0].role, TurnRole::User);
         assert_eq!(turns[0].text, "fix the prose"); // scope hint stripped
         assert_eq!(turns[1].role, TurnRole::Tool);
-        assert_eq!(turns[1].text, "find_replace_in_chapter");
+        assert_eq!(turns[1].text, "edit_chapter");
         assert_eq!(turns[2].role, TurnRole::Assistant);
     }
 
@@ -1172,6 +1337,77 @@ mod tests {
             other => panic!("expected switch to b, got {other:?}"),
         }
         assert!(!s.picker_open());
+    }
+
+    #[test]
+    fn reasoning_streams_then_collapses_and_toggles() {
+        let mut s = RefineScreen::new();
+        s.on_app_event(&AppEvent::RefineReasoning {
+            delta: "weighing the options\nthen deciding".to_string(),
+        });
+        assert_eq!(s.conversation.len(), 1);
+        assert_eq!(s.conversation[0].role, TurnRole::Reasoning);
+        assert!(s.conversation[0].streaming, "reasoning streams live");
+
+        s.on_app_event(&AppEvent::RefineDelta {
+            delta: "Here is the fix.".to_string(),
+        });
+        assert!(!s.conversation[0].streaming, "reasoning stops when the answer starts");
+        assert_eq!(s.conversation[1].role, TurnRole::Assistant);
+
+        let md = s.transcript_markdown();
+        assert!(md.contains("thinking —"), "collapsed reasoning summary shown");
+        assert!(!md.contains("weighing the options"), "full reasoning hidden when collapsed");
+
+        s.expanded = true;
+        let md = s.transcript_markdown();
+        assert!(md.contains("weighing the options"), "expanded reasoning shows the text");
+    }
+
+    #[test]
+    fn tool_run_collapses_then_expands() {
+        let mut s = RefineScreen::new();
+        for (tool, summary) in [
+            ("read_chapter", "ch1"),
+            ("grep_chapter", "ดาบ"),
+            ("edit_chapter", "ch1: 1 edit(s)"),
+        ] {
+            s.on_app_event(&AppEvent::RefineToolInvoked {
+                tool: tool.to_string(),
+                summary: summary.to_string(),
+            });
+        }
+        let md = s.transcript_markdown();
+        assert!(md.contains("3 actions"), "consecutive tool lines coalesce: {md}");
+        assert!(!md.contains("grep_chapter"), "details hidden when collapsed");
+
+        s.expanded = true;
+        let md = s.transcript_markdown();
+        assert!(md.contains("grep_chapter") && md.contains("edit_chapter"));
+        assert!(!md.contains("3 actions"));
+    }
+
+    #[test]
+    fn plan_event_populates_pinned_checklist() {
+        let mut s = RefineScreen::new();
+        assert!(s.plan.is_empty());
+        s.on_app_event(&AppEvent::RefinePlanUpdated {
+            steps: vec![
+                PlanStep {
+                    step: "read ch1".to_string(),
+                    status: PlanStepStatus::Completed,
+                },
+                PlanStep {
+                    step: "fix the term".to_string(),
+                    status: PlanStepStatus::InProgress,
+                },
+            ],
+        });
+        assert_eq!(s.plan.len(), 2);
+        s.input = "do something".to_string();
+        s.cursor = s.input.len();
+        let _ = s.submit();
+        assert!(s.plan.is_empty(), "a new request starts with a clean plan");
     }
 
     #[test]
