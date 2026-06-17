@@ -2866,16 +2866,10 @@ impl App {
             }
         });
         let target = adj.and_then(|adj_vol| {
-            active
-                .project
-                .volumes
-                .iter()
-                .find(|v| v.number == adj_vol)
-                .and_then(|v| {
-                    let nums = v.chapters.iter().map(|c| c.number);
-                    if forward { nums.min() } else { nums.max() }
-                })
-                .map(|ch| (adj_vol, ch))
+            let vol = active.project.volumes.iter().find(|v| v.number == adj_vol)?;
+            let nums = vol.chapters.iter().map(|c| c.number);
+            let ch = if forward { nums.min() } else { nums.max() }?;
+            Some((adj_vol, ch))
         });
 
         match target {
