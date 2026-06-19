@@ -7,6 +7,7 @@
 mod agents;
 mod app;
 mod cleanse;
+mod codex;
 mod config;
 mod document_import;
 mod epub;
@@ -58,9 +59,19 @@ async fn main() -> anyhow::Result<()> {
         _ => {}
     }
 
-    let cfg = config::load();
+    let mut cfg = config::load();
+    if cfg.codex_auth.is_none()
+        && let Some(auth) = codex::import_codex_cli_auth()
+    {
+        cfg.codex_auth = Some(auth);
+        let _ = config::save(&cfg);
+    }
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
-    let mut app = App::new(EventTx(tx), cfg);
+    let etx = EventTx(tx);
+    if let Some(auth) = cfg.codex_auth.clone() {
+        codex::models::spawn_fetch_models(auth, etx.clone());
+    }
+    let mut app = App::new(etx, cfg);
 
     // Raises the recovery overlay when a resumable checkpoint exists.
     app.init_recovery_prompt();

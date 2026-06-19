@@ -270,6 +270,8 @@ pub enum Action {
     DisableRemote,
     /// Sign out: disconnect and forget the linked account.
     RemoteLogout,
+    /// Toggle Codex ("Sign in with ChatGPT"): sign in if signed out, else sign out.
+    ToggleCodexSignIn,
     /// Open the pending GitHub auth URL.
     OpenAuthUrl,
     /// Copy the pending GitHub auth code via OSC-52.
@@ -410,6 +412,7 @@ pub struct App {
     last_skeleton: Option<Skeleton>,
     tab_zones: Vec<(Rect, Screen)>,
     last_click: Option<(std::time::Instant, u16, u16)>,
+    quit_armed_at: Option<std::time::Instant>,
 
     /// Outbound feed to the relay task while remote is connected.
     remote_out: Option<tokio::sync::mpsc::UnboundedSender<crate::remote::protocol::RemoteOutbound>>,
@@ -418,6 +421,8 @@ pub struct App {
     remote_state: crate::remote::protocol::RemoteState,
     remote_watchers: u32,
     remote_auth_code: Option<crate::model::AuthCodePrompt>,
+    /// Live Codex model ids; empty means Settings uses its static fallback.
+    codex_models: Vec<String>,
     /// Dashboard label for the live remote session.
     session_label: Option<String>,
 
@@ -490,11 +495,13 @@ impl App {
             last_skeleton: None,
             tab_zones: Vec::new(),
             last_click: None,
+            quit_armed_at: None,
             remote_out: None,
             remote_kill: None,
             remote_state: crate::remote::protocol::RemoteState::Disconnected,
             remote_watchers: 0,
             remote_auth_code: None,
+            codex_models: Vec::new(),
             session_label: None,
             refine_tx: None,
             refine_cancel: None,
@@ -877,6 +884,30 @@ impl App {
                 self.remote_state = crate::remote::protocol::RemoteState::Disconnected;
                 self.toast = Some(Toast::error(format!("GitHub sign-in: {msg}")));
                 self.push_log(LogLevel::Warn, format!("GitHub sign-in failed: {msg}"));
+                self.sync_settings_remote();
+            }
+            AppEvent::CodexAuthUrl { url } => {
+                self.toast = Some(Toast::info(
+                    "Codex: opening browser to sign in…".to_string(),
+                ));
+                self.push_log(LogLevel::Info, format!("Codex sign-in: {url}"));
+            }
+            AppEvent::CodexSignedIn { auth } => {
+                self.cfg.codex_auth = Some((**auth).clone());
+                let _ = crate::config::save(&self.cfg);
+                if let Some(active) = self.active.as_mut() {
+                    active.clients = crate::build_clients(&self.cfg).ok();
+                }
+                crate::codex::models::spawn_fetch_models(*auth.clone(), self.tx.clone());
+                self.toast = Some(Toast::info("signed in to Codex".to_string()));
+                self.push_log(LogLevel::Info, "Codex account linked".to_string());
+            }
+            AppEvent::CodexAuthError { msg } => {
+                self.toast = Some(Toast::error(format!("Codex sign-in: {msg}")));
+                self.push_log(LogLevel::Warn, format!("Codex sign-in failed: {msg}"));
+            }
+            AppEvent::CodexModels { models } => {
+                self.codex_models = models.clone();
                 self.sync_settings_remote();
             }
             AppEvent::RemoteStatus { state, watchers } => {
@@ -2036,11 +2067,22 @@ impl App {
         }
     }
 
+    /// True during the one-second Ctrl-C confirmation window.
+    fn quit_armed(&self) -> bool {
+        const QUIT_CONFIRM_WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
+        self.quit_armed_at
+            .is_some_and(|t| t.elapsed() < QUIT_CONFIRM_WINDOW)
+    }
+
     /// Decide what a key means given the current overlay / screen / focus state.
     fn route_key(&mut self, k: KeyEvent) -> Action {
-        // Ctrl-C is a hard quit regardless of context.
+        // First Ctrl-C arms; a second inside the window quits.
         if k.modifiers.contains(KeyModifiers::CONTROL) && k.code == KeyCode::Char('c') {
-            return Action::Quit;
+            if self.quit_armed() {
+                return Action::Quit;
+            }
+            self.quit_armed_at = Some(std::time::Instant::now());
+            return Action::None;
         }
 
         // 1) An open overlay gets first refusal (swallows single-letter globals when capturing).
@@ -2467,6 +2509,18 @@ impl App {
             Action::EnableRemote => self.enable_remote(),
             Action::DisableRemote => self.disable_remote(),
             Action::RemoteLogout => self.remote_logout(),
+            Action::ToggleCodexSignIn => {
+                if self.cfg.codex_auth.is_some() {
+                    self.cfg.codex_auth = None;
+                    let _ = crate::config::save(&self.cfg);
+                    if let Some(active) = self.active.as_mut() {
+                        active.clients = crate::build_clients(&self.cfg).ok();
+                    }
+                    self.toast = Some(Toast::info("signed out of Codex".to_string()));
+                } else {
+                    crate::codex::auth::spawn_codex_login(self.tx.clone());
+                }
+            }
             Action::OpenAuthUrl => self.open_auth_url(),
             Action::CopyAuthCode => self.copy_auth_code(),
             Action::ReaderCopy { text, lines } => {
@@ -2604,6 +2658,7 @@ impl App {
         let watchers = self.remote_watchers;
         let code = self.remote_auth_code.clone();
         let session_label = self.session_label.clone();
+        let codex_models = self.codex_models.clone();
         if let self::overlay::Overlay::Settings(st) = &mut self.overlay {
             st.account_login = login;
             st.remote_enabled = enabled;
@@ -2611,6 +2666,9 @@ impl App {
             st.remote_watchers = watchers;
             st.remote_auth_code = code;
             st.session_label = session_label;
+            if !codex_models.is_empty() {
+                st.codex_models = codex_models;
+            }
         }
     }
 
@@ -2873,7 +2931,11 @@ impl App {
             }
         });
         let target = adj.and_then(|adj_vol| {
-            let vol = active.project.volumes.iter().find(|v| v.number == adj_vol)?;
+            let vol = active
+                .project
+                .volumes
+                .iter()
+                .find(|v| v.number == adj_vol)?;
             let nums = vol.chapters.iter().map(|c| c.number);
             let ch = if forward { nums.min() } else { nums.max() }?;
             Some((adj_vol, ch))
@@ -4048,7 +4110,7 @@ impl App {
 
     pub fn render(&mut self, f: &mut Frame) {
         let area = f.area();
-        let show_toast = self.toast.is_some();
+        let show_toast = self.toast.is_some() || self.quit_armed();
         let sk: Skeleton = layout::skeleton(area, show_toast);
         // Stash this frame's geometry so the next mouse event can hit-test it.
         self.last_area = area;
@@ -4085,7 +4147,17 @@ impl App {
         self.render_body(f, sk.body);
 
         if show_toast {
-            self.render_toast(f, sk.toast);
+            if self.quit_armed() {
+                self.render_notice(
+                    f,
+                    sk.toast,
+                    LogLevel::Warn,
+                    "press Ctrl-C again to quit",
+                    "",
+                );
+            } else if let Some(t) = self.toast.as_ref() {
+                self.render_notice(f, sk.toast, t.level, &t.msg, "⌫ dismiss ");
+            }
         }
 
         let hints = self.hints();
@@ -4140,21 +4212,19 @@ impl App {
         );
     }
 
-    fn render_toast(&self, f: &mut Frame, area: Rect) {
+    /// Render a toast or quit prompt above the footer.
+    fn render_notice(&self, f: &mut Frame, area: Rect, level: LogLevel, msg: &str, hint: &str) {
         if area.height == 0 || area.width == 0 {
             return;
         }
-        let Some(toast) = self.toast.as_ref() else {
-            return;
-        };
-        let (glyph, color) = match toast.level {
+        let (glyph, color) = match level {
             LogLevel::Trace => ("·", self.theme.ink_faint),
             LogLevel::Info => ("✓", self.theme.status_done),
             LogLevel::Warn => ("!", self.theme.status_warn),
             LogLevel::Error => ("✗", self.theme.status_failed),
         };
         let body = truncate_cols(
-            &thai_display_safe(&toast.msg),
+            &thai_display_safe(msg),
             area.width.saturating_sub(14) as usize,
         );
         let left = Line::from(vec![
@@ -4167,7 +4237,9 @@ impl App {
             Paragraph::new(left).style(Style::default().bg(self.theme.bg)),
             area,
         );
-        let hint = "⌫ dismiss ";
+        if hint.is_empty() {
+            return;
+        }
         let hint_w = crate::ui::text::col_width(hint) as u16;
         if area.width > hint_w {
             let hint_area = Rect {

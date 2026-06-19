@@ -205,6 +205,7 @@ fn retry_after_hint(err: &LlmError) -> Option<u64> {
 pub struct ClientSet {
     openrouter: Option<Arc<dyn LlmClient>>,
     tokenrouter: Option<Arc<dyn LlmClient>>,
+    codex: Option<Arc<dyn LlmClient>>,
 }
 
 impl ClientSet {
@@ -225,9 +226,16 @@ impl ClientSet {
             ))?) as Arc<dyn LlmClient>),
             None => None,
         };
+        let codex = match &cfg.codex_auth {
+            Some(auth) => {
+                Some(Arc::new(super::codex::CodexClient::new(auth.clone())?) as Arc<dyn LlmClient>)
+            }
+            None => None,
+        };
         Ok(Self {
             openrouter,
             tokenrouter,
+            codex,
         })
     }
 
@@ -237,7 +245,7 @@ impl ClientSet {
         match provider {
             Provider::OpenRouter => self.openrouter.clone(),
             Provider::Tokenrouter => self.tokenrouter.clone(),
-            Provider::Codex => None,
+            Provider::Codex => self.codex.clone(),
         }
     }
 
@@ -248,7 +256,7 @@ impl ClientSet {
 
     /// True when no provider has a key configured (fully unconfigured).
     pub fn is_empty(&self) -> bool {
-        self.openrouter.is_none() && self.tokenrouter.is_none()
+        self.openrouter.is_none() && self.tokenrouter.is_none() && self.codex.is_none()
     }
 
     /// A set with a single client serving the default (OpenRouter) provider.
@@ -257,6 +265,7 @@ impl ClientSet {
         Self {
             openrouter: Some(client),
             tokenrouter: None,
+            codex: None,
         }
     }
 
@@ -266,7 +275,7 @@ impl ClientSet {
         match provider {
             Provider::OpenRouter => self.openrouter = Some(client),
             Provider::Tokenrouter => self.tokenrouter = Some(client),
-            Provider::Codex => {}
+            Provider::Codex => self.codex = Some(client),
         }
         self
     }

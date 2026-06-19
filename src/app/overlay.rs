@@ -374,6 +374,12 @@ const SETTINGS_ORDER: [SField; 20] = [
 
 /// Number of focusable Settings fields.
 const SETTINGS_FIELDS: u8 = SETTINGS_ORDER.len() as u8;
+/// Fallback Codex models until the live backend list arrives.
+const CODEX_MODELS: [&str; 3] = ["gpt-5.5", "gpt-5", "gpt-5-codex"];
+
+fn default_codex_models() -> Vec<String> {
+    CODEX_MODELS.iter().map(|s| s.to_string()).collect()
+}
 /// Index of the OpenRouter API-key field (callers open Settings focused here).
 const SETTINGS_KEY_FIELD: u8 = 12;
 
@@ -448,6 +454,8 @@ pub struct SettingsState {
     pub field: u8,
     /// Caret byte-offset into the focused text field. Secret fields edit at the end.
     pub cursor: usize,
+    /// Codex model picker options.
+    pub codex_models: Vec<String>,
     pub account_login: Option<String>,
     pub remote_enabled: bool,
     pub remote_state: crate::remote::protocol::RemoteState,
@@ -473,6 +481,7 @@ impl SettingsState {
             max_chapter_retranslates: cfg.max_chapter_retranslates.to_string(),
             field: 0,
             cursor: 0,
+            codex_models: default_codex_models(),
             account_login: cfg.account.as_ref().map(|a| a.github_login.clone()),
             // App syncs live remote values after opening Settings.
             remote_enabled: false,
@@ -531,9 +540,55 @@ impl SettingsState {
         })
     }
 
+    /// The provider of the agent owning the focused field, if it's an agent field.
+    fn agent_provider(&self) -> Option<crate::model::Provider> {
+        Some(match self.current() {
+            SField::OrchProvider | SField::OrchModel | SField::OrchEffort => {
+                self.models.orchestrator.provider
+            }
+            SField::TransProvider | SField::TransModel | SField::TransEffort => {
+                self.models.translator.provider
+            }
+            SField::ReviewProvider | SField::ReviewModel | SField::ReviewEffort => {
+                self.models.reviewer.provider
+            }
+            SField::RefineProvider | SField::RefineModel | SField::RefineEffort => {
+                self.models.refine.provider
+            }
+            _ => return None,
+        })
+    }
+
+    /// A model field whose provider is Codex — picked from a list, not typed.
+    fn is_codex_model(&self) -> bool {
+        matches!(
+            self.current(),
+            SField::OrchModel | SField::TransModel | SField::ReviewModel | SField::RefineModel
+        ) && self.agent_provider() == Some(crate::model::Provider::Codex)
+    }
+
+    /// Whether the focused field accepts typed text (vs. a Left/Right choice).
+    fn current_is_editable_text(&self) -> bool {
+        self.current().is_text() && !self.is_codex_model()
+    }
+
     /// Cycle the focused non-text field. `forward` is Right/Space; `false` is Left.
     fn cycle(&mut self, forward: bool) {
         let cur = self.current();
+        if self.is_codex_model() {
+            let models = self.codex_models.clone();
+            if let Some(a) = self.agent_for(cur)
+                && !models.is_empty()
+            {
+                let next = match models.iter().position(|m| *m == a.model) {
+                    Some(i) => step(i, models.len(), forward),
+                    None => 0,
+                };
+                a.model = models[next].clone();
+            }
+            return;
+        }
+        let codex_models = self.codex_models.clone();
         match cur {
             SField::OrchProvider
             | SField::TransProvider
@@ -541,6 +596,13 @@ impl SettingsState {
             | SField::RefineProvider => {
                 if let Some(a) = self.agent_for(cur) {
                     a.provider = a.provider.cycled();
+                    // Snap to a valid Codex model id when switching onto Codex.
+                    if a.provider == crate::model::Provider::Codex
+                        && !codex_models.contains(&a.model)
+                        && let Some(first) = codex_models.first()
+                    {
+                        a.model = first.clone();
+                    }
                 }
             }
             SField::OrchEffort
@@ -1156,6 +1218,7 @@ impl Overlay {
             max_chapter_retranslates: String::new(),
             field: field.min(SETTINGS_FIELDS - 1),
             cursor: 0,
+            codex_models: default_codex_models(),
             account_login: None,
             remote_enabled: false,
             remote_state: crate::remote::protocol::RemoteState::Disconnected,
@@ -1829,6 +1892,9 @@ impl Overlay {
                     Action::StartRemoteLogin
                 }
             }
+            KeyCode::Char('x') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                Action::ToggleCodexSignIn
+            }
             KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 if st.account_login.is_none() {
                     Action::StartRemoteLogin
@@ -1890,7 +1956,7 @@ impl Overlay {
             }
             // Left/Right cycle the focused choice field; text fields keep them for
             // caret movement (handled by the editor below).
-            KeyCode::Left | KeyCode::Right if !st.current().is_text() => {
+            KeyCode::Left | KeyCode::Right if !st.current_is_editable_text() => {
                 st.cycle(matches!(key.code, KeyCode::Right));
                 Action::None
             }
@@ -1923,8 +1989,8 @@ impl Overlay {
                     }
                     return Action::None;
                 }
-                if !cur.is_text() {
-                    return Action::None; // cycle field: typing does nothing
+                if !st.current_is_editable_text() {
+                    return Action::None;
                 }
                 let opts = EditOpts {
                     numeric_only: cur.is_numeric(),
@@ -3526,6 +3592,15 @@ impl Overlay {
             ),
             st.field == 13,
         );
+        let (codex_status, codex_color, codex_hint) = match &cfg.codex_auth {
+            Some(_) => ("signed in", theme.status_done, "Ctrl-X sign out"),
+            None => ("not signed in", theme.ink_soft, "Ctrl-X sign in"),
+        };
+        lines.push(Line::from(vec![
+            Span::styled("   Codex (ChatGPT)     ", Style::default().fg(theme.ink_faint)),
+            Span::styled(codex_status, Style::default().fg(codex_color)),
+            Span::styled(format!("   {codex_hint}"), Style::default().fg(theme.ink_faint)),
+        ]));
 
         lines.push(header("Pipeline"));
         push(
@@ -3911,7 +3986,7 @@ impl Overlay {
                     ("` / l", "activity log (Project keeps l)"),
                     ("Esc / Backspace", "close overlay / dismiss toast"),
                     ("Mouse", "click tabs/rows · wheel scrolls · dbl-click opens"),
-                    ("q", "quit        Ctrl-C hard quit"),
+                    ("q", "quit        Ctrl-C quit"),
                 ],
             ),
             (
@@ -5122,6 +5197,27 @@ mod tests {
                 "raw SARA AM leaked into wizard step {step}"
             );
         }
+    }
+
+    /// Codex model fields are pickers, not free text.
+    #[test]
+    fn codex_provider_snaps_and_cycles_model() {
+        let mut st = SettingsState::for_test(0); // Orchestrator · provider
+        st.cycle(true); // OpenRouter → Tokenrouter
+        st.cycle(true); // Tokenrouter → Codex
+        assert_eq!(
+            st.models.orchestrator.provider,
+            crate::model::Provider::Codex
+        );
+        assert!(CODEX_MODELS.contains(&st.models.orchestrator.model.as_str()));
+
+        st.focus(1); // Orchestrator · model
+        assert!(st.is_codex_model());
+        assert!(!st.current_is_editable_text(), "Codex model is a picker");
+        let before = st.models.orchestrator.model.clone();
+        st.cycle(true);
+        assert_ne!(st.models.orchestrator.model, before);
+        assert!(CODEX_MODELS.contains(&st.models.orchestrator.model.as_str()));
     }
 
     /// The redesigned Settings overlay must render at every focus position

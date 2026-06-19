@@ -266,10 +266,8 @@ pub enum ChunkState {
     NeedsReview, // committed unreviewed after exhausting attempts (flagged in-file)
 }
 
-/// LLM provider an agent routes to. OpenRouter and Tokenrouter speak the same
-/// OpenAI-compatible `/chat/completions` wire format (only base URL + key differ),
-/// so both reuse `OpenRouterClient`; Codex uses ChatGPT's Responses API and a
-/// separate auth flow (wired in a later pass).
+/// LLM provider an agent routes to. OpenRouter and Tokenrouter share the
+/// chat/completions client; Codex uses ChatGPT's Responses API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Provider {
@@ -288,12 +286,11 @@ impl Provider {
         }
     }
 
-    /// Next provider for the Settings cycle. Codex is omitted until its auth flow
-    /// lands; a config that already holds Codex cycles back to OpenRouter.
     pub fn cycled(self) -> Self {
         match self {
             Provider::OpenRouter => Provider::Tokenrouter,
-            Provider::Tokenrouter | Provider::Codex => Provider::OpenRouter,
+            Provider::Tokenrouter => Provider::Codex,
+            Provider::Codex => Provider::OpenRouter,
         }
     }
 }
@@ -623,6 +620,9 @@ pub struct AppConfig {
     /// Remote enablement is per-session, not persisted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<RemoteAccount>,
+    /// Codex OAuth tokens; config.json is written 0600.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_auth: Option<crate::codex::CodexAuth>,
 }
 
 /// Linked GitHub identity and relay credentials.
@@ -681,6 +681,7 @@ impl Default for AppConfig {
             prepass_extract: true,
             coherence_check: true,
             account: None,
+            codex_auth: None,
         }
     }
 }
@@ -1391,6 +1392,21 @@ pub enum AppEvent {
     },
     RemoteAuthError {
         msg: String,
+    },
+    /// Browser URL for Codex OAuth.
+    CodexAuthUrl {
+        url: String,
+    },
+    /// New Codex credentials to persist.
+    CodexSignedIn {
+        auth: Box<crate::codex::CodexAuth>,
+    },
+    CodexAuthError {
+        msg: String,
+    },
+    /// Model ids fetched from the Codex backend for the Settings picker.
+    CodexModels {
+        models: Vec<String>,
     },
     RemoteStatus {
         state: crate::remote::protocol::RemoteState,

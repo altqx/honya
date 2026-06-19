@@ -71,7 +71,7 @@ The three agents (`translator.rs`, `reviewer.rs`, plus the Orchestrator metadata
 
 ### LLM layer (`src/llm/`)
 
-`LlmClient` is a `dyn`-compatible async trait; `OpenRouterClient` is the live impl and `mock.rs` (test-only) returns canned responses for the offline e2e suite. **OpenRouter and Tokenrouter are the same OpenAI-compatible `/chat/completions` wire format** — they share `OpenRouterClient`, differing only in base URL (`ClientConfig::for_endpoint`) + key (Tokenrouter key resolved from `HONYA_TOKENROUTER_API_KEY`/`TOKENROUTER_API_KEY`/config). `ClientSet` holds the per-provider clients built once per run; an agent routes to its provider via `ClientSet::for_agent` (the pipeline resolves it per call, failing fast with a clear message if that provider has no key). `Provider::Codex` is reserved for a later pass (ChatGPT OAuth + Responses API) and currently resolves to `None`. `tool_loop::run_tool_loop` drives multi-turn tool calling against any `ToolExecutor` (the pipeline's executor is `agents::tools::WorkspaceTools`). `structured::chat_structured` handles strict-JSON-schema outputs (Translator/Reviewer return typed structs). Wire-format subtleties that are easy to break: `Message.content` must serialize as JSON `null` (not skipped) on a tool-call turn, and `FunctionCall.arguments` is a JSON *string* decoded again via `parse_args`.
+`LlmClient` is a `dyn`-compatible async trait; `OpenRouterClient` is the live impl and `mock.rs` (test-only) returns canned responses for the offline e2e suite. **OpenRouter and Tokenrouter are the same OpenAI-compatible `/chat/completions` wire format** — they share `OpenRouterClient`, differing only in base URL (`ClientConfig::for_endpoint`) + key (Tokenrouter key resolved from `HONYA_TOKENROUTER_API_KEY`/`TOKENROUTER_API_KEY`/config). `ClientSet` holds the per-provider clients built once per run; an agent routes to its provider via `ClientSet::for_agent` (the pipeline resolves it per call, failing fast with a clear message if that provider has no key). **Codex** (`Provider::Codex`) signs in with ChatGPT (PKCE OAuth in `src/codex/`, auto-importing `~/.codex/auth.json`) and talks to the ChatGPT-backend **Responses API** via `llm::codex::CodexClient` — which translates honya's chat/completions-shaped `ChatRequest` into Responses (`instructions` + typed `input` items + flat tools + `text.format` + `reasoning.effort`) and folds the `response.*` SSE stream back into a `ChatResponse`. `tool_loop::run_tool_loop` drives multi-turn tool calling against any `ToolExecutor` (the pipeline's executor is `agents::tools::WorkspaceTools`). `structured::chat_structured` handles strict-JSON-schema outputs (Translator/Reviewer return typed structs). Wire-format subtleties that are easy to break: `Message.content` must serialize as JSON `null` (not skipped) on a tool-call turn, and `FunctionCall.arguments` is a JSON *string* decoded again via `parse_args`.
 
 ### Remote control & GitHub accounts (`src/remote/`)
 
@@ -99,3 +99,47 @@ Terminal layout is computed in **display columns, never bytes or chars** — use
 ## Dependency pins are intentional
 
 `Cargo.toml` carries comments explaining several deliberate version/feature choices — do **not** "upgrade" or "fix" these without reason: exactly one `crossterm` (0.29, re-exported via ratatui — only added directly for `EventStream`) and one `zip` (8.6, not 9.x prerelease) must be in the lockfile; `reqwest`'s TLS feature is `rustls` (not `rustls-tls`); `tokio-tungstenite` (WebSocket client for `src/remote`) uses `rustls-tls-webpki-roots` to share reqwest's rustls + bundled CA roots — **not** `native-tls` or `rustls-tls-native-roots` (a single `rustls` ends up in the tree; only the `webpki-roots` *data* crate has a benign duplicate); `ego-tree` is a direct dep because `scraper` doesn't re-export it; `quick-xml` is intentionally omitted (roxmltree covers all XML).
+
+
+<!-- headroom:rtk-instructions -->
+# RTK (Rust Token Killer) - Token-Optimized Commands
+
+When running shell commands, **always prefix with `rtk`**. This reduces context
+usage by 60-90% with zero behavior change. If rtk has no filter for a command,
+it passes through unchanged — so it is always safe to use.
+
+## Key Commands
+```bash
+# Git (59-80% savings)
+rtk git status          rtk git diff            rtk git log
+
+# Files & Search (60-75% savings)
+rtk ls <path>           rtk read <file>         rtk grep <pattern>
+rtk find <pattern>      rtk diff <file>
+
+# Test (90-99% savings) — shows failures only
+rtk pytest tests/       rtk cargo test          rtk test <cmd>
+
+# Build & Lint (80-90% savings) — shows errors only
+rtk tsc                 rtk lint                rtk cargo build
+rtk prettier --check    rtk mypy                rtk ruff check
+
+# Analysis (70-90% savings)
+rtk err <cmd>           rtk log <file>          rtk json <file>
+rtk summary <cmd>       rtk deps                rtk env
+
+# GitHub (26-87% savings)
+rtk gh pr view <n>      rtk gh run list         rtk gh issue list
+
+# Infrastructure (85% savings)
+rtk docker ps           rtk kubectl get         rtk docker logs <c>
+
+# Package managers (70-90% savings)
+rtk pip list            rtk pnpm install        rtk npm run <script>
+```
+
+## Rules
+- In command chains, prefix each segment: `rtk git add . && rtk git commit -m "msg"`
+- For debugging, use raw command without rtk prefix
+- `rtk proxy <cmd>` runs command without filtering but tracks usage
+<!-- /headroom:rtk-instructions -->

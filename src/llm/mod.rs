@@ -8,6 +8,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 pub mod client;
+pub mod codex;
 /// Test-only canned-response client for the offline e2e suite (not in the binary).
 #[cfg(test)]
 pub mod mock;
