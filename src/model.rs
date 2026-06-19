@@ -1264,6 +1264,11 @@ pub enum AppEvent {
     RefineReasoning {
         delta: String,
     },
+    /// Per-round token usage for the live turn (accumulates input/output counts).
+    RefineUsage {
+        prompt_tokens: u32,
+        completion_tokens: u32,
+    },
     RefineMessageDone,
     RefineToolInvoked {
         tool: String,

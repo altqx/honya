@@ -349,6 +349,8 @@ pub async fn run_refine_agent(ctx: RefineCtx, mut rx: UnboundedReceiver<RefineCo
         vec![Message::system(refine_system_prompt())],
     );
     req.tools = Some(refine_tools_vec());
+    // Surface the model's thinking in the stream; ignored by non-reasoning models.
+    req.reasoning = Some(json!({"enabled": true}));
     let mut current_id = ctx.session_id.clone();
     req.messages.extend(seed_messages(&ctx.root, &current_id));
 
@@ -415,6 +417,13 @@ async fn run_refine_turn(
                 return;
             }
         };
+
+        if let Some(u) = resp.usage {
+            tx.send(AppEvent::RefineUsage {
+                prompt_tokens: u.prompt_tokens,
+                completion_tokens: u.completion_tokens,
+            });
+        }
 
         let Some(choice) = resp.choices.first() else {
             tx.send(AppEvent::RefineError {

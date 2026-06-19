@@ -949,6 +949,7 @@ impl App {
             let _ = tx.send(crate::agents::refine::RefineControl::Submit(
                 crate::agents::refine::UserTurn { text },
             ));
+            self.refine.begin_turn();
         }
     }
 

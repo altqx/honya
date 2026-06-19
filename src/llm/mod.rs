@@ -37,6 +37,10 @@ pub struct ChatRequest {
     /// [`ClientConfig`](client::ClientConfig) at send time so it applies uniformly.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub service_tier: Option<crate::model::ServiceTier>,
+    /// OpenRouter `reasoning` control (e.g. `{"enabled": true}` to surface a
+    /// reasoning model's thinking in the stream). Ignored by non-reasoning models.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<serde_json::Value>,
 }
 
 impl ChatRequest {
@@ -51,6 +55,7 @@ impl ChatRequest {
             max_tokens: None,
             stream: None,
             service_tier: None,
+            reasoning: None,
         }
     }
 }

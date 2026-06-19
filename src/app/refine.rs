@@ -227,6 +227,13 @@ pub struct RefineScreen {
     plan: Vec<PlanStep>,
     /// Expands finished reasoning and tool detail; streaming reasoning is always shown.
     expanded: bool,
+    /// A turn is in flight (between submit and done/error): drives the working line.
+    in_flight: bool,
+    turn_started: Option<std::time::Instant>,
+    last_turn_elapsed: Option<std::time::Duration>,
+    /// (input, output) tokens — `turn` resets each request, `session` accumulates.
+    turn_tokens: (u32, u32),
+    session_tokens: (u32, u32),
     transcript_area: Rect,
     input_area: Rect,
     transcript_cache: crate::ui::markdown::RenderCache,
@@ -256,6 +263,11 @@ impl RefineScreen {
             active_session: String::new(),
             plan: Vec::new(),
             expanded: false,
+            in_flight: false,
+            turn_started: None,
+            last_turn_elapsed: None,
+            turn_tokens: (0, 0),
+            session_tokens: (0, 0),
             transcript_area: Rect::default(),
             input_area: Rect::default(),
             transcript_cache: crate::ui::markdown::RenderCache::default(),
@@ -278,6 +290,30 @@ impl RefineScreen {
         self.scroll = 0;
         self.follow = true;
         self.plan.clear();
+        self.reset_meters();
+    }
+
+    /// Mark the start of a dispatched turn (called by App once the request is sent).
+    pub fn begin_turn(&mut self) {
+        self.in_flight = true;
+        self.turn_started = Some(std::time::Instant::now());
+        self.turn_tokens = (0, 0);
+    }
+
+    fn reset_meters(&mut self) {
+        self.in_flight = false;
+        self.turn_started = None;
+        self.last_turn_elapsed = None;
+        self.turn_tokens = (0, 0);
+        self.session_tokens = (0, 0);
+    }
+
+    /// End the in-flight turn, banking its elapsed time.
+    fn finish_turn(&mut self) {
+        if let Some(start) = self.turn_started.take() {
+            self.last_turn_elapsed = Some(start.elapsed());
+        }
+        self.in_flight = false;
     }
 
     pub fn open_picker(&mut self, sessions: Vec<SessionMeta>, active_session: String) {
@@ -303,10 +339,12 @@ impl RefineScreen {
         self.scroll = 0;
         self.follow = true;
         self.plan.clear();
+        self.reset_meters();
     }
 
     pub fn cancel(&mut self) {
         self.streaming = false;
+        self.finish_turn();
     }
 
     pub fn handle_key(&mut self, key: KeyEvent, project: Option<&Project>) -> Action {
@@ -366,6 +404,7 @@ impl RefineScreen {
 
         match key.code {
             KeyCode::Enter => self.submit(),
+            KeyCode::Esc if self.in_flight => Action::RefineCancel,
             KeyCode::Esc => {
                 self.focused = false;
                 Action::None
@@ -565,6 +604,15 @@ impl RefineScreen {
     pub fn on_app_event(&mut self, ev: &AppEvent) {
         match ev {
             AppEvent::RefineReasoning { delta } => self.push_reasoning(delta),
+            AppEvent::RefineUsage {
+                prompt_tokens,
+                completion_tokens,
+            } => {
+                self.turn_tokens.0 = self.turn_tokens.0.saturating_add(*prompt_tokens);
+                self.turn_tokens.1 = self.turn_tokens.1.saturating_add(*completion_tokens);
+                self.session_tokens.0 = self.session_tokens.0.saturating_add(*prompt_tokens);
+                self.session_tokens.1 = self.session_tokens.1.saturating_add(*completion_tokens);
+            }
             AppEvent::RefineDelta { delta } => self.push_delta(delta),
             AppEvent::RefinePlanUpdated { steps } => {
                 self.plan = steps.clone();
@@ -587,12 +635,14 @@ impl RefineScreen {
                     last.streaming = false;
                 }
                 self.streaming = false;
+                self.finish_turn();
             }
             AppEvent::RefineError { msg } => {
                 self.settle_reasoning();
                 self.conversation.push(Turn::tool(format!("error: {msg}")));
                 self.streaming = false;
                 self.follow = true;
+                self.finish_turn();
             }
             _ => {}
         }
@@ -675,6 +725,8 @@ impl RefineScreen {
                 ("d", "delete"),
                 ("esc", "close"),
             ]
+        } else if self.in_flight {
+            &[("esc", "interrupt"), ("⌃R", "details"), ("↑↓", "scroll")]
         } else if self.focused {
             &[
                 ("↵", "send"),
@@ -945,6 +997,14 @@ impl RefineScreen {
             }
         }
 
+        // Live working line (or, when idle, a session-usage summary). Built fresh
+        // each frame so the spinner + elapsed time animate without busting the
+        // markdown cache above.
+        if let Some(status) = self.status_line(frame, theme) {
+            lines.push(Line::raw(""));
+            lines.push(status);
+        }
+
         let total_lines = lines.len() as u16;
         let view_h = inner.height;
         self.last_bottom = total_lines.saturating_sub(view_h);
@@ -959,6 +1019,51 @@ impl RefineScreen {
             .scroll((scroll, 0))
             .style(Style::default().bg(theme.bg_panel));
         f.render_widget(para, inner);
+    }
+
+    /// Claude-Code-style working line while a turn runs; an idle session-usage
+    /// summary otherwise. `None` when idle with nothing spent yet.
+    fn status_line(&self, frame: u64, theme: &Theme) -> Option<Line<'static>> {
+        let faint = Style::default().fg(theme.ink_faint);
+        let soft = Style::default().fg(theme.ink_soft);
+        if self.in_flight {
+            let elapsed = self.turn_started.map(|s| s.elapsed()).unwrap_or_default();
+            let (inp, out) = self.turn_tokens;
+            let mut spans = vec![
+                Span::styled(
+                    format!("{} ", theme::refine_spinner_frame(frame)),
+                    Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "Working ",
+                    Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("(", faint),
+                Span::styled(fmt_elapsed(elapsed), soft),
+            ];
+            if inp > 0 || out > 0 {
+                spans.push(Span::styled(format!(" · ↑ {}", fmt_tokens(inp)), soft));
+                spans.push(Span::styled(format!(" ↓ {}", fmt_tokens(out)), soft));
+                spans.push(Span::styled(" tokens", faint));
+            }
+            spans.push(Span::styled(" · esc to interrupt)", faint));
+            return Some(Line::from(spans));
+        }
+
+        let (inp, out) = self.session_tokens;
+        if inp == 0 && out == 0 {
+            return None;
+        }
+        let mut text = format!(
+            "↑ {} ↓ {} · {} tokens",
+            fmt_tokens(inp),
+            fmt_tokens(out),
+            fmt_tokens(inp.saturating_add(out))
+        );
+        if let Some(d) = self.last_turn_elapsed {
+            text.push_str(&format!(" · last {}", fmt_elapsed(d)));
+        }
+        Some(Line::from(Span::styled(text, faint)))
     }
 
     fn transcript_markdown(&self) -> String {
@@ -1151,6 +1256,29 @@ impl RefineScreen {
             Paragraph::new(lines).style(Style::default().bg(theme.bg_inset)),
             inner,
         );
+    }
+}
+
+/// Compact token count: `950`, `1.5k`, `12k`, `120k`.
+fn fmt_tokens(n: u32) -> String {
+    if n < 1000 {
+        n.to_string()
+    } else if n < 10_000 {
+        format!("{:.1}k", n as f64 / 1000.0)
+    } else {
+        format!("{}k", n / 1000)
+    }
+}
+
+/// Human elapsed time: `45s`, `1m 10s`, `1h 2m`.
+fn fmt_elapsed(d: std::time::Duration) -> String {
+    let s = d.as_secs();
+    if s < 60 {
+        format!("{s}s")
+    } else if s < 3600 {
+        format!("{}m {}s", s / 60, s % 60)
+    } else {
+        format!("{}h {}m", s / 3600, (s % 3600) / 60)
     }
 }
 
@@ -1408,6 +1536,39 @@ mod tests {
         s.cursor = s.input.len();
         let _ = s.submit();
         assert!(s.plan.is_empty(), "a new request starts with a clean plan");
+    }
+
+    #[test]
+    fn token_and_elapsed_formatting() {
+        assert_eq!(fmt_tokens(950), "950");
+        assert_eq!(fmt_tokens(1500), "1.5k");
+        assert_eq!(fmt_tokens(12_000), "12k");
+        assert_eq!(fmt_tokens(120_000), "120k");
+        use std::time::Duration;
+        assert_eq!(fmt_elapsed(Duration::from_secs(45)), "45s");
+        assert_eq!(fmt_elapsed(Duration::from_secs(70)), "1m 10s");
+        assert_eq!(fmt_elapsed(Duration::from_secs(3720)), "1h 2m");
+    }
+
+    #[test]
+    fn usage_accumulates_and_turn_lifecycle_clears_in_flight() {
+        let mut s = RefineScreen::new();
+        s.begin_turn();
+        assert!(s.in_flight);
+        s.on_app_event(&AppEvent::RefineUsage {
+            prompt_tokens: 1000,
+            completion_tokens: 200,
+        });
+        s.on_app_event(&AppEvent::RefineUsage {
+            prompt_tokens: 1500,
+            completion_tokens: 300,
+        });
+        assert_eq!(s.turn_tokens, (2500, 500));
+        assert_eq!(s.session_tokens, (2500, 500));
+        s.on_app_event(&AppEvent::RefineMessageDone);
+        assert!(!s.in_flight, "done ends the in-flight turn");
+        assert!(s.last_turn_elapsed.is_some(), "elapsed is banked");
+        assert_eq!(s.session_tokens, (2500, 500), "session total persists across turns");
     }
 
     #[test]

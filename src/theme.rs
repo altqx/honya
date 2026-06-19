@@ -419,6 +419,13 @@ pub fn agent_spinner_frame(role: AgentRole, frame: u64) -> &'static str {
     };
     frames[(frame as usize) % frames.len()]
 }
+/// Refine-agent spinner, ~10fps: a quarter-arc sweeping clockwise like a hand
+/// polishing the text it is refining. Distinct from the braille run spinner.
+pub const REFINE_SPINNER: [&str; 4] = ["◜", "◝", "◞", "◟"];
+pub fn refine_spinner_frame(frame: u64) -> &'static str {
+    REFINE_SPINNER[(frame as usize) % REFINE_SPINNER.len()]
+}
+
 /// Status glyph + semantic color, using a waxing-moon metaphor (○ → ◐/◑ → ●).
 pub fn status_glyph(kind: ChapterKind, status: ChapterStatus, t: &Theme) -> (char, Color) {
     if matches!(kind, ChapterKind::ImageOnly) {
