@@ -5,14 +5,14 @@ use crate::agents::prompts::{REVIEWER_SYSTEM, build_reviewer_user};
 use crate::llm::client::{LlmClient, Result};
 use crate::llm::structured::{chat_structured, reviewer_schema};
 use crate::llm::{ChatRequest, Message, Usage};
-use crate::model::ReviewerOut;
+use crate::model::{AgentModel, ReviewerOut};
 
 /// Review one translated chunk against its source. `reference_ctx` matches the
 /// Translator context so glossary/pronoun/style checks are enforceable.
 #[allow(clippy::too_many_arguments)]
 pub async fn review_chunk(
     client: &dyn LlmClient,
-    model: &str,
+    model: &AgentModel,
     source_jp: &str,
     thai: &str,
     reference_ctx: &str,
@@ -41,9 +41,10 @@ pub async fn review_chunk(
     }
 
     let req = ChatRequest {
-        model: model.to_string(),
+        model: model.model.clone(),
         temperature: Some(if attempt > 1 { 0.4 } else { 0.0 }),
         messages,
+        reasoning: model.reasoning_param(),
         ..ChatRequest::default()
     };
 

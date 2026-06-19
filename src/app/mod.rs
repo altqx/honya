@@ -230,13 +230,13 @@ pub enum Action {
         id: String,
     },
     SaveSettings {
-        base_url: String,
-        orchestrator: String,
-        translator: String,
-        reviewer: String,
-        /// New config API key: `Some("")` clears it, `Some(k)` sets it, `None`
-        /// leaves it untouched (the env var supplies the key, so config is moot).
-        api_key: Option<String>,
+        /// Per-agent provider/model/effort selection (boxed: keeps `Action` small).
+        models: Box<crate::model::ModelSet>,
+        /// New OpenRouter key: `Some("")` clears it, `Some(k)` sets it, `None`
+        /// leaves it untouched (an env var supplies the key, so config is moot).
+        openrouter_key: Option<String>,
+        /// New Tokenrouter key (same `Some`/`None` semantics as `openrouter_key`).
+        tokenrouter_key: Option<String>,
         /// Startup update behavior (auto-install vs. notify only).
         update_mode: crate::model::UpdateMode,
         /// Update channel: stable releases vs latest git built from source.
@@ -339,8 +339,8 @@ impl Toast {
 pub struct ActiveProject {
     pub project: Project,
     pub workspace: Workspace,
-    /// Built lazily so projects can still open offline.
-    pub client: Option<Arc<dyn LlmClient>>,
+    /// Per-provider clients, built lazily so projects can still open offline.
+    pub clients: Option<crate::llm::ClientSet>,
     pub models: ModelSet,
     /// Volume `workspace` resolves and translation runs target.
     pub vol: u32,
@@ -957,7 +957,7 @@ impl App {
         if self.refine_tx.is_some() {
             return true;
         }
-        let Some(client) = self.ensure_active_client() else {
+        let Some(clients) = self.ensure_active_clients() else {
             self.toast = Some(Toast::warn(
                 "no API key — add one in Settings (Ctrl-,) to use Refine",
             ));
@@ -966,13 +966,21 @@ impl App {
         let Some(active) = self.active.as_ref() else {
             return false;
         };
+        let refine_model = active.models.refine.clone();
+        let Some(client) = clients.for_agent(&refine_model) else {
+            self.toast = Some(Toast::warn(format!(
+                "no API key for {} — add one in Settings (Ctrl-,) to use Refine",
+                refine_model.provider.label()
+            )));
+            return false;
+        };
         let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let ctx = crate::agents::refine::RefineCtx {
             client,
             root: active.project.dir.clone(),
             default_vol: active.vol,
-            model: active.models.refine.clone(),
+            model: refine_model,
             tx: self.tx.clone(),
             cancel: cancel.clone(),
             session_id: self.refine_session_id.clone(),
@@ -1057,7 +1065,7 @@ impl App {
         let model = self
             .active
             .as_ref()
-            .map(|a| a.models.refine.clone())
+            .map(|a| a.models.refine.model.clone())
             .unwrap_or_default();
         let mut saved = rs::load(&root, &session)
             .unwrap_or_else(|| RefineSession::new(session.clone(), model.clone()));
@@ -1134,7 +1142,7 @@ impl App {
         let model = self
             .active
             .as_ref()
-            .map(|a| a.models.refine.clone())
+            .map(|a| a.models.refine.model.clone())
             .unwrap_or_default();
         let mut session =
             rs::load(&root, &id).unwrap_or_else(|| RefineSession::new(id.clone(), model));
@@ -1155,15 +1163,15 @@ impl App {
             let cur = self
                 .active
                 .as_ref()
-                .map(|a| a.models.refine.clone())
-                .unwrap_or_else(|| self.cfg.models.refine.clone());
+                .map(|a| a.models.refine.model.clone())
+                .unwrap_or_else(|| self.cfg.models.refine.model.clone());
             self.toast = Some(Toast::info(format!("refine model: {cur}")));
             return;
         }
         if let Some(active) = self.active.as_mut() {
-            active.models.refine = model.clone();
+            active.models.refine.model = model.clone();
         }
-        self.cfg.models.refine = model.clone();
+        self.cfg.models.refine.model = model.clone();
         if let Err(e) = crate::config::save(&self.cfg) {
             self.push_log(
                 LogLevel::Warn,
@@ -2404,11 +2412,9 @@ impl App {
                 self.overlay = Overlay::None;
             }
             Action::SaveSettings {
-                base_url,
-                orchestrator,
-                translator,
-                reviewer,
-                api_key,
+                models,
+                openrouter_key,
+                tokenrouter_key,
                 update_mode,
                 release_channel,
                 service_tier,
@@ -2417,11 +2423,9 @@ impl App {
                 max_chapter_retranslates,
             } => {
                 self.save_settings(
-                    base_url,
-                    orchestrator,
-                    translator,
-                    reviewer,
-                    api_key,
+                    *models,
+                    openrouter_key,
+                    tokenrouter_key,
                     update_mode,
                     release_channel,
                     service_tier,
@@ -2728,14 +2732,14 @@ impl App {
             .clone()
             .unwrap_or_else(|| self.cfg.models.clone());
         let workspace = Workspace::new(project.dir.clone(), vol);
-        let client = crate::build_client(&self.cfg).ok();
+        let clients = crate::build_clients(&self.cfg).ok();
         // Only the no-key case gets the Settings hint toast.
-        let no_key = crate::config::resolve_api_key(&self.cfg).is_none();
+        let no_key = !crate::config::any_provider_key(&self.cfg);
         let id = project.id.clone();
         self.active = Some(ActiveProject {
             project,
             workspace,
-            client,
+            clients,
             models,
             vol,
         });
@@ -2758,12 +2762,14 @@ impl App {
     /// Resolve the active project's LLM client, building and caching it from config
     /// if it was opened without a key (the user may have since added one in
     /// Settings). `None` means no key is configured anywhere.
-    fn ensure_active_client(&mut self) -> Option<Arc<dyn LlmClient>> {
+    fn ensure_active_clients(&mut self) -> Option<crate::llm::ClientSet> {
         let active = self.active.as_mut()?;
-        if active.client.is_none() {
-            active.client = crate::build_client(&self.cfg).ok();
+        if active.clients.is_none() {
+            active.clients = crate::build_clients(&self.cfg).ok();
         }
-        active.client.clone()
+        // Treat a key-less set (no provider configured) as "no client", matching
+        // the old single-client gate so callers still surface the no-key toast.
+        active.clients.clone().filter(|c| !c.is_empty())
     }
 
     /// Resume the interrupted run from the recovery checkpoint: reopen its project
@@ -3085,14 +3091,14 @@ impl App {
             self.toast = Some(Toast::warn("nothing selected"));
             return;
         }
-        let Some(client) = self.ensure_active_client() else {
+        let Some(clients) = self.ensure_active_clients() else {
             // None means either no key (the common case) or a key that failed to
             // build a client — surface the real error in the latter case rather than
             // misleadingly telling the user to add a key they already have.
-            self.toast = Some(if crate::config::resolve_api_key(&self.cfg).is_none() {
+            self.toast = Some(if !crate::config::any_provider_key(&self.cfg) {
                 Toast::warn("no API key — open Settings ( : → Settings ) to add one")
             } else {
-                match crate::build_client(&self.cfg) {
+                match crate::build_clients(&self.cfg) {
                     Err(e) => Toast::error(format!("LLM client unavailable: {e}")),
                     Ok(_) => Toast::warn("could not start translation"),
                 }
@@ -3154,7 +3160,7 @@ impl App {
             checkpoint.chapters.iter().map(|&c| (vol, c)).collect(),
         );
         let ctx = crate::agents::pipeline::PipelineCtx {
-            client,
+            clients,
             ws,
             models,
             cfg: self.cfg.clone(),
@@ -3343,11 +3349,11 @@ impl App {
             self.toast = Some(Toast::warn("no project open"));
             return;
         };
-        let Some(client) = self.ensure_active_client() else {
-            self.toast = Some(if crate::config::resolve_api_key(&self.cfg).is_none() {
+        let Some(clients) = self.ensure_active_clients() else {
+            self.toast = Some(if !crate::config::any_provider_key(&self.cfg) {
                 Toast::warn("no API key — open Settings ( : → Settings ) to add one")
             } else {
-                match crate::build_client(&self.cfg) {
+                match crate::build_clients(&self.cfg) {
                     Err(e) => Toast::error(format!("LLM client unavailable: {e}")),
                     Ok(_) => Toast::warn("could not start translation"),
                 }
@@ -3400,7 +3406,7 @@ impl App {
             .collect();
         let queue = crate::agents::pipeline::ChapterQueue::new(queue_seed);
         let ctx = crate::agents::pipeline::PipelineCtx {
-            client,
+            clients,
             ws,
             models,
             cfg: self.cfg.clone(),
@@ -3581,15 +3587,15 @@ impl App {
     }
 
     /// Client/model pair for one-off editor translations; failures notify the editor.
-    fn editor_translator(&mut self) -> Option<(Arc<dyn LlmClient>, String)> {
+    fn editor_translator(&mut self) -> Option<(Arc<dyn LlmClient>, crate::model::AgentModel)> {
         let model = self
             .active
             .as_ref()
             .map(|a| a.models.translator.clone())
             .unwrap_or_else(|| self.cfg.models.translator.clone());
-        let client = match self.ensure_active_client() {
+        let clients = match self.ensure_active_clients() {
             Some(c) => c,
-            None => match crate::build_client(&self.cfg) {
+            None => match crate::build_clients(&self.cfg) {
                 Ok(c) => c,
                 Err(e) => {
                     self.tx
@@ -3597,6 +3603,12 @@ impl App {
                     return None;
                 }
             },
+        };
+        let Some(client) = clients.for_agent(&model) else {
+            self.tx.send(AppEvent::SynopsisFailed {
+                msg: format!("no API key for {}", model.provider.label()),
+            });
+            return None;
         };
         Some((client, model))
     }
@@ -3610,7 +3622,7 @@ impl App {
         tokio::spawn(async move {
             match crate::agents::synopsis::translate_synopsis(
                 client.as_ref(),
-                &model,
+                &model.model,
                 &raw,
                 temperature,
             )
@@ -3631,7 +3643,7 @@ impl App {
         tokio::spawn(async move {
             match crate::agents::synopsis::translate_title(
                 client.as_ref(),
-                &model,
+                &model.model,
                 &raw,
                 temperature,
             )
@@ -3653,11 +3665,9 @@ impl App {
     #[allow(clippy::too_many_arguments)]
     fn save_settings(
         &mut self,
-        base_url: String,
-        orchestrator: String,
-        translator: String,
-        reviewer: String,
-        api_key: Option<String>,
+        models: crate::model::ModelSet,
+        openrouter_key: Option<String>,
+        tokenrouter_key: Option<String>,
         update_mode: crate::model::UpdateMode,
         release_channel: crate::model::ReleaseChannel,
         service_tier: Option<crate::model::ServiceTier>,
@@ -3665,10 +3675,8 @@ impl App {
         loop_stall_secs: u64,
         max_chapter_retranslates: u32,
     ) {
-        self.cfg.base_url = base_url;
-        self.cfg.models.orchestrator = orchestrator;
-        self.cfg.models.translator = translator;
-        self.cfg.models.reviewer = reviewer;
+        let models_changed = self.cfg.models != models;
+        self.cfg.models = models.clone();
         self.cfg.update_mode = update_mode;
         let channel_changed = self.cfg.release_channel != release_channel;
         self.cfg.release_channel = release_channel;
@@ -3677,21 +3685,30 @@ impl App {
         self.cfg.max_attempts = max_attempts;
         self.cfg.loop_stall_secs = loop_stall_secs;
         self.cfg.max_chapter_retranslates = max_chapter_retranslates;
-        let key_changed = if let Some(k) = api_key {
+        let mut keys_changed = false;
+        if let Some(k) = openrouter_key {
             let k = k.trim();
             let next = (!k.is_empty()).then(|| k.to_string());
-            let changed = next != self.cfg.api_key;
+            keys_changed |= next != self.cfg.api_key;
             self.cfg.api_key = next;
-            changed
-        } else {
-            false
-        };
-        // Rebuild the active client so a newly-added/changed/cleared key — or a new
-        // service tier (snapshotted into ClientConfig) — takes hold without reopening.
-        if (key_changed || tier_changed)
+        }
+        if let Some(k) = tokenrouter_key {
+            let k = k.trim();
+            let next = (!k.is_empty()).then(|| k.to_string());
+            keys_changed |= next != self.cfg.tokenrouter_api_key;
+            self.cfg.tokenrouter_api_key = next;
+        }
+        // Propagate the working model set to the active project so an in-flight
+        // session's next chapter / refine turn uses the new selection.
+        if let Some(active) = self.active.as_mut() {
+            active.models = models;
+        }
+        // Rebuild the active clients so changed keys, providers, or service tier
+        // (snapshotted into ClientConfig) take hold without reopening.
+        if (keys_changed || tier_changed || models_changed)
             && let Some(active) = self.active.as_mut()
         {
-            active.client = crate::build_client(&self.cfg).ok();
+            active.clients = crate::build_clients(&self.cfg).ok();
         }
         match crate::config::save(&self.cfg) {
             Ok(()) => self.toast = Some(Toast::info("settings saved")),

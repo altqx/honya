@@ -14,7 +14,7 @@ pub mod mock;
 pub mod structured;
 pub mod tool_loop;
 
-pub use client::{LlmError, StreamDelta};
+pub use client::{ClientSet, LlmError, StreamDelta};
 
 /// Body of a POST to `{base_url}/chat/completions`.
 #[derive(Debug, Clone, Default, Serialize)]

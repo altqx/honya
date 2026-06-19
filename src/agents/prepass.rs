@@ -82,7 +82,7 @@ pub struct PrepassSeeded {
 /// Returns `Ok(None)` when there is no raw source to sample (nothing to do).
 pub async fn run_prepass(
     client: &dyn LlmClient,
-    model: &str,
+    model: &crate::model::AgentModel,
     ws: &Workspace,
 ) -> Result<Option<PrepassSeeded>> {
     let sample = sample_volume_raw(ws);
@@ -94,9 +94,10 @@ pub async fn run_prepass(
         "<<VOLUME_RAW_SAMPLE: ตัวอย่างเนื้อหาต้นฉบับภาษาญี่ปุ่นจากหลายบทของเล่มนี้ ใช้สกัดข้อมูลอ้างอิงก่อนเริ่มแปล>>\n{sample}\n<<END_VOLUME_RAW_SAMPLE>>"
     );
     let req = ChatRequest {
-        model: model.to_string(),
+        model: model.model.clone(),
         messages: vec![Message::system(PREPASS_SYSTEM), Message::user(user)],
         temperature: Some(0.2),
+        reasoning: model.reasoning_param(),
         ..ChatRequest::default()
     };
 
@@ -340,7 +341,7 @@ mod tests {
         crate::workspace::translation::write_raw(&ws, 1, "有月勇は聖剣を抜いた。彼は笑った。")
             .unwrap();
 
-        let seeded = run_prepass(&SeedingClient, "mock", &ws)
+        let seeded = run_prepass(&SeedingClient, &crate::model::AgentModel::openrouter("mock"), &ws)
             .await
             .expect("run_prepass ok")
             .expect("had raw to sample");
@@ -364,7 +365,7 @@ mod tests {
         let base = std::env::temp_dir().join(format!("honya_prepass_empty_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let ws = Workspace::new(base.clone(), 1);
-        let out = run_prepass(&SeedingClient, "mock", &ws).await.unwrap();
+        let out = run_prepass(&SeedingClient, &crate::model::AgentModel::openrouter("mock"), &ws).await.unwrap();
         assert!(out.is_none(), "no raw chapters → nothing to do");
         let _ = std::fs::remove_dir_all(&base);
     }

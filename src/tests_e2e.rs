@@ -66,8 +66,10 @@ fn reader_note_overlay_saves_line_annotation() {
             models: None,
         },
         workspace: ws.clone(),
-        client: Some(Arc::new(crate::llm::mock::MockClient::default())
-            as Arc<dyn crate::llm::client::LlmClient>),
+        clients: Some(crate::llm::ClientSet::single(
+            Arc::new(crate::llm::mock::MockClient::default())
+                as Arc<dyn crate::llm::client::LlmClient>,
+        )),
         models: ModelSet::default(),
         vol: 1,
     };
@@ -189,8 +191,10 @@ fn project_l_key_is_not_shadowed_by_activity_log() {
     app.active = Some(ActiveProject {
         project,
         workspace: Workspace::new(dir, 1),
-        client: Some(Arc::new(crate::llm::mock::MockClient::default())
-            as Arc<dyn crate::llm::client::LlmClient>),
+        clients: Some(crate::llm::ClientSet::single(
+            Arc::new(crate::llm::mock::MockClient::default())
+                as Arc<dyn crate::llm::client::LlmClient>,
+        )),
         models: ModelSet::default(),
         vol: 1,
     });
@@ -340,70 +344,36 @@ fn settings_api_key_field_edits_and_respects_env_override() {
 
     let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::empty());
 
-    // Editable case: type into the key field (index 4), Enter → SaveSettings{api_key}.
-    let mut ov = Overlay::Settings(SettingsState {
-        base_url: "https://x".into(),
-        orchestrator: "o".into(),
-        translator: "t".into(),
-        reviewer: "r".into(),
-        api_key: String::new(),
-        api_key_env: false,
-        update_mode: crate::model::UpdateMode::Auto,
-        release_channel: crate::model::ReleaseChannel::Stable,
-        service_tier: None,
-        max_attempts: "3".into(),
-        loop_stall_secs: "180".into(),
-        max_chapter_retranslates: "2".into(),
-        field: 4,
-        cursor: 0,
-        account_login: None,
-        remote_enabled: false,
-        remote_state: crate::remote::protocol::RemoteState::Disconnected,
-        remote_watchers: 0,
-        remote_auth_code: None,
-        session_label: None,
-    });
+    // Editable case: type into the OpenRouter key field, Enter → SaveSettings{openrouter_key}.
+    let mut ov = Overlay::Settings(SettingsState::for_test(12));
     for c in "sk-or-1".chars() {
         ov.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::empty()));
     }
     match ov.handle_key(enter) {
-        Action::SaveSettings { api_key, .. } => assert_eq!(api_key.as_deref(), Some("sk-or-1")),
+        Action::SaveSettings { openrouter_key, .. } => {
+            assert_eq!(openrouter_key.as_deref(), Some("sk-or-1"))
+        }
         other => panic!("expected SaveSettings, got {other:?}"),
     }
 
-    // Env-override case: typing is ignored and save passes api_key: None.
+    // Env-override case: typing is ignored and save passes openrouter_key: None.
     let mut ov = Overlay::Settings(SettingsState {
-        base_url: "u".into(),
-        orchestrator: "o".into(),
-        translator: "t".into(),
-        reviewer: "r".into(),
-        api_key: "saved".into(),
         api_key_env: true,
-        update_mode: crate::model::UpdateMode::Auto,
-        release_channel: crate::model::ReleaseChannel::Stable,
-        service_tier: None,
-        max_attempts: "3".into(),
-        loop_stall_secs: "180".into(),
-        max_chapter_retranslates: "2".into(),
-        field: 4,
-        cursor: 0,
-        account_login: None,
-        remote_enabled: false,
-        remote_state: crate::remote::protocol::RemoteState::Disconnected,
-        remote_watchers: 0,
-        remote_auth_code: None,
-        session_label: None,
+        openrouter_key: "saved".into(),
+        ..SettingsState::for_test(12)
     });
     ov.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::empty()));
     ov.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::empty()));
     match &ov {
-        Overlay::Settings(st) => assert_eq!(st.api_key, "saved", "env key field is read-only"),
+        Overlay::Settings(st) => {
+            assert_eq!(st.openrouter_key, "saved", "env key field is read-only")
+        }
         _ => panic!("settings overlay"),
     }
     match ov.handle_key(enter) {
-        Action::SaveSettings { api_key, .. } => {
+        Action::SaveSettings { openrouter_key, .. } => {
             assert!(
-                api_key.is_none(),
+                openrouter_key.is_none(),
                 "env override → config key left untouched"
             )
         }
@@ -419,35 +389,16 @@ fn settings_ctrl_u_toggles_update_mode_and_saves_it() {
     use crate::app::overlay::SettingsState;
     use crate::model::UpdateMode;
 
-    let mut ov = Overlay::Settings(SettingsState {
-        base_url: "u".into(),
-        orchestrator: "o".into(),
-        translator: "t".into(),
-        reviewer: "r".into(),
-        api_key: String::new(),
-        api_key_env: false,
-        update_mode: UpdateMode::Auto,
-        release_channel: crate::model::ReleaseChannel::Stable,
-        service_tier: None,
-        max_attempts: "3".into(),
-        loop_stall_secs: "180".into(),
-        max_chapter_retranslates: "2".into(),
-        field: 0,
-        cursor: 0,
-        account_login: None,
-        remote_enabled: false,
-        remote_state: crate::remote::protocol::RemoteState::Disconnected,
-        remote_watchers: 0,
-        remote_auth_code: None,
-        session_label: None,
-    });
+    // Focus the OpenRouter key field (a text field) to prove Ctrl-U is a toggle,
+    // not a keystroke into the field.
+    let mut ov = Overlay::Settings(SettingsState::for_test(12));
 
     // Ctrl-U flips Auto → Notify without typing into the focused field.
     ov.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
     match &ov {
         Overlay::Settings(st) => {
             assert_eq!(st.update_mode, UpdateMode::Notify);
-            assert_eq!(st.base_url, "u", "Ctrl-U must not type into the field");
+            assert_eq!(st.openrouter_key, "", "Ctrl-U must not type into the field");
         }
         _ => panic!("settings overlay"),
     }
@@ -466,34 +417,14 @@ fn settings_ctrl_g_toggles_release_channel_and_saves_it() {
     use crate::app::overlay::SettingsState;
     use crate::model::ReleaseChannel;
 
-    let mut ov = Overlay::Settings(SettingsState {
-        base_url: "u".into(),
-        orchestrator: "o".into(),
-        translator: "t".into(),
-        reviewer: "r".into(),
-        api_key: String::new(),
-        api_key_env: false,
-        update_mode: crate::model::UpdateMode::Auto,
-        release_channel: ReleaseChannel::Stable,
-        service_tier: None,
-        max_attempts: "3".into(),
-        loop_stall_secs: "180".into(),
-        max_chapter_retranslates: "2".into(),
-        field: 0,
-        cursor: 0,
-        account_login: None,
-        remote_enabled: false,
-        remote_state: crate::remote::protocol::RemoteState::Disconnected,
-        remote_watchers: 0,
-        remote_auth_code: None,
-        session_label: None,
-    });
+    // Focus the OpenRouter key field (a text field) to prove Ctrl-G is a toggle.
+    let mut ov = Overlay::Settings(SettingsState::for_test(12));
 
     ov.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL));
     match &ov {
         Overlay::Settings(st) => {
             assert_eq!(st.release_channel, ReleaseChannel::Dev);
-            assert_eq!(st.base_url, "u", "Ctrl-G must not type into the field");
+            assert_eq!(st.openrouter_key, "", "Ctrl-G must not type into the field");
         }
         _ => panic!("settings overlay"),
     }
@@ -516,27 +447,10 @@ fn settings_retries_field_is_digit_only_and_clamped() {
     let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::empty());
 
     let mk = || {
+        // Focus the "Retry attempts" numeric field (index 14) with an empty buffer.
         Overlay::Settings(SettingsState {
-            base_url: "u".into(),
-            orchestrator: "o".into(),
-            translator: "t".into(),
-            reviewer: "r".into(),
-            api_key: String::new(),
-            api_key_env: false,
-            update_mode: crate::model::UpdateMode::Auto,
-            release_channel: crate::model::ReleaseChannel::Stable,
-            service_tier: None,
             max_attempts: String::new(),
-            loop_stall_secs: String::new(),
-            max_chapter_retranslates: String::new(),
-            field: 5,
-            cursor: 0,
-            account_login: None,
-            remote_enabled: false,
-            remote_state: crate::remote::protocol::RemoteState::Disconnected,
-            remote_watchers: 0,
-            remote_auth_code: None,
-            session_label: None,
+            ..SettingsState::for_test(14)
         })
     };
 
@@ -613,33 +527,20 @@ fn text_box_cursor_moves_and_edits_mid_string() {
 fn settings_field_caret_inserts_mid_value() {
     use crate::app::overlay::SettingsState;
 
+    // Focus the Orchestrator model field (index 1, a text field) holding "htp".
     let mut ov = Overlay::Settings(SettingsState {
-        base_url: "htp".into(),
-        orchestrator: "o".into(),
-        translator: "t".into(),
-        reviewer: "r".into(),
-        api_key: String::new(),
-        api_key_env: false,
-        update_mode: crate::model::UpdateMode::Auto,
-        release_channel: crate::model::ReleaseChannel::Stable,
-        service_tier: None,
-        max_attempts: "3".into(),
-        loop_stall_secs: "180".into(),
-        max_chapter_retranslates: "2".into(),
-        field: 0,
+        models: crate::model::ModelSet {
+            orchestrator: crate::model::AgentModel::openrouter("htp"),
+            ..crate::model::ModelSet::default()
+        },
         cursor: 3, // end of "htp"
-        account_login: None,
-        remote_enabled: false,
-        remote_state: crate::remote::protocol::RemoteState::Disconnected,
-        remote_watchers: 0,
-        remote_auth_code: None,
-        session_label: None,
+        ..SettingsState::for_test(1)
     });
     // Caret after 't', insert the missing 't' → "http".
     ov.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::empty()));
     ov.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::empty()));
     match &ov {
-        Overlay::Settings(st) => assert_eq!(st.base_url, "http"),
+        Overlay::Settings(st) => assert_eq!(st.models.orchestrator.model, "http"),
         _ => panic!("settings overlay"),
     }
 }
@@ -1180,8 +1081,10 @@ async fn qa_overlay_gathers_and_navigates() {
     let active = ActiveProject {
         project,
         workspace: Workspace::new(dir.clone(), 1),
-        client: Some(Arc::new(crate::llm::mock::MockClient::default())
-            as Arc<dyn crate::llm::client::LlmClient>),
+        clients: Some(crate::llm::ClientSet::single(
+            Arc::new(crate::llm::mock::MockClient::default())
+                as Arc<dyn crate::llm::client::LlmClient>,
+        )),
         models: ModelSet::default(),
         vol: 1,
     };
@@ -1288,8 +1191,10 @@ fn qa_collect_continuity_and_key_edges() {
             models: None,
         },
         workspace: Workspace::new(dir.clone(), 1),
-        client: Some(Arc::new(crate::llm::mock::MockClient::default())
-            as Arc<dyn crate::llm::client::LlmClient>),
+        clients: Some(crate::llm::ClientSet::single(
+            Arc::new(crate::llm::mock::MockClient::default())
+                as Arc<dyn crate::llm::client::LlmClient>,
+        )),
         models: ModelSet::default(),
         vol: 1,
     };
@@ -1501,7 +1406,9 @@ async fn end_to_end_import_and_mock_translate() {
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let ctx = PipelineCtx {
-        client: Arc::new(MockClient::default()) as Arc<dyn crate::llm::client::LlmClient>,
+        clients: crate::llm::ClientSet::single(
+            Arc::new(MockClient::default()) as Arc<dyn crate::llm::client::LlmClient>,
+        ),
         ws,
         models: ModelSet::default(),
         cfg: AppConfig::default(),
@@ -1704,7 +1611,9 @@ async fn partial_translator_stream_is_salvaged_as_needs_review() {
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let ctx = PipelineCtx {
-        client: Arc::new(TruncatingTranslatorClient) as Arc<dyn LlmClient>,
+        clients: crate::llm::ClientSet::single(
+            Arc::new(TruncatingTranslatorClient) as Arc<dyn LlmClient>,
+        ),
         ws,
         models: ModelSet::default(),
         cfg: AppConfig::default(),
@@ -1792,7 +1701,7 @@ fn pipeline_events_route_to_the_running_volume() {
     app.active = Some(ActiveProject {
         project,
         workspace: Workspace::new(dir.clone(), 1),
-        client: None,
+        clients: None,
         models: ModelSet::default(),
         vol: 1, // cursor/active volume is Vol.01 ...
     });
@@ -1901,8 +1810,10 @@ fn whole_volume_translate_requeues_legacy_partial_chapter() {
             models: None,
         },
         workspace: ws.clone(),
-        client: Some(Arc::new(crate::llm::mock::MockClient::default())
-            as Arc<dyn crate::llm::client::LlmClient>),
+        clients: Some(crate::llm::ClientSet::single(
+            Arc::new(crate::llm::mock::MockClient::default())
+                as Arc<dyn crate::llm::client::LlmClient>,
+        )),
         models: ModelSet::default(),
         vol: 1,
     };
@@ -2130,8 +2041,10 @@ fn refine_app_with_project(tag: &str) -> App {
             models: None,
         },
         workspace: ws,
-        client: Some(Arc::new(crate::llm::mock::MockClient::default())
-            as Arc<dyn crate::llm::client::LlmClient>),
+        clients: Some(crate::llm::ClientSet::single(
+            Arc::new(crate::llm::mock::MockClient::default())
+                as Arc<dyn crate::llm::client::LlmClient>,
+        )),
         models: ModelSet::default(),
         vol: 1,
     };
@@ -2201,8 +2114,10 @@ fn refine_undo_restores_prior_chapter_text() {
             models: None,
         },
         workspace: ws.clone(),
-        client: Some(Arc::new(crate::llm::mock::MockClient::default())
-            as Arc<dyn crate::llm::client::LlmClient>),
+        clients: Some(crate::llm::ClientSet::single(
+            Arc::new(crate::llm::mock::MockClient::default())
+                as Arc<dyn crate::llm::client::LlmClient>,
+        )),
         models: ModelSet::default(),
         vol: 1,
     };

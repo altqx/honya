@@ -266,26 +266,166 @@ pub enum ChunkState {
     NeedsReview, // committed unreviewed after exhausting attempts (flagged in-file)
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ModelSet {
-    pub orchestrator: String,
-    pub translator: String,
-    pub reviewer: String,
-    /// Default keeps older configs loadable.
-    #[serde(default = "default_refine_model")]
-    pub refine: String,
+/// LLM provider an agent routes to. OpenRouter and Tokenrouter speak the same
+/// OpenAI-compatible `/chat/completions` wire format (only base URL + key differ),
+/// so both reuse `OpenRouterClient`; Codex uses ChatGPT's Responses API and a
+/// separate auth flow (wired in a later pass).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Provider {
+    #[default]
+    OpenRouter,
+    Tokenrouter,
+    Codex,
 }
 
-fn default_refine_model() -> String {
-    "openai/gpt-5.5".to_string()
+impl Provider {
+    pub fn label(self) -> &'static str {
+        match self {
+            Provider::OpenRouter => "OpenRouter",
+            Provider::Tokenrouter => "Tokenrouter",
+            Provider::Codex => "Codex",
+        }
+    }
+
+    /// Next provider for the Settings cycle. Codex is omitted until its auth flow
+    /// lands; a config that already holds Codex cycles back to OpenRouter.
+    pub fn cycled(self) -> Self {
+        match self {
+            Provider::OpenRouter => Provider::Tokenrouter,
+            Provider::Tokenrouter | Provider::Codex => Provider::OpenRouter,
+        }
+    }
+}
+
+/// Reasoning effort for a reasoning-capable model. Stored as `Option` on an
+/// [`AgentModel`]: `None` omits the `reasoning` param; `Some(_)` sends the effort.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Effort {
+    Minimal,
+    Low,
+    Medium,
+    High,
+    Xhigh,
+}
+
+impl Effort {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Effort::Minimal => "minimal",
+            Effort::Low => "low",
+            Effort::Medium => "medium",
+            Effort::High => "high",
+            Effort::Xhigh => "xhigh",
+        }
+    }
+
+    /// Short label for the Settings line (`Off` when unset).
+    pub fn label(this: Option<Self>) -> &'static str {
+        match this {
+            None => "Off",
+            Some(e) => e.as_str(),
+        }
+    }
+
+    /// Cycle Off → minimal → low → medium → high → xhigh → Off.
+    pub fn cycled(this: Option<Self>) -> Option<Self> {
+        match this {
+            None => Some(Effort::Minimal),
+            Some(Effort::Minimal) => Some(Effort::Low),
+            Some(Effort::Low) => Some(Effort::Medium),
+            Some(Effort::Medium) => Some(Effort::High),
+            Some(Effort::High) => Some(Effort::Xhigh),
+            Some(Effort::Xhigh) => None,
+        }
+    }
+}
+
+/// One agent's provider + model id + optional reasoning effort.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AgentModel {
+    pub provider: Provider,
+    pub model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort: Option<Effort>,
+}
+
+impl AgentModel {
+    pub fn new(provider: Provider, model: impl Into<String>, effort: Option<Effort>) -> Self {
+        Self {
+            provider,
+            model: model.into(),
+            effort,
+        }
+    }
+
+    /// A plain OpenRouter model with no reasoning effort (the legacy/default shape).
+    pub fn openrouter(model: impl Into<String>) -> Self {
+        Self::new(Provider::OpenRouter, model, None)
+    }
+
+    /// The `reasoning` request param for this agent, if an effort is configured.
+    pub fn reasoning_param(&self) -> Option<serde_json::Value> {
+        self.effort
+            .map(|e| serde_json::json!({ "effort": e.as_str() }))
+    }
+}
+
+/// Accept either a bare model-id string (legacy configs, where every agent ran on
+/// OpenRouter) or the full `{provider, model, effort}` object.
+impl<'de> Deserialize<'de> for AgentModel {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Str(String),
+            Obj {
+                #[serde(default)]
+                provider: Provider,
+                model: String,
+                #[serde(default)]
+                effort: Option<Effort>,
+            },
+        }
+        Ok(match Raw::deserialize(deserializer)? {
+            Raw::Str(model) => AgentModel::openrouter(model),
+            Raw::Obj {
+                provider,
+                model,
+                effort,
+            } => AgentModel {
+                provider,
+                model,
+                effort,
+            },
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelSet {
+    pub orchestrator: AgentModel,
+    pub translator: AgentModel,
+    pub reviewer: AgentModel,
+    /// Default keeps older configs loadable.
+    #[serde(default = "default_refine_model")]
+    pub refine: AgentModel,
+}
+
+fn default_refine_model() -> AgentModel {
+    AgentModel::openrouter("openai/gpt-5.5")
 }
 
 impl Default for ModelSet {
     fn default() -> Self {
         Self {
-            orchestrator: "google/gemini-3.5-flash".into(),
-            translator: "google/gemini-3-flash-preview".into(),
-            reviewer: "google/gemini-3.1-flash-lite".into(),
+            orchestrator: AgentModel::openrouter("google/gemini-3.5-flash"),
+            translator: AgentModel::openrouter("google/gemini-3-flash-preview"),
+            reviewer: AgentModel::openrouter("google/gemini-3.1-flash-lite"),
             refine: default_refine_model(),
         }
     }
@@ -417,8 +557,6 @@ impl ServiceTier {
 /// Global, persisted app configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
-    /// OpenRouter base URL.
-    pub base_url: String,
     /// Default models (per-project ModelSet overrides this).
     pub models: ModelSet,
     /// Max Translator<->Reviewer retry attempts per chunk before Failed.
@@ -448,6 +586,10 @@ pub struct AppConfig {
     /// variables HONYA_API_KEY / OPENROUTER_API_KEY override this when set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
+    /// Persisted Tokenrouter API key. Env HONYA_TOKENROUTER_API_KEY /
+    /// TOKENROUTER_API_KEY override this when set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokenrouter_api_key: Option<String>,
     /// Active color theme (serde default keeps pre-theme configs loading).
     #[serde(default)]
     pub theme: ThemeId,
@@ -520,7 +662,6 @@ fn default_max_chapter_retranslates() -> u32 {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            base_url: "https://openrouter.ai/api/v1".into(),
             models: ModelSet::default(),
             max_attempts: 3,
             chunk_target_tokens: 1000,
@@ -531,6 +672,7 @@ impl Default for AppConfig {
             referer: Some("https://github.com/altqx/honya".into()),
             title: Some("honya".into()),
             api_key: None,
+            tokenrouter_api_key: None,
             theme: ThemeId::default(),
             onboarded: false,
             update_mode: UpdateMode::default(),
@@ -1428,5 +1570,77 @@ mod progress_tests {
             vec![ch(1, ChapterKind::Prose, ChapterStatus::Pending)],
         ]);
         assert_eq!(p.translation_progress().status, ProjectStatus::InProgress);
+    }
+}
+
+#[cfg(test)]
+mod provider_model_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_string_config_deserializes_to_openrouter_agent() {
+        // Pre-multi-provider configs stored each agent as a bare model-id string.
+        let json = r#""google/gemini-3-flash-preview""#;
+        let a: AgentModel = serde_json::from_str(json).unwrap();
+        assert_eq!(a.provider, Provider::OpenRouter);
+        assert_eq!(a.model, "google/gemini-3-flash-preview");
+        assert_eq!(a.effort, None);
+    }
+
+    #[test]
+    fn full_agent_object_round_trips() {
+        let a = AgentModel::new(Provider::Tokenrouter, "google/gemini-3-flash-preview", Some(Effort::High));
+        let json = serde_json::to_string(&a).unwrap();
+        let back: AgentModel = serde_json::from_str(&json).unwrap();
+        assert_eq!(a, back);
+        // Provider serializes kebab-case, effort lowercase.
+        assert!(json.contains("\"tokenrouter\""));
+        assert!(json.contains("\"high\""));
+    }
+
+    #[test]
+    fn object_defaults_provider_and_effort_when_omitted() {
+        let a: AgentModel = serde_json::from_str(r#"{"model":"x"}"#).unwrap();
+        assert_eq!(a.provider, Provider::OpenRouter);
+        assert_eq!(a.effort, None);
+    }
+
+    #[test]
+    fn reasoning_param_maps_effort_or_is_none() {
+        assert!(AgentModel::openrouter("x").reasoning_param().is_none());
+        let p = AgentModel::new(Provider::Codex, "x", Some(Effort::Xhigh))
+            .reasoning_param()
+            .unwrap();
+        assert_eq!(p, serde_json::json!({"effort": "xhigh"}));
+    }
+
+    #[test]
+    fn legacy_modelset_with_bare_strings_still_loads() {
+        // A whole ModelSet written by an old build (all strings, no `refine`).
+        let json = r#"{
+            "orchestrator": "a/o",
+            "translator": "a/t",
+            "reviewer": "a/r"
+        }"#;
+        let ms: ModelSet = serde_json::from_str(json).unwrap();
+        assert_eq!(ms.translator, AgentModel::openrouter("a/t"));
+        assert_eq!(ms.refine, default_refine_model()); // serde default fills it
+    }
+
+    #[test]
+    fn effort_cycles_through_all_levels_and_back_to_off() {
+        let mut e = None;
+        let order = [
+            Some(Effort::Minimal),
+            Some(Effort::Low),
+            Some(Effort::Medium),
+            Some(Effort::High),
+            Some(Effort::Xhigh),
+            None,
+        ];
+        for want in order {
+            e = Effort::cycled(e);
+            assert_eq!(e, want);
+        }
     }
 }

@@ -235,9 +235,9 @@ fn render_project_body(title: &str, date: &str, models: &ModelSet) -> String {
          - `STYLE.md` — แนวทางการเรียบเรียงและน้ำเสียงรวม\n",
         title = title,
         date = date,
-        orch = models.orchestrator,
-        trans = models.translator,
-        rev = models.reviewer,
+        orch = models.orchestrator.model,
+        trans = models.translator.model,
+        rev = models.reviewer.model,
     )
 }
 

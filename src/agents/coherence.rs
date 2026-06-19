@@ -42,7 +42,7 @@ pub struct CoherenceIssue {
 /// to this chapter.
 pub async fn coherence_sweep(
     client: &dyn LlmClient,
-    model: &str,
+    model: &crate::model::AgentModel,
     chapter_thai: &str,
     reference_ctx: &str,
 ) -> Result<(CoherenceOut, Usage, bool)> {
@@ -68,9 +68,10 @@ pub async fn coherence_sweep(
     user.push_str("\n<<END_CHAPTER_TH>>\n\nAudit this chapter for cross-chunk inconsistencies and return coherence_result.");
 
     let req = ChatRequest {
-        model: model.to_string(),
+        model: model.model.clone(),
         messages: vec![Message::system(COHERENCE_SYSTEM), Message::user(user)],
         temperature: Some(0.0),
+        reasoning: model.reasoning_param(),
         ..ChatRequest::default()
     };
 

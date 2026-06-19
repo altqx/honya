@@ -21,11 +21,11 @@ use crate::agents::reviewer::review_chunk;
 use crate::agents::tools::{WorkspaceTools, orchestrator_tools};
 use crate::agents::translator::translate_chunk_streaming;
 use crate::cleanse;
-use crate::llm::client::LlmClient;
+use crate::llm::client::{ClientSet, LlmClient};
 use crate::llm::tool_loop::run_tool_loop;
 use crate::llm::{ChatRequest, Message, Tool, Usage};
 use crate::model::{
-    AgentRole, AppConfig, AppEvent, ChapterStatus, ChunkState, ContinuityNote, EventTx,
+    AgentModel, AgentRole, AppConfig, AppEvent, ChapterStatus, ChunkState, ContinuityNote, EventTx,
     GlossaryTerm, LogLevel, ModelSet, ReviewVerdict, ReviewerOut, ServiceTier, TokenUsage,
     TranslatorOut, UsageStats,
 };
@@ -421,11 +421,12 @@ enum ChunkOutcome {
     NeedsReview,
 }
 
-/// Everything one pipeline run needs: the shared LLM client, the project
+/// Everything one pipeline run needs: the per-provider clients, the project
 /// workspace, the model set, the runtime config, the UI event channel, and the
-/// shared pause/stop control.
+/// shared pause/stop control. Each agent routes to the client for its configured
+/// provider via [`ClientSet::for_agent`].
 pub struct PipelineCtx {
-    pub client: Arc<dyn LlmClient>,
+    pub clients: ClientSet,
     pub ws: Workspace,
     pub models: ModelSet,
     pub cfg: AppConfig,
@@ -437,6 +438,18 @@ pub struct PipelineCtx {
 }
 
 impl PipelineCtx {
+    /// Resolve the live client for an agent's configured provider, or an error
+    /// naming the missing provider (the run preflight normally catches this).
+    fn client_for(&self, agent: &AgentModel) -> anyhow::Result<Arc<dyn LlmClient>> {
+        self.clients.for_agent(agent).ok_or_else(|| {
+            anyhow::anyhow!(
+                "no API key configured for {} (model {})",
+                agent.provider.label(),
+                agent.model
+            )
+        })
+    }
+
     /// Derive the 1-based volume number from the workspace's `Vol_NN` directory
     /// name so the Orchestrator tool executor can rebuild a fresh `Workspace`.
     fn vol_number(&self) -> u32 {
@@ -454,7 +467,7 @@ impl PipelineCtx {
     /// project-translate run to step through volumes with one set of controls.
     fn with_volume(&self, vol: u32) -> PipelineCtx {
         PipelineCtx {
-            client: self.client.clone(),
+            clients: self.clients.clone(),
             ws: Workspace::new(self.ws.root.clone(), vol),
             models: self.models.clone(),
             cfg: self.cfg.clone(),
@@ -571,7 +584,17 @@ async fn maybe_run_prepass(ctx: &PipelineCtx, acc: &mut Acc) {
         level: LogLevel::Info,
         msg: "pre-scan: extracting characters & terms before translating".to_string(),
     });
-    match prepass::run_prepass(ctx.client.as_ref(), &ctx.models.translator, &ctx.ws).await {
+    let prepass_client = match ctx.client_for(&ctx.models.translator) {
+        Ok(c) => c,
+        Err(e) => {
+            ctx.tx.send(AppEvent::Log {
+                level: LogLevel::Warn,
+                msg: format!("prepass skipped: {e}"),
+            });
+            return;
+        }
+    };
+    match prepass::run_prepass(prepass_client.as_ref(), &ctx.models.translator, &ctx.ws).await {
         Ok(Some(seeded)) => {
             acc.run.add(&stats_from_usage(&seeded.usage));
             note_served_tier(ctx, acc, &ctx.models.translator, &seeded.usage);
@@ -1265,11 +1288,12 @@ impl Acc {
 /// and a flex/priority ask silently falls back to the standard tier on models
 /// without tier support — without this echo check the user believes the flex
 /// discount (or priority speed-up) is in effect when it isn't.
-fn note_served_tier(ctx: &PipelineCtx, acc: &mut Acc, model: &str, usage: &Usage) {
+fn note_served_tier(ctx: &PipelineCtx, acc: &mut Acc, agent: &AgentModel, usage: &Usage) {
     let Some(requested) = ctx.cfg.service_tier else {
         return;
     };
-    if !acc.tier_noted.insert(model.to_string()) {
+    let model = &agent.model;
+    if !acc.tier_noted.insert(model.clone()) {
         return;
     }
     let tier = match requested {
@@ -1343,9 +1367,10 @@ async fn process_chunk(
         });
 
         let tx = ctx.tx.clone();
+        let translator_client = ctx.client_for(&ctx.models.translator)?;
         let (out, t_usage, streamed_preview): (TranslatorOut, Usage, bool) =
             match translate_chunk_streaming(
-                ctx.client.as_ref(),
+                translator_client.as_ref(),
                 &ctx.models.translator,
                 &reference_ctx,
                 &prev_thai,
@@ -1579,8 +1604,9 @@ async fn process_chunk(
                     chunk: chunk.index,
                     attempt,
                 });
+                let reviewer_client = ctx.client_for(&ctx.models.reviewer)?;
                 match review_chunk(
-                    ctx.client.as_ref(),
+                    reviewer_client.as_ref(),
                     &ctx.models.reviewer,
                     &chunk.text,
                     &thai,
@@ -1853,10 +1879,11 @@ async fn run_orchestrator_metadata_turn(
     // tools present + tool_choice unset => OpenRouter defaults to "auto".
     // Leaving tool_choice at its Default avoids coupling to its exact field type.
     let req = ChatRequest {
-        model: ctx.models.orchestrator.clone(),
+        model: ctx.models.orchestrator.model.clone(),
         messages: vec![Message::system(ORCHESTRATOR_SYSTEM), Message::user(user)],
         temperature: Some(0.2),
         tools: Some(tools),
+        reasoning: ctx.models.orchestrator.reasoning_param(),
         ..ChatRequest::default()
     };
 
@@ -1867,7 +1894,8 @@ async fn run_orchestrator_metadata_turn(
         chapter,
     );
 
-    let outcome = run_tool_loop(ctx.client.as_ref(), req, &executor, 8)
+    let orch_client = ctx.client_for(&ctx.models.orchestrator)?;
+    let outcome = run_tool_loop(orch_client.as_ref(), req, &executor, 8)
         .await
         .map_err(|e| anyhow::anyhow!("orchestrator tool loop failed: {e}"))?;
 
@@ -1894,10 +1922,20 @@ async fn run_coherence_sweep(
     // term the chapter uses is available to the auditor.
     let reference_ctx = build_reference_ctx(&ctx.ws, raw, None);
 
+    let coherence_client = match ctx.client_for(&ctx.models.reviewer) {
+        Ok(c) => c,
+        Err(e) => {
+            ctx.tx.send(AppEvent::Log {
+                level: LogLevel::Warn,
+                msg: format!("coherence sweep skipped: {e}"),
+            });
+            return;
+        }
+    };
     wd.ping();
     let result = {
         let fut = coherence::coherence_sweep(
-            ctx.client.as_ref(),
+            coherence_client.as_ref(),
             &ctx.models.reviewer,
             &thai,
             &reference_ctx,
@@ -2350,7 +2388,9 @@ mod tests {
         ]));
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let ctx = PipelineCtx {
-            client: client.clone() as std::sync::Arc<dyn crate::llm::client::LlmClient>,
+            clients: ClientSet::single(
+                client.clone() as std::sync::Arc<dyn crate::llm::client::LlmClient>
+            ),
             ws: ws.clone(),
             models: crate::model::ModelSet::default(),
             cfg: crate::model::AppConfig {
@@ -2435,7 +2475,9 @@ mod tests {
         let client = std::sync::Arc::new(CountingClient::default());
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let ctx = PipelineCtx {
-            client: client.clone() as std::sync::Arc<dyn crate::llm::client::LlmClient>,
+            clients: ClientSet::single(
+                client.clone() as std::sync::Arc<dyn crate::llm::client::LlmClient>
+            ),
             ws: ws.clone(),
             models: crate::model::ModelSet::default(),
             cfg,
@@ -2533,7 +2575,7 @@ mod tests {
         });
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let ctx = PipelineCtx {
-            client: client as std::sync::Arc<dyn crate::llm::client::LlmClient>,
+            clients: ClientSet::single(client as std::sync::Arc<dyn crate::llm::client::LlmClient>),
             ws,
             models: crate::model::ModelSet::default(),
             cfg,
@@ -2804,8 +2846,10 @@ mod tests {
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let ctx = PipelineCtx {
-            client: std::sync::Arc::new(ReviewerErrorClient)
-                as std::sync::Arc<dyn crate::llm::client::LlmClient>,
+            clients: ClientSet::single(
+                std::sync::Arc::new(ReviewerErrorClient)
+                    as std::sync::Arc<dyn crate::llm::client::LlmClient>,
+            ),
             ws: ws.clone(),
             models: crate::model::ModelSet::default(),
             cfg,
@@ -2971,8 +3015,10 @@ mod tests {
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let ctx = PipelineCtx {
-            client: std::sync::Arc::new(HangingClient)
-                as std::sync::Arc<dyn crate::llm::client::LlmClient>,
+            clients: ClientSet::single(
+                std::sync::Arc::new(HangingClient)
+                    as std::sync::Arc<dyn crate::llm::client::LlmClient>,
+            ),
             ws: ws.clone(),
             models: crate::model::ModelSet::default(),
             cfg: crate::model::AppConfig {
@@ -3037,7 +3083,9 @@ mod tests {
         let client = std::sync::Arc::new(CountingClient::default());
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let ctx = PipelineCtx {
-            client: client.clone() as std::sync::Arc<dyn crate::llm::client::LlmClient>,
+            clients: ClientSet::single(
+                client.clone() as std::sync::Arc<dyn crate::llm::client::LlmClient>
+            ),
             ws: ws1.clone(),
             models: crate::model::ModelSet::default(),
             cfg: crate::model::AppConfig::default(),
@@ -3112,7 +3160,9 @@ mod tests {
         assert!(queue.push_back(1, 2));
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let ctx = PipelineCtx {
-            client: client.clone() as std::sync::Arc<dyn crate::llm::client::LlmClient>,
+            clients: ClientSet::single(
+                client.clone() as std::sync::Arc<dyn crate::llm::client::LlmClient>
+            ),
             ws: ws.clone(),
             models: crate::model::ModelSet::default(),
             cfg: crate::model::AppConfig::default(),
@@ -3167,7 +3217,9 @@ mod tests {
         assert!(queue.push_back(2, 2));
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let ctx = PipelineCtx {
-            client: client.clone() as std::sync::Arc<dyn crate::llm::client::LlmClient>,
+            clients: ClientSet::single(
+                client.clone() as std::sync::Arc<dyn crate::llm::client::LlmClient>
+            ),
             ws: ws1.clone(),
             models: crate::model::ModelSet::default(),
             cfg: crate::model::AppConfig::default(),
@@ -3226,7 +3278,9 @@ mod tests {
         assert!(queue.push_back(3, 1));
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let ctx = PipelineCtx {
-            client: client.clone() as std::sync::Arc<dyn crate::llm::client::LlmClient>,
+            clients: ClientSet::single(
+                client.clone() as std::sync::Arc<dyn crate::llm::client::LlmClient>
+            ),
             ws: ws1.clone(),
             models: crate::model::ModelSet::default(),
             cfg: crate::model::AppConfig::default(),

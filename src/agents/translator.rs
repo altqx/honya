@@ -5,7 +5,7 @@ use crate::agents::prompts::TRANSLATOR_SYSTEM;
 use crate::llm::client::{LlmClient, LlmError};
 use crate::llm::structured::{chat_structured_stream_field, translator_schema};
 use crate::llm::{ChatRequest, Message, Usage};
-use crate::model::TranslatorOut;
+use crate::model::{AgentModel, TranslatorOut};
 
 #[derive(Debug, thiserror::Error)]
 #[error("{source}")]
@@ -35,7 +35,7 @@ impl TranslatorStreamError {
 #[allow(clippy::too_many_arguments)]
 pub async fn translate_chunk_streaming<F>(
     client: &dyn LlmClient,
-    model: &str,
+    model: &AgentModel,
     reference_ctx: &str,
     prev_thai: &[String],
     current_pov: Option<&str>,
@@ -80,7 +80,7 @@ where
 }
 
 fn translator_request(
-    model: &str,
+    model: &AgentModel,
     reference_ctx: &str,
     prev_thai: &[String],
     current_pov: Option<&str>,
@@ -111,9 +111,10 @@ fn translator_request(
     ));
 
     ChatRequest {
-        model: model.to_string(),
+        model: model.model.clone(),
         messages: vec![Message::system(TRANSLATOR_SYSTEM), Message::user(user)],
         temperature: Some(0.3),
+        reasoning: model.reasoning_param(),
         ..ChatRequest::default()
     }
 }

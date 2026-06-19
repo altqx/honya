@@ -276,7 +276,7 @@ pub struct RefineCtx {
     pub client: Arc<dyn LlmClient>,
     pub root: PathBuf,
     pub default_vol: u32,
-    pub model: String,
+    pub model: crate::model::AgentModel,
     pub tx: EventTx,
     /// Flipped to stop the in-flight turn between rounds (also set by `/clear`).
     pub cancel: Arc<AtomicBool>,
@@ -345,12 +345,16 @@ fn refine_tools_vec() -> Vec<Tool> {
 pub async fn run_refine_agent(ctx: RefineCtx, mut rx: UnboundedReceiver<RefineControl>) {
     let tools = RefineTools::new(ctx.root.clone(), ctx.default_vol, ctx.tx.clone());
     let mut req = ChatRequest::new(
-        ctx.model.clone(),
+        ctx.model.model.clone(),
         vec![Message::system(refine_system_prompt())],
     );
     req.tools = Some(refine_tools_vec());
-    // Surface the model's thinking in the stream; ignored by non-reasoning models.
-    req.reasoning = Some(json!({"enabled": true}));
+    // Honor a configured reasoning effort; otherwise just surface the model's
+    // thinking in the stream (ignored by non-reasoning models).
+    req.reasoning = ctx
+        .model
+        .reasoning_param()
+        .or_else(|| Some(json!({"enabled": true})));
     let mut current_id = ctx.session_id.clone();
     req.messages.extend(seed_messages(&ctx.root, &current_id));
 
@@ -1861,7 +1865,7 @@ mod tests {
 
     #[test]
     fn default_refine_model_is_gpt_5_5() {
-        assert_eq!(crate::model::ModelSet::default().refine, "openai/gpt-5.5");
+        assert_eq!(crate::model::ModelSet::default().refine.model, "openai/gpt-5.5");
     }
 
     #[tokio::test]

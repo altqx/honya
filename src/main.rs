@@ -152,6 +152,11 @@ pub fn build_client(cfg: &AppConfig) -> anyhow::Result<Arc<dyn LlmClient>> {
     Ok(Arc::new(client))
 }
 
+/// Build the per-provider client set (OpenRouter + Tokenrouter) for a run.
+pub fn build_clients(cfg: &AppConfig) -> anyhow::Result<llm::ClientSet> {
+    Ok(llm::ClientSet::build(cfg)?)
+}
+
 /// Print CLI usage for `honya --help`.
 fn print_help() {
     println!("honya 本屋 — AI-assisted Japanese → Thai light-novel translation\n");
@@ -171,6 +176,9 @@ fn print_help() {
     println!("    or try the bundled sample project to explore offline.\n");
     println!("ENVIRONMENT:");
     println!("    HONYA_API_KEY / OPENROUTER_API_KEY   OpenRouter key (overrides saved config)");
+    println!(
+        "    HONYA_TOKENROUTER_API_KEY / TOKENROUTER_API_KEY   Tokenrouter key (overrides saved config)"
+    );
     println!(
         "    HONYA_NO_UPDATE_CHECK                Disable the startup update check / auto-update"
     );

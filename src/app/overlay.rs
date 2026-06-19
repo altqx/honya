@@ -323,58 +323,130 @@ impl ImportState {
     }
 }
 
-/// Number of focusable Settings fields (base URL, 3 models, API key, retries).
-const SETTINGS_FIELDS: u8 = 8;
-/// Index of the API-key field within Settings.
-const SETTINGS_KEY_FIELD: u8 = 4;
-/// Index of the retry-attempts field within Settings (digits only).
-const SETTINGS_RETRIES_FIELD: u8 = 5;
-/// Index of the loop-watchdog stall field within Settings (digits only, seconds).
-const SETTINGS_STALL_FIELD: u8 = 6;
-/// Index of the per-chapter re-translate-limit field within Settings (digits only).
-const SETTINGS_RETRANSLATE_FIELD: u8 = 7;
-
-/// Whether a Settings field index is a digits-only numeric field.
-fn settings_numeric_field(field: u8) -> bool {
-    matches!(
-        field,
-        SETTINGS_RETRIES_FIELD | SETTINGS_STALL_FIELD | SETTINGS_RETRANSLATE_FIELD
-    )
+/// One focusable Settings field. The order of [`SETTINGS_ORDER`] is the on-screen
+/// order and the index space `SettingsState::field` walks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SField {
+    OrchProvider,
+    OrchModel,
+    OrchEffort,
+    TransProvider,
+    TransModel,
+    TransEffort,
+    ReviewProvider,
+    ReviewModel,
+    ReviewEffort,
+    RefineProvider,
+    RefineModel,
+    RefineEffort,
+    OpenRouterKey,
+    TokenrouterKey,
+    MaxAttempts,
+    LoopStall,
+    Retranslates,
+    ServiceTierField,
+    UpdateModeField,
+    ReleaseChannelField,
 }
 
-/// Settings: editable base URL + model ids + an editable, masked API key.
+const SETTINGS_ORDER: [SField; 20] = [
+    SField::OrchProvider,
+    SField::OrchModel,
+    SField::OrchEffort,
+    SField::TransProvider,
+    SField::TransModel,
+    SField::TransEffort,
+    SField::ReviewProvider,
+    SField::ReviewModel,
+    SField::ReviewEffort,
+    SField::RefineProvider,
+    SField::RefineModel,
+    SField::RefineEffort,
+    SField::OpenRouterKey,
+    SField::TokenrouterKey,
+    SField::MaxAttempts,
+    SField::LoopStall,
+    SField::Retranslates,
+    SField::ServiceTierField,
+    SField::UpdateModeField,
+    SField::ReleaseChannelField,
+];
+
+/// Number of focusable Settings fields.
+const SETTINGS_FIELDS: u8 = SETTINGS_ORDER.len() as u8;
+/// Index of the OpenRouter API-key field (callers open Settings focused here).
+const SETTINGS_KEY_FIELD: u8 = 12;
+
+impl SField {
+    /// A free-text editable field (vs. a Left/Right cycle field).
+    fn is_text(self) -> bool {
+        matches!(
+            self,
+            SField::OrchModel
+                | SField::TransModel
+                | SField::ReviewModel
+                | SField::RefineModel
+                | SField::OpenRouterKey
+                | SField::TokenrouterKey
+                | SField::MaxAttempts
+                | SField::LoopStall
+                | SField::Retranslates
+        )
+    }
+
+    /// A digits-only numeric field.
+    fn is_numeric(self) -> bool {
+        matches!(
+            self,
+            SField::MaxAttempts | SField::LoopStall | SField::Retranslates
+        )
+    }
+
+    /// A masked secret (API key) field.
+    fn is_secret(self) -> bool {
+        matches!(self, SField::OpenRouterKey | SField::TokenrouterKey)
+    }
+}
+
+/// Step an index forward/backward through a wrapped cycle of `len` items.
+fn step(i: usize, len: usize, forward: bool) -> usize {
+    if forward {
+        (i + 1) % len
+    } else {
+        (i + len - 1) % len
+    }
+}
+
+/// Settings: per-agent provider/model/effort, provider keys, pipeline limits, and
+/// the appearance + account controls.
 #[derive(Debug, Clone)]
 pub struct SettingsState {
-    pub base_url: String,
-    pub orchestrator: String,
-    pub translator: String,
-    pub reviewer: String,
-    /// The config-stored API key, editable here (masked on screen). Empty = none.
-    pub api_key: String,
+    /// Working copy of the per-agent provider/model/effort selection.
+    pub models: crate::model::ModelSet,
+    /// The config-stored OpenRouter key, editable here (masked). Empty = none.
+    pub openrouter_key: String,
     /// True when an env var (HONYA_API_KEY / OPENROUTER_API_KEY) supplies the key;
     /// it overrides config, so the field is shown read-only.
     pub api_key_env: bool,
-    /// Startup update behavior; toggled with Ctrl-U (not a text field).
+    /// The config-stored Tokenrouter key, editable here (masked). Empty = none.
+    pub tokenrouter_key: String,
+    /// True when an env var supplies the Tokenrouter key (shown read-only).
+    pub tokenrouter_key_env: bool,
+    /// Startup update behavior (cycle field; also Ctrl-U).
     pub update_mode: UpdateMode,
-    /// Update channel (stable releases vs latest git built from source);
-    /// toggled with Ctrl-G (not a text field).
+    /// Update channel (cycle field; also Ctrl-G).
     pub release_channel: ReleaseChannel,
-    /// OpenRouter request tier; cycled with Ctrl-Y (not a text field).
+    /// Request tier (cycle field; also Ctrl-Y).
     pub service_tier: Option<ServiceTier>,
     /// Max Translator↔Reviewer retry attempts per chunk, as typed (digits only).
-    /// Parsed and clamped to 1..=20 on save via [`SettingsState::max_attempts_value`].
     pub max_attempts: String,
-    /// Loop-watchdog stall window in seconds, as typed (digits only; 0 disables
-    /// the time arm). Parsed via [`SettingsState::loop_stall_secs_value`].
+    /// Loop-watchdog stall window in seconds, as typed (digits only; 0 disables).
     pub loop_stall_secs: String,
-    /// Whole-chapter re-translations allowed on a detected loop before the run
-    /// aborts, as typed (digits only). Parsed via
-    /// [`SettingsState::max_chapter_retranslates_value`].
+    /// Whole-chapter re-translations allowed on a detected loop, as typed (digits).
     pub max_chapter_retranslates: String,
-    /// Which field is focused (0..=7).
+    /// Which field is focused (index into [`SETTINGS_ORDER`]).
     pub field: u8,
-    /// Caret byte-offset into the focused (non-secret) field. The API-key field
-    /// is masked, so it edits at the end and ignores this.
+    /// Caret byte-offset into the focused text field. Secret fields edit at the end.
     pub cursor: usize,
     pub account_login: Option<String>,
     pub remote_enabled: bool,
@@ -388,12 +460,11 @@ pub struct SettingsState {
 impl SettingsState {
     fn from_cfg_focus(cfg: &AppConfig, field: u8) -> Self {
         let mut st = Self {
-            base_url: cfg.base_url.clone(),
-            orchestrator: cfg.models.orchestrator.clone(),
-            translator: cfg.models.translator.clone(),
-            reviewer: cfg.models.reviewer.clone(),
-            api_key: cfg.api_key.clone().unwrap_or_default(),
+            models: cfg.models.clone(),
+            openrouter_key: cfg.api_key.clone().unwrap_or_default(),
             api_key_env: crate::config::api_key_from_env().is_some(),
+            tokenrouter_key: cfg.tokenrouter_api_key.clone().unwrap_or_default(),
+            tokenrouter_key_env: crate::config::tokenrouter_key_from_env().is_some(),
             update_mode: cfg.update_mode,
             release_channel: cfg.release_channel,
             service_tier: cfg.service_tier,
@@ -414,10 +485,97 @@ impl SettingsState {
         st
     }
 
+    /// A default-config Settings state focused on `field` (tests only).
+    #[cfg(test)]
+    pub fn for_test(field: u8) -> Self {
+        Self::from_cfg_focus(&AppConfig::default(), field)
+    }
+
+    /// The currently focused field.
+    fn current(&self) -> SField {
+        SETTINGS_ORDER[self.field as usize]
+    }
+
+    /// Mutable handle to the focused text buffer (None for cycle fields).
+    fn text_field_mut(&mut self) -> Option<&mut String> {
+        Some(match self.current() {
+            SField::OrchModel => &mut self.models.orchestrator.model,
+            SField::TransModel => &mut self.models.translator.model,
+            SField::ReviewModel => &mut self.models.reviewer.model,
+            SField::RefineModel => &mut self.models.refine.model,
+            SField::OpenRouterKey => &mut self.openrouter_key,
+            SField::TokenrouterKey => &mut self.tokenrouter_key,
+            SField::MaxAttempts => &mut self.max_attempts,
+            SField::LoopStall => &mut self.loop_stall_secs,
+            SField::Retranslates => &mut self.max_chapter_retranslates,
+            _ => return None,
+        })
+    }
+
+    /// The working agent for an agent-row field, if this field belongs to one.
+    fn agent_for(&mut self, field: SField) -> Option<&mut crate::model::AgentModel> {
+        Some(match field {
+            SField::OrchProvider | SField::OrchModel | SField::OrchEffort => {
+                &mut self.models.orchestrator
+            }
+            SField::TransProvider | SField::TransModel | SField::TransEffort => {
+                &mut self.models.translator
+            }
+            SField::ReviewProvider | SField::ReviewModel | SField::ReviewEffort => {
+                &mut self.models.reviewer
+            }
+            SField::RefineProvider | SField::RefineModel | SField::RefineEffort => {
+                &mut self.models.refine
+            }
+            _ => return None,
+        })
+    }
+
+    /// Cycle the focused non-text field. `forward` is Right/Space; `false` is Left.
+    fn cycle(&mut self, forward: bool) {
+        let cur = self.current();
+        match cur {
+            SField::OrchProvider
+            | SField::TransProvider
+            | SField::ReviewProvider
+            | SField::RefineProvider => {
+                if let Some(a) = self.agent_for(cur) {
+                    a.provider = a.provider.cycled();
+                }
+            }
+            SField::OrchEffort
+            | SField::TransEffort
+            | SField::ReviewEffort
+            | SField::RefineEffort => {
+                const E: [Option<crate::model::Effort>; 6] = [
+                    None,
+                    Some(crate::model::Effort::Minimal),
+                    Some(crate::model::Effort::Low),
+                    Some(crate::model::Effort::Medium),
+                    Some(crate::model::Effort::High),
+                    Some(crate::model::Effort::Xhigh),
+                ];
+                if let Some(a) = self.agent_for(cur) {
+                    let i = E.iter().position(|e| *e == a.effort).unwrap_or(0);
+                    a.effort = E[step(i, E.len(), forward)];
+                }
+            }
+            SField::ServiceTierField => {
+                const T: [Option<ServiceTier>; 3] =
+                    [None, Some(ServiceTier::Flex), Some(ServiceTier::Priority)];
+                let i = T.iter().position(|t| *t == self.service_tier).unwrap_or(0);
+                self.service_tier = T[step(i, T.len(), forward)];
+            }
+            SField::UpdateModeField => self.update_mode = self.update_mode.toggled(),
+            SField::ReleaseChannelField => self.release_channel = self.release_channel.toggled(),
+            _ => {}
+        }
+    }
+
     /// Focus a field and drop the caret at its end.
     fn focus(&mut self, field: u8) {
         self.field = field % SETTINGS_FIELDS;
-        self.cursor = self.field_mut().len();
+        self.cursor = self.text_field_mut().map(|s| s.len()).unwrap_or(0);
     }
 
     fn next_field(&mut self) {
@@ -426,19 +584,6 @@ impl SettingsState {
 
     fn prev_field(&mut self) {
         self.focus(self.field + SETTINGS_FIELDS - 1);
-    }
-
-    fn field_mut(&mut self) -> &mut String {
-        match self.field {
-            0 => &mut self.base_url,
-            1 => &mut self.orchestrator,
-            2 => &mut self.translator,
-            3 => &mut self.reviewer,
-            4 => &mut self.api_key,
-            5 => &mut self.max_attempts,
-            6 => &mut self.loop_stall_secs,
-            _ => &mut self.max_chapter_retranslates,
-        }
     }
 
     /// The retries field parsed into a usable attempt count. Empty, non-numeric,
@@ -998,12 +1143,11 @@ impl Overlay {
     /// show, preserving the requested focused `field`.
     fn settings_at(field: u8) -> Self {
         Overlay::Settings(SettingsState {
-            base_url: String::new(),
-            orchestrator: String::new(),
-            translator: String::new(),
-            reviewer: String::new(),
-            api_key: String::new(),
+            models: crate::model::ModelSet::default(),
+            openrouter_key: String::new(),
             api_key_env: false,
+            tokenrouter_key: String::new(),
+            tokenrouter_key_env: false,
             update_mode: UpdateMode::default(),
             release_channel: ReleaseChannel::default(),
             service_tier: None,
@@ -1717,15 +1861,17 @@ impl Overlay {
                 }
             }
             KeyCode::Enter => Action::SaveSettings {
-                base_url: st.base_url.clone(),
-                orchestrator: st.orchestrator.clone(),
-                translator: st.translator.clone(),
-                reviewer: st.reviewer.clone(),
+                models: Box::new(st.models.clone()),
                 // Env keys must not overwrite saved config.
-                api_key: if st.api_key_env {
+                openrouter_key: if st.api_key_env {
                     None
                 } else {
-                    Some(st.api_key.clone())
+                    Some(st.openrouter_key.clone())
+                },
+                tokenrouter_key: if st.tokenrouter_key_env {
+                    None
+                } else {
+                    Some(st.tokenrouter_key.clone())
                 },
                 update_mode: st.update_mode,
                 release_channel: st.release_channel,
@@ -1742,33 +1888,52 @@ impl Overlay {
                 st.prev_field();
                 Action::None
             }
+            // Left/Right cycle the focused choice field; text fields keep them for
+            // caret movement (handled by the editor below).
+            KeyCode::Left | KeyCode::Right if !st.current().is_text() => {
+                st.cycle(matches!(key.code, KeyCode::Right));
+                Action::None
+            }
             _ => {
-                // The API-key field is masked, so it edits at the end only
-                // (a positioned caret would be meaningless under masking).
-                if st.field == SETTINGS_KEY_FIELD {
-                    if st.api_key_env {
+                let cur = st.current();
+                // Secret (key) fields are masked, so they edit at the end only.
+                if cur.is_secret() {
+                    let env = match cur {
+                        SField::OpenRouterKey => st.api_key_env,
+                        _ => st.tokenrouter_key_env,
+                    };
+                    if env {
                         return Action::None; // env key is read-only
                     }
                     match key.code {
                         KeyCode::Backspace => {
-                            st.api_key.pop();
+                            if let Some(buf) = st.text_field_mut() {
+                                buf.pop();
+                            }
                         }
                         KeyCode::Char(c)
                             if !key.modifiers.contains(KeyModifiers::CONTROL)
                                 && !key.modifiers.contains(KeyModifiers::ALT) =>
                         {
-                            st.api_key.push(c);
+                            if let Some(buf) = st.text_field_mut() {
+                                buf.push(c);
+                            }
                         }
                         _ => {}
                     }
                     return Action::None;
                 }
+                if !cur.is_text() {
+                    return Action::None; // cycle field: typing does nothing
+                }
                 let opts = EditOpts {
-                    numeric_only: settings_numeric_field(st.field),
+                    numeric_only: cur.is_numeric(),
                     multiline: false,
                 };
                 let mut cursor = st.cursor;
-                input::handle(st.field_mut(), &mut cursor, key, opts);
+                if let Some(buf) = st.text_field_mut() {
+                    input::handle(buf, &mut cursor, key, opts);
+                }
                 st.cursor = cursor;
                 Action::None
             }
@@ -3232,7 +3397,7 @@ impl Overlay {
         cfg: &AppConfig,
         st: &SettingsState,
     ) {
-        let modal = centered_modal(72, 32, area);
+        let modal = centered_modal(76, 34, area);
         f.render_widget(Clear, modal);
         let block = self.modal_block("Settings", theme);
         let inner = block.inner(modal);
@@ -3271,75 +3436,167 @@ impl Overlay {
                 Line::from(spans)
             };
 
-        let fields = [
-            ("Base URL", st.base_url.as_str(), 0u8),
-            ("Orchestrator model", st.orchestrator.as_str(), 1),
-            ("Translator model", st.translator.as_str(), 2),
-            ("Reviewer model", st.reviewer.as_str(), 3),
-        ];
-        let mut lines = vec![Line::raw("")];
-        for (label, value, idx) in fields {
-            lines.push(field_line(
-                label,
-                value.to_string(),
-                st.field == idx,
-                Some(st.cursor),
-            ));
-        }
-
-        let focused_key = st.field == SETTINGS_KEY_FIELD;
-        if st.api_key_env {
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!(" {} ", if focused_key { theme::SELECT_BAR } else { ' ' }),
-                    Style::default().fg(theme.accent),
-                ),
-                Span::styled("API key             ", Style::default().fg(theme.ink_faint)),
-                Span::styled("● via environment", Style::default().fg(theme.status_done)),
-                Span::styled(" (read-only)", Style::default().fg(theme.ink_faint)),
-            ]));
-        } else {
-            let shown = if st.api_key.trim().is_empty() {
+        // Build the scrollable, sectioned field list. `push` records the focused
+        // row's line index so the view can scroll to keep it on screen.
+        let row = |idx: u8, label: &str, value: String, text: bool| -> Line<'static> {
+            field_line(label, value, st.field == idx, text.then_some(st.cursor))
+        };
+        let header = |t: &str| -> Line<'static> {
+            Line::from(Span::styled(
+                format!("  {t}"),
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ))
+        };
+        let mask = |val: &str, env: bool| -> String {
+            if env {
+                "● via environment (read-only)".to_string()
+            } else if val.trim().is_empty() {
                 "— not set —".to_string()
             } else {
-                mask_secret(&st.api_key)
-            };
-            lines.push(field_line("API key", shown, focused_key, None));
+                mask_secret(val)
+            }
+        };
+
+        let mut lines: Vec<Line<'static>> = Vec::new();
+        let mut focus_line = 0usize;
+        let push = |lines: &mut Vec<Line<'static>>,
+                    focus_line: &mut usize,
+                    line: Line<'static>,
+                    focused: bool| {
+            if focused {
+                *focus_line = lines.len();
+            }
+            lines.push(line);
+        };
+
+        lines.push(Line::from(Span::styled(
+            "  ↑↓ move · ←→ change · type to edit · ↵ save",
+            Style::default().fg(theme.ink_faint),
+        )));
+
+        lines.push(header("Agents"));
+        for (name, base, agent) in [
+            ("Orchestrator", 0u8, &st.models.orchestrator),
+            ("Translator", 3, &st.models.translator),
+            ("Reviewer", 6, &st.models.reviewer),
+            ("Refine", 9, &st.models.refine),
+        ] {
+            push(
+                &mut lines,
+                &mut focus_line,
+                row(base, name, agent.provider.label().to_string(), false),
+                st.field == base,
+            );
+            push(
+                &mut lines,
+                &mut focus_line,
+                row(base + 1, "  model", agent.model.clone(), true),
+                st.field == base + 1,
+            );
+            push(
+                &mut lines,
+                &mut focus_line,
+                row(
+                    base + 2,
+                    "  effort",
+                    crate::model::Effort::label(agent.effort).to_string(),
+                    false,
+                ),
+                st.field == base + 2,
+            );
         }
 
-        lines.push(field_line(
-            "Retry attempts",
-            st.max_attempts.clone(),
-            st.field == SETTINGS_RETRIES_FIELD,
-            Some(st.cursor),
-        ));
+        lines.push(header("Providers"));
+        push(
+            &mut lines,
+            &mut focus_line,
+            row(12, "OpenRouter key", mask(&st.openrouter_key, st.api_key_env), false),
+            st.field == 12,
+        );
+        push(
+            &mut lines,
+            &mut focus_line,
+            row(
+                13,
+                "Tokenrouter key",
+                mask(&st.tokenrouter_key, st.tokenrouter_key_env),
+                false,
+            ),
+            st.field == 13,
+        );
+
+        lines.push(header("Pipeline"));
+        push(
+            &mut lines,
+            &mut focus_line,
+            row(14, "Retry attempts", st.max_attempts.clone(), true),
+            st.field == 14,
+        );
         lines.push(Line::from(Span::styled(
             "      ↳ Translator↔Reviewer loop per chunk (1–20)",
             Style::default().fg(theme.ink_faint),
         )));
-
-        lines.push(field_line(
-            "Loop watchdog (s)",
-            st.loop_stall_secs.clone(),
-            st.field == SETTINGS_STALL_FIELD,
-            Some(st.cursor),
-        ));
+        push(
+            &mut lines,
+            &mut focus_line,
+            row(15, "Loop watchdog (s)", st.loop_stall_secs.clone(), true),
+            st.field == 15,
+        );
         lines.push(Line::from(Span::styled(
             "      ↳ stuck/looping chapter re-translated after N s (0 = off)",
             Style::default().fg(theme.ink_faint),
         )));
-        lines.push(field_line(
-            "Loop re-translates",
-            st.max_chapter_retranslates.clone(),
-            st.field == SETTINGS_RETRANSLATE_FIELD,
-            Some(st.cursor),
-        ));
+        push(
+            &mut lines,
+            &mut focus_line,
+            row(
+                16,
+                "Loop re-translates",
+                st.max_chapter_retranslates.clone(),
+                true,
+            ),
+            st.field == 16,
+        );
         lines.push(Line::from(Span::styled(
             "      ↳ whole-chapter re-translates before the run aborts (0–10)",
             Style::default().fg(theme.ink_faint),
         )));
+        push(
+            &mut lines,
+            &mut focus_line,
+            row(
+                17,
+                "Service tier",
+                ServiceTier::label(st.service_tier).to_string(),
+                false,
+            ),
+            st.field == 17,
+        );
+        lines.push(Line::from(Span::styled(
+            format!("      ↳ {}", ServiceTier::desc(st.service_tier)),
+            Style::default().fg(theme.ink_faint),
+        )));
 
-        lines.push(Line::raw(""));
+        lines.push(header("Appearance"));
+        push(
+            &mut lines,
+            &mut focus_line,
+            row(18, "Auto-update", st.update_mode.label().to_string(), false),
+            st.field == 18,
+        );
+        push(
+            &mut lines,
+            &mut focus_line,
+            row(
+                19,
+                "Update channel",
+                st.release_channel.label().to_string(),
+                false,
+            ),
+            st.field == 19,
+        );
         lines.push(Line::from(vec![
             Span::styled(
                 "   Theme               ",
@@ -3348,40 +3605,6 @@ impl Overlay {
             Span::styled(cfg.theme.label(), Style::default().fg(theme.accent)),
             Span::styled("   Ctrl-T to change", Style::default().fg(theme.ink_faint)),
         ]));
-        lines.push(Line::from(vec![
-            Span::styled(
-                "   Auto-update         ",
-                Style::default().fg(theme.ink_faint),
-            ),
-            Span::styled(st.update_mode.label(), Style::default().fg(theme.accent)),
-            Span::styled("   Ctrl-U to toggle", Style::default().fg(theme.ink_faint)),
-        ]));
-        lines.push(Line::from(vec![
-            Span::styled(
-                "   Update channel      ",
-                Style::default().fg(theme.ink_faint),
-            ),
-            Span::styled(
-                st.release_channel.label(),
-                Style::default().fg(theme.accent),
-            ),
-            Span::styled("   Ctrl-G to toggle", Style::default().fg(theme.ink_faint)),
-        ]));
-        lines.push(Line::from(vec![
-            Span::styled(
-                "   Service tier         ",
-                Style::default().fg(theme.ink_faint),
-            ),
-            Span::styled(
-                ServiceTier::label(st.service_tier),
-                Style::default().fg(theme.accent),
-            ),
-            Span::styled("   Ctrl-Y to cycle", Style::default().fg(theme.ink_faint)),
-        ]));
-        lines.push(Line::from(Span::styled(
-            format!("      ↳ {}", ServiceTier::desc(st.service_tier)),
-            Style::default().fg(theme.ink_faint),
-        )));
 
         lines.push(Line::raw(""));
         lines.push(Line::from(Span::styled(
@@ -3477,17 +3700,18 @@ impl Overlay {
         }
 
         lines.push(Line::raw(""));
-        let footer = if st.api_key_env {
-            "   Key from HONYA_API_KEY / OPENROUTER_API_KEY · ↵ save · Esc close"
-        } else {
-            "   Paste an OpenRouter key (sk-or-…); saved to config.json · ↵ save"
-        };
         lines.push(Line::from(Span::styled(
-            footer,
+            "   Keys saved to config.json (0600) · env vars override · ↵ save · Esc close",
             Style::default().fg(theme.ink_faint),
         )));
+        // Scroll so the focused row stays visible (the list is taller than the modal).
+        let content_h = inner.height.max(1) as usize;
+        let max_scroll = lines.len().saturating_sub(content_h);
+        let scroll_y = focus_line.saturating_sub(content_h / 2).min(max_scroll) as u16;
         f.render_widget(
-            Paragraph::new(lines).style(Style::default().bg(theme.bg_panel)),
+            Paragraph::new(lines)
+                .style(Style::default().bg(theme.bg_panel))
+                .scroll((scroll_y, 0)),
             inner,
         );
     }
@@ -4897,6 +5121,24 @@ mod tests {
                 !glyphs.contains('\u{0E33}'),
                 "raw SARA AM leaked into wizard step {step}"
             );
+        }
+    }
+
+    /// The redesigned Settings overlay must render at every focus position
+    /// (exercising the focus-following scroll) without panicking, across a small
+    /// modal where the field list is taller than the visible area.
+    #[test]
+    fn settings_overlay_renders_at_every_focus() {
+        let theme = Theme::washi();
+        let cfg = AppConfig::default();
+        for field in 0..SETTINGS_FIELDS {
+            let ov = Overlay::Settings(SettingsState::for_test(field));
+            let Overlay::Settings(st) = &ov else {
+                unreachable!()
+            };
+            let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+            term.draw(|f| ov.render_settings(f, f.area(), &theme, &cfg, st))
+                .unwrap();
         }
     }
 

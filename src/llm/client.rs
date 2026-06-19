@@ -2,6 +2,7 @@
 //!
 //! The `Result<T>` alias here shadows `std::result::Result` within `crate::llm::*`.
 
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
@@ -10,7 +11,10 @@ use futures::StreamExt;
 use reqwest::StatusCode;
 use serde::Deserialize;
 
-use crate::model::{AppConfig, ServiceTier};
+use crate::model::{AgentModel, AppConfig, Provider, ServiceTier};
+
+pub const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
+pub const TOKENROUTER_BASE_URL: &str = "https://api.tokenrouter.com/v1";
 
 use super::{ChatRequest, ChatResponse, Choice, FunctionCall, ResponseMessage, ToolCall, Usage};
 
@@ -141,16 +145,24 @@ pub struct ClientConfig {
 }
 
 impl ClientConfig {
-    /// Build a config from an [`AppConfig`] + the key resolved once at startup.
-    pub fn from_app_config(cfg: &AppConfig, api_key: String) -> Self {
+    /// Build a config for an explicit endpoint + key, inheriting the ranking
+    /// headers, service tier, and timeout from an [`AppConfig`]. Used to point the
+    /// same OpenAI-compatible client at OpenRouter vs Tokenrouter.
+    pub fn for_endpoint(cfg: &AppConfig, base_url: impl Into<String>, api_key: String) -> Self {
         Self {
-            base_url: cfg.base_url.clone(),
+            base_url: base_url.into(),
             api_key,
             referer: cfg.referer.clone(),
             title: cfg.title.clone(),
             service_tier: cfg.service_tier,
             timeout: Duration::from_secs(120),
         }
+    }
+
+    /// Build a config from an [`AppConfig`] + the key resolved once at startup,
+    /// pointed at the fixed OpenRouter endpoint.
+    pub fn from_app_config(cfg: &AppConfig, api_key: String) -> Self {
+        Self::for_endpoint(cfg, OPENROUTER_BASE_URL, api_key)
     }
 
     fn endpoint(&self) -> String {
@@ -184,6 +196,79 @@ fn retry_after_hint(err: &LlmError) -> Option<u64> {
     match err {
         LlmError::RateLimited { retry_after, .. } => Some(*retry_after),
         _ => None,
+    }
+}
+
+/// Live clients keyed by [`Provider`], built once per run from the resolved keys.
+/// Each agent routes to the client for its configured provider.
+#[derive(Clone, Default)]
+pub struct ClientSet {
+    openrouter: Option<Arc<dyn LlmClient>>,
+    tokenrouter: Option<Arc<dyn LlmClient>>,
+}
+
+impl ClientSet {
+    pub fn build(cfg: &AppConfig) -> Result<Self> {
+        let openrouter = match crate::config::resolve_api_key(cfg) {
+            Some(key) => Some(
+                Arc::new(OpenRouterClient::new(ClientConfig::from_app_config(
+                    cfg, key,
+                ))?) as Arc<dyn LlmClient>,
+            ),
+            None => None,
+        };
+        let tokenrouter = match crate::config::resolve_tokenrouter_key(cfg) {
+            Some(key) => Some(Arc::new(OpenRouterClient::new(ClientConfig::for_endpoint(
+                cfg,
+                TOKENROUTER_BASE_URL,
+                key,
+            ))?) as Arc<dyn LlmClient>),
+            None => None,
+        };
+        Ok(Self {
+            openrouter,
+            tokenrouter,
+        })
+    }
+
+    /// The client for a provider, or `None` when that provider has no key
+    /// configured (Codex is always `None` until its auth flow lands).
+    pub fn for_provider(&self, provider: Provider) -> Option<Arc<dyn LlmClient>> {
+        match provider {
+            Provider::OpenRouter => self.openrouter.clone(),
+            Provider::Tokenrouter => self.tokenrouter.clone(),
+            Provider::Codex => None,
+        }
+    }
+
+    /// The client for an agent's configured provider.
+    pub fn for_agent(&self, agent: &AgentModel) -> Option<Arc<dyn LlmClient>> {
+        self.for_provider(agent.provider)
+    }
+
+    /// True when no provider has a key configured (fully unconfigured).
+    pub fn is_empty(&self) -> bool {
+        self.openrouter.is_none() && self.tokenrouter.is_none()
+    }
+
+    /// A set with a single client serving the default (OpenRouter) provider.
+    /// Convenient for tests and one-client setups.
+    pub fn single(client: Arc<dyn LlmClient>) -> Self {
+        Self {
+            openrouter: Some(client),
+            tokenrouter: None,
+        }
+    }
+
+    /// Override a single provider's client (used by tests to inject a mock).
+    #[cfg(test)]
+    pub fn with_provider(mut self, provider: Provider, client: Arc<dyn LlmClient>) -> Self {
+        match provider {
+            Provider::OpenRouter => self.openrouter = Some(client),
+            Provider::Tokenrouter => self.tokenrouter = Some(client),
+            Provider::Codex => {}
+        }
+        self
     }
 }
 
@@ -686,6 +771,35 @@ fn parse_retry_after(resp: &reqwest::Response) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::{AgentModel, Provider};
+
+    #[test]
+    fn for_endpoint_overrides_base_url_and_keeps_config() {
+        let cfg = AppConfig::default();
+        let cc = ClientConfig::for_endpoint(&cfg, TOKENROUTER_BASE_URL, "k".into());
+        assert_eq!(cc.base_url, TOKENROUTER_BASE_URL);
+        assert_eq!(cc.api_key, "k");
+        assert_eq!(cc.service_tier, cfg.service_tier);
+        assert_eq!(cc.referer, cfg.referer);
+    }
+
+    #[test]
+    fn client_set_routes_by_provider() {
+        let mock: Arc<dyn LlmClient> = Arc::new(crate::llm::mock::MockClient::default());
+        let set = ClientSet::default().with_provider(Provider::Tokenrouter, mock);
+        assert!(set.for_provider(Provider::Tokenrouter).is_some());
+        assert!(set.for_provider(Provider::OpenRouter).is_none());
+        assert!(
+            set.for_provider(Provider::Codex).is_none(),
+            "Codex unwired in phase 1"
+        );
+        assert!(!set.is_empty());
+        // for_agent dispatches on the agent's configured provider.
+        let agent = AgentModel::new(Provider::Tokenrouter, "m", None);
+        assert!(set.for_agent(&agent).is_some());
+        assert!(set.for_agent(&AgentModel::openrouter("m")).is_none());
+        assert!(ClientSet::default().is_empty());
+    }
 
     #[test]
     fn sse_line_appends_content_and_final_usage() {
@@ -718,7 +832,10 @@ mod tests {
 
         assert_eq!(seen, "abc");
         assert_eq!(reasoning, "hmm ", "reasoning deltas surface separately");
-        assert_eq!(stream_resp.content, "abc", "reasoning is not mixed into content");
+        assert_eq!(
+            stream_resp.content, "abc",
+            "reasoning is not mixed into content"
+        );
         assert_eq!(stream_resp.content, "abc");
         assert_eq!(stream_resp.id.as_deref(), Some("cmpl_1"));
         assert_eq!(stream_resp.model.as_deref(), Some("test/model"));
