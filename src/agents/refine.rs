@@ -1,14 +1,16 @@
 //! Refine chat agent backend: cross-volume tools plus the streaming loop.
 //! Chapter-text edits archive the prior version before overwriting.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::oneshot;
 
 use crate::app::refine::{MentionTarget, parse_scope};
 use crate::llm::client::LlmClient;
@@ -266,19 +268,33 @@ pub fn refine_tools_schema() -> serde_json::Value {
                 "properties":{
                     "vol":{"type":"integer"},"ch":{"type":"integer"},"feedback":{"type":"string"}
                 }}
+        }},
+        {"type":"function","function":{
+            "name":"task",
+            "description":"Spawn a focused sub-agent to carry out a self-contained chunk of work (e.g. \"normalize every honorific in volume 2\") using the same project tools, then report back. Use for large or parallelizable sub-tasks so the main thread stays focused. The sub-agent runs to completion and returns a summary; it cannot spawn further sub-agents.",
+            "parameters":{"type":"object","additionalProperties":false,"required":["description"],
+                "properties":{
+                    "description":{"type":"string","description":"The complete, self-contained task for the sub-agent."},
+                    "scope":{"type":"string","description":"Optional scope hint, e.g. a volume or chapter range."}
+                }}
+        }},
+        {"type":"function","function":{
+            "name":"ask_user",
+            "description":"Ask the user a question and wait for their answer when a decision is genuinely theirs to make and you cannot resolve it from the project or sensible defaults (e.g. choosing between two valid Thai renderings, or confirming a risky bulk change). Provide options for a multiple-choice decision, or omit them for a free-text answer. Use sparingly — prefer acting on a reasonable default and saying so.",
+            "parameters":{"type":"object","additionalProperties":false,"required":["question"],
+                "properties":{
+                    "question":{"type":"string","description":"The question to put to the user."},
+                    "options":{"type":"array","items":{"type":"string"},"description":"Optional choices; the user picks one."}
+                }}
         }}
     ])
 }
 
 const MAX_TOOL_ROUNDS: usize = 40;
-/// Compact the conversation once the estimated context passes this fraction of the
-/// model's window.
 const COMPACT_FRACTION: f64 = 0.8;
-/// Keep at least this many recent user turns (plus their tool exchanges) verbatim.
 const KEEP_RECENT_TURNS: usize = 3;
 
-/// A model's context window in tokens, by family (conservative defaults). honya
-/// accepts arbitrary model ids, so this is a heuristic, not an exact table.
+/// Conservative context-window guess for arbitrary model ids.
 pub fn model_max_context(model: &str) -> u32 {
     let m = model.to_ascii_lowercase();
     if m.contains("[1m]") || m.contains("gemini") {
@@ -296,7 +312,7 @@ pub fn model_max_context(model: &str) -> u32 {
     }
 }
 
-/// Rough token estimate (~4 chars/token) over a message slice, including tool I/O.
+/// Rough ~4 chars/token estimate, including tool I/O.
 fn estimate_context_tokens(messages: &[Message]) -> u32 {
     let mut chars = 0usize;
     for m in messages {
@@ -308,21 +324,18 @@ fn estimate_context_tokens(messages: &[Message]) -> u32 {
     (chars / 4).min(u32::MAX as usize) as u32
 }
 
-/// If the conversation is about to overflow the model's context, replace the older
-/// turns (everything between the system prompt and the last [`KEEP_RECENT_TURNS`]
-/// user turns) with a compact text summary. Compaction lands on a user-message
-/// boundary so the kept tail stays a valid chat/completions sequence.
-fn maybe_compact(req: &mut ChatRequest, tx: &EventTx) {
+/// Summarize old turns before the thread outgrows the model window.
+fn maybe_compact(req: &mut ChatRequest, tx: &EventTx, force: bool) {
     if req.messages.len() <= 2 {
         return;
     }
     let max = model_max_context(&req.model);
     let est = estimate_context_tokens(&req.messages);
-    if est < (max as f64 * COMPACT_FRACTION) as u32 {
+    if !force && est < (max as f64 * COMPACT_FRACTION) as u32 {
         return;
     }
 
-    // The boundary: the start of the KEEP_RECENT_TURNS-th-from-last user turn.
+    // Start of the kept tail, on a user-message boundary.
     let user_idxs: Vec<usize> = req
         .messages
         .iter()
@@ -337,7 +350,7 @@ fn maybe_compact(req: &mut ChatRequest, tx: &EventTx) {
         .copied()
         .unwrap_or(1);
     if keep_from <= 1 {
-        return; // nothing old enough to compact
+        return;
     }
 
     let summary = compact_summary(&req.messages[1..keep_from]);
@@ -358,15 +371,93 @@ fn maybe_compact(req: &mut ChatRequest, tx: &EventTx) {
     });
 }
 
-/// Deterministic summary of dropped turns: keep the gist (user requests + assistant
-/// replies, each clipped), discard verbose tool call/result noise.
+/// Diff preview clipped for transcript display.
+fn edit_diff_snippet(pairs: &[(&str, &str)]) -> String {
+    let mut s = String::from("```diff\n");
+    for (old, new) in pairs {
+        for line in old.lines().take(8) {
+            s.push_str("- ");
+            s.push_str(line);
+            s.push('\n');
+        }
+        for line in new.lines().take(8) {
+            s.push_str("+ ");
+            s.push_str(line);
+            s.push('\n');
+        }
+    }
+    s.push_str("```");
+    s
+}
+
+/// Approval summary/diff for mutating chapter-edit tools.
+fn approval_preview(name: &str, args: &str) -> Option<(String, String)> {
+    let v: serde_json::Value = serde_json::from_str(args).ok()?;
+    let s = |k: &str| {
+        v.get(k)
+            .and_then(|x| x.as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+    let ch = || v.get("ch").and_then(|x| x.as_u64()).unwrap_or(0);
+    match name {
+        "edit_chapter" => {
+            let (old, new) = (s("old"), s("new"));
+            Some((
+                format!("edit chapter {}", ch()),
+                edit_diff_snippet(&[(old.as_str(), new.as_str())]),
+            ))
+        }
+        "multi_edit_chapter" => {
+            let pairs: Vec<(String, String)> = v
+                .get("edits")
+                .and_then(|x| x.as_array())
+                .map(|a| {
+                    a.iter()
+                        .map(|e| {
+                            (
+                                e.get("old").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                                e.get("new").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let refs: Vec<(&str, &str)> =
+                pairs.iter().map(|(o, n)| (o.as_str(), n.as_str())).collect();
+            Some((
+                format!("apply {} edit(s) to chapter {}", pairs.len(), ch()),
+                edit_diff_snippet(&refs),
+            ))
+        }
+        "replace_chapter_text" => {
+            let preview: String = s("new_text").chars().take(800).collect();
+            Some((
+                format!("replace ALL text of chapter {}", ch()),
+                format!("```\n{preview}\n```"),
+            ))
+        }
+        "replace_across_project" => {
+            if v.get("dry_run").and_then(|x| x.as_bool()).unwrap_or(false) {
+                return None;
+            }
+            Some((
+                format!("replace across project: \"{}\" → \"{}\"", s("find"), s("replace")),
+                String::new(),
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// Compact old turns while dropping verbose tool noise.
 fn compact_summary(dropped: &[Message]) -> String {
     let mut s = String::from("[Earlier conversation, compacted to fit the context window]\n");
     for m in dropped {
         let label = match m.role {
             Role::User => "User",
             Role::Assistant => "Assistant",
-            _ => continue, // skip system / tool noise
+            _ => continue,
         };
         let Some(text) = m.content.as_deref().map(str::trim).filter(|t| !t.is_empty()) else {
             continue;
@@ -389,9 +480,92 @@ pub struct RefineCtx {
     pub default_vol: u32,
     pub model: crate::model::AgentModel,
     pub tx: EventTx,
-    /// Flipped to stop the in-flight turn between rounds (also set by `/clear`).
+    /// Stops the in-flight turn between rounds.
     pub cancel: Arc<AtomicBool>,
     pub session_id: String,
+    pub interact: RefineInteract,
+}
+
+/// Chapter-edit approval policy cycled by Ctrl+Tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ApprovalMode {
+    /// Apply routine fixes directly; ask before risky, bulky, or subjective edits.
+    #[default]
+    Auto,
+    /// Pause every mutating edit for user approval.
+    Ask,
+    /// Apply edits directly without approval prompts.
+    Always,
+}
+
+impl ApprovalMode {
+    fn from_u8(n: u8) -> Self {
+        match n {
+            1 => ApprovalMode::Ask,
+            2 => ApprovalMode::Always,
+            _ => ApprovalMode::Auto,
+        }
+    }
+    fn to_u8(self) -> u8 {
+        match self {
+            ApprovalMode::Auto => 0,
+            ApprovalMode::Ask => 1,
+            ApprovalMode::Always => 2,
+        }
+    }
+    /// Ctrl+Tab order.
+    pub fn cycled(self) -> Self {
+        match self {
+            ApprovalMode::Always => ApprovalMode::Ask,
+            ApprovalMode::Ask => ApprovalMode::Auto,
+            ApprovalMode::Auto => ApprovalMode::Always,
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            ApprovalMode::Auto => "auto",
+            ApprovalMode::Ask => "ask",
+            ApprovalMode::Always => "always-approve",
+        }
+    }
+}
+
+/// Shared interaction channel for edit approval and `ask_user`.
+#[derive(Clone, Default)]
+pub struct RefineInteract {
+    pending: Arc<Mutex<HashMap<u64, oneshot::Sender<String>>>>,
+    seq: Arc<AtomicU64>,
+    mode: Arc<AtomicU8>,
+}
+
+impl RefineInteract {
+    pub fn mode(&self) -> ApprovalMode {
+        ApprovalMode::from_u8(self.mode.load(Ordering::Relaxed))
+    }
+
+    pub fn cycle_mode(&self) -> ApprovalMode {
+        let next = self.mode().cycled();
+        self.mode.store(next.to_u8(), Ordering::Relaxed);
+        next
+    }
+
+    /// Register a pending interaction and receiver.
+    fn open(&self) -> (u64, oneshot::Receiver<String>) {
+        let id = self.seq.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = oneshot::channel();
+        if let Ok(mut map) = self.pending.lock() {
+            map.insert(id, tx);
+        }
+        (id, rx)
+    }
+
+    pub fn resolve(&self, id: u64, answer: String) {
+        if let Ok(mut map) = self.pending.lock()
+            && let Some(tx) = map.remove(&id)
+        {
+            let _ = tx.send(answer);
+        }
+    }
 }
 
 pub struct UserTurn {
@@ -404,6 +578,7 @@ pub enum RefineControl {
     SetModel(String),
     /// Swap the live thread to another (possibly new/empty) session id.
     SwitchSession(String),
+    Compact,
     Shutdown,
 }
 
@@ -412,6 +587,8 @@ fn seed_messages(root: &Path, id: &str) -> Vec<Message> {
         .map(|s| s.messages)
         .unwrap_or_default()
 }
+
+const SUBAGENT_SYSTEM: &str = "You are a focused sub-agent inside honya's Refine system, completing ONE self-contained task delegated by the main agent. You have the same project tools (read/search chapters and the lexicon; edit chapter text; update characters, glossary, style, recaps, summaries). Work autonomously — do not ask questions. Gather the context you need, make the surgical changes the task requires, verify them, then reply with a concise report of exactly what you did: chapters touched, terms/characters changed, and anything the main agent should know. Keep Thai idiomatic and preserve scene breaks, image links, and Markdown. You cannot spawn further sub-agents.";
 
 fn refine_system_prompt() -> String {
     r#"You are honya's Refine agent — an autonomous, expert engineering assistant for a Japanese→Thai light-novel translation project, working through a chat tab inside the honya TUI. You read, fix, and refine anything in the project: any volume or chapter's Thai translation, the character roster, the glossary, the style guide, the volume recap/synopsis, and chapter summaries. Your tools read and write the project on disk; treat the on-disk files as the single source of truth.
@@ -427,8 +604,9 @@ Keep working until the user's request is fully resolved before yielding the turn
 # Workflow
 1. Understand the request and its scope. The user may tag targets with `@` (e.g. `@v1/c3`, `@glossary`, `@characters`, `@style`, `@recap`); a scope hint is appended to their message. Tools without an explicit `vol` act on the active volume.
 2. Gather context BEFORE editing. Use list_volumes / list_chapters to learn structure, read_chapter to see real text, grep_chapter to locate exact strings, search_project to find a term across chapters, read_lexicon and read_meta to check established names/terminology/style, and list_flagged_chunks to find spots that failed QA ([REVIEW NEEDED]). Issue independent read-only calls together rather than one at a time.
-3. For any multi-step or multi-chapter task, call update_plan to lay out the steps, then keep it current: mark exactly one step in_progress as you work it, flip it to completed when done, and add steps you discover. Skip the plan for a single trivial edit.
-4. Make changes surgically. Prefer the smallest edit that fixes the issue:
+3. For any multi-step or multi-chapter task, call update_plan to lay out the steps, then keep it current: mark exactly one step in_progress as you work it, flip it to completed when done, and add steps you discover. The plan is a persistent TODO list that survives across turns — at the start of a turn, resume from any unfinished steps rather than restarting, and call update_plan with an empty list once the whole task is finished. Skip the plan for a single trivial edit.
+4. For a large, self-contained, or parallelizable chunk of work (e.g. "normalize every honorific across volume 2", "rewrite the action scenes in chapters 5–9"), delegate it with the `task` tool — a focused sub-agent runs it to completion with the same tools and reports back, keeping this thread clean. Do the work inline for anything small.
+5. Make changes surgically. Prefer the smallest edit that fixes the issue:
    - edit_chapter for a targeted wording fix (exact unique match; the safe default).
    - multi_edit_chapter to apply several fixes to one chapter atomically in a single call.
    - replace_across_project to standardize a name/term in EVERY chapter — run it with dry_run first to preview the blast radius, then for real, and also update the matching glossary/character entry.
@@ -436,6 +614,7 @@ Keep working until the user's request is fully resolved before yielding the turn
    - retranslate_chapter / refine_chapter_with_feedback to regenerate a chapter through the Translator→Reviewer pipeline (heavier; for "redo this chapter properly").
    Chapter-text edits archive the prior version automatically and are reversible (the user can /undo or view the Reader diff).
 5. Verify after editing — re-read or grep the changed region to confirm the edit landed and reads naturally; fix it if not.
+6. When a choice is genuinely the user's to make and you can't resolve it from the project or a sensible default (e.g. two equally valid Thai renderings, or confirming a risky bulk change), use the ask_user tool to put it to them — with options for a pick, or open-ended for free text. Otherwise act on a reasonable default and say what you chose.
 
 # Editing discipline
 - read_chapter shows Thai with `N│ ` line-number prefixes. NEVER include that prefix in edit_chapter's `old`/`new`; pass only the real text.
@@ -454,14 +633,20 @@ fn refine_tools_vec() -> Vec<Tool> {
 
 /// Owns the live chat thread so multi-turn history persists.
 pub async fn run_refine_agent(ctx: RefineCtx, mut rx: UnboundedReceiver<RefineControl>) {
-    let tools = RefineTools::new(ctx.root.clone(), ctx.default_vol, ctx.tx.clone());
+    let tools = RefineTools::with_agent(
+        ctx.root.clone(),
+        ctx.default_vol,
+        ctx.tx.clone(),
+        ctx.client.clone(),
+        ctx.model.clone(),
+        ctx.interact.clone(),
+    );
     let mut req = ChatRequest::new(
         ctx.model.model.clone(),
         vec![Message::system(refine_system_prompt())],
     );
     req.tools = Some(refine_tools_vec());
-    // Honor a configured reasoning effort; otherwise just surface the model's
-    // thinking in the stream (ignored by non-reasoning models).
+    // Keep configured effort; otherwise ask reasoning models to stream thinking.
     req.reasoning = ctx
         .model
         .reasoning_param()
@@ -473,11 +658,11 @@ pub async fn run_refine_agent(ctx: RefineCtx, mut rx: UnboundedReceiver<RefineCo
         match ctrl {
             RefineControl::Submit(turn) => {
                 ctx.cancel.store(false, Ordering::Relaxed);
-                let msg = build_user_message(&ctx, &turn);
+                let mut msg = build_user_message(&ctx, &turn);
+                msg.push_str(approval_directive(ctx.interact.mode()));
                 req.messages.push(Message::user(msg));
                 run_refine_turn(ctx.client.as_ref(), &mut req, &tools, &ctx.tx, &ctx.cancel).await;
-                // Hand the updated thread to the App to persist (sole writer), tagged
-                // with the session it belongs to so a stale update is dropped.
+                // Persist through App, tagged so stale session updates are dropped.
                 ctx.tx.send(AppEvent::RefineThreadUpdated {
                     session: current_id.clone(),
                     messages: req.messages[1..].to_vec(),
@@ -498,6 +683,13 @@ pub async fn run_refine_agent(ctx: RefineCtx, mut rx: UnboundedReceiver<RefineCo
                 req.messages.truncate(1);
                 req.messages.extend(seed_messages(&ctx.root, &id));
             }
+            RefineControl::Compact => {
+                maybe_compact(&mut req, &ctx.tx, true);
+                ctx.tx.send(AppEvent::RefineThreadUpdated {
+                    session: current_id.clone(),
+                    messages: req.messages[1..].to_vec(),
+                });
+            }
             RefineControl::Shutdown => break,
         }
     }
@@ -517,8 +709,7 @@ async fn run_refine_turn(
             return;
         }
 
-        // Compact older turns before they overflow the model's context window.
-        maybe_compact(req, tx);
+        maybe_compact(req, tx, false);
 
         let mut on_delta = |d: crate::llm::StreamDelta| match d {
             crate::llm::StreamDelta::Content(s) => tx.send(AppEvent::RefineDelta {
@@ -553,7 +744,6 @@ async fn run_refine_turn(
         let tool_calls = choice.message.tool_calls.clone().unwrap_or_default();
 
         if tool_calls.is_empty() {
-            // Final text turn: persist it so the next user turn sees the reply.
             if let Some(c) = content.filter(|c| !c.is_empty()) {
                 req.messages.push(Message::assistant(c));
             }
@@ -609,7 +799,15 @@ fn summarize_args(args_json: &str) -> String {
     }
 }
 
-/// Persist only a short scope hint, not full chapter text.
+/// Per-turn edit-approval instruction; injected because mode can change live.
+fn approval_directive(mode: ApprovalMode) -> &'static str {
+    match mode {
+        ApprovalMode::Auto => "\n\n[Approval mode: AUTO — apply routine, clearly-wanted fixes directly, but call the ask_user tool to confirm BEFORE any edit the user might not consent to: risky, bulky, subjective, or destructive changes (e.g. rewriting many chapters, changing a character's name everywhere, deleting content).]",
+        ApprovalMode::Ask => "\n\n[Approval mode: ASK — the app pauses every edit for the user to accept or reject, so just proceed and make the edits normally.]",
+        ApprovalMode::Always => "\n\n[Approval mode: ALWAYS-APPROVE — apply edits directly and do not ask for approval.]",
+    }
+}
+
 fn build_user_message(ctx: &RefineCtx, turn: &UserTurn) -> String {
     let scope = parse_scope(&turn.text);
     if scope.is_empty() {
@@ -1509,7 +1707,11 @@ pub async fn dispatch_refine_tool(
                 vol: a.vol.unwrap_or(default_vol),
                 ch: a.ch,
             });
-            ToolResult::ok(format!("edited chapter {}: {count} replacement(s)", a.ch))
+            ToolResult::ok(format!(
+                "edited chapter {}: {count} replacement(s)\n{}",
+                a.ch,
+                edit_diff_snippet(&[(&a.old, &a.new)])
+            ))
         }
 
         "multi_edit_chapter" => {
@@ -1554,10 +1756,16 @@ pub async fn dispatch_refine_tool(
                 vol: a.vol.unwrap_or(default_vol),
                 ch: a.ch,
             });
+            let pairs: Vec<(&str, &str)> = a
+                .edits
+                .iter()
+                .map(|e| (e.old.as_str(), e.new.as_str()))
+                .collect();
             ToolResult::ok(format!(
-                "applied {} edit(s) ({total} replacement(s)) to chapter {}",
+                "applied {} edit(s) ({total} replacement(s)) to chapter {}\n{}",
                 a.edits.len(),
-                a.ch
+                a.ch,
+                edit_diff_snippet(&pairs)
             ))
         }
 
@@ -1715,14 +1923,142 @@ pub struct RefineTools {
     root: PathBuf,
     default_vol: u32,
     tx: EventTx,
+    /// Enables `task`; absent in tests.
+    client: Option<std::sync::Arc<dyn LlmClient>>,
+    model: crate::model::AgentModel,
+    can_spawn: bool,
+    interact: RefineInteract,
 }
 
 impl RefineTools {
+    #[cfg(test)]
     pub fn new(root: PathBuf, default_vol: u32, tx: EventTx) -> Self {
         Self {
             root,
             default_vol,
             tx,
+            client: None,
+            model: crate::model::AgentModel::openrouter(""),
+            can_spawn: false,
+            interact: RefineInteract::default(),
+        }
+    }
+
+    pub fn with_agent(
+        root: PathBuf,
+        default_vol: u32,
+        tx: EventTx,
+        client: std::sync::Arc<dyn LlmClient>,
+        model: crate::model::AgentModel,
+        interact: RefineInteract,
+    ) -> Self {
+        Self {
+            root,
+            default_vol,
+            tx,
+            client: Some(client),
+            model,
+            can_spawn: true,
+            interact,
+        }
+    }
+
+    fn child(&self) -> Self {
+        Self {
+            root: self.root.clone(),
+            default_vol: self.default_vol,
+            tx: self.tx.clone(),
+            client: self.client.clone(),
+            model: self.model.clone(),
+            can_spawn: false,
+            interact: self.interact.clone(),
+        }
+    }
+
+    async fn request_approval(&self, summary: String, diff: String) -> bool {
+        let (id, rx) = self.interact.open();
+        self.tx
+            .send(AppEvent::RefineApprovalRequest { id, summary, diff });
+        rx.await.unwrap_or_default() == "approve"
+    }
+
+    async fn request_decision(&self, question: String, options: Vec<String>) -> String {
+        let (id, rx) = self.interact.open();
+        self.tx.send(AppEvent::RefineDecisionRequest {
+            id,
+            question,
+            options,
+        });
+        rx.await.unwrap_or_default()
+    }
+
+    async fn run_ask_user(&self, arguments_json: &str) -> ToolResult {
+        #[derive(serde::Deserialize)]
+        struct Args {
+            question: String,
+            #[serde(default)]
+            options: Vec<String>,
+        }
+        let a: Args = match serde_json::from_str(arguments_json) {
+            Ok(a) => a,
+            Err(e) => return ToolResult::err(format!("bad ask_user args: {e}")),
+        };
+        let answer = self.request_decision(a.question, a.options).await;
+        if answer.is_empty() {
+            ToolResult::err("the user dismissed the question without answering")
+        } else {
+            ToolResult::ok(format!("user answered: {answer}"))
+        }
+    }
+
+    async fn run_subagent(&self, arguments_json: &str) -> ToolResult {
+        if !self.can_spawn {
+            return ToolResult::err("nested sub-agents are not allowed");
+        }
+        let Some(client) = self.client.clone() else {
+            return ToolResult::err("sub-agents are unavailable (no client wired)");
+        };
+        #[derive(serde::Deserialize)]
+        struct Args {
+            description: String,
+            #[serde(default)]
+            scope: Option<String>,
+        }
+        let a: Args = match serde_json::from_str(arguments_json) {
+            Ok(a) => a,
+            Err(e) => return ToolResult::err(format!("bad task args: {e}")),
+        };
+        let user = match &a.scope {
+            Some(s) if !s.trim().is_empty() => format!("Scope: {s}\n\nTask: {}", a.description),
+            _ => a.description.clone(),
+        };
+        let mut req = ChatRequest::new(
+            self.model.model.clone(),
+            vec![Message::system(SUBAGENT_SYSTEM), Message::user(user)],
+        );
+        req.tools = Some(refine_tools_vec());
+        req.reasoning = self.model.reasoning_param();
+
+        let preview: String = a.description.chars().take(80).collect();
+        self.tx.send(AppEvent::Log {
+            level: LogLevel::Info,
+            msg: format!("Refine sub-agent started: {preview}"),
+        });
+
+        match crate::llm::tool_loop::run_tool_loop(client.as_ref(), req, &self.child(), 30).await {
+            Ok(outcome) => {
+                let report = outcome
+                    .response
+                    .choices
+                    .first()
+                    .and_then(|c| c.message.content.clone())
+                    .unwrap_or_default();
+                ToolResult::ok(format!(
+                    "sub-agent finished ({} tool call(s)):\n{report}",
+                    outcome.tool_calls
+                ))
+            }
+            Err(e) => ToolResult::err(format!("sub-agent failed: {e}")),
         }
     }
 }
@@ -1730,9 +2066,23 @@ impl RefineTools {
 #[async_trait]
 impl ToolExecutor for RefineTools {
     async fn execute(&self, name: &str, arguments_json: &str) -> anyhow::Result<String> {
+        if name == "task" {
+            return Ok(serde_json::to_string(&self.run_subagent(arguments_json).await)?);
+        }
+        if name == "ask_user" {
+            return Ok(serde_json::to_string(&self.run_ask_user(arguments_json).await)?);
+        }
+        // Ask mode gates only mutating tools.
+        if self.interact.mode() == ApprovalMode::Ask
+            && let Some((summary, diff)) = approval_preview(name, arguments_json)
+            && !self.request_approval(summary, diff).await
+        {
+            return Ok(serde_json::to_string(&ToolResult::err(
+                "edit rejected by the user",
+            ))?);
+        }
         let result =
-            dispatch_refine_tool(&self.root, self.default_vol, &self.tx, name, arguments_json)
-                .await;
+            dispatch_refine_tool(&self.root, self.default_vol, &self.tx, name, arguments_json).await;
         Ok(serde_json::to_string(&result)?)
     }
 }
@@ -1756,7 +2106,6 @@ mod tests {
 
     #[test]
     fn compaction_summarizes_old_turns_and_keeps_recent_tail() {
-        // A long conversation that exceeds 0.8 × the claude window (200k).
         let mut req = ChatRequest::new("claude-test", vec![Message::system("sys")]);
         let big = "x".repeat(40_000); // ~10k tokens each
         for i in 0..30 {
@@ -1765,12 +2114,10 @@ mod tests {
         }
         let before = req.messages.len();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        maybe_compact(&mut req, &EventTx(tx));
+        maybe_compact(&mut req, &EventTx(tx), false);
 
         assert!(req.messages.len() < before, "context was compacted");
         assert_eq!(req.messages[0].role, Role::System, "system prompt kept");
-        // The summary is inserted as a user message and the kept tail also starts
-        // on a user message, keeping the sequence valid.
         assert_eq!(req.messages[1].role, Role::User);
         assert!(
             req.messages[1]
@@ -1780,7 +2127,6 @@ mod tests {
                 .contains("compacted")
         );
         assert_eq!(req.messages[2].role, Role::User, "tail starts at a user turn");
-        // The most recent turn survives verbatim.
         assert!(
             req.messages
                 .last()
@@ -1793,13 +2139,63 @@ mod tests {
     }
 
     #[test]
+    fn approval_mode_cycles_and_gates() {
+        let i = RefineInteract::default();
+        assert_eq!(i.mode(), ApprovalMode::Auto);
+        assert_eq!(i.cycle_mode(), ApprovalMode::Always);
+        assert_eq!(i.cycle_mode(), ApprovalMode::Ask);
+        assert_eq!(i.cycle_mode(), ApprovalMode::Auto);
+        assert_eq!(ApprovalMode::Always.cycled(), ApprovalMode::Ask);
+    }
+
+    #[tokio::test]
+    async fn interact_channel_round_trips() {
+        let i = RefineInteract::default();
+        let (id, rx) = i.open();
+        assert_eq!(id, 0, "ids start at 0");
+        let (id2, _rx2) = i.open();
+        assert_eq!(id2, 1, "ids increment");
+        i.resolve(id, "yes".to_string());
+        assert_eq!(rx.await.unwrap(), "yes");
+        i.resolve(999, "x".to_string());
+    }
+
+    #[test]
+    fn approval_preview_builds_diff_for_edits() {
+        let (summary, diff) =
+            approval_preview("edit_chapter", r#"{"ch":3,"old":"foo","new":"bar"}"#).unwrap();
+        assert!(summary.contains("chapter 3"));
+        assert!(diff.contains("- foo") && diff.contains("+ bar"));
+        assert!(approval_preview("read_chapter", r#"{"ch":1}"#).is_none());
+        assert!(
+            approval_preview(
+                "replace_across_project",
+                r#"{"find":"a","replace":"b","dry_run":true}"#
+            )
+            .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn task_tool_blocked_without_agent_wiring() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let tools = RefineTools::new(std::path::PathBuf::from("/tmp"), 1, EventTx(tx));
+        let out = tools
+            .execute("task", r#"{"description":"do something big"}"#)
+            .await
+            .unwrap();
+        assert!(out.contains("\"ok\":false"));
+        assert!(out.contains("sub-agent") || out.contains("nested"));
+    }
+
+    #[test]
     fn no_compaction_when_under_budget() {
         let mut req = ChatRequest::new("claude-test", vec![Message::system("sys")]);
         req.messages.push(Message::user("hi"));
         req.messages.push(Message::assistant("hello"));
         let before = req.messages.clone();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        maybe_compact(&mut req, &EventTx(tx));
+        maybe_compact(&mut req, &EventTx(tx), false);
         assert_eq!(req.messages.len(), before.len(), "small chat untouched");
     }
 

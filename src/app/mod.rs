@@ -298,6 +298,12 @@ pub enum Action {
     },
     RefineUndo,
     RefineOpenDiff,
+    RefineCompact,
+    RefineExport,
+    /// Cycle the refine edit-approval mode (always-approve → ask → auto) — Ctrl+Tab.
+    RefineCycleApprovalMode,
+    /// The user's answer to a blocking refine prompt (approval / ask_user).
+    RefineRespondInteraction { id: u64, answer: String },
     /// Boxed to break the `Action → Overlay → Dialog → Action` size cycle.
     ShowOverlay(Box<Overlay>),
     CloseOverlay,
@@ -429,6 +435,8 @@ pub struct App {
     /// Long-lived Refine agent task, spawned lazily on first submit.
     refine_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::agents::refine::RefineControl>>,
     refine_cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// Shared approval/ask_user channel for Refine.
+    refine_interact: crate::agents::refine::RefineInteract,
     refine_sessions: Vec<crate::workspace::refine_session::SessionMeta>,
     refine_session_id: String,
     /// Last Refine-edited chapter `(vol, ch)`, for `/undo` and `/diff`.
@@ -505,6 +513,7 @@ impl App {
             session_label: None,
             refine_tx: None,
             refine_cancel: None,
+            refine_interact: crate::agents::refine::RefineInteract::default(),
             refine_sessions: Vec::new(),
             refine_session_id: String::new(),
             refine_last_edit: None,
@@ -1016,6 +1025,7 @@ impl App {
             tx: self.tx.clone(),
             cancel: cancel.clone(),
             session_id: self.refine_session_id.clone(),
+            interact: self.refine_interact.clone(),
         };
         tokio::spawn(async move {
             crate::agents::refine::run_refine_agent(ctx, rx).await;
@@ -1072,10 +1082,14 @@ impl App {
             .first()
             .map(|s| s.id.clone())
             .unwrap_or_else(crate::workspace::refine_session::new_id);
-        let turns = crate::workspace::refine_session::load(&root, &id)
+        let loaded = crate::workspace::refine_session::load(&root, &id);
+        let turns = loaded
+            .as_ref()
             .map(|s| refine::display_turns(&s.messages))
             .unwrap_or_default();
+        let plan = loaded.map(|s| s.plan).unwrap_or_default();
         self.refine.load_turns(turns, id.clone());
+        self.refine.set_plan(plan);
         self.refine_session_id = id;
         self.refine_sessions = sessions;
     }
@@ -1104,6 +1118,7 @@ impl App {
             .unwrap_or_else(|| RefineSession::new(session.clone(), model.clone()));
         saved.messages = messages;
         saved.model = model;
+        saved.plan = self.refine.plan().to_vec();
         saved.updated = chrono::Utc::now();
         if saved.title.trim().is_empty() {
             saved.title = refine_session_title(&saved.messages);
@@ -1131,10 +1146,14 @@ impl App {
         let Some(root) = self.refine_root() else {
             return;
         };
-        let turns = crate::workspace::refine_session::load(&root, &id)
+        let session = crate::workspace::refine_session::load(&root, &id);
+        let turns = session
+            .as_ref()
             .map(|s| refine::display_turns(&s.messages))
             .unwrap_or_default();
+        let plan = session.map(|s| s.plan).unwrap_or_default();
         self.refine.load_turns(turns, id.clone());
+        self.refine.set_plan(plan);
         self.refine_session_id = id.clone();
         if let Some(tx) = &self.refine_tx {
             let _ = tx.send(crate::agents::refine::RefineControl::SwitchSession(id));
@@ -1222,6 +1241,25 @@ impl App {
     }
 
     /// Restore the latest archived prior version from `reruns/`.
+    /// Export the active refine conversation to a markdown file at the project root.
+    fn refine_export(&mut self) {
+        let Some(root) = self.refine_root() else {
+            self.toast = Some(Toast::warn("no active refine session"));
+            return;
+        };
+        let id = self.refine_session_id.clone();
+        let Some(session) = crate::workspace::refine_session::load(&root, &id) else {
+            self.toast = Some(Toast::warn("session not found"));
+            return;
+        };
+        let md = refine_session_to_markdown(&session);
+        let path = root.join(format!("refine-{id}.md"));
+        match std::fs::write(&path, md) {
+            Ok(()) => self.toast = Some(Toast::info(format!("exported to {}", path.display()))),
+            Err(e) => self.toast = Some(Toast::error(format!("export failed: {e}"))),
+        }
+    }
+
     fn refine_undo(&mut self) {
         let Some((vol, ch)) = self.refine_last_edit else {
             self.toast = Some(Toast::warn("nothing to undo"));
@@ -2251,6 +2289,36 @@ impl App {
             Action::RefineOpenDiff => {
                 self.refine_open_diff();
             }
+            Action::RefineCompact => {
+                if let Some(tx) = &self.refine_tx {
+                    let _ = tx.send(crate::agents::refine::RefineControl::Compact);
+                    self.toast = Some(Toast::info("compacting refine conversation…".to_string()));
+                } else {
+                    self.toast = Some(Toast::warn("no active refine session".to_string()));
+                }
+            }
+            Action::RefineExport => {
+                self.refine_export();
+            }
+            Action::RefineCycleApprovalMode => {
+                let mode = self.refine_interact.cycle_mode();
+                self.refine.set_approval_mode(mode);
+                let detail = match mode {
+                    crate::agents::refine::ApprovalMode::Auto => {
+                        "auto — the model asks before edits you might not want"
+                    }
+                    crate::agents::refine::ApprovalMode::Ask => {
+                        "ask — every edit pauses for your accept/reject"
+                    }
+                    crate::agents::refine::ApprovalMode::Always => {
+                        "always-approve — edits apply directly"
+                    }
+                };
+                self.toast = Some(Toast::info(format!("approval mode: {detail}")));
+            }
+            Action::RefineRespondInteraction { id, answer } => {
+                self.refine_interact.resolve(id, answer);
+            }
             Action::OpenProject(id) => {
                 self.open_project(id);
             }
@@ -2704,12 +2772,9 @@ impl App {
         self.activate_project(project, vol);
     }
 
-    /// Switch the active volume without resetting screens. Called while the Project
-    /// cursor crosses volume boundaries, so it must stay cheap.
+    /// Switch active volume without resetting screens.
     fn set_active_volume(&mut self, vol: u32) {
-        // The refine agent is intentionally cross-volume (its tools take a `vol`),
-        // so a volume change here does NOT tear it down — that would wipe the chat
-        // on every Project-cursor crossing.
+        // Refine is cross-volume, so cursor-following must not wipe the chat.
         if let Some(active) = self.active.as_mut()
             && active.vol != vol
             && active.project.volumes.iter().any(|v| v.number == vol)
@@ -4341,6 +4406,53 @@ impl App {
 }
 
 /// Title from the first user message, with the scope hint stripped.
+/// Render a refine session's transcript as readable markdown for `/export`.
+fn refine_session_to_markdown(s: &crate::workspace::refine_session::RefineSession) -> String {
+    use crate::llm::Role;
+    let title = if s.title.trim().is_empty() {
+        s.id.as_str()
+    } else {
+        s.title.as_str()
+    };
+    let mut out = format!(
+        "# Refine — {title}\n\n*model: {} · {} · {} messages*\n\n",
+        s.model,
+        s.updated.format("%Y-%m-%d %H:%M"),
+        s.messages.len()
+    );
+    for m in &s.messages {
+        let body = m.content.as_deref().unwrap_or("").trim();
+        match m.role {
+            Role::User => {
+                out.push_str("## 🧑 User\n\n");
+                out.push_str(body);
+                out.push_str("\n\n");
+            }
+            Role::Assistant => {
+                out.push_str("## 🤖 Assistant\n\n");
+                if !body.is_empty() {
+                    out.push_str(body);
+                    out.push_str("\n\n");
+                }
+                for tc in m.tool_calls.iter().flatten() {
+                    out.push_str(&format!("- 🔧 `{}`\n", tc.function.name));
+                }
+                if m.tool_calls.is_some() {
+                    out.push('\n');
+                }
+            }
+            Role::Tool => {
+                let clipped: String = body.chars().take(400).collect();
+                out.push_str("> ");
+                out.push_str(&clipped.replace('\n', "\n> "));
+                out.push_str("\n\n");
+            }
+            Role::System => {}
+        }
+    }
+    out
+}
+
 fn refine_session_title(messages: &[crate::llm::Message]) -> String {
     for m in messages {
         if matches!(m.role, crate::llm::Role::User)
@@ -5170,10 +5282,7 @@ mod completeness_tests {
         (base, ws)
     }
 
-    /// The crux of the whole-project resume fix: a chapter with only some chunks
-    /// committed must read as INCOMPLETE even though `derive_status` would scan its
-    /// non-empty translated file as `Done`. Otherwise the project run silently skips
-    /// it and its remaining chunks are never translated.
+    /// Partial translated files can scan as `Done`; chunk markers decide completeness.
     #[tokio::test]
     async fn partial_chapter_is_incomplete_until_every_chunk_is_committed() {
         let (base, ws) = temp_ws("partial");
@@ -5192,10 +5301,8 @@ mod completeness_tests {
         );
         assert!(chunks.len() >= 3, "fixture must produce several chunks");
 
-        // No translation yet → incomplete.
         assert!(!chapter_complete_on_disk(&ws, 1, &cfg));
 
-        // Commit only the first chunk → still incomplete (the bug: scans as Done).
         translation::append_chunk(&ws, 1, 0, "ประโยคแรก")
             .await
             .unwrap();

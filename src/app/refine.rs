@@ -105,6 +105,11 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/model", "set the refine model"),
     ("/undo", "restore the last chapter edit"),
     ("/diff", "diff the last chapter edit"),
+    ("/compact", "compact the conversation now"),
+    ("/context", "show context-window usage"),
+    ("/export", "export this conversation to markdown"),
+    ("/grep", "search the project for text"),
+    ("/resume", "pick a session to resume"),
 ];
 
 const RESOURCE_CANDS: &[(&str, &str)] = &[
@@ -141,7 +146,6 @@ pub enum TurnRole {
     Tool,
 }
 
-/// UI mirror of the persisted chat thread.
 #[derive(Debug, Clone)]
 pub struct Turn {
     pub role: TurnRole,
@@ -209,6 +213,22 @@ fn user_display(content: &str) -> &str {
         .unwrap_or(content)
 }
 
+/// Blocking prompt awaiting user input.
+#[derive(Debug, Clone)]
+enum RefinePending {
+    Approval {
+        id: u64,
+        summary: String,
+        diff: String,
+    },
+    Decision {
+        id: u64,
+        question: String,
+        options: Vec<String>,
+        selected: usize,
+    },
+}
+
 pub struct RefineScreen {
     pub conversation: Vec<Turn>,
     input: String,
@@ -223,20 +243,16 @@ pub struct RefineScreen {
     sessions: Vec<SessionMeta>,
     picker: Option<usize>,
     active_session: String,
-    /// Live checklist from `update_plan`.
+    pending: Option<RefinePending>,
+    approval_mode: crate::agents::refine::ApprovalMode,
     plan: Vec<PlanStep>,
-    /// Expands finished reasoning and tool detail; streaming reasoning is always shown.
     expanded: bool,
-    /// A turn is in flight (between submit and done/error): drives the working line.
     in_flight: bool,
     turn_started: Option<std::time::Instant>,
     last_turn_elapsed: Option<std::time::Duration>,
-    /// (input, output) tokens — `turn` resets each request, `session` accumulates.
     turn_tokens: (u32, u32),
     session_tokens: (u32, u32),
-    /// Most recent prompt size = how full the model's context window is now.
     last_context: u32,
-    /// The active refine model's context window (set when the session starts).
     context_max: u32,
     transcript_area: Rect,
     input_area: Rect,
@@ -265,6 +281,8 @@ impl RefineScreen {
             sessions: Vec::new(),
             picker: None,
             active_session: String::new(),
+            pending: None,
+            approval_mode: crate::agents::refine::ApprovalMode::default(),
             plan: Vec::new(),
             expanded: false,
             in_flight: false,
@@ -299,7 +317,6 @@ impl RefineScreen {
         self.reset_meters();
     }
 
-    /// Mark the start of a dispatched turn (called by App once the request is sent).
     pub fn begin_turn(&mut self) {
         self.in_flight = true;
         self.turn_started = Some(std::time::Instant::now());
@@ -314,12 +331,22 @@ impl RefineScreen {
         self.session_tokens = (0, 0);
     }
 
-    /// Record the active refine model's context window for the `ctx X/max` meter.
     pub fn set_context_max(&mut self, max: u32) {
         self.context_max = max.max(1);
     }
 
-    /// End the in-flight turn, banking its elapsed time.
+    pub fn set_approval_mode(&mut self, mode: crate::agents::refine::ApprovalMode) {
+        self.approval_mode = mode;
+    }
+
+    pub fn plan(&self) -> &[PlanStep] {
+        &self.plan
+    }
+
+    pub fn set_plan(&mut self, plan: Vec<PlanStep>) {
+        self.plan = plan;
+    }
+
     fn finish_turn(&mut self) {
         if let Some(start) = self.turn_started.take() {
             self.last_turn_elapsed = Some(start.elapsed());
@@ -358,14 +385,89 @@ impl RefineScreen {
         self.finish_turn();
     }
 
+    fn handle_pending_key(&mut self, key: KeyEvent) -> Action {
+        let Some(pending) = self.pending.clone() else {
+            return Action::None;
+        };
+        let respond = |me: &mut Self, id: u64, answer: String| {
+            me.pending = None;
+            me.follow = true;
+            Action::RefineRespondInteraction { id, answer }
+        };
+        match pending {
+            RefinePending::Approval { id, .. } => match key.code {
+                KeyCode::Enter | KeyCode::Char('y') => respond(self, id, "approve".to_string()),
+                KeyCode::Esc | KeyCode::Char('r') | KeyCode::Char('n') => {
+                    respond(self, id, String::new())
+                }
+                _ => Action::None,
+            },
+            RefinePending::Decision {
+                id,
+                options,
+                selected,
+                ..
+            } => {
+                if options.is_empty() {
+                    match key.code {
+                        KeyCode::Enter => {
+                            let answer = self.input.trim().to_string();
+                            if answer.is_empty() {
+                                return Action::None;
+                            }
+                            self.input.clear();
+                            self.cursor = 0;
+                            respond(self, id, answer)
+                        }
+                        KeyCode::Esc => respond(self, id, String::new()),
+                        _ => Action::None,
+                    }
+                } else {
+                    match key.code {
+                        KeyCode::Up => {
+                            if let Some(RefinePending::Decision { selected, .. }) =
+                                self.pending.as_mut()
+                            {
+                                *selected = selected.saturating_sub(1);
+                            }
+                            Action::None
+                        }
+                        KeyCode::Down => {
+                            if let Some(RefinePending::Decision { selected, .. }) =
+                                self.pending.as_mut()
+                            {
+                                *selected = (*selected + 1).min(options.len() - 1);
+                            }
+                            Action::None
+                        }
+                        KeyCode::Enter => respond(self, id, options[selected].clone()),
+                        KeyCode::Esc => respond(self, id, String::new()),
+                        _ => Action::None,
+                    }
+                }
+            }
+        }
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent, project: Option<&Project>) -> Action {
         if let Some(sel) = self.picker {
             return self.handle_picker_key(key, sel);
         }
-        // Details toggle works even while the input is focused.
+        if let Some(pending) = &self.pending {
+            // Free-text decisions use the input; approvals and choices capture all keys.
+            let free_text =
+                matches!(pending, RefinePending::Decision { options, .. } if options.is_empty());
+            if !free_text || matches!(key.code, KeyCode::Enter | KeyCode::Esc) {
+                return self.handle_pending_key(key);
+            }
+        }
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('r') {
             self.expanded = !self.expanded;
             return Action::None;
+        }
+        // Ctrl+Tab cycles always-approve → ask → auto.
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Tab {
+            return Action::RefineCycleApprovalMode;
         }
         if !self.focused {
             match key.code {
@@ -382,7 +484,6 @@ impl RefineScreen {
             }
         }
 
-        // An open popup owns navigation / accept / dismiss keys.
         if !matches!(self.popup, Popup::None) {
             match key.code {
                 KeyCode::Up => {
@@ -405,7 +506,7 @@ impl RefineScreen {
             }
         }
 
-        // Text editing swallows any key the field recognizes, then refreshes popups.
+        // Text editing swallows recognized keys, then refreshes popups.
         if input::handle(&mut self.input, &mut self.cursor, key, EditOpts::default())
             != Edited::Ignored
         {
@@ -498,7 +599,7 @@ impl RefineScreen {
 
         self.follow = true;
         self.last_scope = parse_scope(&text);
-        self.plan.clear(); // a fresh request rebuilds its own plan
+        // Plans persist until the agent updates or clears them.
         self.conversation.push(Turn::user(text.clone()));
         Action::RefineSubmit { text }
     }
@@ -517,6 +618,38 @@ impl RefineScreen {
             },
             "/undo" => Action::RefineUndo,
             "/diff" => Action::RefineOpenDiff,
+            "/compact" => Action::RefineCompact,
+            "/export" => Action::RefineExport,
+            "/resume" => Action::RefineOpenSessions,
+            "/grep" => {
+                if rest.is_empty() {
+                    self.conversation
+                        .push(Turn::tool("usage: /grep <text>".to_string()));
+                    self.follow = true;
+                    Action::None
+                } else {
+                    self.input = format!(
+                        "Search the whole project for \"{rest}\" and list every chapter and line where it appears."
+                    );
+                    self.cursor = self.input.len();
+                    self.submit()
+                }
+            }
+            "/context" => {
+                let pct = if self.context_max > 0 {
+                    (self.last_context as u64 * 100 / self.context_max as u64) as u32
+                } else {
+                    0
+                };
+                self.conversation.push(Turn::tool(format!(
+                    "context {} / {} tokens ({pct}% full) · {} turns · auto-compacts at 80%",
+                    fmt_tokens(self.last_context),
+                    fmt_tokens(self.context_max),
+                    self.conversation.len()
+                )));
+                self.follow = true;
+                Action::None
+            }
             "/delete" => Action::RefineDeleteSession {
                 id: self.active_session.clone(),
             },
@@ -623,12 +756,32 @@ impl RefineScreen {
                 self.turn_tokens.1 = self.turn_tokens.1.saturating_add(*completion_tokens);
                 self.session_tokens.0 = self.session_tokens.0.saturating_add(*prompt_tokens);
                 self.session_tokens.1 = self.session_tokens.1.saturating_add(*completion_tokens);
-                // The latest prompt size is the current context-window fill.
                 self.last_context = *prompt_tokens;
             }
             AppEvent::RefineDelta { delta } => self.push_delta(delta),
             AppEvent::RefinePlanUpdated { steps } => {
                 self.plan = steps.clone();
+                self.follow = true;
+            }
+            AppEvent::RefineApprovalRequest { id, summary, diff } => {
+                self.pending = Some(RefinePending::Approval {
+                    id: *id,
+                    summary: summary.clone(),
+                    diff: diff.clone(),
+                });
+                self.follow = true;
+            }
+            AppEvent::RefineDecisionRequest {
+                id,
+                question,
+                options,
+            } => {
+                self.pending = Some(RefinePending::Decision {
+                    id: *id,
+                    question: question.clone(),
+                    options: options.clone(),
+                    selected: 0,
+                });
                 self.follow = true;
             }
             AppEvent::RefineToolInvoked { tool, summary } => {
@@ -700,7 +853,6 @@ impl RefineScreen {
         self.follow = true;
     }
 
-    /// Ends streaming reasoning when answer or tool output starts.
     fn settle_reasoning(&mut self) {
         if let Some(last) = self.conversation.last_mut()
             && last.role == TurnRole::Reasoning
@@ -789,12 +941,113 @@ impl RefineScreen {
         self.render_input(f, input_row, theme);
         if self.picker.is_some() {
             self.render_session_picker(f, area, theme);
+        } else if self.pending.is_some() {
+            self.render_pending(f, area, theme);
         } else {
             self.render_popup(f, area, input_row.y, theme);
         }
     }
 
-    /// Pinned working/usage row.
+    fn render_pending(&self, f: &mut Frame, area: Rect, theme: &Theme) {
+        let Some(pending) = &self.pending else {
+            return;
+        };
+        let mut lines: Vec<Line> = Vec::new();
+        let (title, hint) = match pending {
+            RefinePending::Approval { summary, diff, .. } => {
+                lines.push(Line::from(Span::styled(
+                    summary.clone(),
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                )));
+                lines.push(Line::raw(""));
+                for l in diff.lines().take(20) {
+                    let color = if l.starts_with('+') {
+                        theme.status_done
+                    } else if l.starts_with('-') {
+                        theme.status_failed
+                    } else {
+                        theme.ink_soft
+                    };
+                    lines.push(Line::from(Span::styled(
+                        l.to_string(),
+                        Style::default().fg(color),
+                    )));
+                }
+                ("Approve edit?", "↵ accept   ·   r / Esc reject")
+            }
+            RefinePending::Decision {
+                question,
+                options,
+                selected,
+                ..
+            } => {
+                lines.push(Line::from(Span::styled(
+                    question.clone(),
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                )));
+                lines.push(Line::raw(""));
+                if options.is_empty() {
+                    lines.push(Line::from(Span::styled(
+                        "type your answer below, then ↵",
+                        Style::default().fg(theme.ink_soft),
+                    )));
+                } else {
+                    for (i, opt) in options.iter().enumerate() {
+                        let marker = if i == *selected { "▸ " } else { "  " };
+                        let style = if i == *selected {
+                            Style::default()
+                                .fg(theme.accent)
+                                .add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(theme.ink)
+                        };
+                        lines.push(Line::from(Span::styled(
+                            format!("{marker}{opt}"),
+                            style,
+                        )));
+                    }
+                }
+                (
+                    "The agent needs a decision",
+                    if options.is_empty() {
+                        "↵ submit   ·   Esc cancel"
+                    } else {
+                        "↑↓ select   ·   ↵ choose   ·   Esc cancel"
+                    },
+                )
+            }
+        };
+        lines.push(Line::raw(""));
+        lines.push(Line::from(Span::styled(
+            hint.to_string(),
+            Style::default().fg(theme.ink_faint),
+        )));
+
+        let w = area.width.min(72);
+        let h = (lines.len() as u16 + 2)
+            .min(area.height.saturating_sub(2))
+            .max(5);
+        let modal = Rect {
+            x: area.x + (area.width.saturating_sub(w)) / 2,
+            y: area.y + (area.height.saturating_sub(h)) / 2,
+            width: w,
+            height: h,
+        };
+        f.render_widget(Clear, modal);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(theme.accent))
+            .title(format!(" {title} "))
+            .style(Style::default().bg(theme.bg_panel));
+        let inner = block.inner(modal);
+        f.render_widget(block, modal);
+        f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    }
+
     fn render_status(&self, f: &mut Frame, area: Rect, line: Line<'static>, theme: &Theme) {
         if area.height == 0 || area.width <= 2 {
             return;
@@ -810,7 +1063,6 @@ impl RefineScreen {
         );
     }
 
-    /// Pinned `update_plan` checklist.
     fn render_plan(&self, f: &mut Frame, area: Rect, theme: &Theme) {
         let done = self
             .plan
@@ -858,8 +1110,6 @@ impl RefineScreen {
         );
     }
 
-    /// Placeholder shown on the Refine tab when no project is open. Refine is
-    /// per-project, so there is nothing to chat about until one is opened.
     fn render_no_project(&self, f: &mut Frame, area: Rect, theme: &Theme) {
         let block = Block::default()
             .borders(Borders::ALL)
@@ -1048,8 +1298,7 @@ impl RefineScreen {
         f.render_widget(para, inner);
     }
 
-    /// Claude-Code-style working line while a turn runs; an idle session-usage
-    /// summary otherwise. `None` when idle with nothing spent yet.
+    /// Working line while a turn runs; idle usage summary otherwise.
     fn status_line(&self, frame: u64, theme: &Theme) -> Option<Line<'static>> {
         let faint = Style::default().fg(theme.ink_faint);
         let soft = Style::default().fg(theme.ink_soft);
@@ -1078,24 +1327,24 @@ impl RefineScreen {
         }
 
         let (inp, out) = self.session_tokens;
-        if inp == 0 && out == 0 {
-            return None;
-        }
-        let mut text = format!(
-            "↑ {} ↓ {} · {} tokens",
-            fmt_tokens(inp),
-            fmt_tokens(out),
-            fmt_tokens(inp.saturating_add(out))
-        );
-        if self.last_context > 0 {
+        let mut text = format!("mode: {} ⌃⇥", self.approval_mode.label());
+        if inp != 0 || out != 0 {
             text.push_str(&format!(
-                " · ctx {}/{}",
-                fmt_tokens(self.last_context),
-                fmt_tokens(self.context_max)
+                " · ↑ {} ↓ {} · {} tokens",
+                fmt_tokens(inp),
+                fmt_tokens(out),
+                fmt_tokens(inp.saturating_add(out))
             ));
-        }
-        if let Some(d) = self.last_turn_elapsed {
-            text.push_str(&format!(" · last {}", fmt_elapsed(d)));
+            if self.last_context > 0 {
+                text.push_str(&format!(
+                    " · ctx {}/{}",
+                    fmt_tokens(self.last_context),
+                    fmt_tokens(self.context_max)
+                ));
+            }
+            if let Some(d) = self.last_turn_elapsed {
+                text.push_str(&format!(" · last {}", fmt_elapsed(d)));
+            }
         }
         Some(Line::from(Span::styled(text, faint)))
     }
@@ -1145,7 +1394,6 @@ impl RefineScreen {
         out
     }
 
-    /// Render reasoning expanded while streaming or collapsed otherwise.
     fn push_reasoning_md(&self, out: &mut String, turn: &Turn) {
         let body = turn.text.trim();
         if body.is_empty() {
@@ -1302,7 +1550,6 @@ fn fmt_tokens(n: u32) -> String {
     } else if n < 1_000_000 {
         format!("{}k", n / 1000)
     } else {
-        // >= 1000k → show in millions (e.g. 2044k → 2.0M).
         format!("{:.1}M", n as f64 / 1_000_000.0)
     }
 }
@@ -1572,7 +1819,11 @@ mod tests {
         s.input = "do something".to_string();
         s.cursor = s.input.len();
         let _ = s.submit();
-        assert!(s.plan.is_empty(), "a new request starts with a clean plan");
+        assert_eq!(
+            s.plan.len(),
+            2,
+            "the TODO list is persistent — it survives across turns"
+        );
     }
 
     #[test]

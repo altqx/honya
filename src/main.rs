@@ -31,8 +31,10 @@ use futures::StreamExt;
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{
     DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyEventKind,
+    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use ratatui::crossterm::execute;
+use ratatui::crossterm::terminal::supports_keyboard_enhancement;
 
 use crate::app::App;
 use crate::llm::client::LlmClient;
@@ -73,13 +75,10 @@ async fn main() -> anyhow::Result<()> {
     }
     let mut app = App::new(etx, cfg);
 
-    // Raises the recovery overlay when a resumable checkpoint exists.
     app.init_recovery_prompt();
 
-    // In-app onboarding defers to crash recovery and skips returning users.
     app.init_onboarding();
 
-    // Best-effort update handling; honors HONYA_NO_UPDATE_CHECK and never blocks startup.
     update::spawn_background_update(app.tx.clone(), app.cfg.update_mode, app.cfg.release_channel);
 
     // Remote startup is opt-in so local sessions do not auto-collide.
@@ -90,15 +89,25 @@ async fn main() -> anyhow::Result<()> {
     // Restore the terminal before panic output; normal teardown does not run on panic.
     let prev_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        let _ = execute!(std::io::stdout(), DisableMouseCapture);
+        let _ = execute!(std::io::stdout(), PopKeyboardEnhancementFlags, DisableMouseCapture);
         ratatui::restore();
         prev_hook(info);
     }));
 
     let mut terminal = ratatui::init();
-    // Best-effort mouse support; terminals that reject it stay keyboard-only.
     let _ = execute!(std::io::stdout(), EnableMouseCapture);
+    // Enables distinct Ctrl+Tab codes where supported; release events are filtered out.
+    let kbd_enhanced = supports_keyboard_enhancement().unwrap_or(false);
+    if kbd_enhanced {
+        let _ = execute!(
+            std::io::stdout(),
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        );
+    }
     let result = run(&mut terminal, &mut app, rx).await;
+    if kbd_enhanced {
+        let _ = execute!(std::io::stdout(), PopKeyboardEnhancementFlags);
+    }
     let _ = execute!(std::io::stdout(), DisableMouseCapture);
     ratatui::restore();
 
@@ -108,7 +117,6 @@ async fn main() -> anyhow::Result<()> {
     result
 }
 
-/// The render-then-await loop. Returns when `app.running` goes false.
 async fn run(
     terminal: &mut DefaultTerminal,
     app: &mut App,
@@ -171,7 +179,6 @@ fn present(terminal: &mut DefaultTerminal, app: &mut App, full: bool) -> anyhow:
     Ok(())
 }
 
-/// Build the live OpenRouter client.
 pub fn build_client(cfg: &AppConfig) -> anyhow::Result<Arc<dyn LlmClient>> {
     let api_key = config::resolve_api_key(cfg).ok_or_else(|| {
         anyhow::anyhow!(
@@ -184,12 +191,10 @@ pub fn build_client(cfg: &AppConfig) -> anyhow::Result<Arc<dyn LlmClient>> {
     Ok(Arc::new(client))
 }
 
-/// Build the per-provider client set (OpenRouter + Tokenrouter) for a run.
 pub fn build_clients(cfg: &AppConfig) -> anyhow::Result<llm::ClientSet> {
     Ok(llm::ClientSet::build(cfg)?)
 }
 
-/// Print CLI usage for `honya --help`.
 fn print_help() {
     println!("honya 本屋 — AI-assisted Japanese → Thai light-novel translation\n");
     println!("USAGE:");
@@ -227,17 +232,14 @@ mod present_tests {
     use ratatui::buffer::{Buffer, Cell};
     use ratatui::layout::Rect;
 
-    // The full-repaint path emits `sentinel.diff(&buf)`. It must cover every cell
-    // (so stale ghost cells get overwritten with spaces) EXCEPT the trailing cell
-    // of a wide grapheme (emitting that would corrupt the wide char's right half).
+    // Full repaint clears stale cells except a wide grapheme's trailing cell.
     #[test]
     fn full_repaint_covers_all_cells_but_wide_char_trailing() {
         let area = Rect::new(0, 0, 6, 1);
         let mut buf = Buffer::filled(area, Cell::new(" "));
         buf[(0, 0)].set_symbol("A"); // narrow
         buf[(1, 0)].set_symbol("の"); // wide: occupies cols 1-2
-        // col 3 is the wide char's trailing cell (left as a space by set_symbol)
-        // cols 4,5 stay blank — a blank here is exactly where a ghost would sit.
+        // Col 3 is the wide trailing cell; cols 4-5 model stale ghosts.
 
         let sentinel = Buffer::filled(area, Cell::new("\u{0}"));
         let cols: Vec<u16> = sentinel.diff(&buf).into_iter().map(|(x, _, _)| x).collect();

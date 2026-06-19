@@ -1453,6 +1453,18 @@ pub enum AppEvent {
     RefinePlanUpdated {
         steps: Vec<PlanStep>,
     },
+    /// Edit approval prompt for a paused mutating tool.
+    RefineApprovalRequest {
+        id: u64,
+        summary: String,
+        diff: String,
+    },
+    /// Blocking `ask_user` prompt.
+    RefineDecisionRequest {
+        id: u64,
+        question: String,
+        options: Vec<String>,
+    },
     RefineRequest(RefineRequest),
 }
 

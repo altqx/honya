@@ -18,9 +18,11 @@ pub struct RefineSession {
     pub updated: DateTime<Utc>,
     #[serde(default)]
     pub model: String,
-    /// User / assistant / tool messages, excluding the system turn.
+    /// Chat messages excluding the system turn.
     #[serde(default)]
     pub messages: Vec<Message>,
+    #[serde(default)]
+    pub plan: Vec<crate::model::PlanStep>,
 }
 
 impl RefineSession {
@@ -33,6 +35,7 @@ impl RefineSession {
             updated: now,
             model,
             messages: Vec::new(),
+            plan: Vec::new(),
         }
     }
 }
