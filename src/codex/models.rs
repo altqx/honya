@@ -3,19 +3,32 @@
 use std::time::Duration;
 
 use super::CodexAuth;
-use crate::model::{AppEvent, EventTx};
+use crate::model::{AppEvent, EventTx, LogLevel};
 
 const MODELS_URL: &str = "https://chatgpt.com/backend-api/codex/models";
-/// The backend requires a `client_version`; this mirrors a recent Codex CLI.
-const CLIENT_VERSION: &str = "0.50.0";
+/// Backend-required client version, mirrored from Codex CLI.
+const CLIENT_VERSION: &str = "0.141.0";
 
-/// Fetch models in the background; failures leave the static picker list in place.
+/// Fetch models and log fallback reasons for the activity log.
 pub fn spawn_fetch_models(auth: CodexAuth, tx: EventTx) {
     tokio::spawn(async move {
-        if let Ok(models) = fetch_models(&auth).await
-            && !models.is_empty()
-        {
-            tx.send(AppEvent::CodexModels { models });
+        match fetch_models(&auth).await {
+            Ok(models) if !models.is_empty() => {
+                tx.send(AppEvent::Log {
+                    level: LogLevel::Info,
+                    msg: format!("Codex models: {}", models.join(", ")),
+                });
+                tx.send(AppEvent::CodexModels { models });
+            }
+            Ok(_) => tx.send(AppEvent::Log {
+                level: LogLevel::Warn,
+                msg: "Codex models: backend returned an empty list (using built-in fallback)"
+                    .to_string(),
+            }),
+            Err(e) => tx.send(AppEvent::Log {
+                level: LogLevel::Warn,
+                msg: format!("Codex models fetch failed (using built-in fallback): {e}"),
+            }),
         }
     });
 }
@@ -29,16 +42,18 @@ pub async fn fetch_models(auth: &CodexAuth) -> anyhow::Result<Vec<String>> {
         .get(format!("{MODELS_URL}?client_version={CLIENT_VERSION}"))
         .bearer_auth(&auth.access_token)
         .header("chatgpt-account-id", &auth.account_id)
-        .header("OpenAI-Beta", "responses=experimental")
         .send()
         .await?;
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
     anyhow::ensure!(
-        resp.status().is_success(),
-        "models fetch failed: {}",
-        resp.status()
+        status.is_success(),
+        "{status}: {}",
+        body.chars().take(200).collect::<String>()
     );
-    let body: serde_json::Value = resp.json().await?;
-    Ok(parse_models(&body))
+    let json: serde_json::Value =
+        serde_json::from_str(&body).map_err(|e| anyhow::anyhow!("bad JSON: {e}"))?;
+    Ok(parse_models(&json))
 }
 
 /// Accept both `{data:[{id}]}` and `{models:[{id|slug}]}` response shapes.

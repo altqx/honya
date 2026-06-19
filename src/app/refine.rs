@@ -746,26 +746,32 @@ impl RefineScreen {
             return;
         }
         let input_h = 3;
-        let rows = if self.plan.is_empty() {
-            Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Min(3), Constraint::Length(input_h)])
-                .split(area)
-        } else {
+        let status = self.status_line(frame, theme);
+
+        let mut constraints = vec![Constraint::Min(3)];
+        if !self.plan.is_empty() {
             let plan_h = (self.plan.len() as u16 + 2).clamp(4, 10);
-            Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Min(3),
-                    Constraint::Length(plan_h),
-                    Constraint::Length(input_h),
-                ])
-                .split(area)
-        };
+            constraints.push(Constraint::Length(plan_h));
+        }
+        if status.is_some() {
+            constraints.push(Constraint::Length(1));
+        }
+        constraints.push(Constraint::Length(input_h));
+
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(constraints)
+            .split(area);
+
         self.render_transcript(f, rows[0], frame, theme);
         let input_row = rows[rows.len() - 1];
+        let mut next = 1;
         if !self.plan.is_empty() {
-            self.render_plan(f, rows[1], theme);
+            self.render_plan(f, rows[next], theme);
+            next += 1;
+        }
+        if let Some(status) = status {
+            self.render_status(f, rows[next], status, theme);
         }
         self.render_input(f, input_row, theme);
         if self.picker.is_some() {
@@ -773,6 +779,22 @@ impl RefineScreen {
         } else {
             self.render_popup(f, area, input_row.y, theme);
         }
+    }
+
+    /// Pinned working/usage row.
+    fn render_status(&self, f: &mut Frame, area: Rect, line: Line<'static>, theme: &Theme) {
+        if area.height == 0 || area.width <= 2 {
+            return;
+        }
+        let inset = Rect {
+            x: area.x + 1,
+            width: area.width - 2,
+            ..area
+        };
+        f.render_widget(
+            Paragraph::new(line).style(Style::default().bg(theme.bg_panel)),
+            inset,
+        );
     }
 
     /// Pinned `update_plan` checklist.
@@ -995,14 +1017,6 @@ impl RefineScreen {
                 Some(last) => last.push_span(caret),
                 None => lines.push(Line::from(caret)),
             }
-        }
-
-        // Live working line (or, when idle, a session-usage summary). Built fresh
-        // each frame so the spinner + elapsed time animate without busting the
-        // markdown cache above.
-        if let Some(status) = self.status_line(frame, theme) {
-            lines.push(Line::raw(""));
-            lines.push(status);
         }
 
         let total_lines = lines.len() as u16;

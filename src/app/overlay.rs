@@ -374,14 +374,67 @@ const SETTINGS_ORDER: [SField; 20] = [
 
 /// Number of focusable Settings fields.
 const SETTINGS_FIELDS: u8 = SETTINGS_ORDER.len() as u8;
-/// Fallback Codex models until the live backend list arrives.
-const CODEX_MODELS: [&str; 3] = ["gpt-5.5", "gpt-5", "gpt-5-codex"];
+/// Fallback Codex model ids until the live list arrives.
+const CODEX_MODELS: [&str; 3] = ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini"];
 
 fn default_codex_models() -> Vec<String> {
     CODEX_MODELS.iter().map(|s| s.to_string()).collect()
 }
 /// Index of the OpenRouter API-key field (callers open Settings focused here).
 const SETTINGS_KEY_FIELD: u8 = 12;
+
+/// Settings tabs group contiguous field ranges; Account has only actions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsTab {
+    Agents,
+    Providers,
+    Pipeline,
+    Appearance,
+    Account,
+}
+
+impl SettingsTab {
+    const ALL: [SettingsTab; 5] = [
+        SettingsTab::Agents,
+        SettingsTab::Providers,
+        SettingsTab::Pipeline,
+        SettingsTab::Appearance,
+        SettingsTab::Account,
+    ];
+
+    fn title(self) -> &'static str {
+        match self {
+            SettingsTab::Agents => "Agents",
+            SettingsTab::Providers => "Providers",
+            SettingsTab::Pipeline => "Pipeline",
+            SettingsTab::Appearance => "Appearance",
+            SettingsTab::Account => "Account",
+        }
+    }
+
+    /// Focusable field range; Account has none.
+    fn field_range(self) -> Option<(u8, u8)> {
+        Some(match self {
+            SettingsTab::Agents => (0, 12),
+            SettingsTab::Providers => (12, 14),
+            SettingsTab::Pipeline => (14, 18),
+            SettingsTab::Appearance => (18, 20),
+            SettingsTab::Account => return None,
+        })
+    }
+
+    fn for_field(field: u8) -> SettingsTab {
+        SettingsTab::ALL
+            .into_iter()
+            .find(|t| t.field_range().is_some_and(|(s, e)| field >= s && field < e))
+            .unwrap_or(SettingsTab::Agents)
+    }
+
+    fn cycled(self, forward: bool) -> SettingsTab {
+        let i = SettingsTab::ALL.iter().position(|t| *t == self).unwrap_or(0);
+        SettingsTab::ALL[step(i, SettingsTab::ALL.len(), forward)]
+    }
+}
 
 impl SField {
     /// A free-text editable field (vs. a Left/Right cycle field).
@@ -450,6 +503,7 @@ pub struct SettingsState {
     pub loop_stall_secs: String,
     /// Whole-chapter re-translations allowed on a detected loop, as typed (digits).
     pub max_chapter_retranslates: String,
+    pub tab: SettingsTab,
     /// Which field is focused (index into [`SETTINGS_ORDER`]).
     pub field: u8,
     /// Caret byte-offset into the focused text field. Secret fields edit at the end.
@@ -479,6 +533,7 @@ impl SettingsState {
             max_attempts: cfg.max_attempts.to_string(),
             loop_stall_secs: cfg.loop_stall_secs.to_string(),
             max_chapter_retranslates: cfg.max_chapter_retranslates.to_string(),
+            tab: SettingsTab::Agents,
             field: 0,
             cursor: 0,
             codex_models: default_codex_models(),
@@ -491,6 +546,7 @@ impl SettingsState {
             session_label: None,
         };
         st.focus(field.min(SETTINGS_FIELDS - 1));
+        st.tab = SettingsTab::for_field(st.field);
         st
     }
 
@@ -641,11 +697,28 @@ impl SettingsState {
     }
 
     fn next_field(&mut self) {
-        self.focus(self.field + 1);
+        if let Some((start, end)) = self.tab.field_range() {
+            let next = if self.field + 1 >= end { start } else { self.field + 1 };
+            self.focus(next);
+        }
     }
 
     fn prev_field(&mut self) {
-        self.focus(self.field + SETTINGS_FIELDS - 1);
+        if let Some((start, end)) = self.tab.field_range() {
+            let prev = if self.field <= start { end - 1 } else { self.field - 1 };
+            self.focus(prev);
+        }
+    }
+
+    fn switch_tab(&mut self, forward: bool) {
+        self.tab = self.tab.cycled(forward);
+        if let Some((start, _)) = self.tab.field_range() {
+            self.focus(start);
+        }
+    }
+
+    fn tab_has_fields(&self) -> bool {
+        self.tab.field_range().is_some()
     }
 
     /// The retries field parsed into a usable attempt count. Empty, non-numeric,
@@ -1216,6 +1289,7 @@ impl Overlay {
             max_attempts: String::new(),
             loop_stall_secs: String::new(),
             max_chapter_retranslates: String::new(),
+            tab: SettingsTab::for_field(field.min(SETTINGS_FIELDS - 1)),
             field: field.min(SETTINGS_FIELDS - 1),
             cursor: 0,
             codex_models: default_codex_models(),
@@ -1946,20 +2020,31 @@ impl Overlay {
                 loop_stall_secs: st.loop_stall_secs_value(),
                 max_chapter_retranslates: st.max_chapter_retranslates_value(),
             },
-            KeyCode::Tab | KeyCode::Down => {
+            // Tab switches between Settings tabs; Up/Down move fields within a tab.
+            KeyCode::Tab => {
+                st.switch_tab(true);
+                Action::None
+            }
+            KeyCode::BackTab => {
+                st.switch_tab(false);
+                Action::None
+            }
+            KeyCode::Down => {
                 st.next_field();
                 Action::None
             }
-            KeyCode::Up | KeyCode::BackTab => {
+            KeyCode::Up => {
                 st.prev_field();
                 Action::None
             }
-            // Left/Right cycle the focused choice field; text fields keep them for
-            // caret movement (handled by the editor below).
-            KeyCode::Left | KeyCode::Right if !st.current_is_editable_text() => {
+            // Text fields keep Left/Right for caret movement below.
+            KeyCode::Left | KeyCode::Right
+                if st.tab_has_fields() && !st.current_is_editable_text() =>
+            {
                 st.cycle(matches!(key.code, KeyCode::Right));
                 Action::None
             }
+            _ if !st.tab_has_fields() => Action::None,
             _ => {
                 let cur = st.current();
                 // Secret (key) fields are masked, so they edit at the end only.
@@ -3463,15 +3548,14 @@ impl Overlay {
         cfg: &AppConfig,
         st: &SettingsState,
     ) {
-        let modal = centered_modal(76, 34, area);
+        let modal = centered_modal(76, 24, area);
         f.render_widget(Clear, modal);
         let block = self.modal_block("Settings", theme);
         let inner = block.inner(modal);
         f.render_widget(block, modal);
 
         let val_w = area.width.saturating_sub(26) as usize;
-        // `caret` positions the bar inside the value (None → caret at the end,
-        // used for the masked API-key field where mid-string position is moot).
+        // None renders the caret at the end for masked API-key fields.
         let field_line =
             |label: &str, value: String, focused: bool, caret: Option<usize>| -> Line<'static> {
                 let marker = if focused { theme::SELECT_BAR } else { ' ' };
@@ -3502,18 +3586,9 @@ impl Overlay {
                 Line::from(spans)
             };
 
-        // Build the scrollable, sectioned field list. `push` records the focused
-        // row's line index so the view can scroll to keep it on screen.
+        // Track the focused row for scroll positioning.
         let row = |idx: u8, label: &str, value: String, text: bool| -> Line<'static> {
             field_line(label, value, st.field == idx, text.then_some(st.cursor))
-        };
-        let header = |t: &str| -> Line<'static> {
-            Line::from(Span::styled(
-                format!("  {t}"),
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            ))
         };
         let mask = |val: &str, env: bool| -> String {
             if env {
@@ -3537,12 +3612,28 @@ impl Overlay {
             lines.push(line);
         };
 
+        let mut tab_spans: Vec<Span<'static>> = vec![Span::raw("  ")];
+        for (i, t) in SettingsTab::ALL.iter().enumerate() {
+            if i > 0 {
+                tab_spans.push(Span::styled(" · ", Style::default().fg(theme.ink_faint)));
+            }
+            let style = if *t == st.tab {
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+            } else {
+                Style::default().fg(theme.ink_soft)
+            };
+            tab_spans.push(Span::styled(t.title(), style));
+        }
+        lines.push(Line::from(tab_spans));
         lines.push(Line::from(Span::styled(
-            "  ↑↓ move · ←→ change · type to edit · ↵ save",
+            "  Tab switch tab · ↑↓ field · ←→ change · type to edit · ↵ save",
             Style::default().fg(theme.ink_faint),
         )));
+        lines.push(Line::raw(""));
 
-        lines.push(header("Agents"));
+        if st.tab == SettingsTab::Agents {
         for (name, base, agent) in [
             ("Orchestrator", 0u8, &st.models.orchestrator),
             ("Translator", 3, &st.models.translator),
@@ -3574,7 +3665,8 @@ impl Overlay {
             );
         }
 
-        lines.push(header("Providers"));
+        }
+        if st.tab == SettingsTab::Providers {
         push(
             &mut lines,
             &mut focus_line,
@@ -3602,7 +3694,8 @@ impl Overlay {
             Span::styled(format!("   {codex_hint}"), Style::default().fg(theme.ink_faint)),
         ]));
 
-        lines.push(header("Pipeline"));
+        }
+        if st.tab == SettingsTab::Pipeline {
         push(
             &mut lines,
             &mut focus_line,
@@ -3654,7 +3747,8 @@ impl Overlay {
             Style::default().fg(theme.ink_faint),
         )));
 
-        lines.push(header("Appearance"));
+        }
+        if st.tab == SettingsTab::Appearance {
         push(
             &mut lines,
             &mut focus_line,
@@ -3680,12 +3774,8 @@ impl Overlay {
             Span::styled(cfg.theme.label(), Style::default().fg(theme.accent)),
             Span::styled("   Ctrl-T to change", Style::default().fg(theme.ink_faint)),
         ]));
-
-        lines.push(Line::raw(""));
-        lines.push(Line::from(Span::styled(
-            "   ── Account / Remote control ───────────────",
-            Style::default().fg(theme.ink_faint),
-        )));
+        }
+        if st.tab == SettingsTab::Account {
         match (&st.account_login, &st.remote_auth_code) {
             (_, Some(prompt)) => {
                 lines.push(Line::from(vec![
@@ -3773,13 +3863,14 @@ impl Overlay {
                 }
             }
         }
+        }
 
         lines.push(Line::raw(""));
         lines.push(Line::from(Span::styled(
             "   Keys saved to config.json (0600) · env vars override · ↵ save · Esc close",
             Style::default().fg(theme.ink_faint),
         )));
-        // Scroll so the focused row stays visible (the list is taller than the modal).
+        // Keep the focused row visible (most tabs fit; scroll is a no-op then).
         let content_h = inner.height.max(1) as usize;
         let max_scroll = lines.len().saturating_sub(content_h);
         let scroll_y = focus_line.saturating_sub(content_h / 2).min(max_scroll) as u16;
@@ -5197,6 +5288,27 @@ mod tests {
                 "raw SARA AM leaked into wizard step {step}"
             );
         }
+    }
+
+    #[test]
+    fn settings_tabs_switch_and_scope_fields() {
+        let mut st = SettingsState::for_test(0);
+        assert_eq!(st.tab, SettingsTab::Agents);
+
+        st.switch_tab(true);
+        assert_eq!(st.tab, SettingsTab::Providers);
+        assert_eq!(st.field, 12, "focus jumps to the tab's first field");
+        st.next_field();
+        assert_eq!(st.field, 13);
+        st.next_field();
+        assert_eq!(st.field, 12, "field nav wraps within the tab");
+
+        let st = SettingsState::for_test(14); // Retry attempts
+        assert_eq!(st.tab, SettingsTab::Pipeline);
+
+        let mut st = SettingsState::for_test(0);
+        st.tab = SettingsTab::Account;
+        assert!(!st.tab_has_fields());
     }
 
     /// Codex model fields are pickers, not free text.
