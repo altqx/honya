@@ -154,6 +154,7 @@ fn present(terminal: &mut DefaultTerminal, app: &mut App, full: bool) -> anyhow:
     } else {
         terminal.flush()?;
     }
+    terminal.hide_cursor()?;
     terminal.swap_buffers();
     terminal.backend_mut().flush()?;
     Ok(())
