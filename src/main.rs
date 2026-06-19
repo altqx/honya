@@ -107,12 +107,17 @@ async fn run(
     let mut ticker = tokio::time::interval(Duration::from_millis(100));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+    let mut force_redraw = true;
     while app.running {
+        if force_redraw {
+            terminal.clear()?;
+        }
         terminal.draw(|frame| app.render(frame))?;
 
         tokio::select! {
             _ = ticker.tick() => {
                 app.frame = app.frame.wrapping_add(1);
+                force_redraw = false;
             }
             maybe_event = events.next() => {
                 match maybe_event {
@@ -121,11 +126,13 @@ async fn run(
                     Some(Ok(_)) => {}
                     Some(Err(_)) | None => {}
                 }
+                force_redraw = true;
             }
             maybe_app = rx.recv() => {
                 if let Some(ev) = maybe_app {
                     app.on_app_event(ev);
                 }
+                force_redraw = true;
             }
         }
     }
