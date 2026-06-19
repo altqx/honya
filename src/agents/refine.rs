@@ -15,7 +15,7 @@ use crate::llm::client::LlmClient;
 use crate::llm::tool_loop::ToolExecutor;
 use crate::llm::{ChatRequest, Message, Role, Tool};
 use crate::model::{
-    AppEvent, Character, ContinuityNote, EventTx, GlossaryTerm, PlanStep, RefineRequest,
+    AppEvent, Character, ContinuityNote, EventTx, GlossaryTerm, LogLevel, PlanStep, RefineRequest,
     Relationship, StyleExample, TermPolicy, ToolResult,
 };
 use crate::workspace::{Workspace, characters, glossary, style, translation, volume};
@@ -271,6 +271,117 @@ pub fn refine_tools_schema() -> serde_json::Value {
 }
 
 const MAX_TOOL_ROUNDS: usize = 40;
+/// Compact the conversation once the estimated context passes this fraction of the
+/// model's window.
+const COMPACT_FRACTION: f64 = 0.8;
+/// Keep at least this many recent user turns (plus their tool exchanges) verbatim.
+const KEEP_RECENT_TURNS: usize = 3;
+
+/// A model's context window in tokens, by family (conservative defaults). honya
+/// accepts arbitrary model ids, so this is a heuristic, not an exact table.
+pub fn model_max_context(model: &str) -> u32 {
+    let m = model.to_ascii_lowercase();
+    if m.contains("[1m]") || m.contains("gemini") {
+        1_000_000
+    } else if m.contains("gpt-5") || m.contains("gpt-4.1") {
+        400_000
+    } else if m.contains("claude")
+        || m.contains("opus")
+        || m.contains("sonnet")
+        || m.contains("haiku")
+    {
+        200_000
+    } else {
+        128_000
+    }
+}
+
+/// Rough token estimate (~4 chars/token) over a message slice, including tool I/O.
+fn estimate_context_tokens(messages: &[Message]) -> u32 {
+    let mut chars = 0usize;
+    for m in messages {
+        chars += m.content.as_deref().map_or(0, str::len);
+        for tc in m.tool_calls.iter().flatten() {
+            chars += tc.function.name.len() + tc.function.arguments.len();
+        }
+    }
+    (chars / 4).min(u32::MAX as usize) as u32
+}
+
+/// If the conversation is about to overflow the model's context, replace the older
+/// turns (everything between the system prompt and the last [`KEEP_RECENT_TURNS`]
+/// user turns) with a compact text summary. Compaction lands on a user-message
+/// boundary so the kept tail stays a valid chat/completions sequence.
+fn maybe_compact(req: &mut ChatRequest, tx: &EventTx) {
+    if req.messages.len() <= 2 {
+        return;
+    }
+    let max = model_max_context(&req.model);
+    let est = estimate_context_tokens(&req.messages);
+    if est < (max as f64 * COMPACT_FRACTION) as u32 {
+        return;
+    }
+
+    // The boundary: the start of the KEEP_RECENT_TURNS-th-from-last user turn.
+    let user_idxs: Vec<usize> = req
+        .messages
+        .iter()
+        .enumerate()
+        .filter(|(i, m)| *i > 0 && m.role == Role::User)
+        .map(|(i, _)| i)
+        .collect();
+    let keep_from = user_idxs
+        .iter()
+        .rev()
+        .nth(KEEP_RECENT_TURNS - 1)
+        .copied()
+        .unwrap_or(1);
+    if keep_from <= 1 {
+        return; // nothing old enough to compact
+    }
+
+    let summary = compact_summary(&req.messages[1..keep_from]);
+    let dropped = keep_from - 1;
+    let mut compacted = Vec::with_capacity(req.messages.len() - dropped + 1);
+    compacted.push(req.messages[0].clone());
+    compacted.push(Message::user(summary));
+    compacted.extend(req.messages[keep_from..].iter().cloned());
+    req.messages = compacted;
+
+    tx.send(AppEvent::Log {
+        level: LogLevel::Info,
+        msg: format!(
+            "Refine context compacted: summarized {dropped} earlier messages (~{}k of {}k tokens)",
+            est / 1000,
+            max / 1000
+        ),
+    });
+}
+
+/// Deterministic summary of dropped turns: keep the gist (user requests + assistant
+/// replies, each clipped), discard verbose tool call/result noise.
+fn compact_summary(dropped: &[Message]) -> String {
+    let mut s = String::from("[Earlier conversation, compacted to fit the context window]\n");
+    for m in dropped {
+        let label = match m.role {
+            Role::User => "User",
+            Role::Assistant => "Assistant",
+            _ => continue, // skip system / tool noise
+        };
+        let Some(text) = m.content.as_deref().map(str::trim).filter(|t| !t.is_empty()) else {
+            continue;
+        };
+        let clipped: String = text.chars().take(280).collect();
+        s.push_str(label);
+        s.push_str(": ");
+        s.push_str(&clipped);
+        if text.chars().count() > 280 {
+            s.push('…');
+        }
+        s.push('\n');
+    }
+    s
+}
 
 pub struct RefineCtx {
     pub client: Arc<dyn LlmClient>,
@@ -405,6 +516,9 @@ async fn run_refine_turn(
             tx.send(AppEvent::RefineMessageDone);
             return;
         }
+
+        // Compact older turns before they overflow the model's context window.
+        maybe_compact(req, tx);
 
         let mut on_delta = |d: crate::llm::StreamDelta| match d {
             crate::llm::StreamDelta::Content(s) => tx.send(AppEvent::RefineDelta {
@@ -1630,6 +1744,64 @@ mod tests {
     use crate::llm::{Choice, FunctionCall, ResponseMessage, ToolCall};
     use std::collections::VecDeque;
     use std::sync::Mutex;
+
+    #[test]
+    fn model_max_context_by_family() {
+        assert_eq!(model_max_context("google/gemini-3-flash"), 1_000_000);
+        assert_eq!(model_max_context("claude-opus-4-8[1m]"), 1_000_000);
+        assert_eq!(model_max_context("anthropic/claude-sonnet-4-6"), 200_000);
+        assert_eq!(model_max_context("openai/gpt-5.5"), 400_000);
+        assert_eq!(model_max_context("some/unknown-model"), 128_000);
+    }
+
+    #[test]
+    fn compaction_summarizes_old_turns_and_keeps_recent_tail() {
+        // A long conversation that exceeds 0.8 × the claude window (200k).
+        let mut req = ChatRequest::new("claude-test", vec![Message::system("sys")]);
+        let big = "x".repeat(40_000); // ~10k tokens each
+        for i in 0..30 {
+            req.messages.push(Message::user(format!("req {i} {big}")));
+            req.messages.push(Message::assistant(format!("ans {i}")));
+        }
+        let before = req.messages.len();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        maybe_compact(&mut req, &EventTx(tx));
+
+        assert!(req.messages.len() < before, "context was compacted");
+        assert_eq!(req.messages[0].role, Role::System, "system prompt kept");
+        // The summary is inserted as a user message and the kept tail also starts
+        // on a user message, keeping the sequence valid.
+        assert_eq!(req.messages[1].role, Role::User);
+        assert!(
+            req.messages[1]
+                .content
+                .as_deref()
+                .unwrap()
+                .contains("compacted")
+        );
+        assert_eq!(req.messages[2].role, Role::User, "tail starts at a user turn");
+        // The most recent turn survives verbatim.
+        assert!(
+            req.messages
+                .last()
+                .unwrap()
+                .content
+                .as_deref()
+                .unwrap()
+                .contains("ans 29")
+        );
+    }
+
+    #[test]
+    fn no_compaction_when_under_budget() {
+        let mut req = ChatRequest::new("claude-test", vec![Message::system("sys")]);
+        req.messages.push(Message::user("hi"));
+        req.messages.push(Message::assistant("hello"));
+        let before = req.messages.clone();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        maybe_compact(&mut req, &EventTx(tx));
+        assert_eq!(req.messages.len(), before.len(), "small chat untouched");
+    }
 
     struct ScriptedClient {
         responses: Mutex<VecDeque<crate::llm::ChatResponse>>,

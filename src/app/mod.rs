@@ -1007,6 +1007,7 @@ impl App {
         };
         let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctx_max = crate::agents::refine::model_max_context(&refine_model.model);
         let ctx = crate::agents::refine::RefineCtx {
             client,
             root: active.project.dir.clone(),
@@ -1019,6 +1020,7 @@ impl App {
         tokio::spawn(async move {
             crate::agents::refine::run_refine_agent(ctx, rx).await;
         });
+        self.refine.set_context_max(ctx_max);
         self.refine_tx = Some(tx);
         self.refine_cancel = Some(cancel);
         true
@@ -1203,6 +1205,8 @@ impl App {
             active.models.refine.model = model.clone();
         }
         self.cfg.models.refine.model = model.clone();
+        self.refine
+            .set_context_max(crate::agents::refine::model_max_context(&model));
         if let Err(e) = crate::config::save(&self.cfg) {
             self.push_log(
                 LogLevel::Warn,

@@ -864,7 +864,9 @@ fn find_volume(active: &ActiveProject, chapter: u32) -> Option<&Volume> {
 
 /// Compact token count: `1.2k` past a thousand, else the raw number.
 fn human_num(n: u32) -> String {
-    if n >= 1000 {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1000 {
         format!("{:.1}k", n as f64 / 1000.0)
     } else {
         n.to_string()

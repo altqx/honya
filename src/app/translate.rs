@@ -1175,7 +1175,9 @@ fn truncate_one_line(s: &str, max: usize) -> String {
 }
 
 fn human_tok(n: u32) -> String {
-    if n >= 1000 {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1000 {
         format!("{:.1}k", n as f64 / 1000.0)
     } else {
         n.to_string()

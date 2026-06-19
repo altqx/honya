@@ -234,6 +234,10 @@ pub struct RefineScreen {
     /// (input, output) tokens — `turn` resets each request, `session` accumulates.
     turn_tokens: (u32, u32),
     session_tokens: (u32, u32),
+    /// Most recent prompt size = how full the model's context window is now.
+    last_context: u32,
+    /// The active refine model's context window (set when the session starts).
+    context_max: u32,
     transcript_area: Rect,
     input_area: Rect,
     transcript_cache: crate::ui::markdown::RenderCache,
@@ -268,6 +272,8 @@ impl RefineScreen {
             last_turn_elapsed: None,
             turn_tokens: (0, 0),
             session_tokens: (0, 0),
+            last_context: 0,
+            context_max: 128_000,
             transcript_area: Rect::default(),
             input_area: Rect::default(),
             transcript_cache: crate::ui::markdown::RenderCache::default(),
@@ -306,6 +312,11 @@ impl RefineScreen {
         self.last_turn_elapsed = None;
         self.turn_tokens = (0, 0);
         self.session_tokens = (0, 0);
+    }
+
+    /// Record the active refine model's context window for the `ctx X/max` meter.
+    pub fn set_context_max(&mut self, max: u32) {
+        self.context_max = max.max(1);
     }
 
     /// End the in-flight turn, banking its elapsed time.
@@ -612,6 +623,8 @@ impl RefineScreen {
                 self.turn_tokens.1 = self.turn_tokens.1.saturating_add(*completion_tokens);
                 self.session_tokens.0 = self.session_tokens.0.saturating_add(*prompt_tokens);
                 self.session_tokens.1 = self.session_tokens.1.saturating_add(*completion_tokens);
+                // The latest prompt size is the current context-window fill.
+                self.last_context = *prompt_tokens;
             }
             AppEvent::RefineDelta { delta } => self.push_delta(delta),
             AppEvent::RefinePlanUpdated { steps } => {
@@ -1074,6 +1087,13 @@ impl RefineScreen {
             fmt_tokens(out),
             fmt_tokens(inp.saturating_add(out))
         );
+        if self.last_context > 0 {
+            text.push_str(&format!(
+                " · ctx {}/{}",
+                fmt_tokens(self.last_context),
+                fmt_tokens(self.context_max)
+            ));
+        }
         if let Some(d) = self.last_turn_elapsed {
             text.push_str(&format!(" · last {}", fmt_elapsed(d)));
         }
@@ -1279,8 +1299,11 @@ fn fmt_tokens(n: u32) -> String {
         n.to_string()
     } else if n < 10_000 {
         format!("{:.1}k", n as f64 / 1000.0)
-    } else {
+    } else if n < 1_000_000 {
         format!("{}k", n / 1000)
+    } else {
+        // >= 1000k → show in millions (e.g. 2044k → 2.0M).
+        format!("{:.1}M", n as f64 / 1_000_000.0)
     }
 }
 
