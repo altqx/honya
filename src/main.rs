@@ -107,17 +107,14 @@ async fn run(
     let mut ticker = tokio::time::interval(Duration::from_millis(100));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-    let mut force_redraw = true;
+    let mut full = true;
     while app.running {
-        if force_redraw {
-            terminal.clear()?;
-        }
-        terminal.draw(|frame| app.render(frame))?;
+        present(terminal, app, full)?;
 
         tokio::select! {
             _ = ticker.tick() => {
                 app.frame = app.frame.wrapping_add(1);
-                force_redraw = false;
+                full = false;
             }
             maybe_event = events.next() => {
                 match maybe_event {
@@ -126,16 +123,39 @@ async fn run(
                     Some(Ok(_)) => {}
                     Some(Err(_)) | None => {}
                 }
-                force_redraw = true;
+                full = true;
             }
             maybe_app = rx.recv() => {
                 if let Some(ev) = maybe_app {
                     app.on_app_event(ev);
                 }
-                force_redraw = true;
+                full = true;
             }
         }
     }
+    Ok(())
+}
+
+fn present(terminal: &mut DefaultTerminal, app: &mut App, full: bool) -> anyhow::Result<()> {
+    use ratatui::backend::Backend;
+    use ratatui::buffer::{Buffer, Cell};
+
+    terminal.autoresize()?;
+    {
+        let mut frame = terminal.get_frame();
+        app.render(&mut frame);
+    }
+    if full {
+        let buf = terminal.current_buffer_mut().clone();
+        let sentinel = Buffer::filled(buf.area, Cell::new("\u{0}"));
+        terminal
+            .backend_mut()
+            .draw(sentinel.diff(&buf).into_iter())?;
+    } else {
+        terminal.flush()?;
+    }
+    terminal.swap_buffers();
+    terminal.backend_mut().flush()?;
     Ok(())
 }
 
@@ -188,4 +208,41 @@ fn print_help() {
     println!(
         "    HONYA_SESSION_FILE                   Override the crash-recovery checkpoint path"
     );
+}
+
+#[cfg(test)]
+mod present_tests {
+    use ratatui::buffer::{Buffer, Cell};
+    use ratatui::layout::Rect;
+
+    // The full-repaint path emits `sentinel.diff(&buf)`. It must cover every cell
+    // (so stale ghost cells get overwritten with spaces) EXCEPT the trailing cell
+    // of a wide grapheme (emitting that would corrupt the wide char's right half).
+    #[test]
+    fn full_repaint_covers_all_cells_but_wide_char_trailing() {
+        let area = Rect::new(0, 0, 6, 1);
+        let mut buf = Buffer::filled(area, Cell::new(" "));
+        buf[(0, 0)].set_symbol("A"); // narrow
+        buf[(1, 0)].set_symbol("の"); // wide: occupies cols 1-2
+        // col 3 is the wide char's trailing cell (left as a space by set_symbol)
+        // cols 4,5 stay blank — a blank here is exactly where a ghost would sit.
+
+        let sentinel = Buffer::filled(area, Cell::new("\u{0}"));
+        let cols: Vec<u16> = sentinel.diff(&buf).into_iter().map(|(x, _, _)| x).collect();
+
+        assert!(cols.contains(&0), "narrow cell must be emitted");
+        assert!(cols.contains(&1), "wide char anchor must be emitted");
+        assert!(
+            !cols.contains(&2),
+            "wide char trailing cell must be skipped"
+        );
+        assert!(
+            cols.contains(&4),
+            "blank cell must be emitted to clear ghosts"
+        );
+        assert!(
+            cols.contains(&5),
+            "blank cell must be emitted to clear ghosts"
+        );
+    }
 }
