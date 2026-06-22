@@ -233,6 +233,9 @@ pub struct ImportState {
     pub syn: SynopsisState,
     /// Live preprocessing progress (done, total, label) once the import starts.
     pub progress: Option<(usize, usize, String)>,
+    /// Append mode: when `Some(vol)`, the pick step launches the import straight
+    /// away (no name/title/synopsis steps) and chapters land after `vol`'s last.
+    pub append_to: Option<u32>,
 }
 
 impl ImportState {
@@ -259,6 +262,22 @@ impl ImportState {
             title_syn: SynopsisState::new_single_line(String::new(), String::new()),
             syn: SynopsisState::new(String::new(), String::new()),
             progress: None,
+            append_to: None,
+        }
+    }
+
+    /// "Add chapters" wizard: pick a source file and append its chapters after the
+    /// existing volume `vol`'s last chapter. The name is the open project's (so the
+    /// import resolves to its directory); every wizard step but the pick is skipped.
+    fn new_append(
+        files: Vec<(PathBuf, u64)>,
+        projects: Vec<ProjectRef>,
+        title: String,
+        vol: u32,
+    ) -> Self {
+        Self {
+            append_to: Some(vol.max(1)),
+            ..Self::new_into(files, projects, title, vol)
         }
     }
 
@@ -287,6 +306,7 @@ impl ImportState {
             title_syn: SynopsisState::new_single_line(String::new(), String::new()),
             syn: SynopsisState::new(String::new(), String::new()),
             progress: None,
+            append_to: None,
         }
     }
 
@@ -1103,6 +1123,19 @@ impl Overlay {
         Overlay::Import(ImportState::new_into(files, refs, title, vol))
     }
 
+    /// "Add chapters" wizard, pre-targeted at an open project's volume `vol`: the
+    /// pick step launches the import immediately and chapters append after `vol`'s
+    /// last chapter.
+    pub fn import_append(
+        files: Vec<(PathBuf, u64)>,
+        projects: &[crate::model::Project],
+        title: String,
+        vol: u32,
+    ) -> Self {
+        let refs = projects.iter().map(ProjectRef::of).collect();
+        Overlay::Import(ImportState::new_append(files, refs, title, vol))
+    }
+
     /// Welcome overlay seeded with live key / sample status.
     pub fn welcome(api_key_present: bool, sample_exists: bool) -> Self {
         Overlay::Welcome(WelcomeState {
@@ -1730,6 +1763,22 @@ impl Overlay {
                 KeyCode::Enter => {
                     if st.files.is_empty() {
                         Action::CloseOverlay
+                    } else if let Some(vol) = st.append_to {
+                        // Append mode skips every wizard step: import the picked
+                        // file straight into the target volume.
+                        let source = st.selected_file().cloned().unwrap_or_default();
+                        let title = st.name.trim().to_string();
+                        st.step = 5;
+                        st.progress = Some((0, 0, "starting".to_string()));
+                        Action::ImportFile {
+                            source,
+                            title,
+                            title_th: String::new(),
+                            vol,
+                            synopsis_raw: String::new(),
+                            synopsis_th: String::new(),
+                            append: true,
+                        }
                     } else {
                         // Until the user types their own name, follow the selected
                         // file's stem so the default tracks the actual pick.
@@ -1907,6 +1956,7 @@ impl Overlay {
                             vol,
                             synopsis_raw,
                             synopsis_th,
+                            append: false,
                         }
                     }
                     SynKey::Skip => {
@@ -1923,6 +1973,7 @@ impl Overlay {
                             vol,
                             synopsis_raw: String::new(),
                             synopsis_th: String::new(),
+                            append: false,
                         }
                     }
                 }
@@ -3078,12 +3129,13 @@ impl Overlay {
                 Constraint::Min(0),    // windowed file list
             ])
             .split(area);
+        let header = match st.append_to {
+            Some(vol) => format!("  Add chapters to Vol.{vol:02} — choose a source file"),
+            None => "  Choose a source file".to_string(),
+        };
         f.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled(
-                    "  Choose a source file",
-                    Style::default().fg(theme.ink_soft),
-                ),
+                Span::styled(header, Style::default().fg(theme.ink_soft)),
                 Span::styled(
                     format!("  ({} found · r rescan)", st.files.len()),
                     Style::default().fg(theme.ink_faint),
@@ -4100,6 +4152,8 @@ impl Overlay {
                     ("y", "volume synopsis (translate/reroll)"),
                     ("R", "project name (translate/reroll)"),
                     ("V", "add volume (import wizard)"),
+                    ("i", "add chapters to volume (append import)"),
+                    ("d", "delete marked/current chapter(s)"),
                     ("Q", "QA review (flagged issues)"),
                 ],
             ),
@@ -5066,6 +5120,31 @@ mod tests {
             vec![(PathBuf::from("cursed_blade_v03.epub"), 2_345_678)],
             projects,
         ))
+    }
+
+    /// Append mode skips every wizard step: picking a file (Enter on step 0)
+    /// launches the import straight into the target volume.
+    #[test]
+    fn append_wizard_imports_into_target_volume_on_pick() {
+        let mut ov = Overlay::Import(ImportState::new_append(
+            vec![(PathBuf::from("bonus_short_story.epub"), 1_600_000)],
+            vec![],
+            "Party Got Sick III".into(),
+            3,
+        ));
+        match ov.handle_key(key(KeyCode::Enter)) {
+            Action::ImportFile {
+                vol,
+                append,
+                source,
+                ..
+            } => {
+                assert_eq!(vol, 3, "lands on the targeted volume");
+                assert!(append, "append flag set");
+                assert_eq!(source, PathBuf::from("bonus_short_story.epub"));
+            }
+            other => panic!("expected ImportFile, got {other:?}"),
+        }
     }
 
     #[test]

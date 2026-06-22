@@ -84,6 +84,9 @@ pub enum Action {
         vol: u32,
         synopsis_raw: String,
         synopsis_th: String,
+        /// Append the source's chapters after the volume's last one instead of
+        /// scaffolding a fresh project/volume (the "add chapters" flow).
+        append: bool,
     },
     /// Translator round-trip for synopsis rerolls.
     TranslateSynopsis {
@@ -132,6 +135,17 @@ pub enum Action {
     },
     /// Open the import wizard pre-targeted at the open project to add the next volume.
     AddVolume,
+    /// Open the import wizard in append mode: its chapters are appended after
+    /// `vol`'s last chapter (e.g. importing a bonus short-story EPUB into Vol.III).
+    AddChapters {
+        vol: u32,
+    },
+    /// Delete the given chapters' raw/translated/reruns files from `vol`. Raised
+    /// behind a confirm dialog.
+    DeleteChapters {
+        vol: u32,
+        chapters: Vec<u32>,
+    },
     /// Re-discover importable source files while the import wizard is open (its
     /// pick step's `r`), so a freshly-dropped file shows up without reopening.
     RescanImports,
@@ -2328,6 +2342,12 @@ impl App {
             Action::AddVolume => {
                 self.open_add_volume();
             }
+            Action::AddChapters { vol } => {
+                self.open_add_chapters(vol);
+            }
+            Action::DeleteChapters { vol, chapters } => {
+                self.delete_chapters(vol, &chapters);
+            }
             Action::RescanImports => {
                 let files = crate::workspace::scan::find_importable_files(&working_root());
                 self.shelf.rescan(&working_root());
@@ -2388,8 +2408,9 @@ impl App {
                 vol,
                 synopsis_raw,
                 synopsis_th,
+                append,
             } => {
-                self.start_import(source, title, title_th, vol, synopsis_raw, synopsis_th);
+                self.start_import(source, title, title_th, vol, synopsis_raw, synopsis_th, append);
             }
             Action::TranslateSynopsis { raw, attempt } => {
                 self.translate_synopsis(raw, attempt);
@@ -2813,6 +2834,61 @@ impl App {
             + 1;
         let files = crate::workspace::scan::find_importable_files(&working_root());
         self.overlay = Overlay::import_into(files, &self.projects, title, next);
+    }
+
+    /// Open the import wizard in append mode: chapters land after `vol`'s last one.
+    fn open_add_chapters(&mut self, vol: u32) {
+        if self.run_active {
+            self.toast = Some(Toast::warn("a run is already in progress"));
+            return;
+        }
+        let Some(active) = self.active.as_ref() else {
+            self.toast = Some(Toast::warn("no project open"));
+            return;
+        };
+        let title = active.project.title.clone();
+        let files = crate::workspace::scan::find_importable_files(&working_root());
+        self.overlay = Overlay::import_append(files, &self.projects, title, vol);
+    }
+
+    /// Remove chapters' raw/translated/reruns files from the active project's `vol`,
+    /// then re-scan so the tree reflects the deletion. Scan tolerates the resulting
+    /// gaps in chapter numbering, so no renumbering is needed.
+    fn delete_chapters(&mut self, vol: u32, chapters: &[u32]) {
+        if self.run_active {
+            self.toast = Some(Toast::warn("can't delete chapters while a run is in progress"));
+            return;
+        }
+        let Some(active) = self.active.as_ref() else {
+            return;
+        };
+        let ws = Workspace::new(active.project.dir.clone(), vol);
+        let mut removed = 0;
+        for &ch in chapters {
+            match crate::workspace::translation::delete_chapter(&ws, ch) {
+                Ok(()) => removed += 1,
+                Err(e) => self.push_log(LogLevel::Error, format!("delete ch {ch:03}: {e}")),
+            }
+        }
+        self.rescan_active();
+        self.resync_run_checkpoint();
+        self.toast = Some(Toast::info(format!(
+            "deleted {removed} chapter(s) from Vol.{vol:02}"
+        )));
+    }
+
+    /// Re-scan the open project from disk and swap it into `self.active`, keeping
+    /// the active volume and clients. Used after on-disk chapter edits.
+    fn rescan_active(&mut self) {
+        let Some(dir) = self.active.as_ref().map(|a| a.project.dir.clone()) else {
+            return;
+        };
+        if let Some(fresh) = crate::workspace::scan::scan_one_project(&dir)
+            && let Some(a) = self.active.as_mut()
+        {
+            a.project = fresh;
+        }
+        self.refresh_projects();
     }
 
     /// Delete a project directory from disk. The shelf is a live scan, so this is
@@ -3623,6 +3699,7 @@ impl App {
         vol: u32,
         synopsis_raw: String,
         synopsis_th: String,
+        append: bool,
     ) {
         if self.run_active {
             self.toast = Some(Toast::warn("a run is already in progress"));
@@ -3633,7 +3710,8 @@ impl App {
         let models = self.cfg.models.clone();
         let tx = self.tx.clone();
         self.run_active = true;
-        self.toast = Some(Toast::info(format!("importing {slug} …")));
+        let verb = if append { "adding chapters to" } else { "importing" };
+        self.toast = Some(Toast::info(format!("{verb} {slug} …")));
         tokio::spawn(async move {
             match run_import(
                 source,
@@ -3644,6 +3722,7 @@ impl App {
                 models,
                 synopsis_raw,
                 synopsis_th,
+                append,
                 &tx,
             )
             .await
@@ -4795,6 +4874,7 @@ async fn run_import(
     models: ModelSet,
     synopsis_raw: String,
     synopsis_th: String,
+    append: bool,
     tx: &EventTx,
 ) -> anyhow::Result<String> {
     if !crate::document_import::is_supported_import_path(&source) {
@@ -4807,8 +4887,10 @@ async fn run_import(
         .map(|s| s.to_string())
         .unwrap_or_else(|| slugify(&title));
 
-    // Scaffold on a blocking thread so the fs work never stalls the runtime.
-    {
+    // Append mode targets an existing project/volume, so scaffolding and the
+    // title/synopsis/source-metadata writes are skipped — only new chapters land.
+    if !append {
+        // Scaffold on a blocking thread so the fs work never stalls the runtime.
         let dest = dest.clone();
         let title = title.clone();
         let models = models.clone();
@@ -4829,9 +4911,9 @@ async fn run_import(
     }
 
     if crate::document_import::is_epub_path(&source) {
-        run_epub_import(source, dest.clone(), vol, tx).await?;
+        run_epub_import(source, dest.clone(), vol, append, tx).await?;
     } else {
-        run_markitdown_import(source, dest.clone(), title, vol, tx).await?;
+        run_markitdown_import(source, dest.clone(), title, vol, append, tx).await?;
     }
 
     Ok(slug)
@@ -4841,6 +4923,7 @@ async fn run_epub_import(
     epub: PathBuf,
     dest: PathBuf,
     vol: u32,
+    append: bool,
     tx: &EventTx,
 ) -> anyhow::Result<()> {
     use crate::epub::import::import_with_media;
@@ -4873,7 +4956,14 @@ async fn run_epub_import(
         .collect();
     let total = doc_paths.len();
     let ws = Workspace::new(dest.clone(), vol);
-    crate::workspace::volume::set_source_metadata(&ws, epub_source_metadata(&book.metadata))?;
+    // Append continues after the volume's last chapter; a fresh import starts at 1
+    // and overwrites the volume's source metadata.
+    let base = if append {
+        crate::workspace::translation::max_chapter_number(&ws)
+    } else {
+        crate::workspace::volume::set_source_metadata(&ws, epub_source_metadata(&book.metadata))?;
+        0
+    };
 
     // TOC title per content doc (first entry wins); prepended as a `# ` heading on prose
     // so real chapter names survive instead of the generic "Chapter NNN".
@@ -4941,7 +5031,7 @@ async fn run_epub_import(
 
     let chapters = crate::epub::segment::segment(&docs);
     for (idx, lc) in chapters.iter().enumerate() {
-        let ch_number = (idx + 1) as u32;
+        let ch_number = base + (idx + 1) as u32;
         match lc.kind {
             crate::epub::segment::LogicalKind::ImageOnly => {
                 write_import_chapter(&ws, ch_number, &lc.body, true)?;
@@ -4966,6 +5056,7 @@ async fn run_markitdown_import(
     dest: PathBuf,
     title: String,
     vol: u32,
+    append: bool,
     tx: &EventTx,
 ) -> anyhow::Result<()> {
     let source_name = source
@@ -4999,12 +5090,17 @@ async fn run_markitdown_import(
     }
 
     let ws = Workspace::new(dest, vol);
+    let base = if append {
+        crate::workspace::translation::max_chapter_number(&ws)
+    } else {
+        0
+    };
     let total = converted.chapters.len();
     if total == 0 {
         anyhow::bail!("MarkItDown produced no chapters");
     }
     for (idx, chapter) in converted.chapters.iter().enumerate() {
-        let ch_number = (idx + 1) as u32;
+        let ch_number = base + (idx + 1) as u32;
         write_import_chapter(&ws, ch_number, &chapter.body, chapter.image_only)?;
         tx.send(AppEvent::ImportProgress {
             done: idx + 1,

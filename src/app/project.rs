@@ -219,6 +219,36 @@ impl ProjectScreen {
                 ))
             }
             KeyCode::Char('V') => Action::AddVolume,
+            KeyCode::Char('i') => {
+                let vol = self.selected_volume(active).unwrap_or(active.vol);
+                Action::AddChapters { vol }
+            }
+            KeyCode::Char('d') => {
+                let vol = self.selected_volume(active).unwrap_or(active.vol);
+                let marked = self.marked_chapters(active);
+                let chapters = if !marked.is_empty() {
+                    marked
+                } else if let Some(ch) = self.selected_chapter(active) {
+                    vec![ch]
+                } else {
+                    Vec::new()
+                };
+                if chapters.is_empty() {
+                    Action::None
+                } else {
+                    let body = if chapters.len() == 1 {
+                        format!("Delete chapter {:03} from Vol.{vol:02}?", chapters[0])
+                    } else {
+                        format!("Delete {} chapters from Vol.{vol:02}?", chapters.len())
+                    };
+                    self.selected.clear();
+                    Action::show_overlay(Overlay::confirm(
+                        "Delete chapters",
+                        body,
+                        Action::DeleteChapters { vol, chapters },
+                    ))
+                }
+            }
             KeyCode::Char('x') => {
                 let vol = self.selected_volume(active).unwrap_or(active.vol);
                 Action::show_overlay(Overlay::export(vol))
@@ -703,6 +733,8 @@ impl ProjectScreen {
             ("T", "whole vol"),
             ("A", "whole project"),
             ("V", "add vol"),
+            ("i", "add chapters"),
+            ("d", "delete"),
             ("x", "export"),
             ("Space", "mark"),
             ("h/l", "tree/focus"),

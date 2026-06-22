@@ -435,6 +435,45 @@ pub fn reset_chapter(ws: &Workspace, chapter: u32) -> std::io::Result<()> {
     }
 }
 
+/// Remove a chapter entirely: its `raw/`, `translated/`, and archived `reruns/`
+/// files. Missing files are not an error. Scan tolerates the gap this leaves in
+/// chapter numbering, so surviving chapters keep their numbers.
+pub fn delete_chapter(ws: &Workspace, chapter: u32) -> std::io::Result<()> {
+    for path in [ws.raw(chapter), ws.translated(chapter)] {
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+    match std::fs::remove_dir_all(ws.reruns_dir(chapter)) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Highest `raw/ch_NNN.md` number present in the active volume, 0 if none. Used
+/// to append imported chapters after the current last one.
+pub fn max_chapter_number(ws: &Workspace) -> u32 {
+    let raw_dir = ws.vol_dir.join("raw");
+    let mut max = 0;
+    if let Ok(entries) = std::fs::read_dir(&raw_dir) {
+        for entry in entries.flatten() {
+            if let Some(n) = entry
+                .file_name()
+                .to_str()
+                .and_then(|s| s.strip_suffix(".md"))
+                .and_then(|s| s.strip_prefix("ch_"))
+                .and_then(|s| s.parse::<u32>().ok())
+            {
+                max = max.max(n);
+            }
+        }
+    }
+    max
+}
+
 /// Read the full accumulated Thai for `chapter` (empty string when absent).
 pub async fn read_translated(ws: &Workspace, chapter: u32) -> String {
     tokio::fs::read_to_string(ws.translated(chapter))
@@ -505,6 +544,36 @@ mod tests {
         std::fs::create_dir_all(&base).unwrap();
         let ws = Workspace::new(base.clone(), 1);
         (base, ws)
+    }
+
+    /// `max_chapter_number` finds the highest `raw/ch_NNN.md`, and `delete_chapter`
+    /// removes a chapter's raw/translated/reruns without touching its neighbours —
+    /// leaving a gap the scan tolerates.
+    #[test]
+    fn delete_and_max_chapter() {
+        let (base, ws) = temp_ws("delete");
+        assert_eq!(max_chapter_number(&ws), 0, "empty volume");
+
+        for ch in [1u32, 2, 3] {
+            write_raw(&ws, ch, &format!("body {ch}")).unwrap();
+        }
+        std::fs::create_dir_all(ws.translated(2).parent().unwrap()).unwrap();
+        std::fs::write(ws.translated(2), "แปลแล้ว").unwrap();
+        std::fs::create_dir_all(ws.reruns_dir(2)).unwrap();
+        std::fs::write(ws.reruns_dir(2).join("old.md"), "x").unwrap();
+        assert_eq!(max_chapter_number(&ws), 3);
+
+        delete_chapter(&ws, 2).unwrap();
+        assert!(!ws.raw(2).exists(), "raw removed");
+        assert!(!ws.translated(2).exists(), "translated removed");
+        assert!(!ws.reruns_dir(2).exists(), "reruns removed");
+        assert!(ws.raw(1).exists() && ws.raw(3).exists(), "neighbours kept");
+        assert_eq!(max_chapter_number(&ws), 3, "gap at 2, max still 3");
+
+        // Deleting an absent chapter is a no-op, not an error.
+        delete_chapter(&ws, 99).unwrap();
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// A chunk that exhausts its review attempts is committed (so the chapter can
