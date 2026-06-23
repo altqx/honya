@@ -2,13 +2,17 @@
 //! Translates honya's chat/completions requests into typed Responses input and
 //! folds streamed `response.*` events back into [`ChatResponse`].
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use async_trait::async_trait;
 use futures::StreamExt;
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
-use super::client::{LlmClient, LlmError, Result, StreamDelta};
+use super::client::{
+    LlmClient, LlmError, Result, StreamDelta, parse_retry_after, retry_after_hint, retry_backoff,
+};
 use super::{
     ChatRequest, ChatResponse, Choice, FunctionCall, ResponseFormat, ResponseMessage, Role,
     ToolCall, Usage,
@@ -16,10 +20,12 @@ use super::{
 use crate::codex::{CodexAuth, auth, now_unix};
 
 const RESPONSES_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
+const MAX_SEND_ATTEMPTS: u32 = 3;
 
 /// An LLM client backed by a Codex (ChatGPT) account's Responses API.
 pub struct CodexClient {
     http: reqwest::Client,
+    responses_url: String,
     /// Held behind a mutex so an expired access token can be refreshed mid-run.
     auth: Mutex<CodexAuth>,
 }
@@ -31,6 +37,7 @@ impl CodexClient {
             .build()?;
         Ok(Self {
             http,
+            responses_url: RESPONSES_URL.to_string(),
             auth: Mutex::new(auth),
         })
     }
@@ -52,7 +59,7 @@ impl CodexClient {
         Ok(guard.clone())
     }
 
-    async fn run(
+    async fn run_once(
         &self,
         req: &ChatRequest,
         on_delta: &mut (dyn for<'a> FnMut(StreamDelta<'a>) + Send),
@@ -62,7 +69,7 @@ impl CodexClient {
 
         let resp = self
             .http
-            .post(RESPONSES_URL)
+            .post(&self.responses_url)
             .bearer_auth(&auth.access_token)
             .header("chatgpt-account-id", &auth.account_id)
             .header("OpenAI-Beta", "responses=experimental")
@@ -75,9 +82,10 @@ impl CodexClient {
 
         let status = resp.status();
         if status == StatusCode::TOO_MANY_REQUESTS {
+            let retry_after = parse_retry_after(&resp);
             let message = resp.text().await.unwrap_or_default();
             return Err(LlmError::RateLimited {
-                retry_after: 0,
+                retry_after,
                 message,
             });
         }
@@ -111,12 +119,39 @@ impl CodexClient {
         }
         Ok(acc.into_response())
     }
+
+    async fn run(
+        &self,
+        req: &ChatRequest,
+        on_delta: &mut (dyn for<'a> FnMut(StreamDelta<'a>) + Send),
+        replay_after_delta: bool,
+    ) -> Result<ChatResponse> {
+        let emitted = AtomicBool::new(false);
+        let mut tracked = |delta: StreamDelta| {
+            emitted.store(true, Ordering::Relaxed);
+            on_delta(delta);
+        };
+        let mut retry = 0u32;
+        loop {
+            match self.run_once(req, &mut tracked).await {
+                Err(e)
+                    if retry + 1 < MAX_SEND_ATTEMPTS
+                        && e.is_retryable()
+                        && (replay_after_delta || !emitted.load(Ordering::Relaxed)) =>
+                {
+                    retry += 1;
+                    tokio::time::sleep(retry_backoff(retry, retry_after_hint(&e))).await;
+                }
+                other => return other,
+            }
+        }
+    }
 }
 
 #[async_trait]
 impl LlmClient for CodexClient {
     async fn chat(&self, req: &ChatRequest) -> Result<ChatResponse> {
-        self.run(req, &mut |_| {}).await
+        self.run(req, &mut |_| {}, true).await
     }
 
     async fn chat_stream(
@@ -124,7 +159,7 @@ impl LlmClient for CodexClient {
         req: &ChatRequest,
         on_delta: &mut (dyn for<'a> FnMut(StreamDelta<'a>) + Send),
     ) -> Result<ChatResponse> {
-        self.run(req, on_delta).await
+        self.run(req, on_delta, false).await
     }
 }
 
@@ -361,6 +396,10 @@ fn apply_event(
 mod tests {
     use super::*;
     use crate::llm::{Message, Tool};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
     #[test]
     fn build_body_maps_system_to_instructions_and_messages_to_input() {
@@ -369,10 +408,7 @@ mod tests {
             reasoning: Some(json!({ "effort": "high" })),
             ..ChatRequest::new(
                 "gpt-5.5",
-                vec![
-                    Message::system("be terse"),
-                    Message::user("translate this"),
-                ],
+                vec![Message::system("be terse"), Message::user("translate this")],
             )
         };
         let body = build_body(&req);
@@ -390,7 +426,11 @@ mod tests {
             "gpt-5.5-codex",
             vec![Message::tool_result("call_1", "{\"ok\":true}")],
         );
-        req.tools = Some(vec![Tool::function("do_it", "does it", json!({"type":"object"}))]);
+        req.tools = Some(vec![Tool::function(
+            "do_it",
+            "does it",
+            json!({"type":"object"}),
+        )]);
         let body = build_body(&req);
         assert_eq!(body["tools"][0]["type"], "function");
         assert_eq!(body["tools"][0]["name"], "do_it");
@@ -431,5 +471,72 @@ mod tests {
         assert_eq!(usage.prompt_tokens, 10);
         assert_eq!(usage.completion_tokens, 5);
         assert_eq!(usage.total_tokens, 15);
+    }
+
+    #[tokio::test]
+    async fn retries_transient_http_failure_before_streaming() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let url = format!(
+            "http://{}/backend-api/codex/responses",
+            listener.local_addr().unwrap()
+        );
+        let hits = Arc::new(AtomicUsize::new(0));
+        let server_hits = hits.clone();
+        let server = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut buf = vec![0u8; 8192];
+                let _ = socket.read(&mut buf).await.unwrap();
+
+                let hit = server_hits.fetch_add(1, AtomicOrdering::SeqCst);
+                if hit == 0 {
+                    let body = "Our servers are currently overloaded. Please try again later.";
+                    let response = format!(
+                        "HTTP/1.1 502 Bad Gateway\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    socket.write_all(response.as_bytes()).await.unwrap();
+                } else {
+                    let body = concat!(
+                        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n",
+                        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"model\":\"gpt-5-codex\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n",
+                        "data: [DONE]\n"
+                    );
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    socket.write_all(response.as_bytes()).await.unwrap();
+                }
+                let _ = socket.shutdown().await;
+            }
+        });
+
+        let client = CodexClient {
+            http: reqwest::Client::builder().build().unwrap(),
+            responses_url: url,
+            auth: Mutex::new(CodexAuth {
+                access_token: "access".to_string(),
+                refresh_token: String::new(),
+                account_id: "acct".to_string(),
+                expires_at: 0,
+            }),
+        };
+        let result = client
+            .chat(&ChatRequest::new("gpt-5-codex", vec![Message::user("hi")]))
+            .await;
+        let resp = match result {
+            Ok(resp) => resp,
+            Err(e) => {
+                server.abort();
+                panic!("Codex retry should have recovered from 502: {e}");
+            }
+        };
+
+        assert_eq!(hits.load(AtomicOrdering::SeqCst), 2);
+        assert_eq!(resp.choices[0].message.content.as_deref(), Some("ok"));
+        server.await.unwrap();
     }
 }

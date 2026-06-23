@@ -133,6 +133,7 @@ fn handle_synopsis_keys(st: &mut SynopsisState, key: KeyEvent) -> SynKey {
             return SynKey::None;
         }
         return match key.code {
+            KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => SynKey::Accept,
             KeyCode::Tab => {
                 if st.raw.trim().is_empty() {
                     SynKey::None
@@ -166,6 +167,14 @@ fn handle_synopsis_keys(st: &mut SynopsisState, key: KeyEvent) -> SynKey {
             }
             match key.code {
                 KeyCode::Esc => SynKey::Back,
+                // Continue without translating: keep the source as-is and move on.
+                KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    if st.raw.trim().is_empty() {
+                        SynKey::Skip
+                    } else {
+                        SynKey::Accept
+                    }
+                }
                 KeyCode::Tab => {
                     if st.raw.trim().is_empty() {
                         SynKey::Skip
@@ -503,12 +512,18 @@ impl SettingsTab {
     fn for_field(field: u8) -> SettingsTab {
         SettingsTab::ALL
             .into_iter()
-            .find(|t| t.field_range().is_some_and(|(s, e)| field >= s && field < e))
+            .find(|t| {
+                t.field_range()
+                    .is_some_and(|(s, e)| field >= s && field < e)
+            })
             .unwrap_or(SettingsTab::Agents)
     }
 
     fn cycled(self, forward: bool) -> SettingsTab {
-        let i = SettingsTab::ALL.iter().position(|t| *t == self).unwrap_or(0);
+        let i = SettingsTab::ALL
+            .iter()
+            .position(|t| *t == self)
+            .unwrap_or(0);
         SettingsTab::ALL[step(i, SettingsTab::ALL.len(), forward)]
     }
 }
@@ -775,14 +790,22 @@ impl SettingsState {
 
     fn next_field(&mut self) {
         if let Some((start, end)) = self.tab.field_range() {
-            let next = if self.field + 1 >= end { start } else { self.field + 1 };
+            let next = if self.field + 1 >= end {
+                start
+            } else {
+                self.field + 1
+            };
             self.focus(next);
         }
     }
 
     fn prev_field(&mut self) {
         if let Some((start, end)) = self.tab.field_range() {
-            let prev = if self.field <= start { end - 1 } else { self.field - 1 };
+            let prev = if self.field <= start {
+                end - 1
+            } else {
+                self.field - 1
+            };
             self.focus(prev);
         }
     }
@@ -2529,9 +2552,12 @@ impl Overlay {
             Overlay::ReaderInspect(_) => {
                 &[("jk", "scroll"), ("e", "edit Thai"), ("Esc/q", "close")]
             }
-            Overlay::ReaderEdit(_) => {
-                &[("type", "edit"), ("↵", "newline"), ("^S", "save"), ("Esc", "cancel")]
-            }
+            Overlay::ReaderEdit(_) => &[
+                ("type", "edit"),
+                ("↵", "newline"),
+                ("^S", "save"),
+                ("Esc", "cancel"),
+            ],
             Overlay::ReaderSearch(_) => &[("type", "query"), ("↵", "search"), ("Esc", "cancel")],
             Overlay::ReaderJump(_) => &[
                 ("type", "filter"),
@@ -2946,7 +2972,12 @@ impl Overlay {
 
         let mut lines: Vec<Line> = body
             .lines()
-            .map(|l| Line::from(Span::styled(l.to_string(), Style::default().fg(theme.th_text))))
+            .map(|l| {
+                Line::from(Span::styled(
+                    l.to_string(),
+                    Style::default().fg(theme.th_text),
+                ))
+            })
             .collect();
         if body.ends_with('\n') {
             lines.push(Line::raw(""));
@@ -3340,7 +3371,10 @@ impl Overlay {
                         ));
                     }
                 } else if syn.th.trim().is_empty() {
-                    spans.push(Span::styled(thai_display_safe("(no Thai title yet.)"), faint));
+                    spans.push(Span::styled(
+                        thai_display_safe("(no Thai title yet.)"),
+                        faint,
+                    ));
                 } else {
                     spans.push(Span::styled(
                         thai_display_safe(syn.th.trim()),
@@ -3726,235 +3760,245 @@ impl Overlay {
         lines.push(Line::raw(""));
 
         if st.tab == SettingsTab::Agents {
-        for (name, base, agent) in [
-            ("Orchestrator", 0u8, &st.models.orchestrator),
-            ("Translator", 3, &st.models.translator),
-            ("Reviewer", 6, &st.models.reviewer),
-            ("Refine", 9, &st.models.refine),
-        ] {
+            for (name, base, agent) in [
+                ("Orchestrator", 0u8, &st.models.orchestrator),
+                ("Translator", 3, &st.models.translator),
+                ("Reviewer", 6, &st.models.reviewer),
+                ("Refine", 9, &st.models.refine),
+            ] {
+                push(
+                    &mut lines,
+                    &mut focus_line,
+                    row(base, name, agent.provider.label().to_string(), false),
+                    st.field == base,
+                );
+                push(
+                    &mut lines,
+                    &mut focus_line,
+                    row(base + 1, "  model", agent.model.clone(), true),
+                    st.field == base + 1,
+                );
+                push(
+                    &mut lines,
+                    &mut focus_line,
+                    row(
+                        base + 2,
+                        "  effort",
+                        crate::model::Effort::label(agent.effort).to_string(),
+                        false,
+                    ),
+                    st.field == base + 2,
+                );
+            }
+        }
+        if st.tab == SettingsTab::Providers {
             push(
                 &mut lines,
                 &mut focus_line,
-                row(base, name, agent.provider.label().to_string(), false),
-                st.field == base,
-            );
-            push(
-                &mut lines,
-                &mut focus_line,
-                row(base + 1, "  model", agent.model.clone(), true),
-                st.field == base + 1,
+                row(
+                    12,
+                    "OpenRouter key",
+                    mask(&st.openrouter_key, st.api_key_env),
+                    false,
+                ),
+                st.field == 12,
             );
             push(
                 &mut lines,
                 &mut focus_line,
                 row(
-                    base + 2,
-                    "  effort",
-                    crate::model::Effort::label(agent.effort).to_string(),
+                    13,
+                    "Tokenrouter key",
+                    mask(&st.tokenrouter_key, st.tokenrouter_key_env),
                     false,
                 ),
-                st.field == base + 2,
+                st.field == 13,
             );
-        }
-
-        }
-        if st.tab == SettingsTab::Providers {
-        push(
-            &mut lines,
-            &mut focus_line,
-            row(12, "OpenRouter key", mask(&st.openrouter_key, st.api_key_env), false),
-            st.field == 12,
-        );
-        push(
-            &mut lines,
-            &mut focus_line,
-            row(
-                13,
-                "Tokenrouter key",
-                mask(&st.tokenrouter_key, st.tokenrouter_key_env),
-                false,
-            ),
-            st.field == 13,
-        );
-        let (codex_status, codex_color, codex_hint) = match &cfg.codex_auth {
-            Some(_) => ("signed in", theme.status_done, "Ctrl-X sign out"),
-            None => ("not signed in", theme.ink_soft, "Ctrl-X sign in"),
-        };
-        lines.push(Line::from(vec![
-            Span::styled("   Codex (ChatGPT)     ", Style::default().fg(theme.ink_faint)),
-            Span::styled(codex_status, Style::default().fg(codex_color)),
-            Span::styled(format!("   {codex_hint}"), Style::default().fg(theme.ink_faint)),
-        ]));
-
+            let (codex_status, codex_color, codex_hint) = match &cfg.codex_auth {
+                Some(_) => ("signed in", theme.status_done, "Ctrl-X sign out"),
+                None => ("not signed in", theme.ink_soft, "Ctrl-X sign in"),
+            };
+            lines.push(Line::from(vec![
+                Span::styled(
+                    "   Codex (ChatGPT)     ",
+                    Style::default().fg(theme.ink_faint),
+                ),
+                Span::styled(codex_status, Style::default().fg(codex_color)),
+                Span::styled(
+                    format!("   {codex_hint}"),
+                    Style::default().fg(theme.ink_faint),
+                ),
+            ]));
         }
         if st.tab == SettingsTab::Pipeline {
-        push(
-            &mut lines,
-            &mut focus_line,
-            row(14, "Retry attempts", st.max_attempts.clone(), true),
-            st.field == 14,
-        );
-        lines.push(Line::from(Span::styled(
-            "      ↳ Translator↔Reviewer loop per chunk (1–20)",
-            Style::default().fg(theme.ink_faint),
-        )));
-        push(
-            &mut lines,
-            &mut focus_line,
-            row(15, "Loop watchdog (s)", st.loop_stall_secs.clone(), true),
-            st.field == 15,
-        );
-        lines.push(Line::from(Span::styled(
-            "      ↳ stuck/looping chapter re-translated after N s (0 = off)",
-            Style::default().fg(theme.ink_faint),
-        )));
-        push(
-            &mut lines,
-            &mut focus_line,
-            row(
-                16,
-                "Loop re-translates",
-                st.max_chapter_retranslates.clone(),
-                true,
-            ),
-            st.field == 16,
-        );
-        lines.push(Line::from(Span::styled(
-            "      ↳ whole-chapter re-translates before the run aborts (0–10)",
-            Style::default().fg(theme.ink_faint),
-        )));
-        push(
-            &mut lines,
-            &mut focus_line,
-            row(
-                17,
-                "Service tier",
-                ServiceTier::label(st.service_tier).to_string(),
-                false,
-            ),
-            st.field == 17,
-        );
-        lines.push(Line::from(Span::styled(
-            format!("      ↳ {}", ServiceTier::desc(st.service_tier)),
-            Style::default().fg(theme.ink_faint),
-        )));
-
+            push(
+                &mut lines,
+                &mut focus_line,
+                row(14, "Retry attempts", st.max_attempts.clone(), true),
+                st.field == 14,
+            );
+            lines.push(Line::from(Span::styled(
+                "      ↳ Translator↔Reviewer loop per chunk (1–20)",
+                Style::default().fg(theme.ink_faint),
+            )));
+            push(
+                &mut lines,
+                &mut focus_line,
+                row(15, "Loop watchdog (s)", st.loop_stall_secs.clone(), true),
+                st.field == 15,
+            );
+            lines.push(Line::from(Span::styled(
+                "      ↳ stuck/looping chapter re-translated after N s (0 = off)",
+                Style::default().fg(theme.ink_faint),
+            )));
+            push(
+                &mut lines,
+                &mut focus_line,
+                row(
+                    16,
+                    "Loop re-translates",
+                    st.max_chapter_retranslates.clone(),
+                    true,
+                ),
+                st.field == 16,
+            );
+            lines.push(Line::from(Span::styled(
+                "      ↳ whole-chapter re-translates before the run aborts (0–10)",
+                Style::default().fg(theme.ink_faint),
+            )));
+            push(
+                &mut lines,
+                &mut focus_line,
+                row(
+                    17,
+                    "Service tier",
+                    ServiceTier::label(st.service_tier).to_string(),
+                    false,
+                ),
+                st.field == 17,
+            );
+            lines.push(Line::from(Span::styled(
+                format!("      ↳ {}", ServiceTier::desc(st.service_tier)),
+                Style::default().fg(theme.ink_faint),
+            )));
         }
         if st.tab == SettingsTab::Appearance {
-        push(
-            &mut lines,
-            &mut focus_line,
-            row(18, "Auto-update", st.update_mode.label().to_string(), false),
-            st.field == 18,
-        );
-        push(
-            &mut lines,
-            &mut focus_line,
-            row(
-                19,
-                "Update channel",
-                st.release_channel.label().to_string(),
-                false,
-            ),
-            st.field == 19,
-        );
-        lines.push(Line::from(vec![
-            Span::styled(
-                "   Theme               ",
-                Style::default().fg(theme.ink_faint),
-            ),
-            Span::styled(cfg.theme.label(), Style::default().fg(theme.accent)),
-            Span::styled("   Ctrl-T to change", Style::default().fg(theme.ink_faint)),
-        ]));
+            push(
+                &mut lines,
+                &mut focus_line,
+                row(18, "Auto-update", st.update_mode.label().to_string(), false),
+                st.field == 18,
+            );
+            push(
+                &mut lines,
+                &mut focus_line,
+                row(
+                    19,
+                    "Update channel",
+                    st.release_channel.label().to_string(),
+                    false,
+                ),
+                st.field == 19,
+            );
+            lines.push(Line::from(vec![
+                Span::styled(
+                    "   Theme               ",
+                    Style::default().fg(theme.ink_faint),
+                ),
+                Span::styled(cfg.theme.label(), Style::default().fg(theme.accent)),
+                Span::styled("   Ctrl-T to change", Style::default().fg(theme.ink_faint)),
+            ]));
         }
         if st.tab == SettingsTab::Account {
-        match (&st.account_login, &st.remote_auth_code) {
-            (_, Some(prompt)) => {
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        "   GitHub             ",
-                        Style::default().fg(theme.ink_faint),
-                    ),
-                    Span::styled(
-                        prompt.code.clone(),
-                        Style::default()
-                            .fg(theme.accent)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                ]));
-                lines.push(Line::from(Span::styled(
-                    format!("      ↳ enter it at {}", prompt.uri),
-                    Style::default().fg(theme.ink_faint),
-                )));
-                lines.push(Line::from(Span::styled(
-                    "      ↳ Ctrl-B open in browser · Ctrl-K copy code".to_string(),
-                    Style::default().fg(theme.ink_faint),
-                )));
-            }
-            (None, None) => {
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        "   GitHub             ",
-                        Style::default().fg(theme.ink_faint),
-                    ),
-                    Span::styled("not signed in", Style::default().fg(theme.ink_soft)),
-                    Span::styled("   Ctrl-A to sign in", Style::default().fg(theme.ink_faint)),
-                ]));
-            }
-            (Some(login), _) => {
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        "   GitHub             ",
-                        Style::default().fg(theme.ink_faint),
-                    ),
-                    Span::styled(format!("@{login}"), Style::default().fg(theme.status_done)),
-                    Span::styled("   Ctrl-O sign out", Style::default().fg(theme.ink_faint)),
-                ]));
-                let (state_label, state_color) = if st.remote_enabled {
-                    (
-                        st.remote_state.label(),
-                        match st.remote_state {
-                            crate::remote::protocol::RemoteState::Connected => theme.status_done,
-                            crate::remote::protocol::RemoteState::Error => theme.status_failed,
-                            _ => theme.status_working,
-                        },
-                    )
-                } else {
-                    ("disabled", theme.ink_soft)
-                };
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        "   Remote link        ",
-                        Style::default().fg(theme.ink_faint),
-                    ),
-                    Span::styled(state_label.to_string(), Style::default().fg(state_color)),
-                    Span::styled("   Ctrl-R to toggle", Style::default().fg(theme.ink_faint)),
-                ]));
-                if let Some(label) = st.session_label.as_ref().filter(|_| st.remote_enabled) {
+            match (&st.account_login, &st.remote_auth_code) {
+                (_, Some(prompt)) => {
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            "   GitHub             ",
+                            Style::default().fg(theme.ink_faint),
+                        ),
+                        Span::styled(
+                            prompt.code.clone(),
+                            Style::default()
+                                .fg(theme.accent)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                    ]));
                     lines.push(Line::from(Span::styled(
-                        format!("      ↳ this session: {label}"),
+                        format!("      ↳ enter it at {}", prompt.uri),
+                        Style::default().fg(theme.ink_faint),
+                    )));
+                    lines.push(Line::from(Span::styled(
+                        "      ↳ Ctrl-B open in browser · Ctrl-K copy code".to_string(),
                         Style::default().fg(theme.ink_faint),
                     )));
                 }
-                if st.remote_enabled
-                    && matches!(
-                        st.remote_state,
-                        crate::remote::protocol::RemoteState::Connected
-                    )
-                {
-                    let watchers = st.remote_watchers;
-                    let note = if watchers == 0 {
-                        "      ↳ no dashboards watching · open honya.altqx.com/app".to_string()
+                (None, None) => {
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            "   GitHub             ",
+                            Style::default().fg(theme.ink_faint),
+                        ),
+                        Span::styled("not signed in", Style::default().fg(theme.ink_soft)),
+                        Span::styled("   Ctrl-A to sign in", Style::default().fg(theme.ink_faint)),
+                    ]));
+                }
+                (Some(login), _) => {
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            "   GitHub             ",
+                            Style::default().fg(theme.ink_faint),
+                        ),
+                        Span::styled(format!("@{login}"), Style::default().fg(theme.status_done)),
+                        Span::styled("   Ctrl-O sign out", Style::default().fg(theme.ink_faint)),
+                    ]));
+                    let (state_label, state_color) = if st.remote_enabled {
+                        (
+                            st.remote_state.label(),
+                            match st.remote_state {
+                                crate::remote::protocol::RemoteState::Connected => {
+                                    theme.status_done
+                                }
+                                crate::remote::protocol::RemoteState::Error => theme.status_failed,
+                                _ => theme.status_working,
+                            },
+                        )
                     } else {
-                        format!("      ↳ {watchers} dashboard(s) watching this session")
+                        ("disabled", theme.ink_soft)
                     };
-                    lines.push(Line::from(Span::styled(
-                        note,
-                        Style::default().fg(theme.ink_faint),
-                    )));
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            "   Remote link        ",
+                            Style::default().fg(theme.ink_faint),
+                        ),
+                        Span::styled(state_label.to_string(), Style::default().fg(state_color)),
+                        Span::styled("   Ctrl-R to toggle", Style::default().fg(theme.ink_faint)),
+                    ]));
+                    if let Some(label) = st.session_label.as_ref().filter(|_| st.remote_enabled) {
+                        lines.push(Line::from(Span::styled(
+                            format!("      ↳ this session: {label}"),
+                            Style::default().fg(theme.ink_faint),
+                        )));
+                    }
+                    if st.remote_enabled
+                        && matches!(
+                            st.remote_state,
+                            crate::remote::protocol::RemoteState::Connected
+                        )
+                    {
+                        let watchers = st.remote_watchers;
+                        let note = if watchers == 0 {
+                            "      ↳ no dashboards watching · open honya.altqx.com/app".to_string()
+                        } else {
+                            format!("      ↳ {watchers} dashboard(s) watching this session")
+                        };
+                        lines.push(Line::from(Span::styled(
+                            note,
+                            Style::default().fg(theme.ink_faint),
+                        )));
+                    }
                 }
             }
-        }
         }
 
         lines.push(Line::raw(""));
@@ -4815,14 +4859,24 @@ fn volume_chips(volumes: &[(u32, usize)]) -> String {
 /// accepting in the wizard starts the import while standalone accept saves.
 fn synopsis_hints(st: &SynopsisState, wizard: bool) -> &'static [(&'static str, &'static str)] {
     if st.edit_th {
-        return &[("type", "thai"), ("Tab", "retranslate"), ("Esc", "done")];
+        return &[
+            ("type", "thai"),
+            ("Tab", "retranslate"),
+            ("^S", "save"),
+            ("Esc", "done"),
+        ];
     }
     match st.phase {
         SynPhase::Editing => {
             if st.raw.trim().is_empty() {
                 &[("type", "raw"), ("Tab", "skip"), ("Esc", "back")]
             } else {
-                &[("type", "raw"), ("Tab", "translate"), ("Esc", "back")]
+                &[
+                    ("type", "raw"),
+                    ("Tab", "translate"),
+                    ("^S", "continue"),
+                    ("Esc", "back"),
+                ]
             }
         }
         SynPhase::Translating => &[("Esc", "cancel"), ("…", "translating")],
@@ -4832,7 +4886,12 @@ fn synopsis_hints(st: &SynopsisState, wizard: bool) -> &'static [(&'static str, 
             ("r", "reroll"),
             ("s", "skip"),
         ],
-        SynPhase::Done => &[("↵", "save"), ("e", "edit th"), ("r", "reroll"), ("o", "src")],
+        SynPhase::Done => &[
+            ("↵", "save"),
+            ("e", "edit th"),
+            ("r", "reroll"),
+            ("o", "src"),
+        ],
         SynPhase::Failed => &[("e", "edit th"), ("r", "retry"), ("o", "src")],
     }
 }
@@ -4843,14 +4902,24 @@ fn import_title_hints(st: &SynopsisState) -> &'static [(&'static str, &'static s
     if st.phase == SynPhase::Translating {
         return &[("Esc", "cancel"), ("…", "translating")];
     }
-    &[("type", "thai"), ("Tab", "translate"), ("↵", "next"), ("Esc", "back")]
+    &[
+        ("type", "thai"),
+        ("Tab", "translate"),
+        ("↵", "next"),
+        ("Esc", "back"),
+    ]
 }
 
 fn title_hints(st: &SynopsisState) -> &'static [(&'static str, &'static str)] {
     if st.phase == SynPhase::Translating {
         return &[("Esc", "cancel"), ("…", "translating")];
     }
-    &[("type", "thai"), ("Tab", "translate"), ("↵", "save"), ("Esc", "cancel")]
+    &[
+        ("type", "thai"),
+        ("Tab", "translate"),
+        ("↵", "save"),
+        ("Esc", "cancel"),
+    ]
 }
 
 struct EditorLabels {
@@ -5015,37 +5084,37 @@ fn render_editor_body(
         )
     } else {
         match st.phase {
-        SynPhase::Editing => Span::styled(
-            thai_display_safe(&if st.raw.trim().is_empty() {
-                "  ยังไม่มีข้อความ — Tab ข้ามขั้นตอนนี้ · Esc กลับ".to_string()
-            } else if st.multiline {
-                format!(
-                    "  {} ตัวอักษร · Tab แปล · Enter ขึ้นบรรทัดใหม่ · Esc กลับ",
-                    st.raw.chars().count()
-                )
-            } else {
-                format!(
-                    "  {} ตัวอักษร · Tab/Enter แปล · Esc กลับ",
-                    st.raw.chars().count()
-                )
-            }),
-            Style::default().fg(theme.ink_faint),
-        ),
-        SynPhase::Translating => Span::styled(
-            thai_display_safe("  ◐ กำลังแปลด้วย Translator agent … (Esc ยกเลิก)"),
-            Style::default().fg(theme.status_working),
-        ),
-        SynPhase::Done => Span::styled(
-            thai_display_safe(&format!(
-                "  ✓ แปลแล้ว (รอบ {}) — Enter {accept_label} · e แก้คำแปล · r แปลใหม่ · o แก้ต้นฉบับ · s ข้าม",
-                st.attempt + 1
-            )),
-            Style::default().fg(theme.status_done),
-        ),
-        SynPhase::Failed => Span::styled(
-            thai_display_safe("  ✗ แปลไม่สำเร็จ — e เขียนเอง · r ลองใหม่ · o แก้ต้นฉบับ · s ข้าม"),
-            Style::default().fg(theme.status_failed),
-        ),
+            SynPhase::Editing => Span::styled(
+                thai_display_safe(&if st.raw.trim().is_empty() {
+                    "  ยังไม่มีข้อความ — Tab ข้ามขั้นตอนนี้ · Esc กลับ".to_string()
+                } else if st.multiline {
+                    format!(
+                        "  {} ตัวอักษร · Tab แปล · Ctrl+S ไปต่อ (ไม่ต้องแปล) · Esc กลับ",
+                        st.raw.chars().count()
+                    )
+                } else {
+                    format!(
+                        "  {} ตัวอักษร · Tab/Enter แปล · Esc กลับ",
+                        st.raw.chars().count()
+                    )
+                }),
+                Style::default().fg(theme.ink_faint),
+            ),
+            SynPhase::Translating => Span::styled(
+                thai_display_safe("  ◐ กำลังแปลด้วย Translator agent … (Esc ยกเลิก)"),
+                Style::default().fg(theme.status_working),
+            ),
+            SynPhase::Done => Span::styled(
+                thai_display_safe(&format!(
+                    "  ✓ แปลแล้ว (รอบ {}) — Enter {accept_label} · e แก้คำแปล · r แปลใหม่ · o แก้ต้นฉบับ · s ข้าม",
+                    st.attempt + 1
+                )),
+                Style::default().fg(theme.status_done),
+            ),
+            SynPhase::Failed => Span::styled(
+                thai_display_safe("  ✗ แปลไม่สำเร็จ — e เขียนเอง · r ลองใหม่ · o แก้ต้นฉบับ · s ข้าม"),
+                Style::default().fg(theme.status_failed),
+            ),
         }
     };
     f.render_widget(
@@ -5203,6 +5272,10 @@ mod tests {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
 
+    fn ctrl(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::CONTROL)
+    }
+
     fn wizard(projects: Vec<ProjectRef>) -> Overlay {
         Overlay::Import(ImportState::new(
             vec![(PathBuf::from("cursed_blade_v03.epub"), 2_345_678)],
@@ -5256,6 +5329,22 @@ mod tests {
                 assert_eq!(th, "เงา", "hand-typed Thai is saved as-is");
             }
             other => panic!("expected SaveProjectTitle, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn synopsis_editor_can_continue_without_translating() {
+        // Typed a source synopsis but don't want to translate: Ctrl+S continues.
+        let mut ov = Overlay::synopsis_edit(String::new(), String::new(), 1, "Novel".into());
+        for c in "あらすじ".chars() {
+            ov.handle_key(key(KeyCode::Char(c)));
+        }
+        match ov.handle_key(ctrl(KeyCode::Char('s'))) {
+            Action::SaveSynopsis { raw, th } => {
+                assert_eq!(raw, "あらすじ");
+                assert_eq!(th, "", "no translation was forced");
+            }
+            other => panic!("expected SaveSynopsis, got {other:?}"),
         }
     }
 

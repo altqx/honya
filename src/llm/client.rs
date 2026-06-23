@@ -183,7 +183,7 @@ impl ClientConfig {
 /// Backoff before the `retry`-th retry (1-based): exponential from 1s, capped at
 /// 20s. A `Retry-After` hint wins but is still capped, so one chunk can't stall
 /// the run for minutes on a single rate-limit reset.
-fn retry_backoff(retry: u32, retry_after: Option<u64>) -> Duration {
+pub(super) fn retry_backoff(retry: u32, retry_after: Option<u64>) -> Duration {
     const MAX_BACKOFF: u64 = 20;
     let secs = match retry_after {
         Some(hint) => hint.min(MAX_BACKOFF),
@@ -192,7 +192,7 @@ fn retry_backoff(retry: u32, retry_after: Option<u64>) -> Duration {
     Duration::from_secs(secs)
 }
 
-fn retry_after_hint(err: &LlmError) -> Option<u64> {
+pub(super) fn retry_after_hint(err: &LlmError) -> Option<u64> {
     match err {
         LlmError::RateLimited { retry_after, .. } => Some(*retry_after),
         _ => None,
@@ -769,7 +769,7 @@ fn parse_error_envelope(raw: &str) -> Option<LlmError> {
 }
 
 /// Read the `Retry-After` header as whole seconds, defaulting to 1.
-fn parse_retry_after(resp: &reqwest::Response) -> u64 {
+pub(super) fn parse_retry_after(resp: &reqwest::Response) -> u64 {
     resp.headers()
         .get(reqwest::header::RETRY_AFTER)
         .and_then(|v| v.to_str().ok())
