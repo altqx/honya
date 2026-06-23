@@ -218,6 +218,11 @@ impl ProjectScreen {
                     active.project.title.clone(),
                 ))
             }
+            KeyCode::Char('e') => Action::show_overlay(Overlay::project_title_edit(
+                active.project.id.clone(),
+                active.project.title.clone(),
+                active.project.title_th.clone(),
+            )),
             KeyCode::Char('V') => Action::AddVolume,
             KeyCode::Char('i') => {
                 let vol = self.selected_volume(active).unwrap_or(active.vol);
@@ -738,6 +743,7 @@ impl ProjectScreen {
             ("x", "export"),
             ("Space", "mark"),
             ("h/l", "tree/focus"),
+            ("e", "thai name"),
             ("y", "synopsis"),
         ]
     }

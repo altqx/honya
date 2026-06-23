@@ -45,8 +45,13 @@ pub struct SynopsisState {
     pub raw: String,
     /// Caret byte-offset into `raw`.
     pub cursor: usize,
-    /// Latest Thai translation (empty until a roll lands).
+    /// Latest Thai translation — directly hand-editable when `edit_th` is set.
     pub th: String,
+    /// Caret byte-offset into `th` (used while `edit_th`).
+    pub th_cursor: usize,
+    /// Focus on the Thai field: type to edit it by hand instead of only
+    /// translating via the agent. Only used by the single-line title editors.
+    pub edit_th: bool,
     pub phase: SynPhase,
     /// Error text shown while `phase == Failed`.
     pub error: String,
@@ -65,8 +70,10 @@ impl SynopsisState {
         };
         Self {
             cursor: raw.len(),
+            th_cursor: th.len(),
             raw,
             th,
+            edit_th: false,
             phase,
             error: String::new(),
             attempt: 0,
@@ -78,6 +85,15 @@ impl SynopsisState {
         Self {
             multiline: false,
             ..Self::new(raw, th)
+        }
+    }
+
+    /// Single-line editor focused on hand-editing the Thai field (project title):
+    /// the user types the Thai name directly, with Tab to translate via the agent.
+    pub fn new_title(raw: String, th: String) -> Self {
+        Self {
+            edit_th: true,
+            ..Self::new_single_line(raw, th)
         }
     }
 }
@@ -97,15 +113,49 @@ enum SynKey {
 
 /// Fold one keypress into a [`SynopsisState`], returning the embedder's next move.
 fn handle_synopsis_keys(st: &mut SynopsisState, key: KeyEvent) -> SynKey {
-    match st.phase {
-        // Late results are ignored by set_synopsis_result once phase changes.
-        SynPhase::Translating => match key.code {
-            KeyCode::Esc => {
-                st.phase = SynPhase::Editing;
+    // A translation round-trip is in flight; ignore input but allow cancel.
+    // Late results are dropped by set_synopsis_result once the phase changes.
+    if st.phase == SynPhase::Translating {
+        if key.code == KeyCode::Esc {
+            st.phase = SynPhase::Editing;
+        }
+        return SynKey::None;
+    }
+    // Hand-editing the Thai field directly: type to edit, Tab to (re)translate from
+    // the source. Single-line (title): Enter accepts, Esc cancels. Multiline
+    // (synopsis): Enter adds a newline, Esc returns to the settled view to save.
+    if st.edit_th {
+        let opts = EditOpts {
+            numeric_only: false,
+            multiline: st.multiline,
+        };
+        if input::handle(&mut st.th, &mut st.th_cursor, key, opts) != Edited::Ignored {
+            return SynKey::None;
+        }
+        return match key.code {
+            KeyCode::Tab => {
+                if st.raw.trim().is_empty() {
+                    SynKey::None
+                } else {
+                    st.phase = SynPhase::Translating;
+                    SynKey::Translate
+                }
+            }
+            KeyCode::Enter if st.multiline => {
+                input::insert_char(&mut st.th, &mut st.th_cursor, '\n');
                 SynKey::None
             }
+            KeyCode::Enter => SynKey::Accept,
+            KeyCode::Esc if st.multiline => {
+                st.edit_th = false;
+                SynKey::None
+            }
+            KeyCode::Esc => SynKey::Back,
             _ => SynKey::None,
-        },
+        };
+    }
+    match st.phase {
+        SynPhase::Translating => SynKey::None,
         SynPhase::Editing => {
             let opts = EditOpts {
                 numeric_only: false,
@@ -145,7 +195,14 @@ fn handle_synopsis_keys(st: &mut SynopsisState, key: KeyEvent) -> SynKey {
                 st.phase = SynPhase::Translating;
                 SynKey::Translate
             }
+            // Edit the Thai translation by hand.
             KeyCode::Char('e') | KeyCode::Char('E') => {
+                st.edit_th = true;
+                st.th_cursor = st.th.len();
+                SynKey::None
+            }
+            // Edit the original source again.
+            KeyCode::Char('o') | KeyCode::Char('O') => {
                 st.phase = SynPhase::Editing;
                 SynKey::None
             }
@@ -259,7 +316,7 @@ impl ImportState {
             lock_name: false,
             projects,
             note: None,
-            title_syn: SynopsisState::new_single_line(String::new(), String::new()),
+            title_syn: SynopsisState::new_title(String::new(), String::new()),
             syn: SynopsisState::new(String::new(), String::new()),
             progress: None,
             append_to: None,
@@ -303,7 +360,7 @@ impl ImportState {
             lock_name: true,
             projects,
             note: None,
-            title_syn: SynopsisState::new_single_line(String::new(), String::new()),
+            title_syn: SynopsisState::new_title(String::new(), String::new()),
             syn: SynopsisState::new(String::new(), String::new()),
             progress: None,
             append_to: None,
@@ -1184,7 +1241,7 @@ impl Overlay {
     pub fn project_title_edit(id: String, title: String, title_th: String) -> Self {
         Overlay::ProjectTitle(TitleEditState {
             id,
-            syn: SynopsisState::new_single_line(title, title_th),
+            syn: SynopsisState::new_title(title, title_th),
         })
     }
 
@@ -1379,8 +1436,14 @@ impl Overlay {
         match result {
             Ok(text) => {
                 st.th = text;
+                st.th_cursor = st.th.len();
                 st.error.clear();
                 st.phase = SynPhase::Done;
+                // Single-line title flow: drop the user back into editing the
+                // result so they can tweak the agent's translation by hand.
+                if !st.multiline {
+                    st.edit_th = true;
+                }
             }
             Err(msg) => {
                 st.error = msg;
@@ -1394,10 +1457,12 @@ impl Overlay {
     pub fn is_input_capturing(&self) -> bool {
         match self {
             Overlay::Import(st) => {
-                st.step == 1 || (st.step == 4 && st.syn.phase == SynPhase::Editing)
+                st.step == 1
+                    || (st.step == 2 && st.title_syn.edit_th)
+                    || (st.step == 4 && (st.syn.phase == SynPhase::Editing || st.syn.edit_th))
             }
-            Overlay::Synopsis(st) => st.syn.phase == SynPhase::Editing,
-            Overlay::ProjectTitle(st) => st.syn.phase == SynPhase::Editing,
+            Overlay::Synopsis(st) => st.syn.phase == SynPhase::Editing || st.syn.edit_th,
+            Overlay::ProjectTitle(st) => st.syn.edit_th || st.syn.phase == SynPhase::Editing,
             Overlay::ReaderNote(_) => true,
             Overlay::ReaderEdit(_) => true,
             Overlay::ReaderSearch(_) => true, // query field
@@ -1824,7 +1889,7 @@ impl Overlay {
                             // A changed name invalidates any earlier translation.
                             let raw = st.name.trim().to_string();
                             if st.title_syn.raw != raw {
-                                st.title_syn = SynopsisState::new_single_line(raw, String::new());
+                                st.title_syn = SynopsisState::new_title(raw, String::new());
                             }
                             st.step = 2;
                         }
@@ -1833,69 +1898,27 @@ impl Overlay {
                     _ => Action::None,
                 }
             }
-            2 => match st.title_syn.phase {
-                SynPhase::Translating => match key.code {
-                    KeyCode::Esc => {
-                        st.title_syn.phase = SynPhase::Editing;
-                        Action::None
-                    }
-                    _ => Action::None,
-                },
-                SynPhase::Done => match key.code {
-                    KeyCode::Enter => {
+            2 => {
+                // Type the Thai title by hand; Tab translates via the agent;
+                // Enter (with or without a Thai title) continues; Esc → name step.
+                match handle_synopsis_keys(&mut st.title_syn, key) {
+                    SynKey::None => Action::None,
+                    SynKey::Translate => Action::TranslateProjectTitle {
+                        raw: st.title_syn.raw.clone(),
+                        attempt: st.title_syn.attempt,
+                    },
+                    SynKey::Accept | SynKey::Skip => {
                         st.step = 3;
                         st.suggest_volume();
                         Action::None
                     }
-                    KeyCode::Char('r') | KeyCode::Char('R') => {
-                        st.title_syn.attempt += 1;
-                        st.title_syn.phase = SynPhase::Translating;
-                        Action::TranslateProjectTitle {
-                            raw: st.title_syn.raw.clone(),
-                            attempt: st.title_syn.attempt,
-                        }
-                    }
-                    KeyCode::Char('s') | KeyCode::Char('S') => {
-                        st.title_syn.th.clear();
-                        st.title_syn.phase = SynPhase::Editing;
-                        st.step = 3;
-                        st.suggest_volume();
-                        Action::None
-                    }
-                    KeyCode::Esc | KeyCode::Char('e') | KeyCode::Char('E') => {
+                    SynKey::Back => {
                         st.step = 1;
                         st.name_cursor = st.name.len();
                         Action::None
                     }
-                    _ => Action::None,
-                },
-                // Editing doubles as "not translated yet" — the step never
-                // captures text (the name was typed in the previous step).
-                SynPhase::Editing | SynPhase::Failed => match key.code {
-                    KeyCode::Enter | KeyCode::Tab | KeyCode::Char('r') | KeyCode::Char('R') => {
-                        if st.title_syn.phase == SynPhase::Failed {
-                            st.title_syn.attempt += 1;
-                        }
-                        st.title_syn.phase = SynPhase::Translating;
-                        Action::TranslateProjectTitle {
-                            raw: st.title_syn.raw.clone(),
-                            attempt: st.title_syn.attempt,
-                        }
-                    }
-                    KeyCode::Char('s') | KeyCode::Char('S') => {
-                        st.title_syn.phase = SynPhase::Editing;
-                        st.step = 3;
-                        st.suggest_volume();
-                        Action::None
-                    }
-                    KeyCode::Esc => {
-                        st.step = 1;
-                        st.name_cursor = st.name.len();
-                        Action::None
-                    }
-                    _ => Action::None,
-                },
-            },
+                }
+            }
             3 => match key.code {
                 KeyCode::Esc => {
                     st.step = if st.lock_name { 0 } else { 2 };
@@ -3294,19 +3317,40 @@ impl Overlay {
                 ),
             ]),
             Line::raw(""),
-            Line::from(vec![
-                Span::styled("  Thai      ", faint),
-                if syn.th.trim().is_empty() {
-                    Span::styled(thai_display_safe("(no Thai title yet.)"), faint)
+            {
+                let mut spans = vec![Span::styled("  Thai      ", faint)];
+                if syn.edit_th {
+                    if syn.th.is_empty() {
+                        spans.push(Span::styled(thai_display_safe("พิมพ์ชื่อไทย…"), faint));
+                        spans.push(Span::styled("▏", Style::default().fg(theme.stream_cursor)));
+                    } else {
+                        let (before, after) = input::caret_halves(&syn.th, syn.th_cursor, 48);
+                        spans.push(Span::styled(
+                            thai_display_safe(&before),
+                            Style::default()
+                                .fg(theme.accent)
+                                .add_modifier(Modifier::BOLD),
+                        ));
+                        spans.push(Span::styled("▏", Style::default().fg(theme.stream_cursor)));
+                        spans.push(Span::styled(
+                            thai_display_safe(&after),
+                            Style::default()
+                                .fg(theme.accent)
+                                .add_modifier(Modifier::BOLD),
+                        ));
+                    }
+                } else if syn.th.trim().is_empty() {
+                    spans.push(Span::styled(thai_display_safe("(no Thai title yet.)"), faint));
                 } else {
-                    Span::styled(
+                    spans.push(Span::styled(
                         thai_display_safe(syn.th.trim()),
                         Style::default()
                             .fg(theme.accent)
                             .add_modifier(Modifier::BOLD),
-                    )
-                },
-            ]),
+                    ));
+                }
+                Line::from(spans)
+            },
             Line::raw(""),
         ];
         match syn.phase {
@@ -3314,16 +3358,9 @@ impl Overlay {
                 thai_display_safe("  ◐ Translator agent is working … (Esc to cancel)"),
                 Style::default().fg(theme.status_working),
             ))),
-            SynPhase::Done => lines.push(Line::from(Span::styled(
-                thai_display_safe(&format!(
-                    "  ✓ translated (round {}) — Enter use · r reroll · s skip · Esc cancel",
-                    syn.attempt + 1
-                )),
-                Style::default().fg(theme.status_done),
-            ))),
             SynPhase::Failed => {
                 lines.push(Line::from(Span::styled(
-                    thai_display_safe("  ✗ failed — r reroll · s skip · Esc cancel"),
+                    thai_display_safe("  ✗ failed — type a Thai title, Tab to retry · Esc cancel"),
                     Style::default().fg(theme.status_failed),
                 )));
                 lines.push(Line::from(Span::styled(
@@ -3331,8 +3368,11 @@ impl Overlay {
                     Style::default().fg(theme.status_failed),
                 )));
             }
-            SynPhase::Editing => lines.push(Line::from(Span::styled(
-                thai_display_safe("  Tab/Enter translate title to Thai · s skip · Esc cancel"),
+            // Edit_th is on for both Editing and Done in the title flow.
+            _ => lines.push(Line::from(Span::styled(
+                thai_display_safe(
+                    "  type a Thai title · Tab translate via agent · Enter next · Esc back",
+                ),
                 faint,
             ))),
         }
@@ -4774,6 +4814,9 @@ fn volume_chips(volumes: &[(u32, usize)]) -> String {
 /// step and the standalone overlay); `wizard` switches the accept label, since
 /// accepting in the wizard starts the import while standalone accept saves.
 fn synopsis_hints(st: &SynopsisState, wizard: bool) -> &'static [(&'static str, &'static str)] {
+    if st.edit_th {
+        return &[("type", "thai"), ("Tab", "retranslate"), ("Esc", "done")];
+    }
     match st.phase {
         SynPhase::Editing => {
             if st.raw.trim().is_empty() {
@@ -4785,49 +4828,29 @@ fn synopsis_hints(st: &SynopsisState, wizard: bool) -> &'static [(&'static str, 
         SynPhase::Translating => &[("Esc", "cancel"), ("…", "translating")],
         SynPhase::Done if wizard => &[
             ("↵", "start import"),
+            ("e", "edit th"),
             ("r", "reroll"),
-            ("e", "edit"),
             ("s", "skip"),
         ],
-        SynPhase::Done => &[("↵", "save"), ("r", "reroll"), ("e", "edit"), ("s", "skip")],
-        SynPhase::Failed => &[("r", "retry"), ("e", "edit"), ("s", "skip")],
+        SynPhase::Done => &[("↵", "save"), ("e", "edit th"), ("r", "reroll"), ("o", "src")],
+        SynPhase::Failed => &[("e", "edit th"), ("r", "retry"), ("o", "src")],
     }
 }
 
-/// Footer hints for the wizard's Thai-title step (Editing = not translated yet;
-/// the step never captures text, so plain letters are free for skip/reroll).
+/// Footer hints for the wizard's Thai-title step: the user types the Thai title
+/// directly, with Tab to translate via the agent.
 fn import_title_hints(st: &SynopsisState) -> &'static [(&'static str, &'static str)] {
-    match st.phase {
-        SynPhase::Editing => &[("Tab/↵", "translate"), ("s", "skip"), ("Esc", "back")],
-        SynPhase::Translating => &[("Esc", "cancel"), ("…", "translating")],
-        SynPhase::Done => &[
-            ("↵", "next"),
-            ("r", "reroll"),
-            ("s", "skip"),
-            ("Esc", "back"),
-        ],
-        SynPhase::Failed => &[("r", "retry"), ("s", "skip"), ("Esc", "back")],
+    if st.phase == SynPhase::Translating {
+        return &[("Esc", "cancel"), ("…", "translating")];
     }
+    &[("type", "thai"), ("Tab", "translate"), ("↵", "next"), ("Esc", "back")]
 }
 
 fn title_hints(st: &SynopsisState) -> &'static [(&'static str, &'static str)] {
-    match st.phase {
-        SynPhase::Editing => {
-            if st.raw.trim().is_empty() {
-                &[("type", "name"), ("Esc", "cancel")]
-            } else {
-                &[("type", "name"), ("Tab/↵", "translate"), ("Esc", "cancel")]
-            }
-        }
-        SynPhase::Translating => &[("Esc", "cancel"), ("…", "translating")],
-        SynPhase::Done => &[
-            ("↵", "save"),
-            ("r", "reroll"),
-            ("e", "edit"),
-            ("s", "close"),
-        ],
-        SynPhase::Failed => &[("r", "retry"), ("e", "edit"), ("s", "close")],
+    if st.phase == SynPhase::Translating {
+        return &[("Esc", "cancel"), ("…", "translating")];
     }
+    &[("type", "thai"), ("Tab", "translate"), ("↵", "save"), ("Esc", "cancel")]
 }
 
 struct EditorLabels {
@@ -4856,6 +4879,38 @@ fn render_synopsis_body(
             input_rows: 9,
         },
     );
+}
+
+/// Render `text` as caret-bearing lines (multi-line aware) for an editable field.
+fn caret_text_lines<'a>(text: &'a str, cursor: usize, theme: &Theme) -> Vec<Line<'a>> {
+    let cursor = input::clamp_cursor(text, cursor);
+    let mut lines = Vec::new();
+    let mut line_start = 0usize;
+    for part in text.split('\n') {
+        let line_end = line_start + part.len();
+        let on_line = cursor >= line_start && cursor <= line_end;
+        let mut spans: Vec<Span> = Vec::new();
+        if on_line {
+            let off = cursor - line_start;
+            spans.push(Span::styled(
+                thai_display_safe(&part[..off]),
+                Style::default().fg(theme.ink),
+            ));
+            spans.push(Span::styled("▏", Style::default().fg(theme.stream_cursor)));
+            spans.push(Span::styled(
+                thai_display_safe(&part[off..]),
+                Style::default().fg(theme.ink),
+            ));
+        } else {
+            spans.push(Span::styled(
+                thai_display_safe(part),
+                Style::default().fg(theme.ink),
+            ));
+        }
+        lines.push(Line::from(spans));
+        line_start = line_end + 1;
+    }
+    lines
 }
 
 /// Shared edit/translate/accept body for synopsis and title editors.
@@ -4887,11 +4942,12 @@ fn render_editor_body(
         rows[0],
     );
 
-    let editing = st.phase == SynPhase::Editing;
-    let border_color = if editing {
-        theme.accent_soft
-    } else {
+    // While hand-editing the Thai field, the source box is a read-only reference.
+    let editing = st.phase == SynPhase::Editing && !st.edit_th;
+    let border_color = if st.edit_th || !editing {
         theme.rule
+    } else {
+        theme.accent_soft
     };
     let input_block = Block::default()
         .borders(Borders::ALL)
@@ -4948,7 +5004,17 @@ fn render_editor_body(
         indent(rows[1], 2),
     );
 
-    let status = match st.phase {
+    let status = if st.edit_th {
+        Span::styled(
+            thai_display_safe(&if st.multiline {
+                "  แก้คำแปลไทยได้เลย · Tab แปลใหม่ · Enter ขึ้นบรรทัด · Esc เสร็จ".to_string()
+            } else {
+                format!("  พิมพ์ชื่อไทยได้เลย · Tab แปลด้วย agent · Enter {accept_label} · Esc ยกเลิก")
+            }),
+            Style::default().fg(theme.ink_faint),
+        )
+    } else {
+        match st.phase {
         SynPhase::Editing => Span::styled(
             thai_display_safe(&if st.raw.trim().is_empty() {
                 "  ยังไม่มีข้อความ — Tab ข้ามขั้นตอนนี้ · Esc กลับ".to_string()
@@ -4971,15 +5037,16 @@ fn render_editor_body(
         ),
         SynPhase::Done => Span::styled(
             thai_display_safe(&format!(
-                "  ✓ แปลแล้ว (รอบ {}) — Enter {accept_label} · r แปลใหม่ · e แก้ต้นฉบับ · s ข้าม",
+                "  ✓ แปลแล้ว (รอบ {}) — Enter {accept_label} · e แก้คำแปล · r แปลใหม่ · o แก้ต้นฉบับ · s ข้าม",
                 st.attempt + 1
             )),
             Style::default().fg(theme.status_done),
         ),
         SynPhase::Failed => Span::styled(
-            thai_display_safe("  ✗ แปลไม่สำเร็จ — r ลองใหม่ · e แก้ต้นฉบับ · s ข้าม"),
+            thai_display_safe("  ✗ แปลไม่สำเร็จ — e เขียนเอง · r ลองใหม่ · o แก้ต้นฉบับ · s ข้าม"),
             Style::default().fg(theme.status_failed),
         ),
+        }
     };
     f.render_widget(
         Paragraph::new(status).style(Style::default().bg(theme.bg_panel)),
@@ -4994,6 +5061,27 @@ fn render_editor_body(
         .style(Style::default().bg(theme.bg_panel)),
         rows[3],
     );
+
+    if st.edit_th {
+        let lines = if st.th.is_empty() {
+            vec![Line::from(vec![
+                Span::styled(
+                    thai_display_safe("(พิมพ์คำแปลไทย หรือกด Tab ให้ agent แปล)"),
+                    Style::default().fg(theme.ink_faint),
+                ),
+                Span::styled("▏", Style::default().fg(theme.stream_cursor)),
+            ])]
+        } else {
+            caret_text_lines(&st.th, st.th_cursor, theme)
+        };
+        f.render_widget(
+            Paragraph::new(Text::from(lines))
+                .wrap(Wrap { trim: false })
+                .style(Style::default().bg(theme.bg_panel)),
+            indent(rows[4], 2),
+        );
+        return;
+    }
 
     let (body, color) = match st.phase {
         SynPhase::Failed => (st.error.clone(), theme.status_failed),
@@ -5148,11 +5236,58 @@ mod tests {
     }
 
     #[test]
+    fn project_title_editor_can_hand_edit_then_save() {
+        let mut ov = Overlay::project_title_edit("novel".into(), "夜の影".into(), String::new());
+
+        // The editor starts focused on the Thai field — type the name by hand.
+        for c in "เงา".chars() {
+            ov.handle_key(key(KeyCode::Char(c)));
+        }
+        if let Overlay::ProjectTitle(st) = &ov {
+            assert!(st.syn.edit_th, "starts editing the Thai field");
+            assert_eq!(st.syn.th, "เงา");
+        } else {
+            panic!("overlay changed variant");
+        }
+        match ov.handle_key(key(KeyCode::Enter)) {
+            Action::SaveProjectTitle { id, raw, th } => {
+                assert_eq!(id, "novel");
+                assert_eq!(raw, "夜の影");
+                assert_eq!(th, "เงา", "hand-typed Thai is saved as-is");
+            }
+            other => panic!("expected SaveProjectTitle, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn synopsis_editor_can_hand_edit_translation() {
+        let mut ov = Overlay::synopsis_edit("源".into(), "เก่า".into(), 1, "Novel".into());
+        // 'e' focuses the Thai field for hand-editing (was: edit the source).
+        ov.handle_key(key(KeyCode::Char('e')));
+        if let Overlay::Synopsis(st) = &ov {
+            assert!(st.syn.edit_th, "'e' edits the translation by hand");
+        } else {
+            panic!("overlay changed variant");
+        }
+        for c in "ใหม่".chars() {
+            ov.handle_key(key(KeyCode::Char(c)));
+        }
+        ov.handle_key(key(KeyCode::Esc)); // settle the Thai field (multiline)
+        match ov.handle_key(key(KeyCode::Enter)) {
+            Action::SaveSynopsis { raw, th } => {
+                assert_eq!(raw, "源");
+                assert_eq!(th, "เก่าใหม่", "hand-edited translation is saved");
+            }
+            other => panic!("expected SaveSynopsis, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn project_title_editor_translates_then_saves() {
         let mut ov = Overlay::project_title_edit("novel".into(), "夜の影".into(), String::new());
 
-        let act = ov.handle_key(key(KeyCode::Enter));
-        match act {
+        // Tab hands the source off to the translator agent.
+        match ov.handle_key(key(KeyCode::Tab)) {
             Action::TranslateProjectTitle { ref raw, attempt } => {
                 assert_eq!(raw, "夜の影");
                 assert_eq!(attempt, 0);
@@ -5161,15 +5296,12 @@ mod tests {
         }
         if let Overlay::ProjectTitle(st) = &ov {
             assert_eq!(st.syn.phase, SynPhase::Translating);
-            assert!(
-                !st.syn.raw.contains('\n'),
-                "Enter must not insert a newline"
-            );
         } else {
             panic!("overlay changed variant");
         }
 
         ov.set_synopsis_result(Ok("เงาแห่งราตรี".into()));
+        // The result lands back in the editable Thai field; Enter saves it.
         match ov.handle_key(key(KeyCode::Enter)) {
             Action::SaveProjectTitle { id, raw, th } => {
                 assert_eq!(id, "novel");
@@ -5230,7 +5362,7 @@ mod tests {
             st.name_cursor = st.name.len();
         }
         ov.handle_key(key(KeyCode::Enter)); // → Thai-title step
-        ov.handle_key(key(KeyCode::Char('s'))); // skip → volume step
+        ov.handle_key(key(KeyCode::Enter)); // empty Thai title → volume step
         let Overlay::Import(st) = &ov else {
             panic!("overlay changed variant")
         };
@@ -5254,12 +5386,12 @@ mod tests {
             st.name_cursor = st.name.len();
         }
         ov.handle_key(key(KeyCode::Enter)); // → Thai-title step
-        ov.handle_key(key(KeyCode::Char('s'))); // → volume step, suggested 2
+        ov.handle_key(key(KeyCode::Enter)); // empty Thai title → volume step, suggested 2
         ov.handle_key(key(KeyCode::Up)); // user picks 3
         ov.handle_key(key(KeyCode::Esc)); // back to Thai title
         ov.handle_key(key(KeyCode::Esc)); // back to name
         ov.handle_key(key(KeyCode::Enter)); // forward again
-        ov.handle_key(key(KeyCode::Char('s')));
+        ov.handle_key(key(KeyCode::Enter)); // empty Thai title → volume step
         let Overlay::Import(st) = &ov else {
             panic!("overlay changed variant")
         };
