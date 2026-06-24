@@ -2763,7 +2763,7 @@ impl Overlay {
             1 => self.render_import_name(f, rows[3], theme, st),
             2 => self.render_import_title(f, rows[3], theme, st),
             3 => self.render_import_volume(f, rows[3], theme, st),
-            4 => render_synopsis_body(f, rows[3], theme, &st.syn, "เริ่มนำเข้า"),
+            4 => render_synopsis_body(f, rows[3], theme, &st.syn, "start import"),
             _ => self.render_import_progress(f, rows[3], theme, st),
         }
     }
@@ -2773,20 +2773,20 @@ impl Overlay {
         let modal = centered_modal(76, 24, area);
         f.render_widget(Clear, modal);
         let title = thai_display_safe(&format!(
-            "เรื่องย่อเล่ม — Vol.{:02} · {}",
+            "Synopsis — Vol.{:02} · {}",
             st.vol,
             truncate_cols(st.title.trim(), 40)
         ));
         let block = self.modal_block(&title, theme);
         let inner = block.inner(modal);
         f.render_widget(block, modal);
-        render_synopsis_body(f, inner, theme, &st.syn, "บันทึก");
+        render_synopsis_body(f, inner, theme, &st.syn, "save");
     }
 
     fn render_project_title(&self, f: &mut Frame, area: Rect, theme: &Theme, st: &TitleEditState) {
         let modal = centered_modal(72, 16, area);
         f.render_widget(Clear, modal);
-        let title = thai_display_safe(&format!("ชื่อเรื่อง — {}", truncate_cols(&st.id, 40)));
+        let title = thai_display_safe(&format!("Title — {}", truncate_cols(&st.id, 40)));
         let block = self.modal_block(&title, theme);
         let inner = block.inner(modal);
         f.render_widget(block, modal);
@@ -2795,10 +2795,10 @@ impl Overlay {
             inner,
             theme,
             &st.syn,
-            "บันทึก",
+            "save",
             &EditorLabels {
-                label: "  ชื่อเรื่องต้นฉบับ — แปลเป็นชื่อไทยได้ด้วย Translator agent",
-                placeholder: "พิมพ์ชื่อเรื่อง…",
+                label: "  Title · source  (translate to Thai with the Translator agent)",
+                placeholder: "Type the source title…",
                 input_rows: 3,
             },
         );
@@ -3333,11 +3333,13 @@ impl Overlay {
         let syn = &st.title_syn;
         let faint = Style::default().fg(theme.ink_faint);
         let mut lines = vec![
+            Line::from(vec![
+                Span::styled("  Thai title", Style::default().fg(theme.ink_soft)),
+                Span::styled("   ◦ optional", faint),
+            ]),
             Line::from(Span::styled(
-                thai_display_safe(
-                    "  Give your novel a Thai title (optional) — Use this during export and on the Shelf page.",
-                ),
-                Style::default().fg(theme.ink_soft),
+                "  Shown on the Shelf and in exports — or add it later from the Project screen.",
+                faint,
             )),
             Line::raw(""),
             Line::from(vec![
@@ -3403,12 +3405,14 @@ impl Overlay {
                 )));
             }
             // Edit_th is on for both Editing and Done in the title flow.
-            _ => lines.push(Line::from(Span::styled(
-                thai_display_safe(
-                    "  type a Thai title · Tab translate via agent · Enter next · Esc back",
-                ),
-                faint,
-            ))),
+            _ => {
+                let msg = if syn.th.trim().is_empty() {
+                    "  ↵ skip · type a Thai title · Tab to translate it for you"
+                } else {
+                    "  ↵ next · type to edit · Tab to retranslate"
+                };
+                lines.push(Line::from(Span::styled(thai_display_safe(msg), faint)));
+            }
         }
         f.render_widget(
             Paragraph::new(lines)
@@ -4773,22 +4777,31 @@ const IMPORT_PICK_LIST_OFFSET: u16 = 2;
 /// The wizard's step rail: done steps get a check, the current step is
 /// highlighted, future steps are dimmed. The add-volume flow hides "Name".
 fn step_rail(st: &ImportState, theme: &Theme) -> Line<'static> {
-    let steps: &[(u8, &str)] = if st.lock_name {
-        &[(0, "File"), (3, "Volume"), (4, "Synopsis")]
+    // (step id, label, optional). Required steps are numbered; optional steps
+    // (Thai title, synopsis) get a `◦` marker so the skippable ones read apart.
+    let steps: &[(u8, &str, bool)] = if st.lock_name {
+        &[(0, "File", false), (3, "Volume", false), (4, "Synopsis", true)]
     } else {
         &[
-            (0, "File"),
-            (1, "Name"),
-            (2, "Thai title"),
-            (3, "Volume"),
-            (4, "Synopsis"),
+            (0, "File", false),
+            (1, "Name", false),
+            (2, "Thai title", true),
+            (3, "Volume", false),
+            (4, "Synopsis", true),
         ]
     };
     let mut spans = vec![Span::raw(" ")];
-    for (i, &(id, label)) in steps.iter().enumerate() {
+    let mut num = 0u8;
+    for (i, &(id, label, optional)) in steps.iter().enumerate() {
         if i > 0 {
             spans.push(Span::styled("  ›  ", Style::default().fg(theme.rule)));
         }
+        let marker = if optional {
+            "◦".to_string()
+        } else {
+            num += 1;
+            num.to_string()
+        };
         if st.step > id {
             spans.push(Span::styled(
                 format!("✓ {label}"),
@@ -4796,14 +4809,14 @@ fn step_rail(st: &ImportState, theme: &Theme) -> Line<'static> {
             ));
         } else if st.step == id {
             spans.push(Span::styled(
-                format!("{} {label}", i + 1),
+                format!("{marker} {label}"),
                 Style::default()
                     .fg(theme.accent)
                     .add_modifier(Modifier::BOLD),
             ));
         } else {
             spans.push(Span::styled(
-                format!("{} {label}", i + 1),
+                format!("{marker} {label}"),
                 Style::default().fg(theme.ink_faint),
             ));
         }
@@ -4902,6 +4915,14 @@ fn import_title_hints(st: &SynopsisState) -> &'static [(&'static str, &'static s
     if st.phase == SynPhase::Translating {
         return &[("Esc", "cancel"), ("…", "translating")];
     }
+    if st.th.trim().is_empty() {
+        return &[
+            ("↵", "skip"),
+            ("type", "thai"),
+            ("Tab", "translate"),
+            ("Esc", "back"),
+        ];
+    }
     &[
         ("type", "thai"),
         ("Tab", "translate"),
@@ -4943,8 +4964,8 @@ fn render_synopsis_body(
         st,
         accept_label,
         &EditorLabels {
-            label: "  เรื่องย่อเล่ม (ไม่บังคับ) — AI ใช้เป็นบริบทตอนแปล",
-            placeholder: "พิมพ์หรือวางเรื่องย่อภาษาต้นฉบับ… (เว้นว่างแล้วกด Tab เพื่อข้าม)",
+            label: "  Synopsis · source  (optional — used as translation context)",
+            placeholder: "Type or paste the source-language synopsis…  (leave empty, Tab to skip)",
             input_rows: 9,
         },
     );
@@ -5073,69 +5094,38 @@ fn render_editor_body(
         indent(rows[1], 2),
     );
 
-    let status = if st.edit_th {
-        Span::styled(
-            thai_display_safe(&if st.multiline {
-                "  แก้คำแปลไทยได้เลย · Tab แปลใหม่ · Enter ขึ้นบรรทัด · Esc เสร็จ".to_string()
-            } else {
-                format!("  พิมพ์ชื่อไทยได้เลย · Tab แปลด้วย agent · Enter {accept_label} · Esc ยกเลิก")
-            }),
-            Style::default().fg(theme.ink_faint),
-        )
-    } else {
-        match st.phase {
-            SynPhase::Editing => Span::styled(
-                thai_display_safe(&if st.raw.trim().is_empty() {
-                    "  ยังไม่มีข้อความ — Tab ข้ามขั้นตอนนี้ · Esc กลับ".to_string()
-                } else if st.multiline {
-                    format!(
-                        "  {} ตัวอักษร · Tab แปล · Ctrl+S ไปต่อ (ไม่ต้องแปล) · Esc กลับ",
-                        st.raw.chars().count()
-                    )
-                } else {
-                    format!(
-                        "  {} ตัวอักษร · Tab/Enter แปล · Esc กลับ",
-                        st.raw.chars().count()
-                    )
-                }),
-                Style::default().fg(theme.ink_faint),
-            ),
-            SynPhase::Translating => Span::styled(
-                thai_display_safe("  ◐ กำลังแปลด้วย Translator agent … (Esc ยกเลิก)"),
-                Style::default().fg(theme.status_working),
-            ),
-            SynPhase::Done => Span::styled(
-                thai_display_safe(&format!(
-                    "  ✓ แปลแล้ว (รอบ {}) — Enter {accept_label} · e แก้คำแปล · r แปลใหม่ · o แก้ต้นฉบับ · s ข้าม",
-                    st.attempt + 1
-                )),
-                Style::default().fg(theme.status_done),
-            ),
-            SynPhase::Failed => Span::styled(
-                thai_display_safe("  ✗ แปลไม่สำเร็จ — e เขียนเอง · r ลองใหม่ · o แก้ต้นฉบับ · s ข้าม"),
-                Style::default().fg(theme.status_failed),
-            ),
-        }
-    };
     f.render_widget(
-        Paragraph::new(status).style(Style::default().bg(theme.bg_panel)),
+        Paragraph::new(editor_status(st, accept_label, theme))
+            .style(Style::default().bg(theme.bg_panel)),
         rows[2],
     );
 
     f.render_widget(
         Paragraph::new(Span::styled(
-            thai_display_safe("  ── คำแปลภาษาไทย / Thai ──"),
-            Style::default().fg(theme.ink_faint),
+            "  Thai translation",
+            Style::default().fg(theme.ink_soft),
         ))
         .style(Style::default().bg(theme.bg_panel)),
         rows[3],
     );
 
+    // The Thai output gets the same boxed treatment as the source, so the pair
+    // reads as siblings; its border accents while it is the field being edited.
+    let th_block = Block::default()
+        .borders(Borders::ALL)
+        .border_set(theme::hairline_set())
+        .border_style(Style::default().fg(if st.edit_th {
+            theme.accent_soft
+        } else {
+            theme.rule
+        }))
+        .style(Style::default().bg(theme.bg_inset));
+
     if st.edit_th {
         let lines = if st.th.is_empty() {
             vec![Line::from(vec![
                 Span::styled(
-                    thai_display_safe("(พิมพ์คำแปลไทย หรือกด Tab ให้ agent แปล)"),
+                    "Type the Thai, or press Tab to translate",
                     Style::default().fg(theme.ink_faint),
                 ),
                 Span::styled("▏", Style::default().fg(theme.stream_cursor)),
@@ -5146,7 +5136,7 @@ fn render_editor_body(
         f.render_widget(
             Paragraph::new(Text::from(lines))
                 .wrap(Wrap { trim: false })
-                .style(Style::default().bg(theme.bg_panel)),
+                .block(th_block),
             indent(rows[4], 2),
         );
         return;
@@ -5154,17 +5144,66 @@ fn render_editor_body(
 
     let (body, color) = match st.phase {
         SynPhase::Failed => (st.error.clone(), theme.status_failed),
-        _ if st.th.trim().is_empty() => {
-            ("(ยังไม่มีคำแปล — กด Tab เพื่อแปล)".to_string(), theme.ink_faint)
-        }
+        _ if st.th.trim().is_empty() => (
+            "No translation yet — press Tab to translate".to_string(),
+            theme.ink_faint,
+        ),
         _ => (st.th.clone(), theme.ink),
     };
     f.render_widget(
         Paragraph::new(crate::ui::text::thai_display_safe(&body))
             .wrap(Wrap { trim: false })
-            .style(Style::default().fg(color).bg(theme.bg_panel)),
+            .block(th_block)
+            .style(Style::default().fg(color).bg(theme.bg_inset)),
         indent(rows[4], 2),
     );
+}
+
+/// The editor's status/actions line — phase-aware, English chrome. `accept_label`
+/// is the verb shown for the commit key (e.g. "save" / "start import").
+fn editor_status(st: &SynopsisState, accept_label: &str, theme: &Theme) -> Span<'static> {
+    let faint = Style::default().fg(theme.ink_faint);
+    if st.edit_th {
+        let msg = if st.multiline {
+            "  Editing Thai · Tab retranslate · Enter newline · Esc done".to_string()
+        } else {
+            format!("  Editing Thai · Tab retranslate · Enter {accept_label} · Esc done")
+        };
+        return Span::styled(msg, faint);
+    }
+    match st.phase {
+        SynPhase::Editing => {
+            let msg = if st.raw.trim().is_empty() {
+                "  Empty — Tab to skip · Esc back".to_string()
+            } else if st.multiline {
+                format!(
+                    "  {} chars · Tab translate · Ctrl+S continue · Esc back",
+                    st.raw.chars().count()
+                )
+            } else {
+                format!(
+                    "  {} chars · Tab/Enter translate · Esc back",
+                    st.raw.chars().count()
+                )
+            };
+            Span::styled(msg, faint)
+        }
+        SynPhase::Translating => Span::styled(
+            "  ◐ Translating with the agent… (Esc to cancel)".to_string(),
+            Style::default().fg(theme.status_working),
+        ),
+        SynPhase::Done => Span::styled(
+            format!(
+                "  ✓ Translated (try {}) · Enter {accept_label} · e edit · r reroll · o source · s skip",
+                st.attempt + 1
+            ),
+            Style::default().fg(theme.status_done),
+        ),
+        SynPhase::Failed => Span::styled(
+            "  ✗ Translation failed · e write it · r retry · o source · s skip".to_string(),
+            Style::default().fg(theme.status_failed),
+        ),
+    }
 }
 
 /// The glyph, color, and short tag for a QA finding row.
