@@ -189,6 +189,8 @@ pub struct LexiconScreen {
     /// Memoized Markdown render of STYLE.md, so the Style tab is not re-parsed on
     /// every 100 ms tick. Keyed on the file body + width + theme.
     style_cache: crate::ui::markdown::RenderCache,
+    /// Vertical scroll offset of the Style tab (clamped to content in render).
+    style_scroll: u16,
 }
 
 impl LexiconScreen {
@@ -206,6 +208,7 @@ impl LexiconScreen {
             table_area: Rect::default(),
             screen_area: Rect::default(),
             style_cache: crate::ui::markdown::RenderCache::default(),
+            style_scroll: 0,
         }
     }
 
@@ -215,6 +218,7 @@ impl LexiconScreen {
         self.filter.clear();
         self.filter_cursor = 0;
         self.list.select(Some(0));
+        self.style_scroll = 0;
     }
 
     /// True while a text field owns the keyboard. The App router consults this to
@@ -296,19 +300,45 @@ impl LexiconScreen {
             KeyCode::Tab => {
                 self.sub = (self.sub + 1) % 3;
                 self.list.select(Some(0));
+                self.style_scroll = 0;
                 Action::None
             }
             KeyCode::BackTab => {
                 self.sub = (self.sub + 2) % 3;
                 self.list.select(Some(0));
+                self.style_scroll = 0;
                 Action::None
             }
             KeyCode::Up | KeyCode::Char('k') => {
-                self.move_sel(ws, -1);
+                if self.sub == SUB_STYLE {
+                    self.style_scroll = self.style_scroll.saturating_sub(1);
+                } else {
+                    self.move_sel(ws, -1);
+                }
                 Action::None
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                self.move_sel(ws, 1);
+                if self.sub == SUB_STYLE {
+                    self.style_scroll = self.style_scroll.saturating_add(1);
+                } else {
+                    self.move_sel(ws, 1);
+                }
+                Action::None
+            }
+            KeyCode::PageUp if self.sub == SUB_STYLE => {
+                self.style_scroll = self.style_scroll.saturating_sub(10);
+                Action::None
+            }
+            KeyCode::PageDown if self.sub == SUB_STYLE => {
+                self.style_scroll = self.style_scroll.saturating_add(10);
+                Action::None
+            }
+            KeyCode::Home if self.sub == SUB_STYLE => {
+                self.style_scroll = 0;
+                Action::None
+            }
+            KeyCode::End if self.sub == SUB_STYLE => {
+                self.style_scroll = u16::MAX; // clamped to content in render_style
                 Action::None
             }
             KeyCode::Char('/') => {
@@ -350,11 +380,19 @@ impl LexiconScreen {
         }
         match m.gesture {
             MouseGesture::ScrollUp => {
-                self.move_sel(ws, -1);
+                if self.sub == SUB_STYLE {
+                    self.style_scroll = self.style_scroll.saturating_sub(3);
+                } else {
+                    self.move_sel(ws, -1);
+                }
                 Action::None
             }
             MouseGesture::ScrollDown => {
-                self.move_sel(ws, 1);
+                if self.sub == SUB_STYLE {
+                    self.style_scroll = self.style_scroll.saturating_add(3);
+                } else {
+                    self.move_sel(ws, 1);
+                }
                 Action::None
             }
             MouseGesture::Click { double } => {
@@ -363,6 +401,7 @@ impl LexiconScreen {
                     if id != self.sub {
                         self.sub = id;
                         self.list.select(Some(0));
+                        self.style_scroll = 0;
                     }
                     return Action::None;
                 }
@@ -375,7 +414,7 @@ impl LexiconScreen {
                 if m.row <= self.table_area.y {
                     return Action::None;
                 }
-                let idx = (m.row - self.table_area.y - 1) as usize;
+                let idx = (m.row - self.table_area.y - 1) as usize + self.list.offset();
                 if idx >= len {
                     return Action::None;
                 }
@@ -710,7 +749,16 @@ impl LexiconScreen {
             Style::default().fg(theme.ink_faint),
         ));
 
-        let mut items = vec![ListItem::new(head)];
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(0)])
+            .split(area);
+        f.render_widget(
+            Paragraph::new(head).style(Style::default().bg(theme.bg_panel)),
+            rows[0],
+        );
+
+        let mut items: Vec<ListItem> = Vec::new();
         let gloss_w = area.width.saturating_sub(63).max(8) as usize;
         for (i, t) in terms.iter().enumerate() {
             let selected = i == sel;
@@ -763,9 +811,10 @@ impl LexiconScreen {
                 Style::default().fg(theme.ink_faint),
             ))));
         }
-        f.render_widget(
+        f.render_stateful_widget(
             List::new(items).style(Style::default().bg(theme.bg_panel)),
-            area,
+            rows[1],
+            &mut self.list,
         );
     }
 
@@ -797,7 +846,15 @@ impl LexiconScreen {
             head.push_str(&pad_to_cols("Names / Notes", cols.extra));
         }
         let head = Line::from(Span::styled(head, Style::default().fg(theme.ink_faint)));
-        let mut items = vec![ListItem::new(head)];
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(0)])
+            .split(area);
+        f.render_widget(
+            Paragraph::new(head).style(Style::default().bg(theme.bg_panel)),
+            rows[0],
+        );
+        let mut items: Vec<ListItem> = Vec::new();
         for (i, c) in chars.iter().enumerate() {
             let selected = i == sel;
             let bar = if selected { theme::SELECT_BAR } else { ' ' };
@@ -843,9 +900,10 @@ impl LexiconScreen {
                 Style::default().fg(theme.ink_faint),
             ))));
         }
-        f.render_widget(
+        f.render_stateful_widget(
             List::new(items).style(Style::default().bg(theme.bg_panel)),
-            area,
+            rows[1],
+            &mut self.list,
         );
     }
 
@@ -865,9 +923,12 @@ impl LexiconScreen {
             .style_cache
             .lines(key, || crate::ui::markdown::render(&body, fg, theme, width))
             .to_vec();
+        let max_scroll = (lines.len() as u16).saturating_sub(area.height);
+        self.style_scroll = self.style_scroll.min(max_scroll);
         f.render_widget(
             Paragraph::new(lines)
                 .wrap(Wrap { trim: false })
+                .scroll((self.style_scroll, 0))
                 .style(Style::default().bg(theme.bg_panel)),
             area,
         );
@@ -974,15 +1035,10 @@ fn character_columns(width: u16) -> CharacterColumns {
         10.min(total.saturating_sub(5).max(4))
     };
     let mut gender = if total >= 68 { 8 } else { 0 };
-    let mut extra = if total >= 84 {
-        (total / 4).clamp(18, 36)
-    } else {
-        0
-    };
-    while total < character_fixed_width(jp, gender, extra) + 12 {
-        if extra > 0 {
-            extra = 0;
-        } else if gender > 0 {
+    // Width of the leading bar + JP name + Gender — everything before Thai name.
+    let base = |jp: usize, gender: usize| 3 + jp + 1 + if gender > 0 { 1 + gender } else { 0 };
+    while total < base(jp, gender) + 9 {
+        if gender > 0 {
             gender = 0;
         } else if jp > 4 {
             jp -= 1;
@@ -990,19 +1046,22 @@ fn character_columns(width: u16) -> CharacterColumns {
             break;
         }
     }
-    let thai = total
-        .saturating_sub(character_fixed_width(jp, gender, extra))
-        .max(1);
+    // Wide pane: "Names / Notes" soaks up the leftover width and Thai stays a
+    // readable fixed width. Narrow pane (no room for notes): Thai absorbs the
+    // slack so the table still fills the pane with no dead space.
+    let thai_fixed = if total >= 48 { 20 } else { 12 };
+    let leftover = total.saturating_sub(base(jp, gender) + thai_fixed + 2);
+    let (thai, extra) = if leftover >= 18 {
+        (thai_fixed, leftover)
+    } else {
+        (total.saturating_sub(base(jp, gender)).max(1), 0)
+    };
     CharacterColumns {
         jp,
         thai,
         gender,
         extra,
     }
-}
-
-fn character_fixed_width(jp: usize, gender: usize, extra: usize) -> usize {
-    3 + jp + 1 + if gender > 0 { 1 + gender } else { 0 } + if extra > 0 { 2 + extra } else { 0 }
 }
 
 fn character_matches_filter(c: &Character, q: &str) -> bool {
@@ -1214,6 +1273,27 @@ mod tests {
             }],
             notes: Some("นางเอก".into()),
             first_seen_chapter: None,
+        }
+    }
+
+    #[test]
+    fn character_columns_fill_width_no_dead_space() {
+        let used = |c: &CharacterColumns| {
+            3 + c.jp + 1 + c.thai
+                + if c.gender > 0 { 1 + c.gender } else { 0 }
+                + if c.extra > 0 { 2 + c.extra } else { 0 }
+        };
+        // Wide panes fill the full width via the flexible Names/Notes column.
+        for w in [200u16, 1900] {
+            let c = character_columns(w);
+            assert_eq!(used(&c), w as usize, "columns should fill width {w}");
+            assert!(c.extra > c.thai, "Names/Notes should be the flexible column");
+        }
+        // Every width fills the pane without overflowing (Thai absorbs slack
+        // when there is no room for a notes column).
+        for w in [10u16, 30, 47, 67, 80] {
+            let c = character_columns(w);
+            assert_eq!(used(&c), w as usize, "no dead space at width {w}");
         }
     }
 
