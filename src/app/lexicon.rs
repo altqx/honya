@@ -9,7 +9,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 
-use crate::model::{Character, GlossaryTerm, TermPolicy};
+use crate::model::{AltName, Character, GlossaryTerm, TermPolicy};
 use crate::theme::{self, Theme};
 use crate::ui::input::{self, EditOpts, Edited};
 use crate::ui::mouse::{MouseGesture, MouseInput};
@@ -27,6 +27,7 @@ const SUB_STYLE: u8 = 2;
 #[derive(Debug, Clone)]
 pub struct EditForm {
     kind: u8,
+    id: Option<String>,
     // Field labels + current values, in tab order.
     fields: Vec<(&'static str, String)>,
     field: usize,
@@ -63,6 +64,7 @@ impl EditForm {
         ];
         Self {
             kind: SUB_GLOSSARY,
+            id: None,
             cursor: fields[0].1.len(),
             fields,
             field: 0,
@@ -82,6 +84,14 @@ impl EditForm {
                 c.as_ref().map(|x| x.thai_name.clone()).unwrap_or_default(),
             ),
             (
+                "Aliases",
+                c.as_ref().map(format_aliases).unwrap_or_default(),
+            ),
+            (
+                "Also called",
+                c.as_ref().map(format_also_called).unwrap_or_default(),
+            ),
+            (
                 "Gender",
                 c.as_ref()
                     .and_then(|x| x.gender.clone())
@@ -94,6 +104,7 @@ impl EditForm {
         ];
         Self {
             kind: SUB_CHARACTERS,
+            id: c.as_ref().map(|x| x.id.clone()),
             cursor: fields[0].1.len(),
             fields,
             field: 0,
@@ -145,17 +156,17 @@ impl EditForm {
         let get = |i: usize| self.fields.get(i).map(|f| f.1.clone()).unwrap_or_default();
         let jp = get(0);
         Character {
-            id: slug_id(&jp),
+            id: self.id.clone().unwrap_or_else(|| slug_id(&jp)),
             jp_name: jp,
             thai_name: get(1),
             romaji: None,
-            gender: opt(get(2)),
+            gender: opt(get(4)),
             honorific: None,
             speech_style: None,
             relationships: Vec::new(),
-            aliases: Vec::new(),
-            also_called: Vec::new(),
-            notes: opt(get(3)),
+            aliases: split_list(&get(2)),
+            also_called: parse_also_called(&get(3)),
+            notes: opt(get(5)),
             first_seen_chapter: None,
         }
     }
@@ -249,9 +260,7 @@ impl LexiconScreen {
         } else {
             let q = self.filter.to_lowercase();
             all.into_iter()
-                .filter(|c| {
-                    c.jp_name.to_lowercase().contains(&q) || c.thai_name.to_lowercase().contains(&q)
-                })
+                .filter(|c| character_matches_filter(c, &q))
                 .collect()
         }
     }
@@ -314,6 +323,7 @@ impl LexiconScreen {
                         SUB_CHARACTERS => EditForm::new_character(None),
                         SUB_STYLE => EditForm {
                             kind: SUB_STYLE,
+                            id: None,
                             fields: vec![("Style note", String::new())],
                             field: 0,
                             cursor: 0,
@@ -496,6 +506,7 @@ impl LexiconScreen {
             SUB_STYLE => {
                 self.editing = Some(EditForm {
                     kind: SUB_STYLE,
+                    id: None,
                     fields: vec![("Style note", String::new())],
                     field: 0,
                     cursor: 0,
@@ -770,18 +781,23 @@ impl LexiconScreen {
             self.list.select(Some(chars.len().saturating_sub(1)));
         }
         let sel = self.list.selected().unwrap_or(0);
+        let cols = character_columns(area.width);
 
-        let head = Line::from(Span::styled(
-            format!(
-                "   {} {} {}  Notes",
-                pad_to_cols("JP name", 14),
-                pad_to_cols("Thai name", 16),
-                pad_to_cols("Gender", 8)
-            ),
-            Style::default().fg(theme.ink_faint),
-        ));
+        let mut head = format!(
+            "   {} {}",
+            pad_to_cols("JP name", cols.jp),
+            pad_to_cols("Thai name", cols.thai)
+        );
+        if cols.gender > 0 {
+            head.push(' ');
+            head.push_str(&pad_to_cols("Gender", cols.gender));
+        }
+        if cols.extra > 0 {
+            head.push_str("  ");
+            head.push_str(&pad_to_cols("Names / Notes", cols.extra));
+        }
+        let head = Line::from(Span::styled(head, Style::default().fg(theme.ink_faint)));
         let mut items = vec![ListItem::new(head)];
-        let notes_w = area.width.saturating_sub(46).max(8) as usize;
         for (i, c) in chars.iter().enumerate() {
             let selected = i == sel;
             let bar = if selected { theme::SELECT_BAR } else { ' ' };
@@ -790,31 +806,36 @@ impl LexiconScreen {
             } else {
                 theme.bg_panel
             };
-            items.push(ListItem::new(Line::from(vec![
+            let mut spans = vec![
                 Span::styled(format!(" {bar} "), Style::default().fg(theme.accent).bg(bg)),
                 Span::styled(
-                    pad_to_cols(&c.jp_name, 14),
+                    pad_to_cols(&c.jp_name, cols.jp),
                     Style::default().fg(theme.ink).bg(bg),
                 ),
                 Span::styled(" ", Style::default().bg(bg)),
                 Span::styled(
-                    pad_to_cols(&thai_display_safe(&c.thai_name), 16),
+                    pad_to_cols(&thai_display_safe(&c.thai_name), cols.thai),
                     Style::default().fg(theme.th_text).bg(bg),
                 ),
-                Span::styled(" ", Style::default().bg(bg)),
-                Span::styled(
-                    pad_to_cols(&thai_display_safe(c.gender.as_deref().unwrap_or("—")), 8),
-                    Style::default().fg(theme.ink_soft).bg(bg),
-                ),
-                Span::styled("  ", Style::default().bg(bg)),
-                Span::styled(
-                    truncate_cols(
-                        &thai_display_safe(c.notes.as_deref().unwrap_or("")),
-                        notes_w,
+            ];
+            if cols.gender > 0 {
+                spans.push(Span::styled(" ", Style::default().bg(bg)));
+                spans.push(Span::styled(
+                    pad_to_cols(
+                        &thai_display_safe(c.gender.as_deref().unwrap_or("—")),
+                        cols.gender,
                     ),
                     Style::default().fg(theme.ink_soft).bg(bg),
-                ),
-            ])));
+                ));
+            }
+            if cols.extra > 0 {
+                spans.push(Span::styled("  ", Style::default().bg(bg)));
+                spans.push(Span::styled(
+                    truncate_cols(&thai_display_safe(&character_extra(c)), cols.extra),
+                    Style::default().fg(theme.ink_soft).bg(bg),
+                ));
+            }
+            items.push(ListItem::new(Line::from(spans)));
         }
         if chars.is_empty() {
             items.push(ListItem::new(Line::from(Span::styled(
@@ -935,6 +956,144 @@ impl Default for LexiconScreen {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct CharacterColumns {
+    jp: usize,
+    thai: usize,
+    gender: usize,
+    extra: usize,
+}
+
+fn character_columns(width: u16) -> CharacterColumns {
+    let total = width as usize;
+    let mut jp = if total >= 78 {
+        20
+    } else if total >= 48 {
+        14
+    } else {
+        10.min(total.saturating_sub(5).max(4))
+    };
+    let mut gender = if total >= 68 { 8 } else { 0 };
+    let mut extra = if total >= 84 {
+        (total / 4).clamp(18, 36)
+    } else {
+        0
+    };
+    while total < character_fixed_width(jp, gender, extra) + 12 {
+        if extra > 0 {
+            extra = 0;
+        } else if gender > 0 {
+            gender = 0;
+        } else if jp > 4 {
+            jp -= 1;
+        } else {
+            break;
+        }
+    }
+    let thai = total
+        .saturating_sub(character_fixed_width(jp, gender, extra))
+        .max(1);
+    CharacterColumns {
+        jp,
+        thai,
+        gender,
+        extra,
+    }
+}
+
+fn character_fixed_width(jp: usize, gender: usize, extra: usize) -> usize {
+    3 + jp + 1 + if gender > 0 { 1 + gender } else { 0 } + if extra > 0 { 2 + extra } else { 0 }
+}
+
+fn character_matches_filter(c: &Character, q: &str) -> bool {
+    let fields = [
+        c.id.as_str(),
+        c.jp_name.as_str(),
+        c.thai_name.as_str(),
+        c.romaji.as_deref().unwrap_or(""),
+        c.gender.as_deref().unwrap_or(""),
+        c.honorific.as_deref().unwrap_or(""),
+        c.speech_style.as_deref().unwrap_or(""),
+        c.notes.as_deref().unwrap_or(""),
+    ];
+    fields.iter().any(|v| v.to_lowercase().contains(q))
+        || c.aliases.iter().any(|v| v.to_lowercase().contains(q))
+        || c.also_called.iter().any(|a| {
+            a.jp.to_lowercase().contains(q)
+                || a.thai.to_lowercase().contains(q)
+                || a.by.as_deref().unwrap_or("").to_lowercase().contains(q)
+        })
+}
+
+fn format_aliases(c: &Character) -> String {
+    c.aliases.join(", ")
+}
+
+fn format_also_called(c: &Character) -> String {
+    c.also_called
+        .iter()
+        .filter(|a| !a.jp.trim().is_empty())
+        .map(format_alt_name)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn format_alt_name(a: &AltName) -> String {
+    let mut out = if a.thai.trim().is_empty() {
+        a.jp.trim().to_string()
+    } else {
+        format!("{}→{}", a.jp.trim(), a.thai.trim())
+    };
+    if let Some(by) = a.by.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+        out.push_str(" @ ");
+        out.push_str(by);
+    }
+    out
+}
+
+fn parse_also_called(s: &str) -> Vec<AltName> {
+    split_list(s)
+        .into_iter()
+        .filter_map(|piece| parse_alt_name(&piece))
+        .collect()
+}
+
+fn parse_alt_name(piece: &str) -> Option<AltName> {
+    let (body, by) = piece
+        .rsplit_once('@')
+        .map(|(body, by)| (body.trim(), opt(by.trim().to_string())))
+        .unwrap_or((piece.trim(), None));
+    let (jp, thai) = body
+        .split_once('→')
+        .or_else(|| body.split_once("=>"))
+        .or_else(|| body.split_once('='))
+        .map(|(jp, thai)| (jp.trim(), thai.trim()))
+        .unwrap_or((body, ""));
+    if jp.is_empty() {
+        return None;
+    }
+    Some(AltName {
+        jp: jp.to_string(),
+        thai: thai.to_string(),
+        by,
+    })
+}
+
+fn character_extra(c: &Character) -> String {
+    let mut parts = Vec::new();
+    if !c.aliases.is_empty() {
+        parts.push(format!("alias: {}", c.aliases.join(", ")));
+    }
+    let called = format_also_called(c);
+    if !called.is_empty() {
+        parts.push(format!("called: {called}"));
+    }
+    if let Some(notes) = c.notes.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+        parts.push(notes.to_string());
+    }
+    parts.join(" · ")
+}
+
 fn opt(s: String) -> Option<String> {
     let t = s.trim();
     if t.is_empty() {
@@ -1022,4 +1181,75 @@ fn split_list(s: &str) -> Vec<String> {
 /// non-ASCII preserved, ASCII lowered, separators collapsed).
 fn slug_id(jp: &str) -> String {
     super::slugify(jp)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::workspace::{Workspace, characters};
+
+    fn temp_ws(tag: &str) -> (std::path::PathBuf, Workspace) {
+        let base = std::env::temp_dir().join(format!("honya_lexicon_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let ws = Workspace::new(base.clone(), 1);
+        (base, ws)
+    }
+
+    fn character() -> Character {
+        Character {
+            id: "char-3199b4b0".into(),
+            jp_name: "清水圭".into(),
+            thai_name: "ชิมิซุ เค".into(),
+            romaji: Some("Shimizu Kei".into()),
+            gender: Some("female".into()),
+            honorific: Some("คุณ".into()),
+            speech_style: None,
+            relationships: Vec::new(),
+            aliases: vec!["圭".into(), "シミズ".into()],
+            also_called: vec![AltName {
+                jp: "ケ様".into(),
+                thai: "ท่านเค".into(),
+                by: Some("清水愛".into()),
+            }],
+            notes: Some("นางเอก".into()),
+            first_seen_chapter: None,
+        }
+    }
+
+    #[test]
+    fn character_filter_matches_alias_and_alt_name() {
+        let (base, ws) = temp_ws("filter_names");
+        characters::upsert(&ws, character()).unwrap();
+        let mut screen = LexiconScreen::new();
+        screen.sub = SUB_CHARACTERS;
+
+        screen.filter = "シミズ".into();
+        assert_eq!(screen.characters(&ws).len(), 1);
+
+        screen.filter = "ท่านเค".into();
+        assert_eq!(screen.characters(&ws).len(), 1);
+
+        screen.filter = "นางเอก".into();
+        assert_eq!(screen.characters(&ws).len(), 1);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn character_edit_form_round_trips_id_aliases_and_alt_names() {
+        let c = character();
+        let form = EditForm::new_character(Some(&c));
+        let edited = form.to_character();
+
+        assert_eq!(edited.id, c.id);
+        assert_eq!(edited.jp_name, "清水圭");
+        assert_eq!(edited.thai_name, "ชิมิซุ เค");
+        assert_eq!(edited.aliases, vec!["圭".to_string(), "シミズ".to_string()]);
+        assert_eq!(edited.also_called.len(), 1);
+        assert_eq!(edited.also_called[0].jp, "ケ様");
+        assert_eq!(edited.also_called[0].thai, "ท่านเค");
+        assert_eq!(edited.also_called[0].by.as_deref(), Some("清水愛"));
+        assert_eq!(edited.gender.as_deref(), Some("female"));
+        assert_eq!(edited.notes.as_deref(), Some("นางเอก"));
+    }
 }
