@@ -95,6 +95,12 @@ pub fn audit_translation_with_terms(
         );
     }
 
+    if let Some(gloss) = japanese_parenthetical_gloss(translated) {
+        findings.push(format!(
+            "remove Japanese parenthetical gloss `{gloss}` from translated_text; render ordinary names/terms in Thai only, and mention source Japanese only when it is plot-critical"
+        ));
+    }
+
     compare_count(
         &mut findings,
         "scene divider `---`",
@@ -274,6 +280,89 @@ fn expected_hard_locked_rendering(term: &GlossaryTerm) -> &str {
     } else {
         ""
     }
+}
+
+fn japanese_parenthetical_gloss(translated: &str) -> Option<String> {
+    let mut iter = translated.char_indices().peekable();
+    while let Some((open_idx, open)) = iter.next() {
+        if !matches!(open, '(' | '（') {
+            continue;
+        }
+        let close = if open == '(' { ')' } else { '）' };
+        let content_start = open_idx + open.len_utf8();
+        let mut content_end = None;
+        while let Some(&(idx, ch)) = iter.peek() {
+            iter.next();
+            if ch == close {
+                content_end = Some(idx);
+                break;
+            }
+            if ch == '\n' || idx.saturating_sub(content_start) > 96 {
+                break;
+            }
+        }
+        let Some(end) = content_end else {
+            continue;
+        };
+        let content = translated[content_start..end].trim();
+        if is_japanese_only_parenthetical(content) {
+            return Some(format!("{open}{content}{close}"));
+        }
+    }
+    None
+}
+
+fn is_japanese_only_parenthetical(content: &str) -> bool {
+    let mut has_japanese = false;
+    let mut count = 0usize;
+    for ch in content.chars() {
+        if ch.is_whitespace() {
+            continue;
+        }
+        count += 1;
+        if is_japanese_text_char(ch) {
+            has_japanese = true;
+            continue;
+        }
+        if is_japanese_parenthetical_punct(ch) || ch.is_ascii_digit() || matches!(ch, '０'..='９')
+        {
+            continue;
+        }
+        return false;
+    }
+    has_japanese && count <= 40
+}
+
+fn is_japanese_text_char(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x3040..=0x309F // Hiragana
+            | 0x30A0..=0x30FF // Katakana
+            | 0x3400..=0x4DBF // CJK Extension A
+            | 0x4E00..=0x9FFF // CJK Unified Ideographs
+            | 0xF900..=0xFAFF // CJK Compatibility Ideographs
+    )
+}
+
+fn is_japanese_parenthetical_punct(ch: char) -> bool {
+    matches!(
+        ch,
+        '々' | '〆'
+            | 'ヶ'
+            | 'ー'
+            | '・'
+            | '＝'
+            | '、'
+            | '。'
+            | '「'
+            | '」'
+            | '『'
+            | '』'
+            | '〜'
+            | '～'
+            | '-'
+            | '/'
+    )
 }
 
 /// The Translator receives the previous chunk's last Thai sentences as
@@ -656,6 +745,36 @@ mod tests {
         let findings = audit_translation_with_terms("彼女は笑った。", "คำแปล: เธอหัวเราะ", &[], &[]);
 
         assert!(findings.iter().any(|f| f.contains("translation labels")));
+    }
+
+    #[test]
+    fn audit_flags_japanese_parenthetical_glosses() {
+        let source = "坂田 (さかた)は幼馴染 (おさななじみ)で、同好会と部に入った。";
+        let thai = "ซึ่ง ซากาตะ (さかた) เป็นเพื่อนสมัยเด็ก (おさななじみ) ที่ตั้งชมรม (同好会) กับแผนก (部)";
+
+        let findings = audit_translation_with_terms(source, thai, &[], &[]);
+
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.contains("Japanese parenthetical gloss")),
+            "Japanese gloss parenthetical flagged: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn audit_allows_plot_critical_quoted_japanese() {
+        let source = "看板には「部」と書いてあった。";
+        let thai = "บนป้ายเขียนตัวอักษร \"部\" เอาไว้";
+
+        let findings = audit_translation_with_terms(source, thai, &[], &[]);
+
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.contains("Japanese parenthetical gloss")),
+            "quoted plot-critical Japanese is not a parenthetical gloss: {findings:?}"
+        );
     }
 
     #[test]
