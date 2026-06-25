@@ -2174,6 +2174,13 @@ impl App {
             return Action::None;
         }
 
+        if k.modifiers.contains(KeyModifiers::CONTROL)
+            && k.code == KeyCode::Char('r')
+            && let Some(action) = self.remote_shortcut_action()
+        {
+            return action;
+        }
+
         // 1) An open overlay gets first refusal (swallows single-letter globals when capturing).
         if !matches!(self.overlay, Overlay::None) {
             return self.overlay.handle_key(k);
@@ -2228,6 +2235,15 @@ impl App {
 
         // 4) Otherwise the active screen decides.
         self.route_to_screen(k)
+    }
+
+    fn remote_shortcut_action(&self) -> Option<Action> {
+        self.cfg.account.as_ref()?;
+        Some(if self.remote_out.is_some() {
+            Action::DisableRemote
+        } else {
+            Action::EnableRemote
+        })
     }
 
     /// True when a focused screen text field should swallow single-letter globals.
@@ -5486,6 +5502,46 @@ mod remote_tests {
     fn app() -> App {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         App::new(EventTx(tx), AppConfig::default())
+    }
+
+    fn linked_account() -> crate::model::RemoteAccount {
+        crate::model::RemoteAccount {
+            github_login: "altq".into(),
+            device_id: "device".into(),
+            device_token: "token".into(),
+        }
+    }
+
+    fn ctrl_r() -> KeyEvent {
+        KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn ctrl_r_global_enables_remote_when_account_linked() {
+        let mut app = app();
+        app.cfg.account = Some(linked_account());
+        app.overlay = Overlay::Help(0);
+
+        assert!(matches!(app.route_key(ctrl_r()), Action::EnableRemote));
+    }
+
+    #[test]
+    fn ctrl_r_global_disables_remote_when_already_connected() {
+        let mut app = app();
+        app.cfg.account = Some(linked_account());
+        let (out_tx, _out_rx) = tokio::sync::mpsc::unbounded_channel();
+        app.remote_out = Some(out_tx);
+        app.overlay = Overlay::Log(0);
+
+        assert!(matches!(app.route_key(ctrl_r()), Action::DisableRemote));
+    }
+
+    #[test]
+    fn ctrl_r_without_account_keeps_settings_sign_in_shortcut() {
+        let mut app = app();
+        app.overlay = Overlay::settings_with_field(&app.cfg, 0);
+
+        assert!(matches!(app.route_key(ctrl_r()), Action::StartRemoteLogin));
     }
 
     #[test]
