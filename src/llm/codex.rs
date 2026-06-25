@@ -21,6 +21,8 @@ use crate::codex::{CodexAuth, auth, now_unix};
 
 const RESPONSES_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
 const MAX_SEND_ATTEMPTS: u32 = 3;
+const STREAM_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// An LLM client backed by a Codex (ChatGPT) account's Responses API.
 pub struct CodexClient {
@@ -34,6 +36,8 @@ impl CodexClient {
     pub fn new(auth: CodexAuth) -> Result<Self> {
         let http = reqwest::Client::builder()
             .user_agent(concat!("honya/", env!("CARGO_PKG_VERSION")))
+            .read_timeout(STREAM_READ_TIMEOUT)
+            .connect_timeout(CONNECT_TIMEOUT)
             .build()?;
         Ok(Self {
             http,
