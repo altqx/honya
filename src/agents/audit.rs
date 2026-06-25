@@ -31,6 +31,9 @@ static TRANSLATION_LABEL: Lazy<Regex> = Lazy::new(|| {
         .expect("translation-label regex is valid")
 });
 
+const DISCOURAGED_CASUAL_PARTICLES: [(&str, &str); 3] =
+    [("เว้ย", "เฟ้ย"), ("ว่ะ", "ฟะ"), ("วะ", "ฟะ")];
+
 /// A blank-line run — two or more newlines with any surrounding spaces/tabs —
 /// left behind after excising a copied span. Collapsed to a single blank line so
 /// removing a copy from the middle of a chunk doesn't leave a gap.
@@ -180,6 +183,12 @@ pub fn advisory_findings(source_jp: &str, thai: &str) -> Vec<String> {
         return findings;
     }
 
+    if let Some((particle, preferred)) = discouraged_casual_particle(translated) {
+        findings.push(format!(
+            "discouraged casual Thai particle `{particle}` appears; prefer `{preferred}` unless this rare roughness is important to SOURCE_JP or an established character voice"
+        ));
+    }
+
     // Multi-digit source numbers should survive; single digits are often spelled out.
     let translated_numbers = digit_runs(translated);
     let mut reported: Vec<String> = Vec::new();
@@ -212,6 +221,75 @@ pub fn advisory_findings(source_jp: &str, thai: &str) -> Vec<String> {
     }
 
     findings
+}
+
+fn discouraged_casual_particle(text: &str) -> Option<(&'static str, &'static str)> {
+    DISCOURAGED_CASUAL_PARTICLES
+        .into_iter()
+        .find(|(particle, _)| contains_discouraged_particle(text, particle))
+}
+
+fn contains_discouraged_particle(text: &str, particle: &str) -> bool {
+    let mut start = 0usize;
+    while let Some(rel) = text[start..].find(particle) {
+        let idx = start + rel;
+        let end = idx + particle.len();
+        let embedded_name_syllable =
+            matches!(particle, "วะ" | "ว่ะ") && previous_char(text, idx).is_some_and(is_thai_mark);
+        if !embedded_name_syllable && has_particle_boundary_after(text, end) {
+            return true;
+        }
+        start = end;
+    }
+    false
+}
+
+fn has_particle_boundary_after(text: &str, end: usize) -> bool {
+    let rest = &text[end..];
+    rest.is_empty()
+        || rest.starts_with("เนี่ย")
+        || rest.starts_with("นี่")
+        || rest.starts_with("นะ")
+        || rest.chars().next().is_some_and(is_particle_boundary_char)
+}
+
+fn previous_char(text: &str, idx: usize) -> Option<char> {
+    text[..idx].chars().next_back()
+}
+
+fn is_thai_mark(ch: char) -> bool {
+    matches!(ch as u32, 0x0E31 | 0x0E34..=0x0E3A | 0x0E47..=0x0E4E)
+}
+
+fn is_particle_boundary_char(ch: char) -> bool {
+    ch.is_whitespace()
+        || matches!(
+            ch,
+            '.' | ','
+                | '!'
+                | '?'
+                | ':'
+                | ';'
+                | '"'
+                | '\''
+                | ')'
+                | ']'
+                | '}'
+                | '>'
+                | '…'
+                | '。'
+                | '、'
+                | '！'
+                | '？'
+                | '”'
+                | '’'
+                | '」'
+                | '』'
+                | '）'
+                | '】'
+                | 'ฯ'
+                | 'ๆ'
+        )
 }
 
 /// Distinct numeric tokens written with ASCII or fullwidth digits, normalized to
@@ -1027,6 +1105,36 @@ mod tests {
         assert!(
             findings.is_empty(),
             "ordinary translation should produce no advisory findings: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn advisory_flags_discouraged_casual_particles() {
+        let findings = advisory_findings("何だよ。", "นี่มันอะไรวะ!");
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.contains("casual Thai particle") && f.contains("`วะ`")),
+            "sentence-final วะ flagged: {findings:?}"
+        );
+
+        let findings = advisory_findings("うるさいぞ。", "หนวกหูเว้ย!");
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.contains("casual Thai particle") && f.contains("`เว้ย`")),
+            "sentence-final เว้ย flagged: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn advisory_allows_preferred_particles_and_fuwa_name() {
+        let source = "不破さんは叫んだ。";
+        let thai = "คุณฟูวะตะโกนว่า “นี่มันอะไรกันฟะ เฟ้ย!”";
+        let findings = advisory_findings(source, thai);
+        assert!(
+            !findings.iter().any(|f| f.contains("casual Thai particle")),
+            "preferred particles and Fuwa name are not flagged: {findings:?}"
         );
     }
 
