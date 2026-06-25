@@ -115,7 +115,7 @@ fn is_xhtml_elem(node: &Node, local: &str) -> bool {
 fn walk_ol(ol: &Node, base_dir: &str, depth: usize, out: &mut Vec<TocEntry>) {
     for li in ol.children().filter(|n| is_xhtml_elem(n, "li")) {
         if let Some(a) = li.children().find(|n| is_xhtml_elem(n, "a")) {
-            let title = anchor_text(&a);
+            let title = anchor_title(&a);
             if let Some(href) = a.attribute("href") {
                 let (_, fragment) = split_fragment(href);
                 let content_path = resolve_href(base_dir, href);
@@ -134,7 +134,15 @@ fn walk_ol(ol: &Node, base_dir: &str, depth: usize, out: &mut Vec<TocEntry>) {
     }
 }
 
-/// Collect all descendant text of an anchor (handles `<a><span>...</span></a>`).
+fn anchor_title(a: &Node) -> String {
+    let text = anchor_text(a);
+    if text.is_empty() {
+        anchor_image_title(a).unwrap_or_default()
+    } else {
+        text
+    }
+}
+
 fn anchor_text(a: &Node) -> String {
     let mut s = String::new();
     for d in a.descendants() {
@@ -145,6 +153,18 @@ fn anchor_text(a: &Node) -> String {
         }
     }
     s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn anchor_image_title(a: &Node) -> Option<String> {
+    a.descendants()
+        .filter(|n| is_xhtml_elem(n, "img") || is_xhtml_elem(n, "image"))
+        .find_map(|img| {
+            img.attribute("alt")
+                .or_else(|| img.attribute("title"))
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "))
+        })
 }
 
 #[cfg(test)]

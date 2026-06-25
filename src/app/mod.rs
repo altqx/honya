@@ -5078,7 +5078,10 @@ async fn run_epub_import(
         docs.push(crate::epub::segment::DocInput {
             archive_path: archive_path.clone(),
             markdown: md,
-            toc_title: toc_titles.get(archive_path).cloned(),
+            toc_title: toc_titles
+                .get(archive_path)
+                .cloned()
+                .or_else(|| crate::cleanse::leading_image_title(&html)),
             internal_link_count: count_internal_xhtml_links(&html),
             body_class: body_class(&html),
         });

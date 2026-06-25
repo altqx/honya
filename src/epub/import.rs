@@ -71,9 +71,12 @@ fn build_toc(
     parsed: &ParsedOpf,
 ) -> Result<Vec<TocEntry>> {
     if let Some(nav_id) = &parsed.nav_id
-        && let Some(&idx) = parsed.manifest_by_id.get(nav_id)
+        && let Some(item) = parsed
+            .manifest
+            .iter()
+            .find(|item| &item.id == nav_id && item.has_property("nav"))
     {
-        let nav_path = parsed.manifest[idx].resolved_path.clone();
+        let nav_path = item.resolved_path.clone();
         if let Ok(xml) = read_or_archive(archive, work_dir, &nav_path)
             && let Ok(entries) = parse_nav_xhtml(&xml, &nav_path)
             && !entries.is_empty()

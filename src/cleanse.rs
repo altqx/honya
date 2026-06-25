@@ -83,10 +83,65 @@ pub fn xhtml_to_markdown(html: &str, image_map: &HashMap<String, String>) -> Str
     post_process(&out)
 }
 
+pub fn leading_image_title(html: &str) -> Option<String> {
+    let doc = Html::parse_fragment(html);
+    match first_visible_content(doc.tree.root()) {
+        VisibleContent::Image(label) => label,
+        VisibleContent::Text | VisibleContent::None => None,
+    }
+}
+
 /// Apply honya's quote, external-glyph, and whitespace cleanup to Markdown that
 /// came from another converter such as MarkItDown.
 pub fn clean_markdown(markdown: &str) -> String {
     post_process(&sanitize_external_chars(markdown))
+}
+
+enum VisibleContent {
+    None,
+    Text,
+    Image(Option<String>),
+}
+
+fn first_visible_content(node: NodeRef<'_, Node>) -> VisibleContent {
+    match node.value() {
+        Node::Text(text) => {
+            if text.trim().is_empty() {
+                VisibleContent::None
+            } else {
+                VisibleContent::Text
+            }
+        }
+        Node::Element(el) => match el.name() {
+            "head" | "script" | "style" | "title" | "br" => VisibleContent::None,
+            "img" | "image" => VisibleContent::Image(image_title(el)),
+            _ => first_visible_child(node),
+        },
+        _ => first_visible_child(node),
+    }
+}
+
+fn first_visible_child(node: NodeRef<'_, Node>) -> VisibleContent {
+    for child in node.children() {
+        match first_visible_content(child) {
+            VisibleContent::None => {}
+            found => return found,
+        }
+    }
+    VisibleContent::None
+}
+
+fn image_title(el: &scraper::node::Element) -> Option<String> {
+    let label = el
+        .attr("alt")
+        .or_else(|| el.attr("title"))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())?;
+    let title = sanitize_external_chars(label)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    (!title.is_empty()).then_some(title)
 }
 
 /// Recursively render a node and its subtree into `out`.
