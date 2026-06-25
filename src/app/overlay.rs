@@ -4780,7 +4780,11 @@ fn step_rail(st: &ImportState, theme: &Theme) -> Line<'static> {
     // (step id, label, optional). Required steps are numbered; optional steps
     // (Thai title, synopsis) get a `◦` marker so the skippable ones read apart.
     let steps: &[(u8, &str, bool)] = if st.lock_name {
-        &[(0, "File", false), (3, "Volume", false), (4, "Synopsis", true)]
+        &[
+            (0, "File", false),
+            (3, "Volume", false),
+            (4, "Synopsis", true),
+        ]
     } else {
         &[
             (0, "File", false),

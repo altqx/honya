@@ -1,9 +1,9 @@
 //! Refine chat agent backend: cross-volume tools plus the streaming loop.
 //! Chapter-text edits archive the prior version before overwriting.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -82,7 +82,7 @@ pub fn refine_tools_schema() -> serde_json::Value {
         }},
         {"type":"function","function":{
             "name":"update_plan",
-            "description":"Record your working plan as a short checklist the user sees live. Call it for any multi-step or multi-chapter task, then call it again to update status as you progress: keep exactly one step in_progress, flip finished steps to completed, and add steps you discover. Each call REPLACES the whole list. Skip it for a single trivial edit.",
+            "description":"Record your working plan as a short checklist the user sees live. Call it for any multi-step or multi-chapter task, then call it again to update status as you progress: keep exactly one step in_progress, flip finished steps to completed, and add steps you discover. Each call REPLACES the whole list; pass an empty steps array to clear it when done. Skip it for a single trivial edit.",
             "parameters":{"type":"object","additionalProperties":false,"required":["steps"],
                 "properties":{
                     "steps":{"type":"array","items":{"type":"object","additionalProperties":false,
@@ -294,6 +294,7 @@ pub fn refine_tools_schema() -> serde_json::Value {
 const MAX_TOOL_ROUNDS: usize = 40;
 const COMPACT_FRACTION: f64 = 0.8;
 const KEEP_RECENT_TURNS: usize = 3;
+const COMPACT_SUMMARY_PREFIX: &str = "[Earlier conversation, compacted to fit the context window]";
 
 /// Conservative context-window guess for arbitrary model ids.
 pub fn model_max_context(model: &str) -> u32 {
@@ -370,6 +371,11 @@ fn maybe_compact(req: &mut ChatRequest, tx: &EventTx, force: bool) {
             max / 1000
         ),
     });
+    tx.send(AppEvent::RefineContextCompacted {
+        dropped_messages: dropped,
+        token_estimate: est,
+        context_max: max,
+    });
 }
 
 /// Diff preview clipped for transcript display.
@@ -417,15 +423,23 @@ fn approval_preview(name: &str, args: &str) -> Option<(String, String)> {
                     a.iter()
                         .map(|e| {
                             (
-                                e.get("old").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-                                e.get("new").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                                e.get("old")
+                                    .and_then(|x| x.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                                e.get("new")
+                                    .and_then(|x| x.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
                             )
                         })
                         .collect()
                 })
                 .unwrap_or_default();
-            let refs: Vec<(&str, &str)> =
-                pairs.iter().map(|(o, n)| (o.as_str(), n.as_str())).collect();
+            let refs: Vec<(&str, &str)> = pairs
+                .iter()
+                .map(|(o, n)| (o.as_str(), n.as_str()))
+                .collect();
             Some((
                 format!("apply {} edit(s) to chapter {}", pairs.len(), ch()),
                 edit_diff_snippet(&refs),
@@ -443,7 +457,11 @@ fn approval_preview(name: &str, args: &str) -> Option<(String, String)> {
                 return None;
             }
             Some((
-                format!("replace across project: \"{}\" → \"{}\"", s("find"), s("replace")),
+                format!(
+                    "replace across project: \"{}\" → \"{}\"",
+                    s("find"),
+                    s("replace")
+                ),
                 String::new(),
             ))
         }
@@ -453,14 +471,20 @@ fn approval_preview(name: &str, args: &str) -> Option<(String, String)> {
 
 /// Compact old turns while dropping verbose tool noise.
 fn compact_summary(dropped: &[Message]) -> String {
-    let mut s = String::from("[Earlier conversation, compacted to fit the context window]\n");
+    let mut s = String::from(COMPACT_SUMMARY_PREFIX);
+    s.push('\n');
     for m in dropped {
         let label = match m.role {
             Role::User => "User",
             Role::Assistant => "Assistant",
             _ => continue,
         };
-        let Some(text) = m.content.as_deref().map(str::trim).filter(|t| !t.is_empty()) else {
+        let Some(text) = m
+            .content
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+        else {
             continue;
         };
         let clipped: String = text.chars().take(280).collect();
@@ -485,6 +509,7 @@ pub struct RefineCtx {
     pub cancel: Arc<AtomicBool>,
     pub session_id: String,
     pub interact: RefineInteract,
+    pub steering: Arc<Mutex<VecDeque<UserTurn>>>,
 }
 
 /// Chapter-edit approval policy cycled by Ctrl+Tab.
@@ -659,10 +684,17 @@ pub async fn run_refine_agent(ctx: RefineCtx, mut rx: UnboundedReceiver<RefineCo
         match ctrl {
             RefineControl::Submit(turn) => {
                 ctx.cancel.store(false, Ordering::Relaxed);
-                let mut msg = build_user_message(&ctx, &turn);
+                let mut msg = build_user_message(ctx.default_vol, &turn);
                 msg.push_str(approval_directive(ctx.interact.mode()));
                 req.messages.push(Message::user(msg));
-                run_refine_turn(ctx.client.as_ref(), &mut req, &tools, &ctx.tx, &ctx.cancel).await;
+                let runtime = RefineTurnRuntime {
+                    tx: &ctx.tx,
+                    cancel: &ctx.cancel,
+                    default_vol: ctx.default_vol,
+                    interact: &ctx.interact,
+                    steering: &ctx.steering,
+                };
+                run_refine_turn(ctx.client.as_ref(), &mut req, &tools, &runtime).await;
                 // Persist through App, tagged so stale session updates are dropped.
                 ctx.tx.send(AppEvent::RefineThreadUpdated {
                     session: current_id.clone(),
@@ -672,6 +704,7 @@ pub async fn run_refine_agent(ctx: RefineCtx, mut rx: UnboundedReceiver<RefineCo
             RefineControl::Clear => {
                 req.messages.truncate(1); // keep the system turn
                 ctx.cancel.store(true, Ordering::Relaxed);
+                clear_steering(&ctx.steering);
                 ctx.tx.send(AppEvent::RefineThreadUpdated {
                     session: current_id.clone(),
                     messages: vec![],
@@ -680,6 +713,7 @@ pub async fn run_refine_agent(ctx: RefineCtx, mut rx: UnboundedReceiver<RefineCo
             RefineControl::SetModel(m) => req.model = m,
             RefineControl::SwitchSession(id) => {
                 ctx.cancel.store(true, Ordering::Relaxed);
+                clear_steering(&ctx.steering);
                 current_id = id.clone();
                 req.messages.truncate(1);
                 req.messages.extend(seed_messages(&ctx.root, &id));
@@ -696,16 +730,27 @@ pub async fn run_refine_agent(ctx: RefineCtx, mut rx: UnboundedReceiver<RefineCo
     }
 }
 
+struct RefineTurnRuntime<'a> {
+    tx: &'a EventTx,
+    cancel: &'a AtomicBool,
+    default_vol: u32,
+    interact: &'a RefineInteract,
+    steering: &'a Arc<Mutex<VecDeque<UserTurn>>>,
+}
+
 /// Streams one user turn and executes tool calls until the model stops.
 async fn run_refine_turn(
     client: &dyn LlmClient,
     req: &mut ChatRequest,
     tools: &dyn ToolExecutor,
-    tx: &EventTx,
-    cancel: &AtomicBool,
+    runtime: &RefineTurnRuntime<'_>,
 ) {
+    let tx = runtime.tx;
+    let mut turn_tool_summaries = Vec::new();
+    let mut latest_plan: Option<Vec<PlanStep>> = None;
+
     for _round in 0..MAX_TOOL_ROUNDS {
-        if cancel.load(Ordering::Relaxed) {
+        if runtime.cancel.load(Ordering::Relaxed) {
             tx.send(AppEvent::RefineMessageDone);
             return;
         }
@@ -745,9 +790,32 @@ async fn run_refine_turn(
         let tool_calls = choice.message.tool_calls.clone().unwrap_or_default();
 
         if tool_calls.is_empty() {
-            if let Some(c) = content.filter(|c| !c.is_empty()) {
+            if let Some(c) = content.filter(|c| !c.trim().is_empty()) {
                 req.messages.push(Message::assistant(c));
             }
+            if drain_steering(
+                req,
+                runtime.default_vol,
+                runtime.interact,
+                runtime.steering,
+                tx,
+            ) > 0
+            {
+                continue;
+            }
+            if req
+                .messages
+                .last()
+                .is_some_and(|m| m.role != Role::Assistant)
+                && !turn_tool_summaries.is_empty()
+            {
+                let summary = fallback_final_summary(&turn_tool_summaries);
+                tx.send(AppEvent::RefineDelta {
+                    delta: summary.clone(),
+                });
+                req.messages.push(Message::assistant(summary));
+            }
+            clear_completed_plan(tx, latest_plan.as_deref());
             tx.send(AppEvent::RefineMessageDone);
             return;
         }
@@ -762,6 +830,9 @@ async fn run_refine_turn(
         });
 
         for call in &tool_calls {
+            if call.function.name == "update_plan" {
+                latest_plan = parse_plan_steps(&call.function.arguments);
+            }
             // Plan calls render in the pinned panel, not the transcript.
             if call.function.name != "update_plan" {
                 tx.send(AppEvent::RefineToolInvoked {
@@ -780,9 +851,20 @@ async fn run_refine_turn(
                 })
                 .to_string(),
             };
+            if let Some(summary) = tool_summary_for_final(&call.function.name, &result) {
+                turn_tool_summaries.push(summary);
+            }
             req.messages
                 .push(Message::tool_result(call.id.clone(), result));
         }
+
+        drain_steering(
+            req,
+            runtime.default_vol,
+            runtime.interact,
+            runtime.steering,
+            tx,
+        );
     }
 
     tx.send(AppEvent::RefineError {
@@ -800,16 +882,124 @@ fn summarize_args(args_json: &str) -> String {
     }
 }
 
-/// Per-turn edit-approval instruction; injected because mode can change live.
-fn approval_directive(mode: ApprovalMode) -> &'static str {
-    match mode {
-        ApprovalMode::Auto => "\n\n[Approval mode: AUTO — apply routine, clearly-wanted fixes directly, but call the ask_user tool to confirm BEFORE any edit the user might not consent to: risky, bulky, subjective, or destructive changes (e.g. rewriting many chapters, changing a character's name everywhere, deleting content).]",
-        ApprovalMode::Ask => "\n\n[Approval mode: ASK — the app pauses every edit for the user to accept or reject, so just proceed and make the edits normally.]",
-        ApprovalMode::Always => "\n\n[Approval mode: ALWAYS-APPROVE — apply edits directly and do not ask for approval.]",
+fn drain_steering(
+    req: &mut ChatRequest,
+    default_vol: u32,
+    interact: &RefineInteract,
+    steering: &Arc<Mutex<VecDeque<UserTurn>>>,
+    tx: &EventTx,
+) -> usize {
+    let mut turns = Vec::new();
+    if let Ok(mut queue) = steering.lock() {
+        while let Some(turn) = queue.pop_front() {
+            turns.push(turn);
+        }
+    }
+
+    let count = turns.len();
+    for turn in turns {
+        let mut msg = build_user_message(default_vol, &turn);
+        msg.push_str(
+            "\n\n[Mid-run steering: the user sent this while the current turn was running. Apply it to the remaining work if it is still relevant; if completed work cannot be changed, say so in the final summary.]",
+        );
+        msg.push_str(approval_directive(interact.mode()));
+        req.messages.push(Message::user(msg));
+    }
+
+    if count > 0 {
+        tx.send(AppEvent::RefineToolInvoked {
+            tool: "steering".to_string(),
+            summary: format!("added {count} queued user instruction(s)"),
+        });
+    }
+
+    count
+}
+
+fn clear_steering(steering: &Arc<Mutex<VecDeque<UserTurn>>>) {
+    if let Ok(mut queue) = steering.lock() {
+        queue.clear();
     }
 }
 
-fn build_user_message(ctx: &RefineCtx, turn: &UserTurn) -> String {
+fn tool_summary_for_final(name: &str, result_json: &str) -> Option<String> {
+    if name == "update_plan" {
+        return None;
+    }
+    let label = name.replace('_', " ");
+    let msg = serde_json::from_str::<ToolResult>(result_json)
+        .map(|r| {
+            let prefix = if r.ok { "" } else { "failed: " };
+            format!("{prefix}{}", r.message)
+        })
+        .unwrap_or_else(|_| result_json.to_string());
+    let first_line = msg.lines().next().unwrap_or("").trim();
+    if first_line.is_empty() {
+        None
+    } else {
+        Some(format!("{label}: {first_line}"))
+    }
+}
+
+fn fallback_final_summary(summaries: &[String]) -> String {
+    let mut out = String::from("Done. Summary:\n");
+    for item in summaries.iter().take(6) {
+        out.push_str("- ");
+        out.push_str(item.trim());
+        out.push('\n');
+    }
+    if summaries.len() > 6 {
+        out.push_str(&format!(
+            "- ...and {} more action(s)\n",
+            summaries.len() - 6
+        ));
+    }
+    out.trim_end().to_string()
+}
+
+fn normalize_plan_steps(steps: Vec<PlanStep>) -> Vec<PlanStep> {
+    steps
+        .into_iter()
+        .filter(|s| !s.step.trim().is_empty())
+        .take(20)
+        .collect()
+}
+
+fn parse_plan_steps(args_json: &str) -> Option<Vec<PlanStep>> {
+    serde_json::from_str::<UpdatePlanArgs>(args_json)
+        .ok()
+        .map(|a| normalize_plan_steps(a.steps))
+}
+
+fn clear_completed_plan(tx: &EventTx, steps: Option<&[PlanStep]>) {
+    let Some(steps) = steps else {
+        return;
+    };
+    if !steps.is_empty()
+        && steps
+            .iter()
+            .all(|s| s.status == crate::model::PlanStepStatus::Completed)
+    {
+        tx.send(AppEvent::RefinePlanUpdated { steps: Vec::new() });
+    }
+}
+
+/// Per-turn edit-approval instruction; injected because mode can change live.
+fn approval_directive(mode: ApprovalMode) -> &'static str {
+    match mode {
+        ApprovalMode::Auto => {
+            "\n\n[Approval mode: AUTO — apply routine, clearly-wanted fixes directly, but call the ask_user tool to confirm BEFORE any edit the user might not consent to: risky, bulky, subjective, or destructive changes (e.g. rewriting many chapters, changing a character's name everywhere, deleting content).]"
+        }
+        ApprovalMode::Ask => {
+            "\n\n[Approval mode: ASK — the app pauses every edit for the user to accept or reject, so just proceed and make the edits normally.]"
+        }
+        ApprovalMode::Always => {
+            "\n\n[Approval mode: ALWAYS-APPROVE — apply edits directly and do not ask for approval.]"
+        }
+    }
+}
+
+fn build_user_message(default_vol: u32, turn: &UserTurn) -> String {
     let scope = parse_scope(&turn.text);
     if scope.is_empty() {
         return turn.text.clone();
@@ -821,7 +1011,7 @@ fn build_user_message(ctx: &RefineCtx, turn: &UserTurn) -> String {
         .join(", ");
     format!(
         "{}\n\n(In scope: {hint}. Active volume: {}. Use your tools to read before editing.)",
-        turn.text, ctx.default_vol
+        turn.text, default_vol
     )
 }
 
@@ -1141,7 +1331,9 @@ fn apply_edit(
         return Err(EditError::Other("`old` is empty".to_string()));
     }
     if old == new {
-        return Err(EditError::Other("`old` and `new` are identical".to_string()));
+        return Err(EditError::Other(
+            "`old` and `new` are identical".to_string(),
+        ));
     }
     let count = content.matches(old).count();
     if count == 0 {
@@ -1328,7 +1520,10 @@ pub async fn dispatch_refine_tool(
                 let jp = std::fs::read_to_string(w.raw(a.ch)).unwrap_or_default();
                 data.insert("japanese".into(), json!(grep(&jp)));
             }
-            ToolResult::data(format!("grep chapter {}", a.ch), serde_json::Value::Object(data))
+            ToolResult::data(
+                format!("grep chapter {}", a.ch),
+                serde_json::Value::Object(data),
+            )
         }
 
         "read_meta" => {
@@ -1370,14 +1565,10 @@ pub async fn dispatch_refine_tool(
 
         "update_plan" => {
             let a = parse!(UpdatePlanArgs);
-            let steps: Vec<PlanStep> = a
-                .steps
-                .into_iter()
-                .filter(|s| !s.step.trim().is_empty())
-                .take(20)
-                .collect();
+            let steps = normalize_plan_steps(a.steps);
             if steps.is_empty() {
-                return ToolResult::err("no plan steps given");
+                tx.send(AppEvent::RefinePlanUpdated { steps });
+                return ToolResult::ok("plan cleared");
             }
             tx.send(AppEvent::RefinePlanUpdated {
                 steps: steps.clone(),
@@ -2071,10 +2262,14 @@ impl RefineTools {
 impl ToolExecutor for RefineTools {
     async fn execute(&self, name: &str, arguments_json: &str) -> anyhow::Result<String> {
         if name == "task" {
-            return Ok(serde_json::to_string(&self.run_subagent(arguments_json).await)?);
+            return Ok(serde_json::to_string(
+                &self.run_subagent(arguments_json).await,
+            )?);
         }
         if name == "ask_user" {
-            return Ok(serde_json::to_string(&self.run_ask_user(arguments_json).await)?);
+            return Ok(serde_json::to_string(
+                &self.run_ask_user(arguments_json).await,
+            )?);
         }
         // Ask mode gates only mutating tools.
         if self.interact.mode() == ApprovalMode::Ask
@@ -2086,7 +2281,8 @@ impl ToolExecutor for RefineTools {
             ))?);
         }
         let result =
-            dispatch_refine_tool(&self.root, self.default_vol, &self.tx, name, arguments_json).await;
+            dispatch_refine_tool(&self.root, self.default_vol, &self.tx, name, arguments_json)
+                .await;
         Ok(serde_json::to_string(&result)?)
     }
 }
@@ -2097,7 +2293,7 @@ mod tests {
     use crate::llm::client::Result as LlmResult;
     use crate::llm::{Choice, FunctionCall, ResponseMessage, ToolCall};
     use std::collections::VecDeque;
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn model_max_context_by_family() {
@@ -2117,7 +2313,7 @@ mod tests {
             req.messages.push(Message::assistant(format!("ans {i}")));
         }
         let before = req.messages.len();
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         maybe_compact(&mut req, &EventTx(tx), false);
 
         assert!(req.messages.len() < before, "context was compacted");
@@ -2130,7 +2326,22 @@ mod tests {
                 .unwrap()
                 .contains("compacted")
         );
-        assert_eq!(req.messages[2].role, Role::User, "tail starts at a user turn");
+        let mut events = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            events.push(ev);
+        }
+        assert!(!events.is_empty(), "compaction emits events");
+        assert!(
+            events
+                .iter()
+                .any(|ev| matches!(ev, AppEvent::RefineContextCompacted { .. })),
+            "compaction emits a UI-visible event"
+        );
+        assert_eq!(
+            req.messages[2].role,
+            Role::User,
+            "tail starts at a user turn"
+        );
         assert!(
             req.messages
                 .last()
@@ -2262,6 +2473,25 @@ mod tests {
         }
     }
 
+    fn empty_steering() -> Arc<Mutex<VecDeque<UserTurn>>> {
+        Arc::new(Mutex::new(VecDeque::new()))
+    }
+
+    fn test_runtime<'a>(
+        tx: &'a EventTx,
+        cancel: &'a AtomicBool,
+        interact: &'a RefineInteract,
+        steering: &'a Arc<Mutex<VecDeque<UserTurn>>>,
+    ) -> RefineTurnRuntime<'a> {
+        RefineTurnRuntime {
+            tx,
+            cancel,
+            default_vol: 1,
+            interact,
+            steering,
+        }
+    }
+
     #[tokio::test]
     async fn refine_turn_streams_executes_tool_and_finishes() {
         let root = temp_root("turn");
@@ -2277,8 +2507,11 @@ mod tests {
         let mut req = ChatRequest::new("m", vec![Message::system("sys")]);
         req.messages.push(Message::user("add a character"));
         let cancel = AtomicBool::new(false);
+        let interact = RefineInteract::default();
+        let steering = empty_steering();
+        let runtime = test_runtime(&etx, &cancel, &interact, &steering);
 
-        run_refine_turn(&client, &mut req, &tools, &etx, &cancel).await;
+        run_refine_turn(&client, &mut req, &tools, &runtime).await;
 
         let (mut saw_tool, mut saw_done, mut saw_delta) = (false, false, false);
         while let Ok(ev) = rx.try_recv() {
@@ -2307,6 +2540,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn refine_turn_synthesizes_summary_after_tool_only_stop() {
+        let root = temp_root("fallback");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let etx = EventTx(tx);
+        let client = ScriptedClient {
+            responses: Mutex::new(VecDeque::from(vec![
+                tool_call_turn("upsert_character", r#"{"jp_name":"勇","thai_name":"ยู"}"#),
+                stop_turn(""),
+            ])),
+        };
+        let tools = RefineTools::new(root.clone(), 1, etx.clone());
+        let mut req = ChatRequest::new("m", vec![Message::system("sys")]);
+        req.messages.push(Message::user("add a character"));
+        let cancel = AtomicBool::new(false);
+        let interact = RefineInteract::default();
+        let steering = empty_steering();
+        let runtime = test_runtime(&etx, &cancel, &interact, &steering);
+
+        run_refine_turn(&client, &mut req, &tools, &runtime).await;
+
+        let mut summary = String::new();
+        let mut saw_done = false;
+        while let Ok(ev) = rx.try_recv() {
+            match ev {
+                AppEvent::RefineDelta { delta } => summary.push_str(&delta),
+                AppEvent::RefineMessageDone => saw_done = true,
+                _ => {}
+            }
+        }
+        assert!(summary.contains("Done. Summary"), "{summary}");
+        assert!(summary.contains("upsert character"), "{summary}");
+        assert!(saw_done, "fallback still finishes the turn");
+        assert!(
+            req.messages
+                .last()
+                .and_then(|m| m.content.as_deref())
+                .is_some_and(|c| c.contains("Done. Summary")),
+            "fallback summary is persisted in chat history"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn refine_turn_clears_fully_completed_plan_on_final_stop() {
+        let root = temp_root("planclearturn");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let etx = EventTx(tx);
+        let client = ScriptedClient {
+            responses: Mutex::new(VecDeque::from(vec![
+                tool_call_turn(
+                    "update_plan",
+                    r#"{"steps":[{"step":"read chapter","status":"completed"},{"step":"apply edit","status":"completed"}]}"#,
+                ),
+                stop_turn("done"),
+            ])),
+        };
+        let tools = RefineTools::new(root.clone(), 1, etx.clone());
+        let mut req = ChatRequest::new("m", vec![Message::system("sys")]);
+        req.messages.push(Message::user("finish a task"));
+        let cancel = AtomicBool::new(false);
+        let interact = RefineInteract::default();
+        let steering = empty_steering();
+        let runtime = test_runtime(&etx, &cancel, &interact, &steering);
+
+        run_refine_turn(&client, &mut req, &tools, &runtime).await;
+
+        let mut plan_lengths = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            if let AppEvent::RefinePlanUpdated { steps } = ev {
+                plan_lengths.push(steps.len());
+            }
+        }
+        assert_eq!(plan_lengths, vec![2, 0]);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
     async fn refine_turn_respects_cancel() {
         let root = temp_root("cancel");
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -2317,8 +2629,11 @@ mod tests {
         let tools = RefineTools::new(root.clone(), 1, etx.clone());
         let mut req = ChatRequest::new("m", vec![Message::system("sys")]);
         let cancel = AtomicBool::new(true); // pre-cancelled
+        let interact = RefineInteract::default();
+        let steering = empty_steering();
+        let runtime = test_runtime(&etx, &cancel, &interact, &steering);
 
-        run_refine_turn(&client, &mut req, &tools, &etx, &cancel).await;
+        run_refine_turn(&client, &mut req, &tools, &runtime).await;
         let mut saw_done = false;
         while let Ok(ev) = rx.try_recv() {
             if matches!(ev, AppEvent::RefineMessageDone) {
@@ -2326,6 +2641,112 @@ mod tests {
             }
         }
         assert!(saw_done, "a cancelled turn still emits MessageDone");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn refine_turn_adds_queued_steering_after_tool_batch() {
+        let root = temp_root("steeraftertool");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let etx = EventTx(tx);
+        let client = ScriptedClient {
+            responses: Mutex::new(VecDeque::from(vec![
+                tool_call_turn("read_meta", r#"{"kind":"project"}"#),
+                stop_turn("checked style too"),
+            ])),
+        };
+        let tools = RefineTools::new(root.clone(), 1, etx.clone());
+        let mut req = ChatRequest::new("m", vec![Message::system("sys")]);
+        req.messages.push(Message::user("read project"));
+        let cancel = AtomicBool::new(false);
+        let interact = RefineInteract::default();
+        let steering = Arc::new(Mutex::new(VecDeque::from(vec![UserTurn {
+            text: "also check @style".to_string(),
+        }])));
+        let runtime = test_runtime(&etx, &cancel, &interact, &steering);
+
+        run_refine_turn(&client, &mut req, &tools, &runtime).await;
+
+        let tool_idx = req
+            .messages
+            .iter()
+            .position(|m| m.role == Role::Tool)
+            .expect("tool result persisted");
+        let steering_idx = req
+            .messages
+            .iter()
+            .position(|m| {
+                m.role == Role::User
+                    && m.content
+                        .as_deref()
+                        .is_some_and(|c| c.contains("also check @style"))
+            })
+            .expect("queued steering persisted as a user message");
+        assert!(
+            steering_idx > tool_idx,
+            "steering is injected after the current tool batch"
+        );
+        let steering_msg = req.messages[steering_idx].content.as_deref().unwrap();
+        assert!(steering_msg.contains("[Mid-run steering:"));
+
+        let mut saw_steering_event = false;
+        while let Ok(ev) = rx.try_recv() {
+            if let AppEvent::RefineToolInvoked { tool, summary } = ev
+                && tool == "steering"
+            {
+                saw_steering_event = true;
+                assert!(summary.contains("1 queued"));
+            }
+        }
+        assert!(
+            saw_steering_event,
+            "the UI is told steering was queued into context"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn refine_turn_continues_at_stop_when_steering_is_queued() {
+        let root = temp_root("steeratstop");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let etx = EventTx(tx);
+        let client = ScriptedClient {
+            responses: Mutex::new(VecDeque::from(vec![
+                stop_turn("initial answer"),
+                stop_turn("after steering"),
+            ])),
+        };
+        let tools = RefineTools::new(root.clone(), 1, etx.clone());
+        let mut req = ChatRequest::new("m", vec![Message::system("sys")]);
+        req.messages.push(Message::user("start"));
+        let cancel = AtomicBool::new(false);
+        let interact = RefineInteract::default();
+        let steering = Arc::new(Mutex::new(VecDeque::from(vec![UserTurn {
+            text: "one more thing".to_string(),
+        }])));
+        let runtime = test_runtime(&etx, &cancel, &interact, &steering);
+
+        run_refine_turn(&client, &mut req, &tools, &runtime).await;
+
+        let contents: Vec<&str> = req
+            .messages
+            .iter()
+            .filter_map(|m| m.content.as_deref())
+            .collect();
+        assert!(contents.contains(&"initial answer"));
+        assert!(
+            contents
+                .iter()
+                .any(|c| c.contains("one more thing") && c.contains("[Mid-run steering:"))
+        );
+        assert!(contents.contains(&"after steering"));
+
+        let done_count = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter(|ev| matches!(ev, AppEvent::RefineMessageDone))
+            .count();
+        assert_eq!(done_count, 1);
+
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -2437,7 +2858,10 @@ mod tests {
 
     #[test]
     fn default_refine_model_is_gpt_5_5() {
-        assert_eq!(crate::model::ModelSet::default().refine.model, "openai/gpt-5.5");
+        assert_eq!(
+            crate::model::ModelSet::default().refine.model,
+            "openai/gpt-5.5"
+        );
     }
 
     #[tokio::test]
@@ -2520,6 +2944,25 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    #[tokio::test]
+    async fn update_plan_accepts_empty_steps_to_clear() {
+        let root = temp_root("planclear");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let etx = EventTx(tx);
+        let r = dispatch_refine_tool(&root, 1, &etx, "update_plan", r#"{"steps":[]}"#).await;
+        assert!(r.ok, "{}", r.message);
+        assert_eq!(r.message, "plan cleared");
+        let mut saw_empty = false;
+        while let Ok(ev) = rx.try_recv() {
+            if let AppEvent::RefinePlanUpdated { steps } = ev {
+                saw_empty = steps.is_empty();
+            }
+        }
+        assert!(saw_empty, "empty plan event clears the UI checklist");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     fn scannable_project(tag: &str) -> (PathBuf, Workspace) {
         let root = temp_root(tag);
         std::fs::write(root.join("PROJECT.md"), "# Test\n").unwrap();
@@ -2577,7 +3020,9 @@ mod tests {
     #[tokio::test]
     async fn replace_across_project_dry_run_then_writes() {
         let (root, ws) = scannable_project("replall");
-        translation::append_chunk(&ws, 1, 0, "ดาบเก่า").await.unwrap();
+        translation::append_chunk(&ws, 1, 0, "ดาบเก่า")
+            .await
+            .unwrap();
         translation::append_chunk(&ws, 2, 0, "ดาบเก่า อีกครั้ง")
             .await
             .unwrap();
@@ -2595,7 +3040,9 @@ mod tests {
         assert!(r.ok, "{}", r.message);
         assert_eq!(r.data.unwrap()["total_matches"], 2);
         assert!(
-            translation::read_translated(&ws, 1).await.contains("ดาบเก่า"),
+            translation::read_translated(&ws, 1)
+                .await
+                .contains("ดาบเก่า"),
             "dry run must not write"
         );
 

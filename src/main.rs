@@ -89,7 +89,11 @@ async fn main() -> anyhow::Result<()> {
     // Restore the terminal before panic output; normal teardown does not run on panic.
     let prev_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        let _ = execute!(std::io::stdout(), PopKeyboardEnhancementFlags, DisableMouseCapture);
+        let _ = execute!(
+            std::io::stdout(),
+            PopKeyboardEnhancementFlags,
+            DisableMouseCapture
+        );
         ratatui::restore();
         prev_hook(info);
     }));

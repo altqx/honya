@@ -37,7 +37,9 @@ async fn run_login(tx: &EventTx) -> anyhow::Result<()> {
 
     let listener = TcpListener::bind(("127.0.0.1", REDIRECT_PORT))
         .await
-        .with_context(|| format!("could not bind port {REDIRECT_PORT} (is the Codex CLI running?)"))?;
+        .with_context(|| {
+            format!("could not bind port {REDIRECT_PORT} (is the Codex CLI running?)")
+        })?;
 
     let url = authorize_url(&challenge, &state);
     let _ = crate::remote::open_url(&url);
@@ -110,7 +112,10 @@ async fn wait_for_callback(listener: &TcpListener) -> anyhow::Result<(String, St
         if let Some(err) = params.get("error") {
             anyhow::bail!("authorization denied: {err}");
         }
-        let code = params.get("code").cloned().context("callback had no code")?;
+        let code = params
+            .get("code")
+            .cloned()
+            .context("callback had no code")?;
         let state = params.get("state").cloned().unwrap_or_default();
         return Ok((code, state));
     }
@@ -136,7 +141,10 @@ async fn exchange_code(
         .await?;
     let status = resp.status();
     let body = resp.text().await.unwrap_or_default();
-    anyhow::ensure!(status.is_success(), "token exchange failed ({status}): {body}");
+    anyhow::ensure!(
+        status.is_success(),
+        "token exchange failed ({status}): {body}"
+    );
     serde_json::from_str(&body).context("could not parse token response")
 }
 
@@ -156,7 +164,10 @@ pub async fn refresh(auth: &CodexAuth) -> anyhow::Result<CodexAuth> {
         .await?;
     let status = resp.status();
     let body = resp.text().await.unwrap_or_default();
-    anyhow::ensure!(status.is_success(), "token refresh failed ({status}): {body}");
+    anyhow::ensure!(
+        status.is_success(),
+        "token refresh failed ({status}): {body}"
+    );
     let tokens: TokenResponse =
         serde_json::from_str(&body).context("could not parse refresh response")?;
 

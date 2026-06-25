@@ -12,9 +12,9 @@ pub mod refine;
 pub mod shelf;
 pub mod translate;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use ratatui::Frame;
 use ratatui::crossterm::event::{
@@ -317,7 +317,10 @@ pub enum Action {
     /// Cycle the refine edit-approval mode (always-approve → ask → auto) — Ctrl+Tab.
     RefineCycleApprovalMode,
     /// The user's answer to a blocking refine prompt (approval / ask_user).
-    RefineRespondInteraction { id: u64, answer: String },
+    RefineRespondInteraction {
+        id: u64,
+        answer: String,
+    },
     /// Boxed to break the `Action → Overlay → Dialog → Action` size cycle.
     ShowOverlay(Box<Overlay>),
     CloseOverlay,
@@ -449,6 +452,7 @@ pub struct App {
     /// Long-lived Refine agent task, spawned lazily on first submit.
     refine_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::agents::refine::RefineControl>>,
     refine_cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+    refine_steering: Option<Arc<Mutex<VecDeque<crate::agents::refine::UserTurn>>>>,
     /// Shared approval/ask_user channel for Refine.
     refine_interact: crate::agents::refine::RefineInteract,
     refine_sessions: Vec<crate::workspace::refine_session::SessionMeta>,
@@ -527,6 +531,7 @@ impl App {
             session_label: None,
             refine_tx: None,
             refine_cancel: None,
+            refine_steering: None,
             refine_interact: crate::agents::refine::RefineInteract::default(),
             refine_sessions: Vec::new(),
             refine_session_id: String::new(),
@@ -999,6 +1004,17 @@ impl App {
         if !self.ensure_refine_agent() {
             return;
         }
+        if self.refine.is_in_flight() {
+            if let Some(steering) = &self.refine_steering
+                && let Ok(mut queue) = steering.lock()
+            {
+                queue.push_back(crate::agents::refine::UserTurn { text });
+                self.toast = Some(Toast::info(
+                    "steering queued for the running Refine turn".to_string(),
+                ));
+            }
+            return;
+        }
         if let Some(tx) = &self.refine_tx {
             let _ = tx.send(crate::agents::refine::RefineControl::Submit(
                 crate::agents::refine::UserTurn { text },
@@ -1029,6 +1045,7 @@ impl App {
             return false;
         };
         let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let steering = Arc::new(Mutex::new(VecDeque::new()));
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let ctx_max = crate::agents::refine::model_max_context(&refine_model.model);
         let ctx = crate::agents::refine::RefineCtx {
@@ -1040,6 +1057,7 @@ impl App {
             cancel: cancel.clone(),
             session_id: self.refine_session_id.clone(),
             interact: self.refine_interact.clone(),
+            steering: steering.clone(),
         };
         tokio::spawn(async move {
             crate::agents::refine::run_refine_agent(ctx, rx).await;
@@ -1047,6 +1065,7 @@ impl App {
         self.refine.set_context_max(ctx_max);
         self.refine_tx = Some(tx);
         self.refine_cancel = Some(cancel);
+        self.refine_steering = Some(steering);
         true
     }
 
@@ -1054,6 +1073,7 @@ impl App {
         if let Some(c) = &self.refine_cancel {
             c.store(true, std::sync::atomic::Ordering::Relaxed);
         }
+        self.clear_refine_steering();
         self.refine.cancel();
     }
 
@@ -1062,6 +1082,7 @@ impl App {
         if let Some(c) = &self.refine_cancel {
             c.store(true, std::sync::atomic::Ordering::Relaxed);
         }
+        self.clear_refine_steering();
         self.refine.clear();
         if let Some(tx) = &self.refine_tx {
             let _ = tx.send(crate::agents::refine::RefineControl::Clear);
@@ -1077,9 +1098,19 @@ impl App {
             let _ = tx.send(crate::agents::refine::RefineControl::Shutdown);
         }
         self.refine_cancel = None;
+        self.clear_refine_steering();
+        self.refine_steering = None;
         self.refine.clear();
         self.refine_sessions.clear();
         self.refine_session_id.clear();
+    }
+
+    fn clear_refine_steering(&mut self) {
+        if let Some(steering) = &self.refine_steering
+            && let Ok(mut queue) = steering.lock()
+        {
+            queue.clear();
+        }
     }
 
     fn refine_root(&self) -> Option<PathBuf> {
@@ -1148,6 +1179,7 @@ impl App {
 
     fn refine_new_session(&mut self) {
         let id = crate::workspace::refine_session::new_id();
+        self.clear_refine_steering();
         self.refine.load_turns(Vec::new(), id.clone());
         self.refine_session_id = id.clone();
         if let Some(tx) = &self.refine_tx {
@@ -1166,6 +1198,7 @@ impl App {
             .map(|s| refine::display_turns(&s.messages))
             .unwrap_or_default();
         let plan = session.map(|s| s.plan).unwrap_or_default();
+        self.clear_refine_steering();
         self.refine.load_turns(turns, id.clone());
         self.refine.set_plan(plan);
         self.refine_session_id = id.clone();
@@ -2410,7 +2443,15 @@ impl App {
                 synopsis_th,
                 append,
             } => {
-                self.start_import(source, title, title_th, vol, synopsis_raw, synopsis_th, append);
+                self.start_import(
+                    source,
+                    title,
+                    title_th,
+                    vol,
+                    synopsis_raw,
+                    synopsis_th,
+                    append,
+                );
             }
             Action::TranslateSynopsis { raw, attempt } => {
                 self.translate_synopsis(raw, attempt);
@@ -2856,7 +2897,9 @@ impl App {
     /// gaps in chapter numbering, so no renumbering is needed.
     fn delete_chapters(&mut self, vol: u32, chapters: &[u32]) {
         if self.run_active {
-            self.toast = Some(Toast::warn("can't delete chapters while a run is in progress"));
+            self.toast = Some(Toast::warn(
+                "can't delete chapters while a run is in progress",
+            ));
             return;
         }
         let Some(active) = self.active.as_ref() else {
@@ -3710,7 +3753,11 @@ impl App {
         let models = self.cfg.models.clone();
         let tx = self.tx.clone();
         self.run_active = true;
-        let verb = if append { "adding chapters to" } else { "importing" };
+        let verb = if append {
+            "adding chapters to"
+        } else {
+            "importing"
+        };
         self.toast = Some(Toast::info(format!("{verb} {slug} …")));
         tokio::spawn(async move {
             match run_import(

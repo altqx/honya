@@ -1440,6 +1440,11 @@ pub enum AppEvent {
         prompt_tokens: u32,
         completion_tokens: u32,
     },
+    RefineContextCompacted {
+        dropped_messages: usize,
+        token_estimate: u32,
+        context_max: u32,
+    },
     RefineMessageDone,
     RefineToolInvoked {
         tool: String,
@@ -1630,7 +1635,11 @@ mod provider_model_tests {
 
     #[test]
     fn full_agent_object_round_trips() {
-        let a = AgentModel::new(Provider::Tokenrouter, "google/gemini-3-flash-preview", Some(Effort::High));
+        let a = AgentModel::new(
+            Provider::Tokenrouter,
+            "google/gemini-3-flash-preview",
+            Some(Effort::High),
+        );
         let json = serde_json::to_string(&a).unwrap();
         let back: AgentModel = serde_json::from_str(&json).unwrap();
         assert_eq!(a, back);

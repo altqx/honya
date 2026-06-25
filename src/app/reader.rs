@@ -771,7 +771,8 @@ impl ReaderScreen {
             return Action::None;
         };
         let source_jp = self.source_for_chunk(chunk).unwrap_or_default();
-        let thai = crate::workspace::translation::chunk_prose_in(&self.th, chunk).unwrap_or_default();
+        let thai =
+            crate::workspace::translation::chunk_prose_in(&self.th, chunk).unwrap_or_default();
         let review = crate::workspace::translation::chunk_review_reason_in(&self.th, chunk);
         Action::show_overlay(Overlay::reader_inspect(
             self.chapter,

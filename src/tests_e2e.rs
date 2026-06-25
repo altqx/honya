@@ -1407,7 +1407,7 @@ async fn end_to_end_import_and_mock_translate() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let ctx = PipelineCtx {
         clients: crate::llm::ClientSet::single(
-            Arc::new(MockClient::default()) as Arc<dyn crate::llm::client::LlmClient>,
+            Arc::new(MockClient::default()) as Arc<dyn crate::llm::client::LlmClient>
         ),
         ws,
         models: ModelSet::default(),
@@ -1612,7 +1612,7 @@ async fn partial_translator_stream_is_salvaged_as_needs_review() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let ctx = PipelineCtx {
         clients: crate::llm::ClientSet::single(
-            Arc::new(TruncatingTranslatorClient) as Arc<dyn LlmClient>,
+            Arc::new(TruncatingTranslatorClient) as Arc<dyn LlmClient>
         ),
         ws,
         models: ModelSet::default(),
@@ -1852,7 +1852,10 @@ fn refine_tab_gated_without_project() {
     app.on_key(KeyEvent::new(KeyCode::Char('6'), KeyModifiers::empty()));
     assert_eq!(app.screen, Screen::Refine);
     app.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::empty()));
-    assert!(!app.running, "q quits — Refine does not capture without a project");
+    assert!(
+        !app.running,
+        "q quits — Refine does not capture without a project"
+    );
 }
 
 #[test]

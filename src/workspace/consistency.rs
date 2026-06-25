@@ -134,10 +134,7 @@ mod tests {
 
     #[test]
     fn flags_characters_with_same_reading_different_thai() {
-        let chars = vec![
-            ch("朱夏", "ชูกะ", "Shuka"),
-            ch("シュカ", "ชูคา", "shuka"),
-        ];
+        let chars = vec![ch("朱夏", "ชูกะ", "Shuka"), ch("シュカ", "ชูคา", "shuka")];
         let issues = roster_consistency(&chars, &[]);
         assert_eq!(issues.len(), 1);
         assert!(issues[0].detail.contains("ชูกะ"));
@@ -152,9 +149,16 @@ mod tests {
 
     #[test]
     fn flags_term_reading_divergence() {
-        let terms = vec![term("聖剣", "ดาบเทพ", "seiken"), term("正剣", "ดาบแท้", "seiken")];
+        let terms = vec![
+            term("聖剣", "ดาบเทพ", "seiken"),
+            term("正剣", "ดาบแท้", "seiken"),
+        ];
         let issues = roster_consistency(&[], &terms);
-        assert!(issues.iter().any(|i| i.detail.contains("map to different Thai")));
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.detail.contains("map to different Thai"))
+        );
     }
 
     #[test]

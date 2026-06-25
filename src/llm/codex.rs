@@ -395,7 +395,7 @@ fn apply_event(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm::{Message, Tool};
+    use crate::llm::{FunctionCall, Message, Role, Tool, ToolCall};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -416,6 +416,7 @@ mod tests {
         assert_eq!(body["input"][0]["role"], "user");
         assert_eq!(body["input"][0]["content"][0]["type"], "input_text");
         assert_eq!(body["reasoning"]["effort"], "high");
+        assert_eq!(body["reasoning"]["summary"], "auto");
         assert_eq!(body["store"], false);
         assert_eq!(body["stream"], true);
     }
@@ -424,7 +425,23 @@ mod tests {
     fn build_body_flattens_tools_and_tool_results() {
         let mut req = ChatRequest::new(
             "gpt-5.5-codex",
-            vec![Message::tool_result("call_1", "{\"ok\":true}")],
+            vec![
+                Message {
+                    role: Role::Assistant,
+                    content: None,
+                    tool_calls: Some(vec![ToolCall {
+                        id: "call_1".to_string(),
+                        kind: "function".to_string(),
+                        function: FunctionCall {
+                            name: "do_it".to_string(),
+                            arguments: "{\"x\":1}".to_string(),
+                        },
+                    }]),
+                    tool_call_id: None,
+                    name: None,
+                },
+                Message::tool_result("call_1", "{\"ok\":true}"),
+            ],
         );
         req.tools = Some(vec![Tool::function(
             "do_it",
@@ -435,8 +452,11 @@ mod tests {
         assert_eq!(body["tools"][0]["type"], "function");
         assert_eq!(body["tools"][0]["name"], "do_it");
         assert_eq!(body["tool_choice"], "auto");
-        assert_eq!(body["input"][0]["type"], "function_call_output");
-        assert_eq!(body["input"][0]["call_id"], "call_1");
+        assert_eq!(body["input"][0]["type"], "function_call");
+        assert_eq!(body["input"][0]["name"], "do_it");
+        assert_eq!(body["input"][0]["arguments"], "{\"x\":1}");
+        assert_eq!(body["input"][1]["type"], "function_call_output");
+        assert_eq!(body["input"][1]["call_id"], "call_1");
     }
 
     #[test]
@@ -450,6 +470,7 @@ mod tests {
         let mut acc = Acc::default();
         for line in [
             r#"data: {"type":"response.reasoning_summary_text.delta","delta":"think "}"#,
+            r#"data: {"type":"response.reasoning_text.delta","delta":"more "}"#,
             r#"data: {"type":"response.output_text.delta","delta":"hello "}"#,
             r#"data: {"type":"response.output_text.delta","delta":"world"}"#,
             r#"data: {"type":"response.output_item.done","item":{"type":"function_call","name":"f","arguments":"{}","call_id":"c1"}}"#,
@@ -458,7 +479,7 @@ mod tests {
             handle_event_line(line.as_bytes(), &mut on, &mut acc).unwrap();
         }
         assert_eq!(text, "hello world");
-        assert_eq!(reasoning, "think ");
+        assert_eq!(reasoning, "think more ");
         let resp = acc.into_response();
         assert_eq!(resp.id.as_deref(), Some("r1"));
         let choice = &resp.choices[0];

@@ -1029,10 +1029,10 @@ mod tests {
                 models: None,
             },
             workspace: Workspace::new(dir, 1),
-            clients: Some(crate::llm::ClientSet::single(
-                std::sync::Arc::new(crate::llm::mock::MockClient::default())
-                    as std::sync::Arc<dyn crate::llm::client::LlmClient>,
-            )),
+            clients: Some(crate::llm::ClientSet::single(std::sync::Arc::new(
+                crate::llm::mock::MockClient::default(),
+            )
+                as std::sync::Arc<dyn crate::llm::client::LlmClient>)),
             models: ModelSet::default(),
             vol: 1,
         }

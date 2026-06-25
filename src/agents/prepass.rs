@@ -342,10 +342,14 @@ mod tests {
         crate::workspace::translation::write_raw(&ws, 1, "有月勇は聖剣を抜いた。彼は笑った。")
             .unwrap();
 
-        let seeded = run_prepass(&SeedingClient, &crate::model::AgentModel::openrouter("mock"), &ws)
-            .await
-            .expect("run_prepass ok")
-            .expect("had raw to sample");
+        let seeded = run_prepass(
+            &SeedingClient,
+            &crate::model::AgentModel::openrouter("mock"),
+            &ws,
+        )
+        .await
+        .expect("run_prepass ok")
+        .expect("had raw to sample");
         assert_eq!(seeded.characters, 1);
         assert_eq!(seeded.terms, 1);
         assert_eq!(seeded.examples, 1);
@@ -366,7 +370,13 @@ mod tests {
         let base = std::env::temp_dir().join(format!("honya_prepass_empty_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let ws = Workspace::new(base.clone(), 1);
-        let out = run_prepass(&SeedingClient, &crate::model::AgentModel::openrouter("mock"), &ws).await.unwrap();
+        let out = run_prepass(
+            &SeedingClient,
+            &crate::model::AgentModel::openrouter("mock"),
+            &ws,
+        )
+        .await
+        .unwrap();
         assert!(out.is_none(), "no raw chapters → nothing to do");
         let _ = std::fs::remove_dir_all(&base);
     }

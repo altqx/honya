@@ -131,9 +131,22 @@ pub fn uuid_v4() -> String {
     let b = random_bytes(16);
     format!(
         "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-4{:01x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        b[0], b[1], b[2], b[3], b[4], b[5],
-        b[6] & 0x0f, b[7], (b[8] & 0x3f) | 0x80, b[9],
-        b[10], b[11], b[12], b[13], b[14], b[15],
+        b[0],
+        b[1],
+        b[2],
+        b[3],
+        b[4],
+        b[5],
+        b[6] & 0x0f,
+        b[7],
+        (b[8] & 0x3f) | 0x80,
+        b[9],
+        b[10],
+        b[11],
+        b[12],
+        b[13],
+        b[14],
+        b[15],
     )
 }
 
@@ -224,7 +237,14 @@ mod tests {
 
     #[test]
     fn base64url_round_trips_and_is_url_safe() {
-        for case in [&b""[..], b"f", b"fo", b"foo", b"foob", b"\xff\xfe\xfd\x00\x01"] {
+        for case in [
+            &b""[..],
+            b"f",
+            b"fo",
+            b"foo",
+            b"foob",
+            b"\xff\xfe\xfd\x00\x01",
+        ] {
             let enc = base64url_encode(case);
             assert!(!enc.contains('=') && !enc.contains('+') && !enc.contains('/'));
             assert_eq!(base64url_decode(&enc).unwrap(), case);
@@ -250,7 +270,10 @@ mod tests {
         let token = jwt(&serde_json::json!({
             "https://api.openai.com/auth": { "chatgpt_account_id": "acct-123" }
         }));
-        assert_eq!(account_id_from_id_token(&token).as_deref(), Some("acct-123"));
+        assert_eq!(
+            account_id_from_id_token(&token).as_deref(),
+            Some("acct-123")
+        );
     }
 
     #[test]

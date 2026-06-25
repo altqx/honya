@@ -92,7 +92,10 @@ pub fn upsert(ws: &Workspace, mut c: Character) -> std::io::Result<CharacterUpse
 
 /// Like [`upsert`], but preserves established Thai names on auto-merge.
 /// Agent writes use this; human/coherence edits still use plain [`upsert`].
-pub fn upsert_keep_thai(ws: &Workspace, mut c: Character) -> std::io::Result<CharacterUpsertOutcome> {
+pub fn upsert_keep_thai(
+    ws: &Workspace,
+    mut c: Character,
+) -> std::io::Result<CharacterUpsertOutcome> {
     if !c.thai_name.trim().is_empty() {
         if c.id.trim().is_empty() {
             c.id = derive_id(&c);
@@ -384,7 +387,10 @@ fn merge_into(target: &mut Character, incoming: Character) {
 }
 
 /// Union address forms by normalized JP; later non-empty Thai/`by` values win.
-fn union_also_called(target: &mut Vec<crate::model::AltName>, incoming: Vec<crate::model::AltName>) {
+fn union_also_called(
+    target: &mut Vec<crate::model::AltName>,
+    incoming: Vec<crate::model::AltName>,
+) {
     for inc in incoming {
         if inc.jp.trim().is_empty() {
             continue;
@@ -810,7 +816,10 @@ mod tests {
 
         let blurb = render_context_blurb(&chars);
         assert!(blurb.contains("ユウ→ยู"), "alt Thai shown:\n{blurb}");
-        assert!(blurb.contains("お兄ちゃん→พี่"), "sister's name shown:\n{blurb}");
+        assert!(
+            blurb.contains("お兄ちゃん→พี่"),
+            "sister's name shown:\n{blurb}"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 

@@ -15,7 +15,7 @@ use crate::model::{AppEvent, PlanStep, PlanStepStatus, Project};
 use crate::theme::{self, Theme};
 use crate::ui::input::{self, EditOpts, Edited};
 use crate::ui::mouse::{MouseGesture, MouseInput};
-use crate::ui::text::truncate_cols;
+use crate::ui::text::{col_width, truncate_cols};
 use crate::workspace::refine_session::SessionMeta;
 
 use super::Action;
@@ -112,6 +112,8 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/resume", "pick a session to resume"),
 ];
 
+const COMPACT_SUMMARY_PREFIX: &str = "[Earlier conversation, compacted to fit the context window]";
+
 const RESOURCE_CANDS: &[(&str, &str)] = &[
     ("@lexicon", "cast + glossary"),
     ("@characters", "the cast"),
@@ -184,7 +186,13 @@ pub fn display_turns(messages: &[Message]) -> Vec<Turn> {
         match m.role {
             Role::User => {
                 if let Some(c) = &m.content {
-                    turns.push(Turn::user(user_display(c).to_string()));
+                    if is_compacted_summary(c) {
+                        turns.push(Turn::tool(
+                            "context summarized - earlier messages compacted".to_string(),
+                        ));
+                    } else {
+                        turns.push(Turn::user(user_display(c).to_string()));
+                    }
                 }
             }
             Role::Assistant => {
@@ -207,10 +215,21 @@ pub fn display_turns(messages: &[Message]) -> Vec<Turn> {
 }
 
 fn user_display(content: &str) -> &str {
-    content
-        .split_once("\n\n(In scope:")
-        .map(|(head, _)| head)
-        .unwrap_or(content)
+    let mut end = content.len();
+    for marker in [
+        "\n\n(In scope:",
+        "\n\n[Mid-run steering:",
+        "\n\n[Approval mode:",
+    ] {
+        if let Some((head, _)) = content.split_once(marker) {
+            end = end.min(head.len());
+        }
+    }
+    &content[..end]
+}
+
+fn is_compacted_summary(content: &str) -> bool {
+    content.starts_with(COMPACT_SUMMARY_PREFIX)
 }
 
 /// Blocking prompt awaiting user input.
@@ -343,6 +362,10 @@ impl RefineScreen {
         &self.plan
     }
 
+    pub fn is_in_flight(&self) -> bool {
+        self.in_flight
+    }
+
     pub fn set_plan(&mut self, plan: Vec<PlanStep>) {
         self.plan = plan;
     }
@@ -469,6 +492,16 @@ impl RefineScreen {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Tab {
             return Action::RefineCycleApprovalMode;
         }
+        if self.in_flight
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+            && key.code == KeyCode::Char('c')
+        {
+            return Action::RefineCancel;
+        }
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::End {
+            self.jump_bottom();
+            return Action::None;
+        }
         if !self.focused {
             match key.code {
                 KeyCode::Char(_) | KeyCode::Enter => self.focused = true,
@@ -516,7 +549,6 @@ impl RefineScreen {
 
         match key.code {
             KeyCode::Enter => self.submit(),
-            KeyCode::Esc if self.in_flight => Action::RefineCancel,
             KeyCode::Esc => {
                 self.focused = false;
                 Action::None
@@ -758,6 +790,19 @@ impl RefineScreen {
                 self.session_tokens.1 = self.session_tokens.1.saturating_add(*completion_tokens);
                 self.last_context = *prompt_tokens;
             }
+            AppEvent::RefineContextCompacted {
+                dropped_messages,
+                token_estimate,
+                context_max,
+            } => {
+                self.settle_reasoning();
+                self.conversation.push(Turn::tool(compaction_notice(
+                    *dropped_messages,
+                    *token_estimate,
+                    *context_max,
+                )));
+                self.follow = true;
+            }
             AppEvent::RefineDelta { delta } => self.push_delta(delta),
             AppEvent::RefinePlanUpdated { steps } => {
                 self.plan = steps.clone();
@@ -815,6 +860,7 @@ impl RefineScreen {
     }
 
     fn push_delta(&mut self, delta: &str) {
+        let keep_following = self.at_bottom();
         self.settle_reasoning();
         let need_new = !matches!(
             self.conversation.last(),
@@ -831,10 +877,13 @@ impl RefineScreen {
             last.text.push_str(delta);
         }
         self.streaming = true;
-        self.follow = true;
+        if keep_following {
+            self.jump_bottom();
+        }
     }
 
     fn push_reasoning(&mut self, delta: &str) {
+        let keep_following = self.at_bottom();
         let need_new = !matches!(
             self.conversation.last(),
             Some(t) if t.role == TurnRole::Reasoning && t.streaming
@@ -850,7 +899,18 @@ impl RefineScreen {
             last.text.push_str(delta);
         }
         self.streaming = true;
+        if keep_following {
+            self.jump_bottom();
+        }
+    }
+
+    fn at_bottom(&self) -> bool {
+        self.follow || self.scroll >= self.last_bottom
+    }
+
+    fn jump_bottom(&mut self) {
         self.follow = true;
+        self.scroll = self.last_bottom;
     }
 
     fn settle_reasoning(&mut self) {
@@ -891,21 +951,39 @@ impl RefineScreen {
                 ("esc", "close"),
             ]
         } else if self.in_flight {
-            &[("esc", "interrupt"), ("⌃R", "details"), ("↑↓", "scroll")]
+            &[
+                ("⌃C", "interrupt"),
+                ("⌃End", "bottom"),
+                ("⌃R", "details"),
+                ("↑↓", "scroll"),
+            ]
         } else if self.focused {
             &[
                 ("↵", "send"),
                 ("@", "mention"),
                 ("/", "cmd"),
+                ("⌃End", "bottom"),
                 ("⌃R", "details"),
-                ("esc", "tabs"),
+                ("esc", "unfocus"),
             ]
         } else {
-            &[("type", "focus"), ("↑↓", "scroll"), ("⌃R", "details")]
+            &[
+                ("type", "focus"),
+                ("⌃End", "bottom"),
+                ("↑↓", "scroll"),
+                ("⌃R", "details"),
+            ]
         }
     }
 
-    pub fn render(&mut self, f: &mut Frame, area: Rect, frame: u64, has_project: bool, theme: &Theme) {
+    pub fn render(
+        &mut self,
+        f: &mut Frame,
+        area: Rect,
+        frame: u64,
+        has_project: bool,
+        theme: &Theme,
+    ) {
         if !has_project {
             self.render_no_project(f, area, theme);
             return;
@@ -1005,10 +1083,7 @@ impl RefineScreen {
                         } else {
                             Style::default().fg(theme.ink)
                         };
-                        lines.push(Line::from(Span::styled(
-                            format!("{marker}{opt}"),
-                            style,
-                        )));
+                        lines.push(Line::from(Span::styled(format!("{marker}{opt}"), style)));
                     }
                 }
                 (
@@ -1090,11 +1165,15 @@ impl RefineScreen {
                 let (mark, style) = match s.status {
                     PlanStepStatus::Completed => (
                         "✓ ",
-                        Style::default().fg(theme.ink_faint).add_modifier(Modifier::CROSSED_OUT),
+                        Style::default()
+                            .fg(theme.ink_faint)
+                            .add_modifier(Modifier::CROSSED_OUT),
                     ),
                     PlanStepStatus::InProgress => (
                         "▸ ",
-                        Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(theme.accent)
+                            .add_modifier(Modifier::BOLD),
                     ),
                     PlanStepStatus::Pending => ("◻ ", Style::default().fg(theme.ink_soft)),
                 };
@@ -1282,13 +1361,16 @@ impl RefineScreen {
             }
         }
 
-        let total_lines = lines.len() as u16;
+        let was_at_bottom = self.at_bottom();
+        let total_lines = wrapped_line_count(&lines, width);
         let view_h = inner.height;
         self.last_bottom = total_lines.saturating_sub(view_h);
-        let scroll = if self.follow {
+        let scroll = if self.follow || was_at_bottom {
+            self.jump_bottom();
             self.last_bottom
         } else {
-            self.scroll.min(total_lines.saturating_sub(1))
+            self.scroll = self.scroll.min(self.last_bottom);
+            self.scroll
         };
 
         let para = Paragraph::new(lines)
@@ -1308,7 +1390,9 @@ impl RefineScreen {
             let mut spans = vec![
                 Span::styled(
                     format!("{} ", theme::refine_spinner_frame(frame)),
-                    Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
                     "Working ",
@@ -1322,7 +1406,7 @@ impl RefineScreen {
                 spans.push(Span::styled(format!(" ↓ {}", fmt_tokens(out)), soft));
                 spans.push(Span::styled(" tokens", faint));
             }
-            spans.push(Span::styled(" · esc to interrupt)", faint));
+            spans.push(Span::styled(" · Ctrl-C to interrupt)", faint));
             return Some(Line::from(spans));
         }
 
@@ -1371,8 +1455,7 @@ impl RefineScreen {
                 TurnRole::Tool => {
                     // Collapse runs so the answer stays prominent; ⌃R expands detail.
                     let start = i;
-                    while i < self.conversation.len()
-                        && self.conversation[i].role == TurnRole::Tool
+                    while i < self.conversation.len() && self.conversation[i].role == TurnRole::Tool
                     {
                         i += 1;
                     }
@@ -1541,6 +1624,33 @@ impl RefineScreen {
     }
 }
 
+fn wrapped_line_count(lines: &[Line<'_>], width: usize) -> u16 {
+    if width == 0 {
+        return 0;
+    }
+    let rows: usize = lines
+        .iter()
+        .map(|line| {
+            let cols: usize = line
+                .spans
+                .iter()
+                .map(|span| col_width(span.content.as_ref()))
+                .sum();
+            cols.div_ceil(width).max(1)
+        })
+        .sum();
+    rows.min(u16::MAX as usize) as u16
+}
+
+/// Transcript notice for context compaction.
+fn compaction_notice(dropped: usize, token_estimate: u32, context_max: u32) -> String {
+    format!(
+        "context summarized - {dropped} old message(s), before ~{} / {} tokens",
+        fmt_tokens(token_estimate),
+        fmt_tokens(context_max)
+    )
+}
+
 /// Compact token count: `950`, `1.5k`, `12k`, `120k`.
 fn fmt_tokens(n: u32) -> String {
     if n < 1000 {
@@ -1684,6 +1794,9 @@ mod tests {
         use crate::llm::{FunctionCall, ToolCall};
         let messages = vec![
             Message::user("fix the prose\n\n(In scope: volume 1 chapter 1. Active volume: 1.)"),
+            Message::user(
+                "also update tone\n\n[Mid-run steering: hidden note]\n\n[Approval mode: auto]",
+            ),
             Message {
                 role: Role::Assistant,
                 content: None,
@@ -1702,12 +1815,35 @@ mod tests {
             Message::assistant("done — tightened the phrasing"),
         ];
         let turns = display_turns(&messages);
-        assert_eq!(turns.len(), 3);
+        assert_eq!(turns.len(), 4);
         assert_eq!(turns[0].role, TurnRole::User);
         assert_eq!(turns[0].text, "fix the prose"); // scope hint stripped
-        assert_eq!(turns[1].role, TurnRole::Tool);
-        assert_eq!(turns[1].text, "edit_chapter");
-        assert_eq!(turns[2].role, TurnRole::Assistant);
+        assert_eq!(turns[1].role, TurnRole::User);
+        assert_eq!(turns[1].text, "also update tone"); // steering metadata stripped
+        assert_eq!(turns[2].role, TurnRole::Tool);
+        assert_eq!(turns[2].text, "edit_chapter");
+        assert_eq!(turns[3].role, TurnRole::Assistant);
+    }
+
+    #[test]
+    fn in_flight_reflects_running_turn_state() {
+        let mut s = RefineScreen::new();
+        assert!(!s.is_in_flight());
+        s.begin_turn();
+        assert!(s.is_in_flight());
+        s.on_app_event(&AppEvent::RefineMessageDone);
+        assert!(!s.is_in_flight());
+    }
+
+    #[test]
+    fn display_turns_shows_compacted_history_as_tool_notice() {
+        let messages = vec![Message::user(format!(
+            "{COMPACT_SUMMARY_PREFIX}\nUser: earlier request"
+        ))];
+        let turns = display_turns(&messages);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].role, TurnRole::Tool);
+        assert!(turns[0].text.contains("context summarized"));
     }
 
     #[test]
@@ -1764,16 +1900,28 @@ mod tests {
         s.on_app_event(&AppEvent::RefineDelta {
             delta: "Here is the fix.".to_string(),
         });
-        assert!(!s.conversation[0].streaming, "reasoning stops when the answer starts");
+        assert!(
+            !s.conversation[0].streaming,
+            "reasoning stops when the answer starts"
+        );
         assert_eq!(s.conversation[1].role, TurnRole::Assistant);
 
         let md = s.transcript_markdown();
-        assert!(md.contains("thinking —"), "collapsed reasoning summary shown");
-        assert!(!md.contains("weighing the options"), "full reasoning hidden when collapsed");
+        assert!(
+            md.contains("thinking —"),
+            "collapsed reasoning summary shown"
+        );
+        assert!(
+            !md.contains("weighing the options"),
+            "full reasoning hidden when collapsed"
+        );
 
         s.expanded = true;
         let md = s.transcript_markdown();
-        assert!(md.contains("weighing the options"), "expanded reasoning shows the text");
+        assert!(
+            md.contains("weighing the options"),
+            "expanded reasoning shows the text"
+        );
     }
 
     #[test]
@@ -1790,13 +1938,150 @@ mod tests {
             });
         }
         let md = s.transcript_markdown();
-        assert!(md.contains("3 actions"), "consecutive tool lines coalesce: {md}");
-        assert!(!md.contains("grep_chapter"), "details hidden when collapsed");
+        assert!(
+            md.contains("3 actions"),
+            "consecutive tool lines coalesce: {md}"
+        );
+        assert!(
+            !md.contains("grep_chapter"),
+            "details hidden when collapsed"
+        );
 
         s.expanded = true;
         let md = s.transcript_markdown();
         assert!(md.contains("grep_chapter") && md.contains("edit_chapter"));
         assert!(!md.contains("3 actions"));
+    }
+
+    #[test]
+    fn compaction_event_adds_visible_tool_notice() {
+        let mut s = RefineScreen::new();
+        s.on_app_event(&AppEvent::RefineContextCompacted {
+            dropped_messages: 4,
+            token_estimate: 120_000,
+            context_max: 128_000,
+        });
+        assert_eq!(s.conversation.len(), 1);
+        assert_eq!(s.conversation[0].role, TurnRole::Tool);
+        let md = s.transcript_markdown();
+        assert!(md.contains("context summarized"));
+        assert!(md.contains("4 old message"));
+    }
+
+    #[test]
+    fn end_moves_chat_input_cursor_to_back() {
+        let mut s = RefineScreen::new();
+        s.input = "draft".to_string();
+        s.cursor = 0;
+        s.last_bottom = 12;
+        s.scroll = 3;
+        s.follow = false;
+
+        let action = s.handle_key(
+            ratatui::crossterm::event::KeyEvent::new(
+                KeyCode::End,
+                ratatui::crossterm::event::KeyModifiers::empty(),
+            ),
+            None,
+        );
+
+        assert!(matches!(action, Action::None));
+        assert!(!s.follow);
+        assert_eq!(s.scroll, 3);
+        assert_eq!(s.cursor, s.input.len());
+    }
+
+    #[test]
+    fn ctrl_end_jumps_to_bottom_even_with_input_text() {
+        let mut s = RefineScreen::new();
+        s.input = "draft".to_string();
+        s.cursor = 0;
+        s.last_bottom = 9;
+        s.scroll = 2;
+        s.follow = false;
+
+        let action = s.handle_key(
+            ratatui::crossterm::event::KeyEvent::new(
+                KeyCode::End,
+                ratatui::crossterm::event::KeyModifiers::CONTROL,
+            ),
+            None,
+        );
+
+        assert!(matches!(action, Action::None));
+        assert!(s.follow);
+        assert_eq!(s.scroll, 9);
+        assert_eq!(s.cursor, 0, "Ctrl+End scrolls instead of moving the caret");
+    }
+
+    #[test]
+    fn ctrl_c_interrupts_in_flight_refine_turn() {
+        let mut s = RefineScreen::new();
+        s.begin_turn();
+
+        let action = s.handle_key(
+            ratatui::crossterm::event::KeyEvent::new(
+                KeyCode::Char('c'),
+                ratatui::crossterm::event::KeyModifiers::CONTROL,
+            ),
+            None,
+        );
+
+        assert!(matches!(action, Action::RefineCancel));
+    }
+
+    #[test]
+    fn esc_unfocuses_input_even_while_refine_turn_is_in_flight() {
+        let mut s = RefineScreen::new();
+        s.begin_turn();
+        assert!(s.focused);
+
+        let action = s.handle_key(
+            ratatui::crossterm::event::KeyEvent::new(
+                KeyCode::Esc,
+                ratatui::crossterm::event::KeyModifiers::empty(),
+            ),
+            None,
+        );
+
+        assert!(matches!(action, Action::None));
+        assert!(!s.focused);
+        assert!(s.in_flight);
+    }
+
+    #[test]
+    fn streaming_follows_only_when_already_at_bottom() {
+        let mut at_bottom = RefineScreen::new();
+        at_bottom.follow = false;
+        at_bottom.last_bottom = 10;
+        at_bottom.scroll = 10;
+        at_bottom.on_app_event(&AppEvent::RefineDelta {
+            delta: "new text".to_string(),
+        });
+        assert!(
+            at_bottom.follow,
+            "bottom viewport keeps following streamed text"
+        );
+
+        let mut scrolled_up = RefineScreen::new();
+        scrolled_up.follow = false;
+        scrolled_up.last_bottom = 10;
+        scrolled_up.scroll = 4;
+        scrolled_up.on_app_event(&AppEvent::RefineDelta {
+            delta: "new text".to_string(),
+        });
+        assert!(
+            !scrolled_up.follow,
+            "scrolled-up viewport is not forced to bottom"
+        );
+        assert_eq!(scrolled_up.scroll, 4);
+    }
+
+    #[test]
+    fn wrapped_line_count_matches_display_rows() {
+        let lines = vec![Line::raw("abcdefghij"), Line::raw("")];
+        assert_eq!(wrapped_line_count(&lines, 4), 4);
+        assert_eq!(wrapped_line_count(&lines, 80), 2);
     }
 
     #[test]
@@ -1856,7 +2141,11 @@ mod tests {
         s.on_app_event(&AppEvent::RefineMessageDone);
         assert!(!s.in_flight, "done ends the in-flight turn");
         assert!(s.last_turn_elapsed.is_some(), "elapsed is banked");
-        assert_eq!(s.session_tokens, (2500, 500), "session total persists across turns");
+        assert_eq!(
+            s.session_tokens,
+            (2500, 500),
+            "session total persists across turns"
+        );
     }
 
     #[test]

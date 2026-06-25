@@ -2849,10 +2849,8 @@ mod tests {
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let ctx = PipelineCtx {
-            clients: ClientSet::single(
-                std::sync::Arc::new(ReviewerErrorClient)
-                    as std::sync::Arc<dyn crate::llm::client::LlmClient>,
-            ),
+            clients: ClientSet::single(std::sync::Arc::new(ReviewerErrorClient)
+                as std::sync::Arc<dyn crate::llm::client::LlmClient>),
             ws: ws.clone(),
             models: crate::model::ModelSet::default(),
             cfg,
@@ -3018,10 +3016,8 @@ mod tests {
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let ctx = PipelineCtx {
-            clients: ClientSet::single(
-                std::sync::Arc::new(HangingClient)
-                    as std::sync::Arc<dyn crate::llm::client::LlmClient>,
-            ),
+            clients: ClientSet::single(std::sync::Arc::new(HangingClient)
+                as std::sync::Arc<dyn crate::llm::client::LlmClient>),
             ws: ws.clone(),
             models: crate::model::ModelSet::default(),
             cfg: crate::model::AppConfig {
