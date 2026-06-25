@@ -488,7 +488,21 @@ struct GoogleStreamResponse {
 impl GoogleStreamResponse {
     fn into_response(self) -> Result<ChatResponse> {
         if let Some(interaction) = self.latest_interaction {
-            return interaction_to_chat(interaction);
+            let mut resp = interaction_to_chat(interaction)?;
+            // Streaming delivers the text via `step.delta` events; the terminal
+            // `interaction.completed` summary carries no `steps`, so its content
+            // is empty. Recover the accumulated stream instead of dropping it.
+            if let Some(choice) = resp.choices.first_mut() {
+                let has_text = choice
+                    .message
+                    .content
+                    .as_deref()
+                    .is_some_and(|c| !c.is_empty());
+                if !has_text && !self.content.is_empty() {
+                    choice.message.content = Some(self.content);
+                }
+            }
+            return Ok(resp);
         }
 
         Ok(ChatResponse {
@@ -733,5 +747,41 @@ mod tests {
         assert_eq!(content, "hel");
         let chat = stream.into_response().unwrap();
         assert_eq!(chat.choices[0].message.content.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn stepless_terminal_interaction_keeps_streamed_content() {
+        // The live Interactions API streams text via `step.delta` and ends with an
+        // `interaction.completed` summary that carries no `steps` — the content must
+        // survive instead of collapsing to an empty `finish_reason=stop` response.
+        let mut stream = GoogleStreamResponse::default();
+        let mut sink = |_: StreamDelta| {};
+
+        handle_sse_line(
+            br#"data: {"event_type":"step.start","index":1,"step":{"type":"model_output"}}"#,
+            &mut sink,
+            &mut stream,
+        )
+        .unwrap();
+        handle_sse_line(
+            br#"data: {"event_type":"step.delta","index":1,"delta":{"type":"text","text":"{\"translated_text\":\"hi\"}"}}"#,
+            &mut sink,
+            &mut stream,
+        )
+        .unwrap();
+        handle_sse_line(
+            br#"data: {"event_type":"interaction.completed","interaction":{"id":"i9","status":"completed","model":"gemini-3-flash-preview","usage":{"total_input_tokens":12,"total_output_tokens":8,"total_tokens":20}}}"#,
+            &mut sink,
+            &mut stream,
+        )
+        .unwrap();
+
+        let chat = stream.into_response().unwrap();
+        assert_eq!(
+            chat.choices[0].message.content.as_deref(),
+            Some(r#"{"translated_text":"hi"}"#)
+        );
+        assert_eq!(chat.choices[0].finish_reason.as_deref(), Some("stop"));
+        assert_eq!(chat.usage.unwrap().total_tokens, 20);
     }
 }
