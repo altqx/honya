@@ -1029,6 +1029,7 @@ async fn gate(ctx: &PipelineCtx, chapter: u32) -> bool {
 const MAX_GLOSSARY_IN_CTX: usize = 80;
 const MAX_CHARACTERS_IN_CTX: usize = 40;
 const MAX_PROTECTED_TERMS_FOR_ORCH: usize = 40;
+const ORCHESTRATOR_MAX_TOOL_ROUNDS: usize = 32;
 
 fn glossary_terms_for_chunk(ws: &Workspace, chunk_text: &str, max: usize) -> Vec<GlossaryTerm> {
     let mut terms = glossary::load(ws);
@@ -1895,9 +1896,14 @@ async fn run_orchestrator_metadata_turn(
     );
 
     let orch_client = ctx.client_for(&ctx.models.orchestrator)?;
-    let outcome = run_tool_loop(orch_client.as_ref(), req, &executor, 8)
-        .await
-        .map_err(|e| anyhow::anyhow!("orchestrator tool loop failed: {e}"))?;
+    let outcome = run_tool_loop(
+        orch_client.as_ref(),
+        req,
+        &executor,
+        ORCHESTRATOR_MAX_TOOL_ROUNDS,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("orchestrator tool loop failed: {e}"))?;
 
     Ok((outcome.usage, outcome.tool_calls))
 }

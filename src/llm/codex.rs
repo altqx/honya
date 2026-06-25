@@ -229,7 +229,7 @@ fn build_body(req: &ChatRequest) -> Value {
             .collect();
         body["tools"] = json!(mapped);
         body["tool_choice"] = json!("auto");
-        body["parallel_tool_calls"] = json!(false);
+        body["parallel_tool_calls"] = json!(true);
     }
 
     // Codex is reasoning-capable; default the effort when config omits it.
@@ -452,6 +452,7 @@ mod tests {
         assert_eq!(body["tools"][0]["type"], "function");
         assert_eq!(body["tools"][0]["name"], "do_it");
         assert_eq!(body["tool_choice"], "auto");
+        assert_eq!(body["parallel_tool_calls"], true);
         assert_eq!(body["input"][0]["type"], "function_call");
         assert_eq!(body["input"][0]["name"], "do_it");
         assert_eq!(body["input"][0]["arguments"], "{\"x\":1}");
