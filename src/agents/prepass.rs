@@ -128,6 +128,7 @@ pub async fn run_prepass(
                 .map(|a| a.trim().to_string())
                 .filter(|a| !a.is_empty())
                 .collect(),
+            also_called: Vec::new(),
             notes: non_empty(&c.notes),
             first_seen_chapter: None,
         };

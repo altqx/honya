@@ -50,7 +50,21 @@ pub fn orchestrator_tools() -> serde_json::Value {
                                 }
                             }
                         },
-                        "aliases": {"type": "array", "items": {"type": "string"}, "description": "Alternate JP surface forms of THIS SAME character (e.g. bare given name, alternate kanji). Used to fold name variants into one entry instead of creating duplicates."},
+                        "aliases": {"type": "array", "items": {"type": "string"}, "description": "Alternate JP surface forms of THIS SAME character (e.g. bare given name, alternate kanji) that should render as the SAME Thai name. Used to fold name variants into one entry instead of creating duplicates."},
+                        "also_called": {
+                            "type": "array",
+                            "description": "DISTINCT names other characters use to address this person (nickname, title, term of endearment) that get their OWN Thai rendering — e.g. ユウ→ยู, お兄ちゃん→พี่. Different from `aliases` (same name, same Thai). Record one here whenever someone addresses this character by a different name so that form stays consistent.",
+                            "items": {
+                                "type": "object",
+                                "additionalProperties": false,
+                                "required": ["jp", "thai"],
+                                "properties": {
+                                    "jp": {"type": "string", "description": "The JP name/form as spoken."},
+                                    "thai": {"type": "string", "description": "Fixed Thai rendering for THIS form."},
+                                    "by": {"type": "string", "description": "Who calls them this (character name or role), optional."}
+                                }
+                            }
+                        },
                         "notes": {"type": "string"},
                         "first_seen_chapter": {"type": "integer"}
                     }
@@ -209,6 +223,8 @@ struct UpsertCharacterArgs {
     #[serde(default)]
     aliases: Vec<String>,
     #[serde(default)]
+    also_called: Vec<crate::model::AltName>,
+    #[serde(default)]
     notes: Option<String>,
     #[serde(default)]
     first_seen_chapter: Option<u32>,
@@ -342,10 +358,11 @@ pub async fn dispatch_tool(
                 speech_style: a.speech_style,
                 relationships: a.relationships,
                 aliases: a.aliases,
+                also_called: a.also_called,
                 notes: a.notes,
                 first_seen_chapter: a.first_seen_chapter.or(Some(chapter)),
             };
-            match characters::upsert(ws, character) {
+            match characters::upsert_keep_thai(ws, character) {
                 Ok(outcome) => {
                     tx.send(AppEvent::CharacterUpserted {
                         id: id.clone(),
@@ -824,6 +841,7 @@ mod tests {
             speech_style: None,
             relationships: Vec::new(),
             aliases: Vec::new(),
+            also_called: Vec::new(),
             notes: None,
             first_seen_chapter: None,
         }

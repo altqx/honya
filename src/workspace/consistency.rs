@@ -1,8 +1,4 @@
-//! Project-wide roster consistency checks.
-//!
-//! Shared CHARACTERS.md/GLOSSARY.md entries can drift when later volumes add
-//! near-duplicates or map one reading to multiple Thai forms. This read-only audit
-//! reports those cross-volume disagreements for QA.
+//! Read-only project-wide roster consistency checks for QA.
 
 use std::collections::BTreeMap;
 
@@ -114,6 +110,7 @@ mod tests {
             speech_style: None,
             relationships: Vec::new(),
             aliases: Vec::new(),
+            also_called: Vec::new(),
             notes: None,
             first_seen_chapter: None,
         }

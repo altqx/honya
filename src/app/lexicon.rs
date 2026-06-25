@@ -1,6 +1,4 @@
-//! src/app/lexicon.rs — the Lexicon (5 辞): editor for the tool-mutated context
-//! files. Tab cycles Glossary ↔ Characters ↔ Style. Entries can be added / edited /
-//! deleted inline, persisting via workspace::{glossary,characters}::upsert.
+//! Lexicon screen for editing glossary, character, and style context files.
 
 use std::hash::{Hash, Hasher};
 
@@ -25,17 +23,15 @@ const SUB_GLOSSARY: u8 = 0;
 const SUB_CHARACTERS: u8 = 1;
 const SUB_STYLE: u8 = 2;
 
-/// An inline edit form. The fields are generic key→value pairs so the same form
-/// type backs both glossary terms and characters; `kind` says which it commits to.
+/// Generic inline edit form for glossary terms, characters, and style notes.
 #[derive(Debug, Clone)]
 pub struct EditForm {
     kind: u8,
-    /// Field labels + current values, in tab order.
+    // Field labels + current values, in tab order.
     fields: Vec<(&'static str, String)>,
     field: usize,
-    /// Caret byte-offset into the focused field's value.
+    // Byte offset into the focused field.
     cursor: usize,
-    /// True for a brand-new entry (vs editing an existing one).
     is_new: bool,
 }
 
@@ -158,6 +154,7 @@ impl EditForm {
             speech_style: None,
             relationships: Vec::new(),
             aliases: Vec::new(),
+            also_called: Vec::new(),
             notes: opt(get(3)),
             first_seen_chapter: None,
         }
@@ -260,12 +257,10 @@ impl LexiconScreen {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent, ws: Option<&Workspace>) -> Action {
-        // ---- edit mode owns all keys ----
         if self.editing.is_some() {
             return self.handle_edit_key(key, ws);
         }
 
-        // ---- search field owns text input ----
         if self.searching {
             if input::handle(
                 &mut self.filter,
@@ -338,10 +333,7 @@ impl LexiconScreen {
         }
     }
 
-    /// Mouse: click a section tab to switch; click a table row to select it, then
-    /// double-click (or click the selected row again) to edit; the wheel moves the
-    /// cursor. While the inline editor is open the wheel cycles fields and a click
-    /// focuses the field under it.
+    /// Mouse handling for tabs, table selection/editing, and edit-field focus.
     pub fn handle_mouse(&mut self, m: MouseInput, ws: Option<&Workspace>) -> Action {
         if self.editing.is_some() {
             return self.handle_edit_mouse(m);
@@ -396,9 +388,7 @@ impl LexiconScreen {
             MouseGesture::ScrollUp => form.prev_field(),
             MouseGesture::ScrollDown => form.next_field(),
             MouseGesture::Click { .. } => {
-                // Focus the field whose row was clicked. The modal mirrors
-                // `render_edit`: a centered 60-wide box, inner line 0 blank, then
-                // each field on inner line 1 + i*2.
+                // Mirror `render_edit`'s field rows for hit testing.
                 let modal = crate::ui::layout::centered_modal(
                     60,
                     (form.fields.len() as u16) * 2 + 6,
@@ -485,8 +475,6 @@ impl LexiconScreen {
             ),
             _ => crate::workspace::glossary::upsert(ws, form.to_glossary()),
         };
-        // Surface success/failure via a confirm-less toast modal-free path: we use
-        // a transient modal only on error; success is reflected by the refreshed list.
         match result {
             Ok(()) => Action::None,
             Err(e) => Action::show_overlay(Overlay::confirm(
@@ -506,7 +494,6 @@ impl LexiconScreen {
                 self.editing = Some(EditForm::new_character(list.get(idx)));
             }
             SUB_STYLE => {
-                // Style is a free-form file; offer a single-field note editor.
                 self.editing = Some(EditForm {
                     kind: SUB_STYLE,
                     fields: vec![("Style note", String::new())],
@@ -525,7 +512,6 @@ impl LexiconScreen {
     fn begin_delete(&mut self, ws: Option<&Workspace>) -> Action {
         let Some(ws) = ws else { return Action::None };
         let idx = self.list.selected().unwrap_or(0);
-        // (display label, delete action) for the selected entry.
         let labelled: Option<(String, Action)> = match self.sub {
             SUB_CHARACTERS => self.characters(ws).get(idx).map(|c| {
                 (
@@ -533,7 +519,6 @@ impl LexiconScreen {
                     Action::DeleteCharacter { id: c.id.clone() },
                 )
             }),
-            // Style is append-only free-form prose; nothing structured to delete.
             SUB_STYLE => None,
             _ => self.glossary(ws).get(idx).map(|t| {
                 (
@@ -622,7 +607,6 @@ impl LexiconScreen {
             }
             spans.push(Span::raw(" "));
         }
-        // Right side: filter + count.
         let count = match (ws, self.sub) {
             (Some(ws), SUB_GLOSSARY) => format!("{} terms", self.glossary(ws).len()),
             (Some(ws), SUB_CHARACTERS) => format!("{} characters", self.characters(ws).len()),
@@ -703,7 +687,6 @@ impl LexiconScreen {
         }
         let sel = self.list.selected().unwrap_or(0);
 
-        // Header row.
         let head = Line::from(Span::styled(
             format!(
                 "   {} {} {} {} {}  Notes",
@@ -848,9 +831,7 @@ impl LexiconScreen {
     fn render_style(&mut self, f: &mut Frame, area: Rect, ws: &Workspace, theme: &Theme) {
         let body = std::fs::read_to_string(ws.style_md())
             .unwrap_or_else(|_| "STYLE.md not found.".to_string());
-        // Render STYLE.md as Markdown (headings, emphasis, lists) instead of raw
-        // syntax; wrap so long guidance lines stay readable. Memoize the parse so a
-        // static file is not re-rendered on every animation tick.
+        // Cache the Markdown render by body, width, and theme.
         let width = area.width.saturating_sub(2) as usize;
         let fg = theme.ink_soft;
         let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -953,10 +934,6 @@ impl Default for LexiconScreen {
         Self::new()
     }
 }
-
-// ============================================================================
-// HELPERS
-// ============================================================================
 
 fn opt(s: String) -> Option<String> {
     let t = s.trim();

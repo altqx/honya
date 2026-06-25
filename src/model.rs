@@ -781,14 +781,27 @@ pub struct Character {
     pub speech_style: Option<String>,
     #[serde(default)]
     pub relationships: Vec<Relationship>,
-    /// Alternate JP surface forms of this same character (given name, full name,
-    /// alternate kanji). Lets variant names dedup into one canonical entry.
+    /// JP variants that render to this character's canonical Thai name.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub aliases: Vec<String>,
+    /// Address forms for this character, each with its own Thai rendering.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub also_called: Vec<AltName>,
     #[serde(default)]
     pub notes: Option<String>,
     #[serde(default)]
     pub first_seen_chapter: Option<u32>,
+}
+
+/// Alternate address form with a fixed Thai rendering.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AltName {
+    pub jp: String,
+    #[serde(default)]
+    pub thai: String,
+    /// Who uses this name, when that context matters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

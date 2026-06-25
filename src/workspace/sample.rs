@@ -1,9 +1,5 @@
-//! Build the bundled demo project. `create_sample_project` materializes a small,
-//! mostly *pre-translated* light novel on disk so a first-time user can explore all
-//! five screens — Shelf, Project, Reader, Lexicon — without an API key or any spend.
-//! Two chapters ship already translated (JA + TH); a third ships untranslated so the
-//! Translate pipeline has something to run once a key is set. The story and all its
-//! names are original to honya (no third-party text).
+//! Bundled sample project: an original mini light novel with two translated
+//! chapters and one pending chapter for trying the pipeline.
 
 use std::path::Path;
 
@@ -12,28 +8,23 @@ use chrono::Utc;
 use crate::model::{Character, GlossaryTerm, ModelSet, ReaderAnnotation, Relationship, TermPolicy};
 use crate::workspace::{Workspace, characters, glossary, scaffold, translation, volume};
 
-/// Directory name (and project id / slug) of the bundled sample.
+/// Bundled sample project slug.
 pub const SAMPLE_SLUG: &str = "honya-sample";
 
-/// Display title written as PROJECT.md's `# ` heading; the Shelf reads it back.
 const SAMPLE_TITLE: &str = "星詠みの図書館 ・ honya sample";
 
-/// True when the sample already exists under `root` (so onboarding can offer
-/// "open" instead of "create" and creation stays idempotent).
+/// True if the bundled sample has already been created.
 pub fn sample_exists(root: &Path) -> bool {
     root.join(SAMPLE_SLUG).join("PROJECT.md").is_file()
 }
 
-/// Create the bundled sample project under `root` and return its slug. Idempotent:
-/// if the sample is already present it is left untouched and its slug returned, so
-/// "Create sample project" is safe to invoke repeatedly.
+/// Create the bundled sample project without clobbering an existing copy.
 pub fn create_sample_project(root: &Path, models: &ModelSet) -> std::io::Result<String> {
     let dir = root.join(SAMPLE_SLUG);
     if dir.join("PROJECT.md").is_file() {
         return Ok(SAMPLE_SLUG.to_string());
     }
 
-    // Lay down the canonical tree + empty metadata files, then fill them in.
     scaffold::create_project(&dir, SAMPLE_TITLE, models, 1)?;
     let ws = Workspace::new(dir.clone(), 1);
 
@@ -46,8 +37,7 @@ pub fn create_sample_project(root: &Path, models: &ModelSet) -> std::io::Result<
     Ok(SAMPLE_SLUG.to_string())
 }
 
-/// Seed the glossary with three terms, each demonstrating a different terminology
-/// policy the user will see enforced in real translations.
+/// Seed terms that exercise hard/preferred/forbidden policies.
 fn write_glossary(ws: &Workspace) -> std::io::Result<()> {
     let terms = [
         GlossaryTerm {
@@ -111,6 +101,7 @@ fn write_characters(ws: &Workspace) -> std::io::Result<()> {
             speech_style: Some("สุภาพ พูดน้อย".into()),
             relationships: Vec::new(),
             aliases: Vec::new(),
+            also_called: Vec::new(),
             notes: Some("ตัวเอก ผู้มาเยือนหอสมุดยามค่ำคืน".into()),
             first_seen_chapter: Some(1),
         },
@@ -130,6 +121,7 @@ fn write_characters(ws: &Workspace) -> std::io::Result<()> {
                 relation: "ผู้ชี้นำ".into(),
             }],
             aliases: Vec::new(),
+            also_called: Vec::new(),
             notes: Some("ผู้ขับขานดาราผมสีเงิน ผู้ดูแลหอสมุด".into()),
             first_seen_chapter: Some(1),
         },
@@ -156,9 +148,7 @@ fn write_volume_meta(ws: &Workspace) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Write the three chapters: ch1/ch2 with both JA source and committed TH (so the
-/// Reader shows a real side-by-side); ch3 with JA only (Pending — left for the user
-/// to translate once a key is configured).
+/// Write two translated chapters and one pending chapter.
 fn write_chapters(ws: &Workspace) -> std::io::Result<()> {
     translation::write_raw(ws, 1, CH1_JA)?;
     write_translated(ws, 1, CH1_TH)?;
@@ -166,13 +156,11 @@ fn write_chapters(ws: &Workspace) -> std::io::Result<()> {
     translation::write_raw(ws, 2, CH2_JA)?;
     write_translated(ws, 2, CH2_TH)?;
 
-    // ch3 stays untranslated → scans as Pending → "try the pipeline" target.
     translation::write_raw(ws, 3, CH3_JA)?;
     Ok(())
 }
 
-/// Write a finished translated chapter as a single committed chunk (`honya:chunk 0`),
-/// matching the on-disk format the pipeline produces and the Reader/scan expect.
+/// Write a finished translated chapter in the pipeline's chunk format.
 fn write_translated(ws: &Workspace, chapter: u32, thai: &str) -> std::io::Result<()> {
     let body = format!("<!-- honya:chunk 0 -->\n{}\n", thai.trim_end_matches('\n'));
     let path = ws.translated(chapter);
@@ -182,8 +170,7 @@ fn write_translated(ws: &Workspace, chapter: u32, thai: &str) -> std::io::Result
     std::fs::write(path, body)
 }
 
-/// Seed one bookmark and one proofreading note so those Reader features are
-/// discoverable on first open.
+/// Seed Reader marks for first-open discovery.
 fn write_reader_marks(ws: &Workspace) -> std::io::Result<()> {
     volume::toggle_reader_bookmark(ws, 1, 2, "เปิดเรื่อง — หอสมุดยามราตรี")?;
     volume::add_reader_annotation(
@@ -198,7 +185,7 @@ fn write_reader_marks(ws: &Workspace) -> std::io::Result<()> {
     Ok(())
 }
 
-// ---- bundled story text (original to honya) --------------------------------
+// Original sample story text.
 
 const CH1_JA: &str = "\
 # 第一章 星の図書館
@@ -266,9 +253,7 @@ mod tests {
         base
     }
 
-    /// The generated sample scans into a real project: three chapters (two finished,
-    /// one pending), a populated glossary and cast, and a translated volume synopsis —
-    /// everything a first-time user needs to explore all five screens offline.
+    /// The generated sample scans as a usable offline demo.
     #[test]
     fn sample_project_scans_as_a_usable_demo() {
         let root = temp_root("scan");
@@ -280,14 +265,11 @@ mod tests {
         let project = crate::workspace::scan::scan_one_project(&dir).expect("scans as a project");
         let vol = &project.volumes[0];
         assert_eq!(vol.chapters.len(), 3, "three chapters");
-        // ch1/ch2 ship translated → Done; ch3 ships raw-only → Pending (a run target).
         assert_eq!(vol.chapters[0].status, ChapterStatus::Done);
         assert_eq!(vol.chapters[1].status, ChapterStatus::Done);
         assert_eq!(vol.chapters[2].status, ChapterStatus::Pending);
         assert!(vol.chapters.iter().all(|c| c.kind == ChapterKind::Prose));
-        // Titles come from each raw chapter's leading heading.
         assert!(vol.chapters[0].title.contains("星の図書館"));
-        // The volume label is parsed from the recap's `เล่ม:` line.
         assert_eq!(vol.label.as_deref(), Some("星の章"));
 
         let ws = Workspace::new(dir.clone(), 1);
@@ -306,15 +288,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Re-creating an existing sample is a no-op that returns the same slug and never
-    /// clobbers built-up content (so "Create sample" is safe to press twice).
+    /// Re-creating the sample is a no-op.
     #[test]
     fn sample_creation_is_idempotent() {
         let root = temp_root("idem");
         let models = ModelSet::default();
         let first = create_sample_project(&root, &models).unwrap();
 
-        // Mutate the glossary, then re-create: the extra term must survive.
         let ws = Workspace::new(root.join(SAMPLE_SLUG), 1);
         glossary::upsert(
             &ws,

@@ -128,7 +128,8 @@ pub fn refine_tools_schema() -> serde_json::Value {
                     "relationships":{"type":"array","items":{"type":"object","additionalProperties":false,
                         "required":["target_id","relation"],
                         "properties":{"target_id":{"type":"string"},"relation":{"type":"string"}}}},
-                    "aliases":{"type":"array","items":{"type":"string"}},
+                    "aliases":{"type":"array","items":{"type":"string"},"description":"Variant JP spellings of the SAME name that render to the same Thai."},
+                    "also_called":{"type":"array","description":"Distinct names others use for this character (nickname/title), each with its OWN Thai rendering.","items":{"type":"object","additionalProperties":false,"required":["jp","thai"],"properties":{"jp":{"type":"string"},"thai":{"type":"string"},"by":{"type":"string"}}}},
                     "notes":{"type":"string"},
                     "first_seen_chapter":{"type":"integer"}
                 }}
@@ -914,6 +915,8 @@ struct UpsertCharacterArgs {
     #[serde(default)]
     aliases: Vec<String>,
     #[serde(default)]
+    also_called: Vec<crate::model::AltName>,
+    #[serde(default)]
     notes: Option<String>,
     #[serde(default)]
     first_seen_chapter: Option<u32>,
@@ -1464,6 +1467,7 @@ pub async fn dispatch_refine_tool(
                 speech_style: a.speech_style,
                 relationships: a.relationships,
                 aliases: a.aliases,
+                also_called: a.also_called,
                 notes: a.notes,
                 first_seen_chapter: a.first_seen_chapter,
             };

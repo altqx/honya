@@ -90,6 +90,35 @@ pub fn upsert(ws: &Workspace, mut c: Character) -> std::io::Result<CharacterUpse
     finish(ws, chars, outcome)
 }
 
+/// Like [`upsert`], but preserves established Thai names on auto-merge.
+/// Agent writes use this; human/coherence edits still use plain [`upsert`].
+pub fn upsert_keep_thai(ws: &Workspace, mut c: Character) -> std::io::Result<CharacterUpsertOutcome> {
+    if !c.thai_name.trim().is_empty() {
+        if c.id.trim().is_empty() {
+            c.id = derive_id(&c);
+        }
+        let chars = load(ws);
+        if let Some(i) = find_match(&chars, &c)
+            && !chars[i].thai_name.trim().is_empty()
+        {
+            c.thai_name = String::new();
+        }
+    }
+    upsert(ws, c)
+}
+
+/// Existing entry that would receive `c` under the auto-merge rules.
+fn find_match(chars: &[Character], c: &Character) -> Option<usize> {
+    if let Some(i) = chars.iter().position(|e| e.id == c.id) {
+        return Some(i);
+    }
+    if let Some(i) = find_exact(chars, &c.jp_name) {
+        return Some(i);
+    }
+    let suffix = suffix_candidates(chars, c);
+    (suffix.len() == 1).then(|| suffix[0])
+}
+
 /// Sort by id, re-render the table, and write the data block atomically.
 fn finish(
     ws: &Workspace,
@@ -215,18 +244,35 @@ pub fn render_table(chars: &[Character]) -> String {
                 .collect::<Vec<_>>()
                 .join("; ")
         };
-        // Show alias forms inline so the duplicate name variants this folds together
-        // stay visible in the human-readable table.
         let jp = if c.aliases.is_empty() {
             cell(&c.jp_name)
         } else {
             cell(&format!("{} ({})", c.jp_name, c.aliases.join(", ")))
         };
+        let thai = if c.also_called.is_empty() {
+            cell(&c.thai_name)
+        } else {
+            let calls = c
+                .also_called
+                .iter()
+                .filter(|a| !a.jp.trim().is_empty())
+                .map(|a| {
+                    let th = if a.thai.trim().is_empty() {
+                        c.thai_name.trim()
+                    } else {
+                        a.thai.trim()
+                    };
+                    format!("{}→{}", a.jp.trim(), th)
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            cell(&format!("{} [{}]", c.thai_name, calls))
+        };
         s.push_str(&format!(
             "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
             cell(&c.id),
             jp,
-            cell(&c.thai_name),
+            thai,
             opt(&c.romaji),
             opt(&c.gender),
             opt(&c.honorific),
@@ -249,7 +295,7 @@ pub fn render_context_blurb(chars: &[Character]) -> String {
         return String::new();
     }
     let mut s = String::new();
-    s.push_str("ตัวละคร (สรรพนาม/น้ำเสียงที่กำหนด ต้องใช้ให้สอดคล้อง):\n");
+    s.push_str("ตัวละคร — ชื่อไทยหลัง → คือการสะกดที่ตายตัว (canonical) ต้องใช้ให้ตรงตัวทุกครั้งที่เอ่ยถึงตัวละครนั้น ห้ามสะกดต่าง ห้ามบัญญัติชื่อไทยใหม่ และต้องใช้สรรพนาม/น้ำเสียงที่กำหนดให้สอดคล้อง:\n");
     for c in chars {
         let jp = c.jp_name.trim();
         if jp.is_empty() {
@@ -257,8 +303,7 @@ pub fn render_context_blurb(chars: &[Character]) -> String {
         }
         s.push_str("- ");
         s.push_str(jp);
-        // List alias forms so a chunk that uses a bare given name still maps to this
-        // one canonical character instead of looking like someone new.
+        // Alias hits keep bare-name mentions tied to this character.
         let aliases: Vec<&str> = c
             .aliases
             .iter()
@@ -288,6 +333,25 @@ pub fn render_context_blurb(chars: &[Character]) -> String {
         if let Some(sp) = c.speech_style.as_deref().filter(|x| !x.trim().is_empty()) {
             s.push_str(&format!(" [น้ำเสียง: {}]", sp.trim()));
         }
+        let calls: Vec<String> = c
+            .also_called
+            .iter()
+            .filter(|a| !a.jp.trim().is_empty())
+            .map(|a| {
+                let th = if a.thai.trim().is_empty() {
+                    c.thai_name.trim()
+                } else {
+                    a.thai.trim()
+                };
+                match a.by.as_deref().map(str::trim).filter(|b| !b.is_empty()) {
+                    Some(by) => format!("{}→{} (โดย {by})", a.jp.trim(), th),
+                    None => format!("{}→{}", a.jp.trim(), th),
+                }
+            })
+            .collect();
+        if !calls.is_empty() {
+            s.push_str(&format!(" [เรียกอีกชื่อ: {}]", calls.join(", ")));
+        }
         s.push('\n');
     }
     s
@@ -316,6 +380,27 @@ fn merge_into(target: &mut Character, incoming: Character) {
         };
     }
     union_relationships(&mut target.relationships, incoming.relationships);
+    union_also_called(&mut target.also_called, incoming.also_called);
+}
+
+/// Union address forms by normalized JP; later non-empty Thai/`by` values win.
+fn union_also_called(target: &mut Vec<crate::model::AltName>, incoming: Vec<crate::model::AltName>) {
+    for inc in incoming {
+        if inc.jp.trim().is_empty() {
+            continue;
+        }
+        let key = norm_name(&inc.jp);
+        if let Some(existing) = target.iter_mut().find(|e| norm_name(&e.jp) == key) {
+            if !inc.thai.trim().is_empty() {
+                existing.thai = inc.thai;
+            }
+            if inc.by.as_deref().is_some_and(|b| !b.trim().is_empty()) {
+                existing.by = inc.by;
+            }
+        } else {
+            target.push(inc);
+        }
+    }
 }
 
 /// Overwrite `slot` only when `incoming` is a non-empty `Some`.
@@ -381,6 +466,12 @@ fn character_matches(c: &Character, needle: &str) -> bool {
         norm_name(c.romaji.as_deref().unwrap_or("")).to_lowercase(),
     ];
     hay.extend(c.aliases.iter().map(|a| norm_name(a).to_lowercase()));
+    hay.extend(c.also_called.iter().flat_map(|a| {
+        [
+            norm_name(&a.jp).to_lowercase(),
+            norm_name(&a.thai).to_lowercase(),
+        ]
+    }));
     if hay.iter().any(|h| contains_either(h, &norm_needle)) {
         return true;
     }
@@ -416,8 +507,6 @@ pub(crate) fn contains_either(hay: &str, needle: &str) -> bool {
     }
     (hay.chars().count() >= 2 || !hay.is_ascii()) && needle.contains(hay)
 }
-
-// ---- Deduplication helpers -------------------------------------------------
 
 /// Auto-merge an incoming entry into `target`: keep the longer JP surface form as
 /// the canonical `jp_name`, record the other as an alias, then fold the remaining
@@ -681,6 +770,7 @@ mod tests {
             speech_style: None,
             relationships: Vec::new(),
             aliases: Vec::new(),
+            also_called: Vec::new(),
             notes: None,
             first_seen_chapter: None,
         }
@@ -688,6 +778,40 @@ mod tests {
 
     fn find<'a>(chars: &'a [Character], id: &str) -> Option<&'a Character> {
         chars.iter().find(|c| c.id == id)
+    }
+
+    /// Address forms union, search, and render with per-form Thai.
+    #[test]
+    fn also_called_per_form_thai() {
+        use crate::model::AltName;
+        let (base, ws) = temp_ws("also_called");
+        let mut yuu = ch("yuu", "結城勇", "ยูกิ ยู", Some("Yuuki Yuu"));
+        yuu.also_called = vec![AltName {
+            jp: "ユウ".into(),
+            thai: "ยู".into(),
+            by: Some("เพื่อนสนิท".into()),
+        }];
+        upsert(&ws, yuu).unwrap();
+
+        let mut again = ch("yuu", "結城勇", "ยูกิ ยู", None);
+        again.also_called = vec![AltName {
+            jp: "お兄ちゃん".into(),
+            thai: "พี่".into(),
+            by: None,
+        }];
+        upsert(&ws, again).unwrap();
+
+        let chars = load(&ws);
+        assert_eq!(chars.len(), 1, "alt-names must not spawn duplicate entries");
+        let c = &chars[0];
+        assert_eq!(c.also_called.len(), 2, "alt-names union, not clobber");
+
+        assert!(get(&ws, Some("ユウ"), None).iter().any(|c| c.id == "yuu"));
+
+        let blurb = render_context_blurb(&chars);
+        assert!(blurb.contains("ユウ→ยู"), "alt Thai shown:\n{blurb}");
+        assert!(blurb.contains("お兄ちゃん→พี่"), "sister's name shown:\n{blurb}");
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// Same written JP name under two different ids → one entry (always safe).
@@ -700,6 +824,22 @@ mod tests {
         let chars = load(&ws);
         assert_eq!(chars.len(), 1, "identical JP form must not duplicate");
         assert!(matches!(out, CharacterUpsertOutcome::Merged { .. }));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Agent upserts preserve established Thai names but set first sightings.
+    #[test]
+    fn keep_thai_preserves_established_name() {
+        let (base, ws) = temp_ws("keep_thai");
+        upsert_keep_thai(&ws, ch("yuu", "勇", "ยู", Some("Yuu"))).unwrap();
+        upsert_keep_thai(&ws, ch("yuu", "勇", "ยูว์", Some("Yuu"))).unwrap();
+
+        let chars = load(&ws);
+        assert_eq!(chars.len(), 1);
+        assert_eq!(chars[0].thai_name, "ยู", "established Thai name must stick");
+
+        upsert_keep_thai(&ws, ch("miya", "未夜", "มิยะ", Some("Miya"))).unwrap();
+        assert_eq!(find(&load(&ws), "miya").unwrap().thai_name, "มิยะ");
         let _ = std::fs::remove_dir_all(&base);
     }
 

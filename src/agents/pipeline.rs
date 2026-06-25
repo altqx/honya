@@ -1081,12 +1081,14 @@ fn build_reference_ctx(ws: &Workspace, chunk_text: &str, prev_chunk_text: Option
     let mut chars = characters::load(ws);
     let mentions = |c: &crate::model::Character, text: &str| {
         let jp = c.jp_name.trim();
-        // Match alias forms too, so a chunk using a bare given name still pulls in
-        // the one canonical entry instead of looking like an unknown character.
+        // Alias and alt-name hits keep nickname-only chunks tied to this entry.
         (!jp.is_empty() && text.contains(jp))
             || c.aliases
                 .iter()
                 .any(|a| !a.trim().is_empty() && text.contains(a.trim()))
+            || c.also_called
+                .iter()
+                .any(|a| !a.jp.trim().is_empty() && text.contains(a.jp.trim()))
     };
     chars.retain(|c| {
         mentions(c, chunk_text) || prev_chunk_text.is_some_and(|prev| mentions(c, prev))
@@ -1735,12 +1737,10 @@ async fn process_chunk(
             return Ok(ChunkOutcome::Committed);
         }
 
-        // ---- Rejected ----
         if attempt < max {
             emit_attempt_failed_retry(ctx, chapter, chunk, attempt, max, &fb_text);
             feedback = Some(fb_text);
         } else {
-            // ---- Retries exhausted: commit the last attempt unreviewed ----
             let reason = if fb_text.is_empty() {
                 "reviewer rejected after max attempts".to_string()
             } else {
@@ -2642,6 +2642,7 @@ mod tests {
                 speech_style: None,
                 relationships: Vec::new(),
                 aliases: Vec::new(),
+                also_called: Vec::new(),
                 notes: None,
                 first_seen_chapter: None,
             },
@@ -2681,6 +2682,7 @@ mod tests {
             speech_style: None,
             relationships: Vec::new(),
             aliases: vec!["勇".into()],
+            also_called: Vec::new(),
             notes: None,
             first_seen_chapter: None,
         };
@@ -2715,6 +2717,7 @@ mod tests {
                 speech_style: Some("สรรพนามตัวเอง: ฉัน".into()),
                 relationships: Vec::new(),
                 aliases: Vec::new(),
+                also_called: Vec::new(),
                 notes: None,
                 first_seen_chapter: None,
             },
