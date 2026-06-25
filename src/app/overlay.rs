@@ -5099,7 +5099,7 @@ fn render_editor_body(
     );
 
     f.render_widget(
-        Paragraph::new(editor_status(st, accept_label, theme))
+        Paragraph::new(editor_status(st, accept_label, theme, rows[2].width))
             .style(Style::default().bg(theme.bg_panel)),
         rows[2],
     );
@@ -5165,16 +5165,35 @@ fn render_editor_body(
 
 /// The editor's status/actions line — phase-aware, English chrome. `accept_label`
 /// is the verb shown for the commit key (e.g. "save" / "start import").
-fn editor_status(st: &SynopsisState, accept_label: &str, theme: &Theme) -> Span<'static> {
+fn editor_status(
+    st: &SynopsisState,
+    accept_label: &str,
+    theme: &Theme,
+    max_cols: u16,
+) -> Span<'static> {
     let faint = Style::default().fg(theme.ink_faint);
+    let text = editor_status_text(st, accept_label, max_cols as usize);
+    if st.edit_th {
+        return Span::styled(text, faint);
+    }
+    match st.phase {
+        SynPhase::Editing => Span::styled(text, faint),
+        SynPhase::Translating => Span::styled(text, Style::default().fg(theme.status_working)),
+        SynPhase::Done => Span::styled(text, Style::default().fg(theme.status_done)),
+        SynPhase::Failed => Span::styled(text, Style::default().fg(theme.status_failed)),
+    }
+}
+
+fn editor_status_text(st: &SynopsisState, accept_label: &str, max_cols: usize) -> String {
     if st.edit_th {
         let msg = if st.multiline {
             "  Editing Thai · Tab retranslate · Enter newline · Esc done".to_string()
         } else {
             format!("  Editing Thai · Tab retranslate · Enter {accept_label} · Esc done")
         };
-        return Span::styled(msg, faint);
+        return fit_status_text(std::iter::once(msg), max_cols);
     }
+
     match st.phase {
         SynPhase::Editing => {
             let msg = if st.raw.trim().is_empty() {
@@ -5190,24 +5209,65 @@ fn editor_status(st: &SynopsisState, accept_label: &str, theme: &Theme) -> Span<
                     st.raw.chars().count()
                 )
             };
-            Span::styled(msg, faint)
+            fit_status_text(std::iter::once(msg), max_cols)
         }
-        SynPhase::Translating => Span::styled(
-            "  ◐ Translating with the agent… (Esc to cancel)".to_string(),
-            Style::default().fg(theme.status_working),
+        SynPhase::Translating => fit_status_text(
+            std::iter::once("  ◐ Translating with the agent… (Esc to cancel)".to_string()),
+            max_cols,
         ),
-        SynPhase::Done => Span::styled(
-            format!(
-                "  ✓ Translated (try {}) · Enter {accept_label} · e edit · r reroll · o source · s skip",
-                st.attempt + 1
-            ),
-            Style::default().fg(theme.status_done),
-        ),
-        SynPhase::Failed => Span::styled(
-            "  ✗ Translation failed · e write it · r retry · o source · s skip".to_string(),
-            Style::default().fg(theme.status_failed),
+        SynPhase::Done => {
+            let attempt = st.attempt + 1;
+            let accept = accept_label.trim();
+            let short_accept = if accept == "start import" {
+                "start"
+            } else {
+                accept
+            };
+            fit_status_text(
+                [
+                    format!(
+                        "  ✓ Translated (try {attempt}) · Enter {accept} · e edit · r reroll · o source · s skip"
+                    ),
+                    format!(
+                        "  ✓ Translated (try {attempt}) · Enter {short_accept} · e edit · r reroll · o source · s skip"
+                    ),
+                    format!(
+                        "  ✓ Translated (try {attempt}) · Enter {short_accept} · e edit · r reroll · s skip"
+                    ),
+                    format!(
+                        "  ✓ Translated (try {attempt}) · Enter {short_accept} · e edit · r reroll"
+                    ),
+                    format!("  ✓ Translated (try {attempt}) · Enter {short_accept}"),
+                    format!("  ✓ Translated (try {attempt})"),
+                ],
+                max_cols,
+            )
+        }
+        SynPhase::Failed => fit_status_text(
+            [
+                "  ✗ Translation failed · e write it · r retry · o source · s skip".to_string(),
+                "  ✗ Translation failed · e write · r retry · s skip".to_string(),
+                "  ✗ Translation failed · r retry · s skip".to_string(),
+                "  ✗ Translation failed".to_string(),
+            ],
+            max_cols,
         ),
     }
+}
+
+fn fit_status_text<I>(candidates: I, max_cols: usize) -> String
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut fallback = String::new();
+    for msg in candidates {
+        let safe = thai_display_safe(&msg);
+        if col_width(&safe) <= max_cols {
+            return safe;
+        }
+        fallback = safe;
+    }
+    truncate_cols(&fallback, max_cols)
 }
 
 /// The glyph, color, and short tag for a QA finding row.
@@ -5747,5 +5807,26 @@ mod tests {
                 "raw SARA AM leaked into the {phase:?} synopsis render"
             );
         }
+    }
+
+    #[test]
+    fn import_done_status_fits_modal_body() {
+        let mut st = SynopsisState::new("源のあらすじ".to_string(), "เรื่องย่อภาษาไทย".to_string());
+        st.phase = SynPhase::Done;
+
+        let status = editor_status_text(&st, "start import", 76);
+
+        assert!(
+            col_width(&status) <= 76,
+            "status exceeds import modal body: {status}"
+        );
+        assert!(
+            !status.ends_with('…'),
+            "status should choose a fitting variant, not truncate: {status}"
+        );
+        assert!(
+            status.contains("s skip"),
+            "status lost the final action hint: {status}"
+        );
     }
 }
