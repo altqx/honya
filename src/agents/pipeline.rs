@@ -1352,6 +1352,9 @@ async fn process_chunk(
     let mut feedback: Option<String> = None;
     // Keep the best non-refusal Thai so later hard errors can still yield NeedsReview.
     let mut candidate: Option<String> = None;
+    // Every reviewer rejection so far, so retry 2+ sees the whole critique history
+    // and stops repeating mistakes it was already told to fix.
+    let mut past_reviews: Vec<String> = Vec::new();
 
     for attempt in 1..=max {
         ctx.tx.send(AppEvent::ChunkStateChanged {
@@ -1740,7 +1743,8 @@ async fn process_chunk(
 
         if attempt < max {
             emit_attempt_failed_retry(ctx, chapter, chunk, attempt, max, &fb_text);
-            feedback = Some(fb_text);
+            feedback = Some(combine_review_feedback(&past_reviews, &fb_text));
+            past_reviews.push(fb_text);
         } else {
             let reason = if fb_text.is_empty() {
                 "reviewer rejected after max attempts".to_string()
@@ -1757,6 +1761,24 @@ async fn process_chunk(
         "chunk {} exhausted attempts without resolution",
         chunk.index
     )
+}
+
+/// Fold prior reviewer rejections in front of the latest one so a 2nd+ retry sees
+/// the full critique history, not just the most recent verdict. The first rejection
+/// (no history yet) passes through unchanged.
+fn combine_review_feedback(past: &[String], latest: &str) -> String {
+    if past.is_empty() {
+        return latest.to_string();
+    }
+    let mut s = String::from(
+        "รอบก่อนหน้านี้ถูกตีกลับด้วยเหตุผลเหล่านี้ — อย่าทำผิดซ้ำเดิม:\n",
+    );
+    for (i, fb) in past.iter().enumerate() {
+        s.push_str(&format!("[รอบที่ {}]\n{}\n\n", i + 1, fb.trim()));
+    }
+    s.push_str("[รอบล่าสุด]\n");
+    s.push_str(latest.trim());
+    s
 }
 
 /// Emit the per-attempt "rejected, will retry" event pair the UI renders when an
@@ -2195,6 +2217,21 @@ mod queue_tests {
 mod tests {
     use super::*;
     use crate::model::{Character, GlossaryTerm};
+
+    #[test]
+    fn combine_review_feedback_first_rejection_passes_through() {
+        assert_eq!(combine_review_feedback(&[], "fix tone"), "fix tone");
+    }
+
+    #[test]
+    fn combine_review_feedback_carries_past_reviews() {
+        let out = combine_review_feedback(&["wrong name".into(), "tense slip".into()], "still off");
+        assert!(out.contains("wrong name"));
+        assert!(out.contains("tense slip"));
+        assert!(out.contains("still off"));
+        // Latest is last so the model weights it most.
+        assert!(out.rfind("still off") > out.rfind("wrong name"));
+    }
 
     fn temp_ws(tag: &str) -> (std::path::PathBuf, Workspace) {
         let base = std::env::temp_dir().join(format!("honya_ctx_{tag}_{}", std::process::id()));
