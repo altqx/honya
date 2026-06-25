@@ -115,10 +115,35 @@ pub fn tokenrouter_key_from_env() -> Option<String> {
     None
 }
 
-/// Whether any provider has a usable key configured (OpenRouter or Tokenrouter).
+pub fn resolve_google_key(cfg: &AppConfig) -> Option<String> {
+    google_key_from_env().or_else(|| {
+        cfg.google_api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string)
+    })
+}
+
+pub fn google_key_from_env() -> Option<String> {
+    for var in ["HONYA_GOOGLE_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"] {
+        if let Ok(v) = std::env::var(var) {
+            let v = v.trim();
+            if !v.is_empty() {
+                return Some(v.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Whether any provider has a usable key configured.
 /// Used to gate "no API key" prompts now that agents can route per-provider.
 pub fn any_provider_key(cfg: &AppConfig) -> bool {
-    resolve_api_key(cfg).is_some() || resolve_tokenrouter_key(cfg).is_some()
+    resolve_api_key(cfg).is_some()
+        || resolve_tokenrouter_key(cfg).is_some()
+        || resolve_google_key(cfg).is_some()
+        || cfg.codex_auth.is_some()
 }
 
 /// Truthiness helper for opt-in env flags.

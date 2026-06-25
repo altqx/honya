@@ -267,13 +267,15 @@ pub enum ChunkState {
 }
 
 /// LLM provider an agent routes to. OpenRouter and Tokenrouter share the
-/// chat/completions client; Codex uses ChatGPT's Responses API.
+/// chat/completions client; Google uses the Gemini Interactions API; Codex uses
+/// ChatGPT's Responses API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Provider {
     #[default]
     OpenRouter,
     Tokenrouter,
+    Google,
     Codex,
 }
 
@@ -282,6 +284,7 @@ impl Provider {
         match self {
             Provider::OpenRouter => "OpenRouter",
             Provider::Tokenrouter => "Tokenrouter",
+            Provider::Google => "Google",
             Provider::Codex => "Codex",
         }
     }
@@ -289,7 +292,8 @@ impl Provider {
     pub fn cycled(self) -> Self {
         match self {
             Provider::OpenRouter => Provider::Tokenrouter,
-            Provider::Tokenrouter => Provider::Codex,
+            Provider::Tokenrouter => Provider::Google,
+            Provider::Google => Provider::Codex,
             Provider::Codex => Provider::OpenRouter,
         }
     }
@@ -587,6 +591,10 @@ pub struct AppConfig {
     /// TOKENROUTER_API_KEY override this when set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tokenrouter_api_key: Option<String>,
+    /// Persisted Google Gemini API key. Env HONYA_GOOGLE_API_KEY / GEMINI_API_KEY
+    /// / GOOGLE_API_KEY override this when set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub google_api_key: Option<String>,
     /// Active color theme (serde default keeps pre-theme configs loading).
     #[serde(default)]
     pub theme: ThemeId,
@@ -602,8 +610,8 @@ pub struct AppConfig {
     /// (built from source on this machine).
     #[serde(default)]
     pub release_channel: ReleaseChannel,
-    /// OpenRouter `service_tier` sent on every chat request (`flex` = cheaper and
-    /// slower, `priority` = faster). `None` omits the field — the provider default.
+    /// Optional provider request tier (`flex` = cheaper and slower, `priority` =
+    /// faster). `None` omits the field — the provider default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_tier: Option<ServiceTier>,
     /// Run a one-time terminology/character pre-extraction pass over a volume's raw
@@ -673,6 +681,7 @@ impl Default for AppConfig {
             title: Some("honya".into()),
             api_key: None,
             tokenrouter_api_key: None,
+            google_api_key: None,
             theme: ThemeId::default(),
             onboarded: false,
             update_mode: UpdateMode::default(),

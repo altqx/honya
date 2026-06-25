@@ -220,6 +220,7 @@ fn print_help() {
     println!(
         "    HONYA_TOKENROUTER_API_KEY / TOKENROUTER_API_KEY   Tokenrouter key (overrides saved config)"
     );
+    println!("    HONYA_GOOGLE_API_KEY / GEMINI_API_KEY / GOOGLE_API_KEY   Google Gemini key");
     println!(
         "    HONYA_NO_UPDATE_CHECK                Disable the startup update check / auto-update"
     );

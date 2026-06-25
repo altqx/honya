@@ -251,11 +251,13 @@ pub enum Action {
         openrouter_key: Option<String>,
         /// New Tokenrouter key (same `Some`/`None` semantics as `openrouter_key`).
         tokenrouter_key: Option<String>,
+        /// New Google key (same `Some`/`None` semantics as `openrouter_key`).
+        google_key: Option<String>,
         /// Startup update behavior (auto-install vs. notify only).
         update_mode: crate::model::UpdateMode,
         /// Update channel: stable releases vs latest git built from source.
         release_channel: crate::model::ReleaseChannel,
-        /// OpenRouter `service_tier` for every request (`None` = provider default).
+        /// Provider request tier for every request (`None` = provider default).
         service_tier: Option<crate::model::ServiceTier>,
         /// Max Translator↔Reviewer retry attempts per chunk (already clamped 1..=20).
         max_attempts: u32,
@@ -2607,6 +2609,7 @@ impl App {
                 models,
                 openrouter_key,
                 tokenrouter_key,
+                google_key,
                 update_mode,
                 release_channel,
                 service_tier,
@@ -2618,6 +2621,7 @@ impl App {
                     *models,
                     openrouter_key,
                     tokenrouter_key,
+                    google_key,
                     update_mode,
                     release_channel,
                     service_tier,
@@ -3928,11 +3932,10 @@ impl App {
         });
     }
 
-    /// Persist edited Settings (base URL, model ids, and the config API key) and
-    /// close. `api_key` is `None` when the environment supplies the key (config is
-    /// left untouched), `Some("")` clears the saved key, `Some(k)` sets it. After a
-    /// key change, the active project's client is rebuilt so translation works at
-    /// once (or stops, if the key was cleared).
+    /// Persist edited Settings and close. Key fields are `None` when the
+    /// environment supplies that key, `Some("")` clears the saved key, and
+    /// `Some(k)` sets it. After a key change, the active project's clients are
+    /// rebuilt so translation works at once (or stops, if the key was cleared).
     // Args mirror the `Action::SaveSettings` payload one-to-one (config fields the
     // Settings overlay edits); bundling them into a struct would only add ceremony.
     #[allow(clippy::too_many_arguments)]
@@ -3941,6 +3944,7 @@ impl App {
         models: crate::model::ModelSet,
         openrouter_key: Option<String>,
         tokenrouter_key: Option<String>,
+        google_key: Option<String>,
         update_mode: crate::model::UpdateMode,
         release_channel: crate::model::ReleaseChannel,
         service_tier: Option<crate::model::ServiceTier>,
@@ -3970,6 +3974,12 @@ impl App {
             let next = (!k.is_empty()).then(|| k.to_string());
             keys_changed |= next != self.cfg.tokenrouter_api_key;
             self.cfg.tokenrouter_api_key = next;
+        }
+        if let Some(k) = google_key {
+            let k = k.trim();
+            let next = (!k.is_empty()).then(|| k.to_string());
+            keys_changed |= next != self.cfg.google_api_key;
+            self.cfg.google_api_key = next;
         }
         // Propagate the working model set to the active project so an in-flight
         // session's next chapter / refine turn uses the new selection.
@@ -4064,7 +4074,7 @@ impl App {
         if !matches!(self.overlay, Overlay::None) {
             return;
         }
-        let key_present = crate::config::resolve_api_key(&self.cfg).is_some();
+        let key_present = crate::config::any_provider_key(&self.cfg);
         let sample_exists = crate::workspace::sample::sample_exists(&working_root());
         // Shown once automatically; mark it so we don't nag on every launch. It stays
         // reachable from the palette / Help for anyone who wants it again.

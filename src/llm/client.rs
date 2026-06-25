@@ -15,6 +15,7 @@ use crate::model::{AgentModel, AppConfig, Provider, ServiceTier};
 
 pub const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
 pub const TOKENROUTER_BASE_URL: &str = "https://api.tokenrouter.com/v1";
+pub const GOOGLE_INTERACTIONS_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta";
 
 use super::{ChatRequest, ChatResponse, Choice, FunctionCall, ResponseMessage, ToolCall, Usage};
 
@@ -127,27 +128,26 @@ impl LlmError {
 /// LLM-layer result alias. Shadows `std::result::Result` within `crate::llm::*`.
 pub type Result<T> = std::result::Result<T, LlmError>;
 
-/// Everything the HTTP client needs to talk to OpenRouter.
+/// Shared HTTP client settings for provider transports.
 #[derive(Debug, Clone)]
 pub struct ClientConfig {
-    /// Base URL, e.g. `https://openrouter.ai/api/v1` (no trailing slash needed).
+    /// Provider base URL (no trailing slash needed).
     pub base_url: String,
-    /// Bearer token.
+    /// Provider API key or bearer token.
     pub api_key: String,
     /// `HTTP-Referer` ranking header (optional).
     pub referer: Option<String>,
     /// `X-Title` ranking header (optional).
     pub title: Option<String>,
-    /// `service_tier` stamped onto every request when set (`flex`/`priority`).
+    /// Provider request tier stamped onto every request when set (`flex`/`priority`).
     pub service_tier: Option<ServiceTier>,
     /// Per-request timeout.
     pub timeout: Duration,
 }
 
 impl ClientConfig {
-    /// Build a config for an explicit endpoint + key, inheriting the ranking
-    /// headers, service tier, and timeout from an [`AppConfig`]. Used to point the
-    /// same OpenAI-compatible client at OpenRouter vs Tokenrouter.
+    /// Build a config for an explicit endpoint + key, inheriting request settings
+    /// from an [`AppConfig`].
     pub fn for_endpoint(cfg: &AppConfig, base_url: impl Into<String>, api_key: String) -> Self {
         Self {
             base_url: base_url.into(),
@@ -172,7 +172,7 @@ impl ClientConfig {
 
     /// Send attempts (initial + retries) per chat call. Flex runs on spare,
     /// deprioritized capacity and faults far more often, so it gets a deeper budget.
-    fn max_send_attempts(&self) -> u32 {
+    pub(super) fn max_send_attempts(&self) -> u32 {
         match self.service_tier {
             Some(ServiceTier::Flex) => 5,
             _ => 3,
@@ -205,6 +205,7 @@ pub(super) fn retry_after_hint(err: &LlmError) -> Option<u64> {
 pub struct ClientSet {
     openrouter: Option<Arc<dyn LlmClient>>,
     tokenrouter: Option<Arc<dyn LlmClient>>,
+    google: Option<Arc<dyn LlmClient>>,
     codex: Option<Arc<dyn LlmClient>>,
 }
 
@@ -226,6 +227,12 @@ impl ClientSet {
             ))?) as Arc<dyn LlmClient>),
             None => None,
         };
+        let google = match crate::config::resolve_google_key(cfg) {
+            Some(key) => Some(Arc::new(super::google::GoogleInteractionsClient::new(
+                ClientConfig::for_endpoint(cfg, GOOGLE_INTERACTIONS_BASE_URL, key),
+            )?) as Arc<dyn LlmClient>),
+            None => None,
+        };
         let codex = match &cfg.codex_auth {
             Some(auth) => {
                 Some(Arc::new(super::codex::CodexClient::new(auth.clone())?) as Arc<dyn LlmClient>)
@@ -235,16 +242,18 @@ impl ClientSet {
         Ok(Self {
             openrouter,
             tokenrouter,
+            google,
             codex,
         })
     }
 
-    /// The client for a provider, or `None` when that provider has no key
-    /// configured (Codex is always `None` until its auth flow lands).
+    /// The client for a provider, or `None` when that provider has no usable key
+    /// or auth configured.
     pub fn for_provider(&self, provider: Provider) -> Option<Arc<dyn LlmClient>> {
         match provider {
             Provider::OpenRouter => self.openrouter.clone(),
             Provider::Tokenrouter => self.tokenrouter.clone(),
+            Provider::Google => self.google.clone(),
             Provider::Codex => self.codex.clone(),
         }
     }
@@ -256,7 +265,10 @@ impl ClientSet {
 
     /// True when no provider has a key configured (fully unconfigured).
     pub fn is_empty(&self) -> bool {
-        self.openrouter.is_none() && self.tokenrouter.is_none() && self.codex.is_none()
+        self.openrouter.is_none()
+            && self.tokenrouter.is_none()
+            && self.google.is_none()
+            && self.codex.is_none()
     }
 
     /// A set with a single client serving the default (OpenRouter) provider.
@@ -265,6 +277,7 @@ impl ClientSet {
         Self {
             openrouter: Some(client),
             tokenrouter: None,
+            google: None,
             codex: None,
         }
     }
@@ -275,6 +288,7 @@ impl ClientSet {
         match provider {
             Provider::OpenRouter => self.openrouter = Some(client),
             Provider::Tokenrouter => self.tokenrouter = Some(client),
+            Provider::Google => self.google = Some(client),
             Provider::Codex => self.codex = Some(client),
         }
         self
