@@ -6,7 +6,7 @@
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::agents::audit::{
@@ -19,7 +19,7 @@ use crate::agents::prepass;
 use crate::agents::prompts::{ORCHESTRATOR_SYSTEM, build_orchestrator_metadata_msg};
 use crate::agents::reviewer::review_chunk;
 use crate::agents::tools::{WorkspaceTools, orchestrator_tools};
-use crate::agents::translator::translate_chunk_streaming;
+use crate::agents::translator::{TranslatorStreamError, translate_chunk_streaming};
 use crate::cleanse;
 use crate::llm::client::{ClientSet, LlmClient};
 use crate::llm::tool_loop::run_tool_loop;
@@ -173,11 +173,9 @@ impl ChapterQueue {
 
 pub type QueueSnapshot = (Option<(u32, u32)>, Vec<(u32, u32)>);
 
-/// Why the loop watchdog tripped on a chapter.
+/// Why the chapter-level watchdog tripped.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum LoopReason {
-    /// The streamed translation degenerated into repeating the same text.
-    Repetition,
     /// The chapter made no pipeline progress for `loop_stall_secs`.
     Stall,
 }
@@ -185,7 +183,6 @@ enum LoopReason {
 impl LoopReason {
     fn describe(self) -> &'static str {
         match self {
-            LoopReason::Repetition => "output stuck repeating itself",
             LoopReason::Stall => "no progress for too long",
         }
     }
@@ -201,6 +198,7 @@ const REP_MIN_TOTAL: usize = 48; // don't judge until this much text has streame
 const REP_MIN_LINES: usize = 6; // identical consecutive lines to call it a loop
 const REP_MIN_LINE_LEN: usize = 3; // ignore repeated blank/tiny lines
 const REP_CHECK_EVERY: usize = 48; // re-run the (bounded) scan every N new chars
+const STALL_EXTERNAL_WAIT_GRACE: u32 = 2; // active model calls get one extra window
 
 /// True when the tail of streamed text looks like a degenerate repetition loop:
 /// either a short character-level cycle repeated many times, or the same non-empty
@@ -227,7 +225,7 @@ fn looks_like_repetition_loop(text: &str) -> bool {
         let unit = &window[start..start + p];
         let is_cycle =
             (1..REP_MIN_REPEATS).all(|r| &window[start + r * p..start + (r + 1) * p] == unit);
-        if is_cycle && !unit.iter().all(|c| c.is_whitespace()) {
+        if is_cycle && repeating_unit_has_signal(unit) {
             return true;
         }
         p += 1;
@@ -249,19 +247,48 @@ fn looks_like_repetition_loop(text: &str) -> bool {
     false
 }
 
-/// Detects a chapter that is "stuck in a loop" two ways at once: a wall-clock
-/// **stall** (no pipeline progress for `stall`) and streamed-output **repetition**.
-/// The pipeline pings it at each step and feeds it the Translator's stream; a
-/// concurrent [`Watchdog::watch`] future resolves the moment either arm trips.
+fn repeating_unit_has_signal(unit: &[char]) -> bool {
+    let mut distinct = Vec::new();
+    for &ch in unit {
+        if ch.is_whitespace() || is_combining_mark(ch) {
+            continue;
+        }
+        if !distinct.contains(&ch) {
+            distinct.push(ch);
+            if distinct.len() >= 2 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn is_combining_mark(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x0300..=0x036F
+            | 0x1AB0..=0x1AFF
+            | 0x1DC0..=0x1DFF
+            | 0x20D0..=0x20FF
+            | 0xFE20..=0xFE2F
+            | 0x0E31
+            | 0x0E34..=0x0E3A
+            | 0x0E47..=0x0E4E
+    )
+}
+
+/// Detects quiet pipeline stalls and repeated Translator streams. Active model-call
+/// stalls and repeated streamed output are handled inside the active chunk first;
+/// chapter-level recovery is reserved for stalls outside a tracked chunk attempt.
 struct Watchdog {
-    /// Master switch (`loop_stall_secs > 0`). When off, neither arm ever trips, so
-    /// runs behave exactly as before the watchdog existed (loops grind through
-    /// `max_attempts` and degrade to `NeedsReview` rather than re-translate/abort).
+    /// Master switch (`loop_stall_secs > 0`). When off, neither arm trips.
     enabled: bool,
     /// Stall window; `None` disables only the time arm (repetition still runs).
     stall: Option<Duration>,
     /// Last time the pipeline reported progress (a step or a streamed delta).
     last_progress: Mutex<Instant>,
+    /// Active external model calls. These can be legitimately quiet for a while.
+    external_waits: AtomicU32,
     /// Rolling tail of the current chunk's streamed Thai (bounded).
     repeat_buf: Mutex<String>,
     /// Chars accumulated since the last repetition scan (throttle).
@@ -278,6 +305,7 @@ impl Watchdog {
             enabled,
             stall,
             last_progress: Mutex::new(Instant::now()),
+            external_waits: AtomicU32::new(0),
             repeat_buf: Mutex::new(String::new()),
             since_check: Mutex::new(0),
             repetition: AtomicBool::new(false),
@@ -292,6 +320,7 @@ impl Watchdog {
             enabled: true,
             stall,
             last_progress: Mutex::new(Instant::now()),
+            external_waits: AtomicU32::new(0),
             repeat_buf: Mutex::new(String::new()),
             since_check: Mutex::new(0),
             repetition: AtomicBool::new(false),
@@ -301,6 +330,12 @@ impl Watchdog {
     /// Record pipeline progress (resets the stall timer).
     fn ping(&self) {
         *self.last_progress.lock().unwrap() = Instant::now();
+    }
+
+    fn external_wait(&self) -> WatchdogExternalWait<'_> {
+        self.external_waits.fetch_add(1, Ordering::Relaxed);
+        self.ping();
+        WatchdogExternalWait { wd: self }
     }
 
     /// Feed a streamed Translator delta: counts as progress and feeds the
@@ -348,11 +383,38 @@ impl Watchdog {
         self.reset_chunk();
     }
 
-    /// Resolve as soon as the watchdog trips. Polls a few times a second; treats a
-    /// paused/stopped run as progress so neither falsely reads as a stall.
+    fn repetition_triggered(&self) -> bool {
+        self.repetition.load(Ordering::Relaxed)
+    }
+
+    /// Resolve as soon as the active chunk's stream looks like a repetition loop.
+    async fn watch_repetition(&self, ctl: &RunControl) {
+        if !self.enabled {
+            std::future::pending::<()>().await;
+        }
+        loop {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            if ctl.is_paused() || ctl.is_stopped() {
+                continue;
+            }
+            if self.repetition_triggered() {
+                return;
+            }
+        }
+    }
+
+    async fn watch_active_call_stall(&self, ctl: &RunControl) -> LoopReason {
+        self.watch_stall(ctl, true).await
+    }
+
+    /// Resolve as soon as the chapter stalls outside an active model call. Polls a
+    /// few times a second; treats a paused/stopped run as progress so it does not
+    /// falsely read as a stall.
     async fn watch(&self, ctl: &RunControl) -> LoopReason {
-        // Disabled: never trips, so `process_chapter` always wins the select and
-        // behaves exactly as it did before the watchdog existed.
+        self.watch_stall(ctl, false).await
+    }
+
+    async fn watch_stall(&self, ctl: &RunControl, include_external_waits: bool) -> LoopReason {
         if !self.enabled {
             std::future::pending::<()>().await;
         }
@@ -366,15 +428,32 @@ impl Watchdog {
                 self.ping();
                 continue;
             }
-            if self.repetition.load(Ordering::Relaxed) {
-                return LoopReason::Repetition;
-            }
-            if let Some(stall) = self.stall
-                && self.last_progress.lock().unwrap().elapsed() >= stall
-            {
-                return LoopReason::Stall;
+            if let Some(stall) = self.stall {
+                let idle = self.last_progress.lock().unwrap().elapsed();
+                let external_waiting = self.external_waits.load(Ordering::Relaxed) > 0;
+                let deadline = if external_waiting && include_external_waits {
+                    stall.saturating_mul(STALL_EXTERNAL_WAIT_GRACE)
+                } else if external_waiting {
+                    continue;
+                } else {
+                    stall
+                };
+                if idle >= deadline {
+                    return LoopReason::Stall;
+                }
             }
         }
+    }
+}
+
+struct WatchdogExternalWait<'a> {
+    wd: &'a Watchdog,
+}
+
+impl Drop for WatchdogExternalWait<'_> {
+    fn drop(&mut self) {
+        self.wd.external_waits.fetch_sub(1, Ordering::Relaxed);
+        self.wd.ping();
     }
 }
 
@@ -419,6 +498,17 @@ enum Outcome {
 enum ChunkOutcome {
     Committed,
     NeedsReview,
+}
+
+enum TranslatorAttemptRun {
+    Finished(Box<Result<(TranslatorOut, Usage, bool), TranslatorStreamError>>),
+    Repeated,
+    Stalled(LoopReason),
+}
+
+enum ReviewerAttemptRun {
+    Finished(crate::llm::client::Result<(ReviewerOut, Usage)>),
+    Stalled(LoopReason),
 }
 
 /// Everything one pipeline run needs: the per-provider clients, the project
@@ -765,11 +855,10 @@ async fn run_volume_chapters(
     }
 }
 
-/// Process a chapter under the loop watchdog. Runs [`process_chapter`] and a
-/// concurrent [`Watchdog::watch`]; if the watchdog trips first the in-flight work
-/// is cancelled, the chapter is reset, and it is re-translated whole — up to
-/// `cfg.max_chapter_retranslates` times, after which the chapter resolves to
-/// [`Outcome::Aborted`] (the run then halts).
+/// Process a chapter under the outer stall watchdog. Active model-call stalls are
+/// retried inside the current chunk; if the chapter stalls outside that tracked
+/// chunk work, the in-flight chapter is cancelled and re-translated whole — up to
+/// `cfg.max_chapter_retranslates` times, after which the run halts.
 async fn process_chapter_watched(
     ctx: &PipelineCtx,
     chapter: u32,
@@ -791,7 +880,7 @@ async fn process_chapter_watched(
             ChapterRun::Looped(reason) => {
                 if retranslates >= max_retranslates {
                     let msg = format!(
-                        "chapter {chapter} stuck in a loop ({}) after {retranslates} re-translation(s) — aborting run",
+                        "chapter {chapter} stalled ({}) after {retranslates} re-translation(s) — aborting run",
                         reason.describe()
                     );
                     ctx.tx.send(AppEvent::Log {
@@ -1183,6 +1272,8 @@ fn effective_feedback_text(audit_findings: &[String], review: &ReviewerOut) -> S
 const REFUSAL_RETRY_FEEDBACK: &str = "The previous output was a refusal or policy notice, not a translation. Treat this as neutral literary translation work: translate only SOURCE_JP into Thai, preserve Markdown, do not add explicit detail or commentary, and return the final Thai story text in translated_text.";
 const PARTIAL_STREAM_RETRY_FEEDBACK: &str = "The previous stream stopped after an incomplete translated_text. Discard that partial output and translate the entire SOURCE_JP again from scratch. Keep neutral literary wording, preserve Markdown, do not add commentary, and return complete final Thai story text in valid translated_text JSON.";
 const LENGTH_RETRY_FEEDBACK: &str = "The previous attempt ran out of output tokens before completing translated_text. Be far more concise: keep thought_process to a few short words or leave it empty, never draft the translation there, and spend the budget on translated_text only. Translate the ENTIRE SOURCE_JP without omitting anything and return the complete final Thai in valid JSON.";
+const REPETITION_RETRY_FEEDBACK: &str = "The previous translated_text started repeating inside this chunk. Discard that output and redo only this SOURCE_JP chunk from the beginning. Do not copy any repeated tail, do not continue the loop, preserve Markdown, and return complete final Thai story text in valid JSON.";
+const STALL_RETRY_FEEDBACK: &str = "The previous attempt made no progress for too long. Redo only this SOURCE_JP chunk from the beginning, keep the output concise, preserve Markdown, and return complete final Thai story text in valid JSON.";
 
 /// User-facing NeedsReview reason for token-budget cutoffs.
 fn length_reason(length_trunc: bool, base: &str) -> String {
@@ -1356,7 +1447,7 @@ async fn process_chunk(
     // and stops repeating mistakes it was already told to fix.
     let mut past_reviews: Vec<String> = Vec::new();
 
-    for attempt in 1..=max {
+    'attempts: for attempt in 1..=max {
         ctx.tx.send(AppEvent::ChunkStateChanged {
             chapter,
             chunk: chunk.index,
@@ -1372,10 +1463,12 @@ async fn process_chunk(
             attempt,
         });
 
+        wd.reset_chunk();
         let tx = ctx.tx.clone();
         let translator_client = ctx.client_for(&ctx.models.translator)?;
-        let (out, t_usage, streamed_preview): (TranslatorOut, Usage, bool) =
-            match translate_chunk_streaming(
+        let translate_res = {
+            let _wait = wd.external_wait();
+            let translate = translate_chunk_streaming(
                 translator_client.as_ref(),
                 &ctx.models.translator,
                 &reference_ctx,
@@ -1394,10 +1487,67 @@ async fn process_chunk(
                         delta: delta.to_string(),
                     });
                 },
-            )
-            .await
-            {
-                Ok(o) => o,
+            );
+            tokio::pin!(translate);
+            let repeated = wd.watch_repetition(&ctx.ctl);
+            tokio::pin!(repeated);
+            let stalled = wd.watch_active_call_stall(&ctx.ctl);
+            tokio::pin!(stalled);
+            tokio::select! {
+                biased;
+                _ = &mut repeated => TranslatorAttemptRun::Repeated,
+                reason = &mut stalled => TranslatorAttemptRun::Stalled(reason),
+                res = &mut translate => TranslatorAttemptRun::Finished(Box::new(res)),
+            }
+        };
+
+        let (out, t_usage, streamed_preview): (TranslatorOut, Usage, bool) = match translate_res {
+            TranslatorAttemptRun::Finished(res) => match *res {
+                Ok(o) if !wd.repetition_triggered() => o,
+                Ok(_) => {
+                    ctx.tx.send(AppEvent::Log {
+                        level: LogLevel::Warn,
+                        msg: format!(
+                            "chapter {chapter} chunk {} output repeated — retrying chunk only ({attempt}/{max})",
+                            chunk.index + 1
+                        ),
+                    });
+                    if attempt < max {
+                        emit_attempt_failed_retry(
+                            ctx,
+                            chapter,
+                            chunk,
+                            attempt,
+                            max,
+                            REPETITION_RETRY_FEEDBACK,
+                        );
+                        feedback = Some(REPETITION_RETRY_FEEDBACK.to_string());
+                        continue;
+                    }
+
+                    match candidate {
+                        Some(thai) => {
+                            let reason = format!(
+                                "translator output kept repeating on chunk {} after {max} attempts; committed the best available result for review",
+                                chunk.index + 1
+                            );
+                            return commit_chunk_needs_review(
+                                ctx, chapter, chunk, &thai, attempt, reason,
+                            )
+                            .await;
+                        }
+                        None => {
+                            let reason = format!(
+                                "translator output kept repeating on chunk {} after {max} attempts; no usable translation was produced",
+                                chunk.index + 1
+                            );
+                            return commit_chunk_needs_review(
+                                ctx, chapter, chunk, "", attempt, reason,
+                            )
+                            .await;
+                        }
+                    }
+                }
                 Err(e) => {
                     let partial = e.partial_translated_text().trim().to_string();
                     // Token-budget cutoffs need a tighter retry, not a verbatim replay.
@@ -1516,7 +1666,93 @@ async fn process_chunk(
                         }
                     }
                 }
-            };
+            },
+            TranslatorAttemptRun::Repeated => {
+                ctx.tx.send(AppEvent::Log {
+                    level: LogLevel::Warn,
+                    msg: format!(
+                        "chapter {chapter} chunk {} output repeated — retrying chunk only ({attempt}/{max})",
+                        chunk.index + 1
+                    ),
+                });
+                if attempt < max {
+                    emit_attempt_failed_retry(
+                        ctx,
+                        chapter,
+                        chunk,
+                        attempt,
+                        max,
+                        REPETITION_RETRY_FEEDBACK,
+                    );
+                    feedback = Some(REPETITION_RETRY_FEEDBACK.to_string());
+                    continue;
+                }
+
+                match candidate {
+                    Some(thai) => {
+                        let reason = format!(
+                            "translator output kept repeating on chunk {} after {max} attempts; committed the best available result for review",
+                            chunk.index + 1
+                        );
+                        return commit_chunk_needs_review(
+                            ctx, chapter, chunk, &thai, attempt, reason,
+                        )
+                        .await;
+                    }
+                    None => {
+                        let reason = format!(
+                            "translator output kept repeating on chunk {} after {max} attempts; no usable translation was produced",
+                            chunk.index + 1
+                        );
+                        return commit_chunk_needs_review(ctx, chapter, chunk, "", attempt, reason)
+                            .await;
+                    }
+                }
+            }
+            TranslatorAttemptRun::Stalled(reason) => {
+                ctx.tx.send(AppEvent::Log {
+                    level: LogLevel::Warn,
+                    msg: format!(
+                        "chapter {chapter} chunk {} translator stalled ({}) — retrying chunk only ({attempt}/{max})",
+                        chunk.index + 1,
+                        reason.describe()
+                    ),
+                });
+                if attempt < max {
+                    emit_attempt_failed_retry(
+                        ctx,
+                        chapter,
+                        chunk,
+                        attempt,
+                        max,
+                        STALL_RETRY_FEEDBACK,
+                    );
+                    feedback = Some(STALL_RETRY_FEEDBACK.to_string());
+                    continue;
+                }
+
+                match candidate {
+                    Some(thai) => {
+                        let reason = format!(
+                            "translator stalled on chunk {} after {max} attempts; committed the best available result for review",
+                            chunk.index + 1
+                        );
+                        return commit_chunk_needs_review(
+                            ctx, chapter, chunk, &thai, attempt, reason,
+                        )
+                        .await;
+                    }
+                    None => {
+                        let reason = format!(
+                            "translator stalled on chunk {} after {max} attempts; no usable translation was produced",
+                            chunk.index + 1
+                        );
+                        return commit_chunk_needs_review(ctx, chapter, chunk, "", attempt, reason)
+                            .await;
+                    }
+                }
+            }
+        };
 
         // Drop echoed continuity before audit/review/append; no retry needed.
         let thai = strip_copied_continuity(&prev_thai, &out.translated_text);
@@ -1603,7 +1839,6 @@ async fn process_chunk(
         let (review, r_usage) = {
             let mut review_attempt = 1u32;
             loop {
-                // The Reviewer streams no deltas, so ping the stall arm around it.
                 wd.ping();
                 ctx.tx.send(AppEvent::ReviewerRequested {
                     chapter,
@@ -1611,21 +1846,65 @@ async fn process_chunk(
                     attempt,
                 });
                 let reviewer_client = ctx.client_for(&ctx.models.reviewer)?;
-                match review_chunk(
-                    reviewer_client.as_ref(),
-                    &ctx.models.reviewer,
-                    &chunk.text,
-                    &thai,
-                    &reference_ctx,
-                    &audit_findings,
-                    &advisory,
-                    &prev_thai,
-                    review_attempt,
-                )
-                .await
-                {
-                    Ok(r) => break r,
-                    Err(e) => {
+                let result = {
+                    let _wait = wd.external_wait();
+                    let review = review_chunk(
+                        reviewer_client.as_ref(),
+                        &ctx.models.reviewer,
+                        &chunk.text,
+                        &thai,
+                        &reference_ctx,
+                        &audit_findings,
+                        &advisory,
+                        &prev_thai,
+                        review_attempt,
+                    );
+                    tokio::pin!(review);
+                    let stalled = wd.watch_active_call_stall(&ctx.ctl);
+                    tokio::pin!(stalled);
+                    tokio::select! {
+                        biased;
+                        reason = &mut stalled => ReviewerAttemptRun::Stalled(reason),
+                        r = &mut review => ReviewerAttemptRun::Finished(r),
+                    }
+                };
+                match result {
+                    ReviewerAttemptRun::Finished(Ok(r)) => break r,
+                    ReviewerAttemptRun::Stalled(reason) => {
+                        ctx.tx.send(AppEvent::Log {
+                            level: LogLevel::Warn,
+                            msg: format!(
+                                "chapter {chapter} chunk {} reviewer stalled ({}) — retrying chunk only ({attempt}/{max})",
+                                chunk.index + 1,
+                                reason.describe()
+                            ),
+                        });
+                        if attempt < max {
+                            emit_attempt_failed_retry(
+                                ctx,
+                                chapter,
+                                chunk,
+                                attempt,
+                                max,
+                                STALL_RETRY_FEEDBACK,
+                            );
+                            feedback = Some(STALL_RETRY_FEEDBACK.to_string());
+                            continue 'attempts;
+                        }
+                        return commit_chunk_needs_review(
+                            ctx,
+                            chapter,
+                            chunk,
+                            &thai,
+                            attempt,
+                            format!(
+                                "reviewer stalled on chunk {} after {max} attempts; committed without review",
+                                chunk.index + 1
+                            ),
+                        )
+                        .await;
+                    }
+                    ReviewerAttemptRun::Finished(Err(e)) => {
                         ctx.tx.send(AppEvent::Error {
                             context: format!("reviewer ch{chapter} chunk{}", chunk.index),
                             msg: e.to_string(),
@@ -1770,9 +2049,7 @@ fn combine_review_feedback(past: &[String], latest: &str) -> String {
     if past.is_empty() {
         return latest.to_string();
     }
-    let mut s = String::from(
-        "รอบก่อนหน้านี้ถูกตีกลับด้วยเหตุผลเหล่านี้ — อย่าทำผิดซ้ำเดิม:\n",
-    );
+    let mut s = String::from("รอบก่อนหน้านี้ถูกตีกลับด้วยเหตุผลเหล่านี้ — อย่าทำผิดซ้ำเดิม:\n");
     for (i, fb) in past.iter().enumerate() {
         s.push_str(&format!("[รอบที่ {}]\n{}\n\n", i + 1, fb.trim()));
     }
@@ -2533,6 +2810,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn repeated_stream_retries_only_the_active_chunk() {
+        let (base, ws) = temp_ws("chunk_repeat_retry");
+        let looped = "ก็ได้ครับ".repeat(20);
+        let client = std::sync::Arc::new(AuditRetryClient::new(vec![&looped, "ข้อความแปลที่สะอาด"]));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = PipelineCtx {
+            clients: ClientSet::single(
+                client.clone() as std::sync::Arc<dyn crate::llm::client::LlmClient>
+            ),
+            ws: ws.clone(),
+            models: crate::model::ModelSet::default(),
+            cfg: crate::model::AppConfig {
+                max_attempts: 2,
+                ..crate::model::AppConfig::default()
+            },
+            tx: crate::model::EventTx(tx),
+            ctl: RunControl::new(),
+            queue: ChapterQueue::new(vec![]),
+        };
+        let chunk = Chunk {
+            index: 0,
+            text: "これは短い文です。".to_string(),
+            est_tokens: 1,
+        };
+        let wd = Watchdog::new(&ctx.cfg);
+        let mut acc = Acc::default();
+
+        match process_chunk(&ctx, 1, &chunk, &mut acc, &wd, &mut None, None)
+            .await
+            .expect("process_chunk")
+        {
+            ChunkOutcome::Committed => {}
+            ChunkOutcome::NeedsReview => panic!("clean retry should be approved"),
+        }
+
+        assert_eq!(
+            client.schema_calls("translation_result"),
+            2,
+            "the repeated stream should spend one chunk retry"
+        );
+        assert_eq!(
+            client.schema_calls("review_result"),
+            1,
+            "the repeated attempt should not reach the Reviewer"
+        );
+
+        let translated = translation::read_translated(&ws, 1).await;
+        assert!(translated.contains("ข้อความแปลที่สะอาด"));
+        assert!(!translated.contains(&looped));
+
+        let mut saw_chunk_retry = false;
+        let mut saw_chapter_loop = false;
+        while let Ok(ev) = rx.try_recv() {
+            match ev {
+                AppEvent::ChunkRetry { feedback, .. }
+                    if feedback.contains("started repeating inside this chunk") =>
+                {
+                    saw_chunk_retry = true;
+                }
+                AppEvent::ChapterLooping { .. } => saw_chapter_loop = true,
+                _ => {}
+            }
+        }
+        assert!(
+            saw_chunk_retry,
+            "repetition should surface as a chunk retry"
+        );
+        assert!(
+            !saw_chapter_loop,
+            "repetition must not wipe and retranslate the whole chapter"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
     async fn pipeline_resumes_from_committed_chunk_markers() {
         let (base, ws) = temp_ws("resume");
         let raw =
@@ -3046,6 +3399,24 @@ mod tests {
     }
 
     #[test]
+    fn repetition_detector_allows_elongated_thai_shout() {
+        let shout = format!("โว้ย{}\nเธอสูดหายใจแล้วพูดต่อ", "ย".repeat(80));
+        assert!(
+            !looks_like_repetition_loop(&shout),
+            "an elongated single Thai character followed by another line is not a loop"
+        );
+    }
+
+    #[test]
+    fn repetition_detector_allows_streaming_elongated_tail() {
+        let shout = format!("โว้ย{}", "ย".repeat(80));
+        assert!(
+            !looks_like_repetition_loop(&shout),
+            "a stretched single-character tail should not trip before the next line arrives"
+        );
+    }
+
+    #[test]
     fn repetition_detector_ignores_short_text() {
         assert!(
             !looks_like_repetition_loop("สั้น"),
@@ -3077,8 +3448,54 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn stall_watchdog_trips_plain_idle_work_at_configured_window() {
+        let wd = Watchdog::with_stall(Some(Duration::from_millis(120)));
+        let ctl = RunControl::new();
+
+        let reason = tokio::time::timeout(Duration::from_millis(260), wd.watch(&ctl))
+            .await
+            .expect("plain idle work should trip");
+
+        assert_eq!(reason, LoopReason::Stall);
+    }
+
+    #[tokio::test]
+    async fn stall_watchdog_graces_active_external_call_once() {
+        let wd = Watchdog::with_stall(Some(Duration::from_millis(120)));
+        let ctl = RunControl::new();
+        let _wait = wd.external_wait();
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(170), wd.watch_active_call_stall(&ctl))
+                .await
+                .is_err(),
+            "an active model call should not trip during the first quiet window"
+        );
+
+        let reason =
+            tokio::time::timeout(Duration::from_millis(180), wd.watch_active_call_stall(&ctl))
+                .await
+                .expect("a still-silent model call should trip after the grace window");
+        assert_eq!(reason, LoopReason::Stall);
+    }
+
+    #[tokio::test]
+    async fn chapter_watchdog_ignores_active_external_call() {
+        let wd = Watchdog::with_stall(Some(Duration::from_millis(80)));
+        let ctl = RunControl::new();
+        let _wait = wd.external_wait();
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(260), wd.watch(&ctl))
+                .await
+                .is_err(),
+            "chapter-level recovery must not race ahead of chunk-level call recovery"
+        );
+    }
+
     /// A Translator whose every call hangs far longer than the watchdog's stall
-    /// window — used to exercise the stall arm + whole-chapter re-translate + abort.
+    /// window — used to exercise the active-call stall arm.
     struct HangingClient;
 
     #[async_trait::async_trait]
@@ -3094,8 +3511,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn watchdog_retranslates_then_aborts_a_stuck_chapter() {
-        let (base, ws) = temp_ws("watchdog_abort");
+    async fn watchdog_retries_stuck_chunk_before_chapter_retranslate() {
+        let (base, ws) = temp_ws("watchdog_chunk_stall");
         translation::write_raw(&ws, 1, "# 第一章\n\nこれは短い章です。").unwrap();
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -3105,8 +3522,9 @@ mod tests {
             ws: ws.clone(),
             models: crate::model::ModelSet::default(),
             cfg: crate::model::AppConfig {
-                // One whole-chapter re-translate, then abort.
+                max_attempts: 2,
                 max_chapter_retranslates: 1,
+                coherence_check: false,
                 ..crate::model::AppConfig::default()
             },
             tx: crate::model::EventTx(tx),
@@ -3114,39 +3532,61 @@ mod tests {
             queue: ChapterQueue::new(vec![(1, 1)]),
         };
         // A sub-second stall so the stall arm fires without a real multi-second wait.
-        let wd = Watchdog::with_stall(Some(Duration::from_millis(200)));
+        let wd = Watchdog::with_stall(Some(Duration::from_millis(100)));
         let mut acc = Acc::default();
         let mut totals = Totals::default();
 
         let halt = run_volume_chapters(&ctx, None, &wd, &mut acc, &mut totals).await;
 
         assert!(
-            matches!(halt, Halt::Stopped),
-            "a chapter looping past the limit must halt the run"
+            matches!(halt, Halt::Completed),
+            "a stuck model call should resolve at chunk scope, not halt the run"
         );
-        assert_eq!(totals.failed, 1, "the aborted chapter counts as failed");
-        assert!(ctx.ctl.is_stopped(), "abort must stop the run control");
+        assert_eq!(
+            totals.failed, 0,
+            "chunk-level stalls must not fail the chapter"
+        );
+        assert_eq!(
+            totals.need_review, 1,
+            "the unresolved chunk should be committed for review"
+        );
+        assert!(
+            !ctx.ctl.is_stopped(),
+            "chunk-level stall recovery must not stop the run control"
+        );
 
-        let mut looping = 0u32;
-        let mut saw_abort = false;
-        let mut saw_failed = false;
+        let mut chunk_retries = 0u32;
+        let mut saw_needs_review = false;
+        let mut saw_chapter_loop = false;
         while let Ok(ev) = rx.try_recv() {
             match ev {
-                AppEvent::ChapterLooping { attempt, max, .. } => {
-                    looping += 1;
-                    assert_eq!((attempt, max), (1, 1));
+                AppEvent::ChunkRetry {
+                    attempt,
+                    max,
+                    feedback,
+                    ..
+                } if feedback.contains("made no progress") => {
+                    chunk_retries += 1;
+                    assert_eq!((attempt, max), (1, 2));
                 }
-                AppEvent::Error { msg, .. } if msg.contains("aborting run") => saw_abort = true,
-                AppEvent::ChapterFailed { .. } => saw_failed = true,
+                AppEvent::ChunkNeedsReview { reason, .. }
+                    if reason.contains("translator stalled") =>
+                {
+                    saw_needs_review = true;
+                }
+                AppEvent::ChapterLooping { .. } => saw_chapter_loop = true,
                 _ => {}
             }
         }
-        assert_eq!(
-            looping, 1,
-            "exactly one whole-chapter re-translate before abort"
+        assert_eq!(chunk_retries, 1, "first stall should retry the chunk once");
+        assert!(
+            saw_needs_review,
+            "final stalled chunk should be visible as NeedsReview"
         );
-        assert!(saw_abort, "abort reason should be surfaced as an error");
-        assert!(saw_failed, "the chapter should be marked failed on abort");
+        assert!(
+            !saw_chapter_loop,
+            "active-call stalls must not retranslate the whole chapter first"
+        );
 
         let _ = std::fs::remove_dir_all(&base);
     }

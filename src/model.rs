@@ -661,7 +661,7 @@ fn default_loop_stall_secs() -> u64 {
     180
 }
 
-/// Default whole-chapter re-translations allowed before a looping chapter aborts
+/// Default whole-chapter re-translations allowed before a stalled chapter aborts
 /// the run.
 fn default_max_chapter_retranslates() -> u32 {
     2

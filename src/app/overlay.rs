@@ -3884,7 +3884,7 @@ impl Overlay {
                 st.field == 16,
             );
             lines.push(Line::from(Span::styled(
-                "      ↳ stuck/looping chapter re-translated after N s (0 = off)",
+                "      ↳ quiet pipeline stalls after N s; active model calls retry chunk first",
                 Style::default().fg(theme.ink_faint),
             )));
             push(
@@ -3899,7 +3899,7 @@ impl Overlay {
                 st.field == 17,
             );
             lines.push(Line::from(Span::styled(
-                "      ↳ whole-chapter re-translates before the run aborts (0–10)",
+                "      ↳ stalled-chapter re-translates before the run aborts (0–10)",
                 Style::default().fg(theme.ink_faint),
             )));
             push(
