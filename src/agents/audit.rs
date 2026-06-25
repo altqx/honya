@@ -31,8 +31,7 @@ static TRANSLATION_LABEL: Lazy<Regex> = Lazy::new(|| {
         .expect("translation-label regex is valid")
 });
 
-const DISCOURAGED_CASUAL_PARTICLES: [(&str, &str); 3] =
-    [("เว้ย", "เฟ้ย"), ("ว่ะ", "ฟะ"), ("วะ", "ฟะ")];
+const DISCOURAGED_CASUAL_PARTICLES: [(&str, &str); 2] = [("ว่ะ", "ฟะ"), ("วะ", "ฟะ")];
 
 /// A blank-line run — two or more newlines with any surrounding spaces/tabs —
 /// left behind after excising a copied span. Collapsed to a single blank line so
@@ -1118,23 +1117,23 @@ mod tests {
             "sentence-final วะ flagged: {findings:?}"
         );
 
-        let findings = advisory_findings("うるさいぞ。", "หนวกหูเว้ย!");
+        let findings = advisory_findings("何だって。", "นี่มันอะไรว่ะ!");
         assert!(
             findings
                 .iter()
-                .any(|f| f.contains("casual Thai particle") && f.contains("`เว้ย`")),
-            "sentence-final เว้ย flagged: {findings:?}"
+                .any(|f| f.contains("casual Thai particle") && f.contains("`ว่ะ`")),
+            "sentence-final ว่ะ flagged: {findings:?}"
         );
     }
 
     #[test]
-    fn advisory_allows_preferred_particles_and_fuwa_name() {
+    fn advisory_allows_preferred_particles_fuwa_name_and_tho_woei() {
         let source = "不破さんは叫んだ。";
-        let thai = "คุณฟูวะตะโกนว่า “นี่มันอะไรกันฟะ เฟ้ย!”";
+        let thai = "คุณฟูวะตะโกนว่า “นี่มันอะไรกันฟะ เฟ้ย! โธ่เว้ย!”";
         let findings = advisory_findings(source, thai);
         assert!(
             !findings.iter().any(|f| f.contains("casual Thai particle")),
-            "preferred particles and Fuwa name are not flagged: {findings:?}"
+            "preferred particles, Fuwa name, and โธ่เว้ย are not flagged: {findings:?}"
         );
     }
 
