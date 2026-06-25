@@ -101,6 +101,12 @@ pub fn audit_translation_with_terms(
         ));
     }
 
+    if let Some(gloss) = translated_parenthetical_gloss(translated) {
+        findings.push(format!(
+            "remove reading/original gloss `{gloss}` from translated_text; choose the natural Thai wording only unless the original sound/spelling is plot-critical"
+        ));
+    }
+
     compare_count(
         &mut findings,
         "scene divider `---`",
@@ -363,6 +369,127 @@ fn is_japanese_parenthetical_punct(ch: char) -> bool {
             | '-'
             | '/'
     )
+}
+
+fn translated_parenthetical_gloss(translated: &str) -> Option<String> {
+    let mut iter = translated.char_indices().peekable();
+    while let Some((open_idx, open)) = iter.next() {
+        if !matches!(open, '(' | '（') || !has_preceding_thai(translated, open_idx) {
+            continue;
+        }
+        let close = if open == '(' { ')' } else { '）' };
+        let content_start = open_idx + open.len_utf8();
+        let mut content_end = None;
+        while let Some(&(idx, ch)) = iter.peek() {
+            iter.next();
+            if ch == close {
+                content_end = Some(idx);
+                break;
+            }
+            if ch == '\n' || idx.saturating_sub(content_start) > 48 {
+                break;
+            }
+        }
+        let Some(end) = content_end else {
+            continue;
+        };
+        let content = translated[content_start..end].trim();
+        if is_latin_original_parenthetical(content) || is_thai_phonetic_parenthetical(content) {
+            return Some(format!("{open}{content}{close}"));
+        }
+    }
+    None
+}
+
+fn has_preceding_thai(text: &str, open_idx: usize) -> bool {
+    text[..open_idx]
+        .chars()
+        .rev()
+        .find(|ch| !ch.is_whitespace())
+        .is_some_and(is_thai_char)
+}
+
+fn is_latin_original_parenthetical(content: &str) -> bool {
+    let mut has_ascii_alpha = false;
+    for ch in content.chars() {
+        if ch.is_ascii_alphabetic() {
+            has_ascii_alpha = true;
+            continue;
+        }
+        if ch.is_ascii_digit() || matches!(ch, ' ' | '-' | '\'' | '&' | '.' | '/') {
+            continue;
+        }
+        return false;
+    }
+    has_ascii_alpha && content.chars().count() <= 64
+}
+
+fn is_thai_phonetic_parenthetical(content: &str) -> bool {
+    let mut thai = 0usize;
+    for ch in content.chars() {
+        if ch.is_whitespace() {
+            return false;
+        }
+        if is_thai_char(ch) || matches!(ch, 'ๆ' | 'ฯ' | '์') {
+            thai += 1;
+            continue;
+        }
+        return false;
+    }
+    (2..=24).contains(&thai)
+        && !looks_like_thai_meaning_explanation(content)
+        && looks_like_transliterated_japanese(content)
+}
+
+fn looks_like_thai_meaning_explanation(content: &str) -> bool {
+    [
+        "รัก",
+        "หลง",
+        "ชอบ",
+        "น้อง",
+        "พี่",
+        "สาว",
+        "ชาย",
+        "เด็ก",
+        "คน",
+        "ผู้",
+        "ความ",
+        "การ",
+        "แบบ",
+        "อย่าง",
+        "ของ",
+        "ที่",
+        "ไม่",
+    ]
+    .iter()
+    .any(|word| content.contains(word))
+}
+
+fn looks_like_transliterated_japanese(content: &str) -> bool {
+    [
+        "ฮิ",
+        "ฮิโ",
+        "โต",
+        "เมะ",
+        "โบ",
+        "เระ",
+        "โอส",
+        "เซ",
+        "โซ",
+        "คาวา",
+        "อิ",
+        "ซึ",
+        "เดเระ",
+        "โมริ",
+        "มาบุ",
+        "ดาจิ",
+    ]
+    .iter()
+    .any(|part| content.contains(part))
+}
+
+fn is_thai_char(ch: char) -> bool {
+    matches!(ch as u32, 0x0E00..=0x0E7F)
 }
 
 /// The Translator receives the previous chunk's last Thai sentences as
@@ -774,6 +901,81 @@ mod tests {
                 .iter()
                 .any(|f| f.contains("Japanese parenthetical gloss")),
             "quoted plot-critical Japanese is not a parenthetical gloss: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn audit_flags_thai_pronunciation_parenthetical_glosses() {
+        let source = "「押忍！」";
+        let thai = "“รับทราบ (โอส)!”";
+
+        let findings = audit_translation_with_terms(source, thai, &[], &[]);
+
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.contains("reading/original gloss")),
+            "Thai pronunciation gloss flagged: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn audit_flags_long_thai_transliteration_parenthetical_glosses() {
+        let source = "一目惚れ？";
+        let thai = "หรือว่าจะเป็นรักแรกพบ (ฮิโตเมะโบเระ)?";
+
+        let findings = audit_translation_with_terms(source, thai, &[], &[]);
+
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.contains("reading/original gloss")),
+            "long Thai transliteration gloss flagged: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn audit_flags_latin_original_parenthetical_glosses() {
+        let source = "Perfectだと思った。";
+        let thai = "พี่นึกว่าเป็นคำตอบที่เพอร์เฟกต์ (Perfect) แล้ว";
+
+        let findings = audit_translation_with_terms(source, thai, &[], &[]);
+
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.contains("reading/original gloss")),
+            "Latin original gloss flagged: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn audit_allows_longer_thai_parenthetical_as_story_text() {
+        let source = "彼女は小さく（本当に小さく）頷いた。";
+        let thai = "เธอพยักหน้าเบา ๆ (เบาจริง ๆ) อย่างลังเล";
+
+        let findings = audit_translation_with_terms(source, thai, &[], &[]);
+
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.contains("reading/original gloss")),
+            "longer Thai parenthetical should not be treated as a pronunciation gloss: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn audit_allows_thai_meaning_parenthetical_for_loanword() {
+        let source = "シスコンなの？";
+        let thai = "นายเข้าข่ายพวกซิสคอน (รักน้องสาวหลงน้องสาว) หรือเปล่า?";
+
+        let findings = audit_translation_with_terms(source, thai, &[], &[]);
+
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.contains("reading/original gloss")),
+            "Thai meaning explanation should be allowed: {findings:?}"
         );
     }
 

@@ -2063,16 +2063,16 @@ fn reconcile_coherence_issue(ws: &Workspace, issue: &coherence::CoherenceIssue) 
             }
         }
         "character" => {
-            // Do not create a character from a coherence note.
-            let mut existing = characters::get(ws, Some(jp), None)
+            let existing = characters::get(ws, Some(jp), None)
                 .into_iter()
                 .find(|c| character_matches_surface(c, jp))?;
             if existing.thai_name.trim() == th {
                 return None;
             }
-            existing.thai_name = th.to_string();
-            characters::upsert(ws, existing).ok()?;
-            Some(format!("standardized character {jp} → {th}"))
+            Some(format!(
+                "kept character {jp} → {} unchanged; suggested {th} left as a note",
+                existing.thai_name.trim()
+            ))
         }
         _ => None,
     }
@@ -2218,6 +2218,47 @@ mod tests {
             do_not_translate: None,
             first_seen_chapter: None,
         }
+    }
+
+    fn character(id: &str, jp: &str, th: &str) -> Character {
+        Character {
+            id: id.into(),
+            jp_name: jp.into(),
+            thai_name: th.into(),
+            romaji: None,
+            gender: None,
+            honorific: None,
+            speech_style: None,
+            relationships: Vec::new(),
+            aliases: Vec::new(),
+            also_called: Vec::new(),
+            notes: None,
+            first_seen_chapter: None,
+        }
+    }
+
+    #[test]
+    fn coherence_character_resolution_keeps_canonical_thai_name() {
+        let (base, ws) = temp_ws("coherence_character_name");
+        characters::upsert(&ws, character("ai", "清水愛", "ชิมิซุ ไอ")).unwrap();
+
+        let issue = coherence::CoherenceIssue {
+            severity: "warning".into(),
+            note: "context form drift".into(),
+            resolve_kind: "character".into(),
+            resolve_jp: "清水愛".into(),
+            resolve_canonical_th: "คุณไอ".into(),
+        };
+        let msg = reconcile_coherence_issue(&ws, &issue).unwrap();
+
+        let chars = characters::load(&ws);
+        assert_eq!(chars.len(), 1);
+        assert_eq!(chars[0].thai_name, "ชิมิซุ ไอ");
+        assert!(
+            msg.contains("unchanged"),
+            "coherence should report without mutating: {msg}"
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[derive(Default)]
