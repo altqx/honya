@@ -58,8 +58,11 @@ fn relocate_inner(
         fs::create_dir_all(images_dir)?;
     }
 
-    // Track taken basenames for dedup (x.png -> x_1.png -> x_2.png).
-    let mut used: HashSet<String> = HashSet::new();
+    let mut used = if has_images {
+        existing_basenames(images_dir)?
+    } else {
+        HashSet::new()
+    };
 
     for item in manifest.iter().filter(|m| m.is_image()) {
         let src_path = join_archive_path(work_dir, &item.resolved_path);
@@ -106,6 +109,15 @@ fn join_archive_path(base: &Path, archive_path: &str) -> PathBuf {
 
 fn basename_of(archive_path: &str) -> &str {
     archive_path.rsplit('/').next().unwrap_or(archive_path)
+}
+
+fn existing_basenames(dir: &Path) -> Result<HashSet<String>> {
+    let mut names = HashSet::new();
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        names.insert(entry.file_name().to_string_lossy().into_owned());
+    }
+    Ok(names)
 }
 
 /// Return a basename not in `used`, appending `_N` before the extension on
@@ -203,6 +215,35 @@ mod tests {
         assert!(images.join("a.png").exists());
         assert!(images.join("a_1.png").exists());
         assert_eq!(reloc.written.len(), 2);
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn relocate_dedups_against_existing_images_dir() {
+        let tmp =
+            std::env::temp_dir().join(format!("honya_media_existing_test_{}", std::process::id()));
+        let work = tmp.join("work");
+        let images = tmp.join("images");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(work.join("OEBPS/Images")).unwrap();
+        fs::create_dir_all(&images).unwrap();
+        fs::write(images.join("a.png"), b"previous-volume").unwrap();
+        fs::write(work.join("OEBPS/Images/a.png"), b"next-volume").unwrap();
+
+        let manifest = vec![img("i1", "Images/a.png", "OEBPS/Images/a.png")];
+
+        let reloc = relocate_images(&manifest, &work, &images, "images").unwrap();
+        assert_eq!(
+            reloc
+                .by_resolved_path
+                .get("OEBPS/Images/a.png")
+                .map(|s| s.as_str()),
+            Some("a_1.png")
+        );
+        assert_eq!(fs::read(images.join("a.png")).unwrap(), b"previous-volume");
+        assert_eq!(fs::read(images.join("a_1.png")).unwrap(), b"next-volume");
+        assert_eq!(reloc.written, vec![images.join("a_1.png")]);
 
         let _ = fs::remove_dir_all(&tmp);
     }
