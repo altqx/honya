@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::agents::audit::{
-    advisory_findings, audit_translation_with_references, strip_copied_continuity,
+    advisory_findings_with_references, audit_translation_with_terms, strip_copied_continuity,
 };
 use crate::agents::chunk::{Chunk, chunk_chapter};
 use crate::agents::coherence;
@@ -1833,15 +1833,10 @@ async fn process_chunk(
         }
 
         let audit_terms = glossary_terms_for_chunk(&ctx.ws, &chunk.text, MAX_GLOSSARY_IN_CTX);
-        let audit_findings = audit_translation_with_references(
-            &chunk.text,
-            &thai,
-            &prev_thai,
-            &audit_terms,
-            &audit_characters,
-        );
+        let audit_findings =
+            audit_translation_with_terms(&chunk.text, &thai, &prev_thai, &audit_terms);
         // Non-gating signals for the Reviewer to verify.
-        let advisory = advisory_findings(&chunk.text, &thai);
+        let advisory = advisory_findings_with_references(&chunk.text, &thai, &audit_characters);
         ctx.tx.send(AppEvent::ChunkStateChanged {
             chapter,
             chunk: chunk.index,

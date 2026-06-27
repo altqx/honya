@@ -178,23 +178,6 @@ pub fn audit_translation_with_terms(
     findings
 }
 
-/// Same mechanical gate as `audit_translation_with_terms`, plus scoped character
-/// surface checks from the roster injected into this chunk.
-pub fn audit_translation_with_references(
-    source_jp: &str,
-    thai: &str,
-    prev_thai: &[String],
-    terms: &[GlossaryTerm],
-    characters: &[Character],
-) -> Vec<String> {
-    let mut findings = audit_translation_with_terms(source_jp, thai, prev_thai, terms);
-    if thai.trim().is_empty() {
-        return findings;
-    }
-    audit_character_names(&mut findings, source_jp.trim(), thai.trim(), characters);
-    findings
-}
-
 /// Soft Reviewer signals, not hard gates; false positives must never force reject.
 /// Catches dropped multi-digit numbers and severe length shortfalls.
 pub fn advisory_findings(source_jp: &str, thai: &str) -> Vec<String> {
@@ -248,6 +231,23 @@ pub fn advisory_findings(source_jp: &str, thai: &str) -> Vec<String> {
         ));
     }
 
+    findings
+}
+
+/// Advisory signals with scoped character surfaces from the roster injected into
+/// this chunk. Character metadata is useful but not deterministic enough to force
+/// local retries: aliases and address forms can be contextual, and the Reviewer
+/// should make the final call.
+pub fn advisory_findings_with_references(
+    source_jp: &str,
+    thai: &str,
+    characters: &[Character],
+) -> Vec<String> {
+    let mut findings = advisory_findings(source_jp, thai);
+    if thai.trim().is_empty() {
+        return findings;
+    }
+    audit_character_names(&mut findings, source_jp.trim(), thai.trim(), characters);
     findings
 }
 
@@ -1287,7 +1287,7 @@ mod tests {
     }
 
     #[test]
-    fn audit_flags_mapped_character_surface_drift() {
+    fn advisory_flags_mapped_character_surface_drift() {
         let character = Character {
             id: "amano".to_string(),
             jp_name: "雨野景太".to_string(),
@@ -1307,19 +1307,53 @@ mod tests {
             first_seen_chapter: None,
         };
 
-        let findings = audit_translation_with_references(
-            "雨野君は慌てた。",
-            "คุณอามาโนะลนลาน",
-            &[],
-            &[],
-            &[character],
+        let hard = audit_translation_with_terms("雨野君は慌てた。", "คุณอามาโนะลนลาน", &[], &[]);
+        assert!(
+            !hard.iter().any(|f| f.contains("character/name surface")),
+            "character names must not be hard local-audit gates: {hard:?}"
         );
+
+        let findings =
+            advisory_findings_with_references("雨野君は慌てた。", "คุณอามาโนะลนลาน", &[character]);
 
         assert!(
             findings
                 .iter()
                 .any(|f| f.contains("雨野君") && f.contains("อามาโนะคุง")),
             "mapped alt-name rendering drift should be flagged: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn audit_does_not_retry_on_alias_inside_honorific() {
+        let character = Character {
+            id: "amano".to_string(),
+            jp_name: "雨野景太".to_string(),
+            thai_name: "อามาโนะ เคย์ตะ".to_string(),
+            romaji: Some("Amano Keita".to_string()),
+            gender: Some("male".to_string()),
+            honorific: None,
+            speech_style: None,
+            relationships: Vec::new(),
+            aliases: vec!["雨野".to_string()],
+            also_called: Vec::new(),
+            notes: None,
+            first_seen_chapter: None,
+        };
+
+        let source = "失礼します。雨野君はいらっしゃいますか？";
+        let thai = "ขออนุญาตค่ะ อามาโนะคุงอยู่ไหมคะ?";
+
+        let hard = audit_translation_with_terms(source, thai, &[], &[]);
+        assert!(
+            !hard.iter().any(|f| f.contains("character/name surface")),
+            "short aliases are context hints, not exact hard-gate surfaces: {hard:?}"
+        );
+
+        let advisory = advisory_findings_with_references(source, thai, &[character]);
+        assert!(
+            !advisory.iter().any(|f| f.contains("雨野")),
+            "alias inside an honorific should not demand the canonical full name: {advisory:?}"
         );
     }
 
