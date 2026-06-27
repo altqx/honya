@@ -189,7 +189,10 @@ pub fn audit_character_pronoun_rules(
 ) -> Vec<String> {
     let source = source_jp.trim();
     let translated = thai.trim();
-    if translated.is_empty() || !source.contains('俺') || !translated.contains("ฉัน") {
+    if translated.is_empty()
+        || !source.contains('俺')
+        || !chan_conflicts_with_ore_voice(source, translated)
+    {
         return Vec::new();
     }
 
@@ -362,7 +365,52 @@ fn is_japanese_residue_punct(ch: char) -> bool {
 }
 
 fn ore_source_with_chan_rendering(source: &str, translated: &str) -> bool {
-    source.contains('俺') && translated.contains("ฉัน")
+    source.contains('俺') && chan_conflicts_with_ore_voice(source, translated)
+}
+
+fn chan_conflicts_with_ore_voice(source: &str, translated: &str) -> bool {
+    translated.lines().any(line_has_unquoted_chan)
+        || paired_quote_has_ore_and_chan(source, translated)
+}
+
+fn paired_quote_has_ore_and_chan(source: &str, translated: &str) -> bool {
+    let source_quotes = quote_lines(source);
+    let translated_quotes = quote_lines(translated);
+    source_quotes
+        .iter()
+        .zip(translated_quotes.iter())
+        .any(|(source_line, translated_line)| {
+            source_line.contains('俺') && translated_line.contains("ฉัน")
+        })
+}
+
+fn quote_lines(text: &str) -> Vec<&str> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with(['“', '‘', '"', '「', '『']))
+        .collect()
+}
+
+fn line_has_unquoted_chan(line: &str) -> bool {
+    let mut in_quote = false;
+    for (idx, ch) in line.char_indices() {
+        if ch == '"' {
+            in_quote = !in_quote;
+            continue;
+        }
+        if matches!(ch, '“' | '‘' | '「' | '『') {
+            in_quote = true;
+            continue;
+        }
+        if matches!(ch, '”' | '’' | '」' | '』') {
+            in_quote = false;
+            continue;
+        }
+        if !in_quote && line[idx..].starts_with("ฉัน") {
+            return true;
+        }
+    }
+    false
 }
 
 fn reciprocal_bond_rendered_as_gift(source: &str, translated: &str) -> bool {
@@ -1473,6 +1521,21 @@ mod tests {
     }
 
     #[test]
+    fn advisory_ignores_chan_inside_non_ore_dialogue() {
+        let source = "“……えとえと、それに、あの様子では、たとえ本人達に直接訊ねたところで、普通に否定するだけだったと思います……”\n\nだが、しかし。今の俺達三人が知りたいのは……そういうことでは、ないわけで。\n\n“ところで、上原君と亜玖璃さんがお付き合いなさっているというのは私も把握しておりますので”";
+        let thai = "“……เอ่อ คือว่า แล้วก็ ดูจากท่าทางแบบนั้นแล้ว ต่อให้ไปถามเจ้าตัวโดยตรง ฉันคิดว่าพวกเขาก็คงแค่ปฏิเสธตามปกติค่ะ……”\n\nแต่ว่า สิ่งที่พวกผมทั้งสามคนในตอนนี้อยากรู้……มันไม่ใช่เรื่องแบบนั้นนี่นา\n\n“จะว่าไป เรื่องที่อุเอฮาระคุงกับอากุริคบกันอยู่ฉันเองก็รับทราบแล้ว”";
+
+        let findings = advisory_findings(source, thai);
+
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.contains("`俺`") && f.contains("`ฉัน`")),
+            "female/polite dialogue `ฉัน` should not be treated as the `俺` narrator: {findings:?}"
+        );
+    }
+
+    #[test]
     fn audit_character_pronoun_rule_rejects_chan_against_explicit_roster_voice() {
         let character = character_with_voice(
             "uehara",
@@ -1488,6 +1551,43 @@ mod tests {
                 .iter()
                 .any(|f| f.contains("อุเอฮาระ ทาสุคุ") && f.contains("ผม") && f.contains("ฉัน")),
             "explicit roster voice should make the pronoun mismatch a hard audit finding: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn audit_character_pronoun_rule_ignores_chan_inside_non_ore_dialogue() {
+        let character = character_with_voice(
+            "uehara",
+            "ผู้บรรยายชาย ใช้สรรพนาม 俺 (Ore); ในไทยให้ใช้ 'ผม' ไม่ใช้ 'ฉัน'",
+        );
+        let source = "“……えとえと、それに、あの様子では、たとえ本人達に直接訊ねたところで、普通に否定するだけだったと思います……”\n\nだが、しかし。今の俺達三人が知りたいのは……そういうことでは、ないわけで。\n\n“ところで、上原君と亜玖璃さんがお付き合いなさっているというのは私も把握しておりますので”";
+        let thai = "“……เอ่อ คือว่า แล้วก็ ดูจากท่าทางแบบนั้นแล้ว ต่อให้ไปถามเจ้าตัวโดยตรง ฉันคิดว่าพวกเขาก็คงแค่ปฏิเสธตามปกติค่ะ……”\n\nแต่ว่า สิ่งที่พวกผมทั้งสามคนในตอนนี้อยากรู้……มันไม่ใช่เรื่องแบบนั้นนี่นา\n\n“จะว่าไป เรื่องที่อุเอฮาระคุงกับอากุริคบกันอยู่ฉันเองก็รับทราบแล้ว”";
+
+        let findings = audit_character_pronoun_rules(source, thai, None, &[character]);
+
+        assert!(
+            findings.is_empty(),
+            "hard audit must not attach female/polite dialogue `ฉัน` to Uehara's narration: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn audit_character_pronoun_rule_rejects_chan_in_ore_dialogue() {
+        let character = character_with_voice(
+            "uehara",
+            "ผู้บรรยายชาย ใช้สรรพนาม 俺 (Ore); ในไทยให้ใช้ 'ผม' ไม่ใช้ 'ฉัน'",
+        );
+
+        let findings = audit_character_pronoun_rules(
+            "“んなの、俺じゃなく当人達に──”",
+            "“เรื่องแบบนั้น แทนที่จะมาถามฉัน ไปถามเจ้าตัวเขาเอง—”",
+            None,
+            &[character],
+        );
+
+        assert!(
+            findings.iter().any(|f| f.contains("ผม")),
+            "Uehara's own `俺` dialogue rendered as `ฉัน` should stay a hard audit finding: {findings:?}"
         );
     }
 
@@ -1537,8 +1637,8 @@ mod tests {
         );
 
         let findings = audit_character_pronoun_rules(
-            "佐藤一郎は言った。俺は帰る。",
-            "ซาโต้ อิจิโร่พูดว่า “ฉันจะกลับ”",
+            "佐藤一郎は言った。\n“俺は帰る。”",
+            "ซาโต้ อิจิโร่พูดขึ้น\n“ฉันจะกลับ”",
             None,
             &[uehara, other],
         );
