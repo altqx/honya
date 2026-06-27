@@ -310,16 +310,6 @@ fn audit_character_names(
             c.jp_name.trim(),
             canonical,
         );
-        for alias in &c.aliases {
-            audit_character_surface(
-                findings,
-                &mut reported,
-                source,
-                translated,
-                alias.trim(),
-                canonical,
-            );
-        }
         for alt in &c.also_called {
             let expected = if alt.thai.trim().is_empty() {
                 canonical
