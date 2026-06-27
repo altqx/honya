@@ -311,7 +311,7 @@ pub fn render_context_blurb(chars: &[Character]) -> String {
             .aliases
             .iter()
             .map(|a| a.trim())
-            .filter(|a| !a.is_empty())
+            .filter(|a| source_side_alias(a))
             .collect();
         if !aliases.is_empty() {
             s.push_str(&format!(" (={})", aliases.join(", ")));
@@ -358,6 +358,14 @@ pub fn render_context_blurb(chars: &[Character]) -> String {
         s.push('\n');
     }
     s
+}
+
+fn source_side_alias(alias: &str) -> bool {
+    !alias.trim().is_empty() && !alias.chars().any(is_thai_char)
+}
+
+fn is_thai_char(ch: char) -> bool {
+    matches!(ch as u32, 0x0E00..=0x0E7F)
 }
 
 /// Merge `incoming` into `target`: empty/None incoming fields keep existing;
@@ -821,6 +829,26 @@ mod tests {
             "sister's name shown:\n{blurb}"
         );
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn context_blurb_hides_thai_only_aliases() {
+        let mut amano = ch("amano", "雨野景太", "อามาโนะ เคย์ตะ", Some("Amano Keita"));
+        amano.aliases = vec![
+            "ケータ".into(),
+            "เคตะ".into(),
+            "อามาโนะคุง".into(),
+            "Amano-kun".into(),
+        ];
+
+        let blurb = render_context_blurb(&[amano]);
+
+        assert!(blurb.contains("ケータ"));
+        assert!(blurb.contains("Amano-kun"));
+        assert!(
+            !blurb.contains("เคตะ") && !blurb.contains("อามาโนะคุง"),
+            "Thai target variants must not be shown as source aliases:\n{blurb}"
+        );
     }
 
     /// Same written JP name under two different ids → one entry (always safe).

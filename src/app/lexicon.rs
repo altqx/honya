@@ -1279,7 +1279,9 @@ mod tests {
     #[test]
     fn character_columns_fill_width_no_dead_space() {
         let used = |c: &CharacterColumns| {
-            3 + c.jp + 1 + c.thai
+            3 + c.jp
+                + 1
+                + c.thai
                 + if c.gender > 0 { 1 + c.gender } else { 0 }
                 + if c.extra > 0 { 2 + c.extra } else { 0 }
         };
@@ -1287,7 +1289,10 @@ mod tests {
         for w in [200u16, 1900] {
             let c = character_columns(w);
             assert_eq!(used(&c), w as usize, "columns should fill width {w}");
-            assert!(c.extra > c.thai, "Names/Notes should be the flexible column");
+            assert!(
+                c.extra > c.thai,
+                "Names/Notes should be the flexible column"
+            );
         }
         // Every width fills the pane without overflowing (Thai absorbs slack
         // when there is no room for a notes column).

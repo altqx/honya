@@ -5,7 +5,7 @@
 use once_cell::sync::Lazy;
 use regex::Regex;
 
-use crate::model::{GlossaryTerm, TermPolicy};
+use crate::model::{Character, GlossaryTerm, TermPolicy};
 use crate::workspace::glossary;
 
 static HTML_TAG: Lazy<Regex> = Lazy::new(|| {
@@ -109,6 +109,12 @@ pub fn audit_translation_with_terms(
         ));
     }
 
+    if let Some(residue) = hard_japanese_punctuation_residue(translated) {
+        findings.push(format!(
+            "replace Japanese punctuation/brackets `{residue}` in translated_text with natural Thai punctuation, unless the source explicitly requires visible Japanese story text"
+        ));
+    }
+
     compare_count(
         &mut findings,
         "scene divider `---`",
@@ -172,6 +178,23 @@ pub fn audit_translation_with_terms(
     findings
 }
 
+/// Same mechanical gate as `audit_translation_with_terms`, plus scoped character
+/// surface checks from the roster injected into this chunk.
+pub fn audit_translation_with_references(
+    source_jp: &str,
+    thai: &str,
+    prev_thai: &[String],
+    terms: &[GlossaryTerm],
+    characters: &[Character],
+) -> Vec<String> {
+    let mut findings = audit_translation_with_terms(source_jp, thai, prev_thai, terms);
+    if thai.trim().is_empty() {
+        return findings;
+    }
+    audit_character_names(&mut findings, source_jp.trim(), thai.trim(), characters);
+    findings
+}
+
 /// Soft Reviewer signals, not hard gates; false positives must never force reject.
 /// Catches dropped multi-digit numbers and severe length shortfalls.
 pub fn advisory_findings(source_jp: &str, thai: &str) -> Vec<String> {
@@ -185,6 +208,12 @@ pub fn advisory_findings(source_jp: &str, thai: &str) -> Vec<String> {
     if let Some((particle, preferred)) = discouraged_casual_particle(translated) {
         findings.push(format!(
             "discouraged casual Thai particle `{particle}` appears; prefer `{preferred}` unless this rare roughness is important to SOURCE_JP or an established character voice"
+        ));
+    }
+
+    if let Some(residue) = japanese_punctuation_residue(translated) {
+        findings.push(format!(
+            "translated_text contains Japanese punctuation/brackets `{residue}`; verify it is intentional story text, otherwise replace it with natural Thai punctuation or remove the leftover source markers"
         ));
     }
 
@@ -226,6 +255,113 @@ fn discouraged_casual_particle(text: &str) -> Option<(&'static str, &'static str
     DISCOURAGED_CASUAL_PARTICLES
         .into_iter()
         .find(|(particle, _)| contains_discouraged_particle(text, particle))
+}
+
+fn japanese_punctuation_residue(text: &str) -> Option<String> {
+    let mut found = Vec::new();
+    for ch in text.chars().filter(|ch| is_japanese_residue_punct(*ch)) {
+        if !found.contains(&ch) {
+            found.push(ch);
+        }
+        if found.len() >= 8 {
+            break;
+        }
+    }
+    (!found.is_empty()).then(|| found.into_iter().collect())
+}
+
+fn hard_japanese_punctuation_residue(text: &str) -> Option<String> {
+    let mut found = Vec::new();
+    for ch in text
+        .chars()
+        .filter(|ch| matches!(ch, '。' | '、' | '「' | '」' | '『' | '』' | '（' | '）'))
+    {
+        if !found.contains(&ch) {
+            found.push(ch);
+        }
+        if found.len() >= 8 {
+            break;
+        }
+    }
+    (!found.is_empty()).then(|| found.into_iter().collect())
+}
+
+fn is_japanese_residue_punct(ch: char) -> bool {
+    matches!(
+        ch,
+        '。' | '、' | '？' | '！' | '「' | '」' | '『' | '』' | '（' | '）'
+    )
+}
+
+fn audit_character_names(
+    findings: &mut Vec<String>,
+    source: &str,
+    translated: &str,
+    characters: &[Character],
+) {
+    let mut reported: Vec<(String, String)> = Vec::new();
+    for c in characters {
+        let canonical = c.thai_name.trim();
+        audit_character_surface(
+            findings,
+            &mut reported,
+            source,
+            translated,
+            c.jp_name.trim(),
+            canonical,
+        );
+        for alias in &c.aliases {
+            audit_character_surface(
+                findings,
+                &mut reported,
+                source,
+                translated,
+                alias.trim(),
+                canonical,
+            );
+        }
+        for alt in &c.also_called {
+            let expected = if alt.thai.trim().is_empty() {
+                canonical
+            } else {
+                alt.thai.trim()
+            };
+            audit_character_surface(
+                findings,
+                &mut reported,
+                source,
+                translated,
+                alt.jp.trim(),
+                expected,
+            );
+        }
+    }
+}
+
+fn audit_character_surface(
+    findings: &mut Vec<String>,
+    reported: &mut Vec<(String, String)>,
+    source: &str,
+    translated: &str,
+    surface: &str,
+    expected: &str,
+) {
+    if surface.is_empty()
+        || expected.is_empty()
+        || !contains_japanese_text(surface)
+        || !source.contains(surface)
+        || translated.contains(expected)
+    {
+        return;
+    }
+    let key = (surface.to_string(), expected.to_string());
+    if reported.contains(&key) {
+        return;
+    }
+    reported.push(key);
+    findings.push(format!(
+        "character/name surface `{surface}` appears in SOURCE_JP but translated_text does not contain required rendering `{expected}` from CHARACTERS.md"
+    ));
 }
 
 fn contains_discouraged_particle(text: &str, particle: &str) -> bool {
@@ -414,6 +550,10 @@ fn is_japanese_only_parenthetical(content: &str) -> bool {
         return false;
     }
     has_japanese && count <= 40
+}
+
+fn contains_japanese_text(text: &str) -> bool {
+    text.chars().any(is_japanese_text_char)
 }
 
 fn is_japanese_text_char(ch: char) -> bool {
@@ -1134,6 +1274,62 @@ mod tests {
         assert!(
             !findings.iter().any(|f| f.contains("casual Thai particle")),
             "preferred particles, Fuwa name, and โธ่เว้ย are not flagged: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn advisory_flags_japanese_punctuation_residue() {
+        let source = "彼女は笑った。";
+        let thai = "เธอยิ้ม。";
+        let hard = audit_translation_with_terms(source, thai, &[], &[]);
+        assert!(
+            hard.iter().any(|f| f.contains("Japanese punctuation")),
+            "Japanese punctuation residue is a hard mechanical gate: {hard:?}"
+        );
+
+        let findings = advisory_findings(source, thai);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.contains("Japanese punctuation") && f.contains("。")),
+            "Japanese punctuation residue is surfaced to the reviewer: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn audit_flags_mapped_character_surface_drift() {
+        let character = Character {
+            id: "amano".to_string(),
+            jp_name: "雨野景太".to_string(),
+            thai_name: "อามาโนะ เคย์ตะ".to_string(),
+            romaji: Some("Amano Keita".to_string()),
+            gender: Some("male".to_string()),
+            honorific: None,
+            speech_style: None,
+            relationships: Vec::new(),
+            aliases: vec!["ケータ".to_string()],
+            also_called: vec![crate::model::AltName {
+                jp: "雨野君".to_string(),
+                thai: "อามาโนะคุง".to_string(),
+                by: None,
+            }],
+            notes: None,
+            first_seen_chapter: None,
+        };
+
+        let findings = audit_translation_with_references(
+            "雨野君は慌てた。",
+            "คุณอามาโนะลนลาน",
+            &[],
+            &[],
+            &[character],
+        );
+
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.contains("雨野君") && f.contains("อามาโนะคุง")),
+            "mapped alt-name rendering drift should be flagged: {findings:?}"
         );
     }
 

@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::agents::audit::{
-    advisory_findings, audit_translation_with_terms, strip_copied_continuity,
+    advisory_findings, audit_translation_with_references, strip_copied_continuity,
 };
 use crate::agents::chunk::{Chunk, chunk_chapter};
 use crate::agents::coherence;
@@ -1132,6 +1132,30 @@ fn glossary_terms_for_chunk(ws: &Workspace, chunk_text: &str, max: usize) -> Vec
     terms
 }
 
+fn characters_for_chunk(
+    ws: &Workspace,
+    chunk_text: &str,
+    prev_chunk_text: Option<&str>,
+    max: usize,
+) -> Vec<crate::model::Character> {
+    let mut chars = characters::load(ws);
+    let mentions = |c: &crate::model::Character, text: &str| {
+        let jp = c.jp_name.trim();
+        (!jp.is_empty() && text.contains(jp))
+            || c.aliases
+                .iter()
+                .any(|a| !a.trim().is_empty() && text.contains(a.trim()))
+            || c.also_called
+                .iter()
+                .any(|a| !a.jp.trim().is_empty() && text.contains(a.jp.trim()))
+    };
+    chars.retain(|c| {
+        mentions(c, chunk_text) || prev_chunk_text.is_some_and(|prev| mentions(c, prev))
+    });
+    chars.truncate(max);
+    chars
+}
+
 /// Assemble the reference context bundled into every Translator/Reviewer call:
 /// the scoped terminology policies, the character roster (pronouns/register), the
 /// few-shot style exemplars, and the PROJECT/STYLE prose — each in its own clearly-
@@ -1168,22 +1192,7 @@ fn build_reference_ctx(ws: &Workspace, chunk_text: &str, prev_chunk_text: Option
         &glossary::render_context_blurb(&terms),
         "<<END_GLOSSARY>>",
     );
-    let mut chars = characters::load(ws);
-    let mentions = |c: &crate::model::Character, text: &str| {
-        let jp = c.jp_name.trim();
-        // Alias and alt-name hits keep nickname-only chunks tied to this entry.
-        (!jp.is_empty() && text.contains(jp))
-            || c.aliases
-                .iter()
-                .any(|a| !a.trim().is_empty() && text.contains(a.trim()))
-            || c.also_called
-                .iter()
-                .any(|a| !a.jp.trim().is_empty() && text.contains(a.jp.trim()))
-    };
-    chars.retain(|c| {
-        mentions(c, chunk_text) || prev_chunk_text.is_some_and(|prev| mentions(c, prev))
-    });
-    chars.truncate(MAX_CHARACTERS_IN_CTX);
+    let chars = characters_for_chunk(ws, chunk_text, prev_chunk_text, MAX_CHARACTERS_IN_CTX);
     section(
         &mut s,
         "<<CHARACTERS: สรรพนาม/น้ำเสียงที่กำหนด>>",
@@ -1430,6 +1439,8 @@ async fn process_chunk(
 
     // Context and continuity are stable across this chunk's attempts.
     let reference_ctx = build_reference_ctx(&ctx.ws, &chunk.text, prev_chunk_text);
+    let audit_characters =
+        characters_for_chunk(&ctx.ws, &chunk.text, prev_chunk_text, MAX_CHARACTERS_IN_CTX);
     let mut prev_thai =
         continuity::last_thai_sentences(&ctx.ws, chapter, ctx.cfg.continuity_sentences).await;
     // Seed chunk 0 from the previous chapter when this one has no Thai yet.
@@ -1822,8 +1833,13 @@ async fn process_chunk(
         }
 
         let audit_terms = glossary_terms_for_chunk(&ctx.ws, &chunk.text, MAX_GLOSSARY_IN_CTX);
-        let audit_findings =
-            audit_translation_with_terms(&chunk.text, &thai, &prev_thai, &audit_terms);
+        let audit_findings = audit_translation_with_references(
+            &chunk.text,
+            &thai,
+            &prev_thai,
+            &audit_terms,
+            &audit_characters,
+        );
         // Non-gating signals for the Reviewer to verify.
         let advisory = advisory_findings(&chunk.text, &thai);
         ctx.tx.send(AppEvent::ChunkStateChanged {
