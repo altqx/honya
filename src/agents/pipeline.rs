@@ -1487,6 +1487,7 @@ async fn process_chunk(
                 pov.as_deref(),
                 &chunk.text,
                 feedback.as_deref(),
+                attempt,
                 move |delta| {
                     // Feed the watchdog: streaming is progress (resets the stall
                     // timer) and the repetition detector sees the live tail.
@@ -2053,19 +2054,32 @@ async fn process_chunk(
     )
 }
 
-/// Fold prior reviewer rejections in front of the latest one so a 2nd+ retry sees
-/// the full critique history, not just the most recent verdict. The first rejection
-/// (no history yet) passes through unchanged.
+const REVIEW_FEEDBACK_HISTORY_LIMIT: usize = 3;
+
+/// Package reviewer rejections as a retry contract. The latest verdict comes
+/// first; recent history is capped so long retry loops do not drown the fix.
 fn combine_review_feedback(past: &[String], latest: &str) -> String {
-    if past.is_empty() {
-        return latest.to_string();
+    let retry_no = past.len() + 2;
+    let mut s = format!(
+        "รอบถัดไปคือ retry #{retry_no}: คำแปลก่อนหน้าถูก Reviewer ตีกลับ ต้องแก้ทุกข้อด้านล่างก่อนส่ง JSON ใหม่\n\
+         ห้ามแก้แบบเดาสุ่มหรือ rewrite จนเกิดข้อผิดพลาดใหม่ ให้แก้จุดที่ถูกตีกลับและรักษาส่วนที่ถูกต้องไว้\n\n\
+         [ข้อที่ต้องแก้ล่าสุด]\n{}\n",
+        latest.trim()
+    );
+
+    if retry_no >= 4 {
+        s.push_str(
+            "\nคำเตือน: ชังก์นี้ถูกตีกลับหลายรอบแล้ว ก่อนตอบให้ทำ self-check กับ SOURCE_JP ทีละบรรทัด โดยเฉพาะชื่อ สรรพนาม POV ผู้พูด คำศัพท์ และประโยคท้ายชังก์\n",
+        );
     }
-    let mut s = String::from("รอบก่อนหน้านี้ถูกตีกลับด้วยเหตุผลเหล่านี้ — อย่าทำผิดซ้ำเดิม:\n");
-    for (i, fb) in past.iter().enumerate() {
-        s.push_str(&format!("[รอบที่ {}]\n{}\n\n", i + 1, fb.trim()));
+
+    if !past.is_empty() {
+        s.push_str("\n[ประวัติ feedback ล่าสุด ห้ามทำผิดซ้ำ]\n");
+        let start = past.len().saturating_sub(REVIEW_FEEDBACK_HISTORY_LIMIT);
+        for (idx, fb) in past.iter().enumerate().skip(start) {
+            s.push_str(&format!("[รอบที่ {}]\n{}\n\n", idx + 1, fb.trim()));
+        }
     }
-    s.push_str("[รอบล่าสุด]\n");
-    s.push_str(latest.trim());
     s
 }
 
@@ -2522,18 +2536,29 @@ mod tests {
     }
 
     #[test]
-    fn combine_review_feedback_first_rejection_passes_through() {
-        assert_eq!(combine_review_feedback(&[], "fix tone"), "fix tone");
+    fn combine_review_feedback_wraps_first_rejection() {
+        let out = combine_review_feedback(&[], "fix tone");
+        assert!(out.contains("retry #2"));
+        assert!(out.contains("[ข้อที่ต้องแก้ล่าสุด]"));
+        assert!(out.contains("fix tone"));
     }
 
     #[test]
-    fn combine_review_feedback_carries_past_reviews() {
-        let out = combine_review_feedback(&["wrong name".into(), "tense slip".into()], "still off");
-        assert!(out.contains("wrong name"));
-        assert!(out.contains("tense slip"));
+    fn combine_review_feedback_prioritizes_latest_and_caps_history() {
+        let past = vec![
+            "round 1".into(),
+            "round 2".into(),
+            "round 3".into(),
+            "round 4".into(),
+        ];
+        let out = combine_review_feedback(&past, "still off");
+        assert!(out.contains("retry #6"));
         assert!(out.contains("still off"));
-        // Latest is last so the model weights it most.
-        assert!(out.rfind("still off") > out.rfind("wrong name"));
+        assert!(out.contains("round 2"));
+        assert!(out.contains("round 4"));
+        assert!(!out.contains("round 1"));
+        assert!(out.find("still off") < out.find("round 2"));
+        assert!(out.contains("ถูกตีกลับหลายรอบ"));
     }
 
     fn temp_ws(tag: &str) -> (std::path::PathBuf, Workspace) {
