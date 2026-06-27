@@ -2397,15 +2397,7 @@ fn character_matches_surface(c: &crate::model::Character, jp: &str) -> bool {
 /// Strip honya bookkeeping (chunk-index comments, the review-needed marker/banner)
 /// from an assembled translated file so the coherence auditor sees only prose.
 fn strip_translation_markers(text: &str) -> String {
-    text.lines()
-        .filter(|line| {
-            let t = line.trim_start();
-            !t.starts_with("<!-- honya:")
-                && !t.contains("[REVIEW NEEDED]")
-                && !t.starts_with("> เหตุผลจากผู้ตรวจ")
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+    translation::export_prose(text)
 }
 
 #[cfg(test)]
@@ -2505,6 +2497,29 @@ mod queue_tests {
 mod tests {
     use super::*;
     use crate::model::{Character, GlossaryTerm};
+
+    #[test]
+    fn strip_translation_markers_removes_wrapped_review_banner() {
+        let text = "<!-- honya:chunk 0 -->\n\
+            <!-- honya:review-needed -->\n\
+            > ⚠️ **[REVIEW NEEDED]** chunk 1 — แปลไม่ผ่าน\n\
+            >\n\
+            > เหตุผลจากผู้ตรวจ: ประโยคแรกยังผิด\n\
+            > บริบทต่อท้ายที่ห้ามส่งกลับเข้าโมเดล\n\
+            \n\
+            เนื้อหาไทย\n\
+            \n\
+            <!-- honya:chunk 1 -->\n\
+            คำแปลสอง\n";
+
+        let stripped = strip_translation_markers(text);
+
+        assert!(!stripped.contains("[REVIEW NEEDED]"));
+        assert!(!stripped.contains("เหตุผลจากผู้ตรวจ"));
+        assert!(!stripped.contains("บริบทต่อท้าย"));
+        assert!(stripped.contains("เนื้อหาไทย"));
+        assert!(stripped.contains("คำแปลสอง"));
+    }
 
     #[test]
     fn combine_review_feedback_first_rejection_passes_through() {

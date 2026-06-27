@@ -273,12 +273,30 @@ pub fn export_prose(text: &str) -> String {
 /// Kept in lock-step with the banner `append_chunk_needs_review` writes.
 fn extract_review_reason(block: &str) -> String {
     const KEY: &str = "เหตุผลจากผู้ตรวจ:";
+    let mut parts = Vec::new();
+    let mut collecting = false;
     for line in block.lines() {
-        if let Some(pos) = line.find(KEY) {
-            return line[pos + KEY.len()..].trim().to_string();
+        let trimmed = line.trim_start();
+        if let Some(pos) = trimmed.find(KEY) {
+            collecting = true;
+            let first = trimmed[pos + KEY.len()..].trim();
+            if !first.is_empty() {
+                parts.push(first.to_string());
+            }
+            continue;
+        }
+        if collecting {
+            if let Some(rest) = trimmed.strip_prefix('>') {
+                let rest = rest.trim();
+                if !rest.is_empty() {
+                    parts.push(rest.to_string());
+                }
+            } else {
+                break;
+            }
         }
     }
-    String::new()
+    parts.join(" ")
 }
 
 fn chunk_block_ranges(text: &str) -> Vec<(u32, usize, usize)> {
@@ -403,7 +421,14 @@ pub async fn append_chunk_needs_review(
     ));
     let reason = sanitize_reason(reason);
     if !reason.is_empty() {
-        block.push_str(&format!(">\n> เหตุผลจากผู้ตรวจ: {reason}\n"));
+        block.push_str(">\n");
+        let mut lines = review_reason_lines(&reason);
+        if let Some(first) = lines.next() {
+            block.push_str(&format!("> เหตุผลจากผู้ตรวจ: {first}\n"));
+            for line in lines {
+                block.push_str(&format!("> {line}\n"));
+            }
+        }
     }
     block.push('\n');
     block.push_str(thai_text.trim_end_matches('\n'));
@@ -413,15 +438,67 @@ pub async fn append_chunk_needs_review(
 }
 
 /// Collapse a reviewer feedback string into a single safe Markdown blockquote
-/// line: newlines → spaces, runs of whitespace squeezed, truncated so the banner
-/// stays compact.
+/// payload: newlines become spaces, whitespace runs are squeezed, and only
+/// runaway diagnostics are truncated.
 fn sanitize_reason(reason: &str) -> String {
     let one_line: String = reason.split_whitespace().collect::<Vec<_>>().join(" ");
-    const MAX: usize = 240;
-    if one_line.chars().count() <= MAX {
+    if one_line.chars().count() <= MAX_REVIEW_REASON_CHARS {
         one_line
     } else {
-        one_line.chars().take(MAX).collect::<String>() + "…"
+        one_line
+            .chars()
+            .take(MAX_REVIEW_REASON_CHARS)
+            .collect::<String>()
+            + "…"
+    }
+}
+
+const MAX_REVIEW_REASON_CHARS: usize = 4096;
+const REVIEW_REASON_WRAP_CHARS: usize = 120;
+
+fn review_reason_lines(reason: &str) -> impl Iterator<Item = String> + '_ {
+    WrappedWords::new(reason, REVIEW_REASON_WRAP_CHARS)
+}
+
+struct WrappedWords<'a> {
+    words: std::str::SplitWhitespace<'a>,
+    pending: Option<&'a str>,
+    width: usize,
+}
+
+impl<'a> WrappedWords<'a> {
+    fn new(text: &'a str, width: usize) -> Self {
+        Self {
+            words: text.split_whitespace(),
+            pending: None,
+            width: width.max(1),
+        }
+    }
+}
+
+impl<'a> Iterator for WrappedWords<'a> {
+    type Item = String;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let mut line = String::new();
+        while let Some(word) = self.pending.take().or_else(|| self.words.next()) {
+            let word_len = word.chars().count();
+            let line_len = line.chars().count();
+            let sep = usize::from(!line.is_empty());
+            if line_len + sep + word_len <= self.width {
+                if !line.is_empty() {
+                    line.push(' ');
+                }
+                line.push_str(word);
+                continue;
+            }
+            if line.is_empty() {
+                return Some(word.to_string());
+            }
+            self.pending = Some(word);
+            break;
+        }
+        if line.is_empty() { None } else { Some(line) }
     }
 }
 
@@ -649,6 +726,39 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    #[tokio::test]
+    async fn needs_review_reason_preserves_actionable_context() {
+        let (base, ws) = temp_ws("needs_review_reason_context");
+        let reason = format!(
+            "{} ท้ายเหตุผลที่เคยถูกตัด",
+            (0..45)
+                .map(|i| format!("ประเด็น{i}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+        let expected = sanitize_reason(&reason);
+
+        append_chunk_needs_review(&ws, 2, 5, "คำแปลร่าง", 10, &reason)
+            .await
+            .unwrap();
+
+        let body = read_translated(&ws, 2).await;
+        assert!(
+            body.contains("ท้ายเหตุผลที่เคยถูกตัด"),
+            "the banner must keep the actionable tail context"
+        );
+        assert!(
+            body.lines()
+                .any(|line| line.starts_with("> ประเด็น") || line.starts_with("> ท้ายเหตุผล")),
+            "long reasons are wrapped as blockquote continuation lines"
+        );
+
+        let details = review_needed_details_in(&body);
+        assert_eq!(details, vec![(5, expected)]);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     /// A review-needed chunk committed with no usable Thai counts as *skipped*
     /// (the chapter is partially translated); one committed with a salvaged best
     /// attempt does not. Clean (approved) chunks never count.
@@ -719,13 +829,20 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// Reviewer feedback is squeezed to one safe blockquote line and truncated.
+    /// Reviewer feedback is squeezed to one safe payload and only runaway
+    /// diagnostics are truncated.
     #[test]
-    fn sanitize_reason_is_one_line_and_bounded() {
+    fn sanitize_reason_is_one_line_and_preserves_context() {
         assert_eq!(sanitize_reason("  a\nb   c  "), "a b c");
-        let long = "ก".repeat(500);
+
+        let old_cutoff = format!("{}ท้ายสุด", "ก".repeat(260));
+        let kept = sanitize_reason(&old_cutoff);
+        assert!(kept.contains("ท้ายสุด"));
+        assert!(!kept.ends_with('…'));
+
+        let long = "ก".repeat(MAX_REVIEW_REASON_CHARS + 100);
         let out = sanitize_reason(&long);
         assert!(out.ends_with('…'));
-        assert_eq!(out.chars().count(), 241); // 240 + ellipsis
+        assert_eq!(out.chars().count(), MAX_REVIEW_REASON_CHARS + 1);
     }
 }
