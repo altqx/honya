@@ -178,6 +178,60 @@ pub fn audit_translation_with_terms(
     findings
 }
 
+/// Deterministic character-voice checks backed by explicit roster rules.
+/// Unlike name-surface hints, these only fire when CHARACTERS.md clearly says a
+/// scoped male `俺` speaker must use a specific Thai self-pronoun and not `ฉัน`.
+pub fn audit_character_pronoun_rules(
+    source_jp: &str,
+    thai: &str,
+    current_pov: Option<&str>,
+    characters: &[Character],
+) -> Vec<String> {
+    let source = source_jp.trim();
+    let translated = thai.trim();
+    if translated.is_empty() || !source.contains('俺') || !translated.contains("ฉัน") {
+        return Vec::new();
+    }
+
+    let candidates = characters
+        .iter()
+        .filter_map(|character| {
+            explicit_male_ore_pronoun_rule(character).map(|expected| (character, expected))
+        })
+        .collect::<Vec<_>>();
+    let require_anchor = candidates.len() > 1;
+    let mut rules = Vec::new();
+    for (character, expected) in candidates {
+        if require_anchor && !character_voice_anchor(character, source, current_pov) {
+            continue;
+        }
+        let name = if character.thai_name.trim().is_empty() {
+            character.jp_name.trim()
+        } else {
+            character.thai_name.trim()
+        };
+        if name.is_empty() {
+            continue;
+        }
+        rules.push((name.to_string(), expected));
+    }
+    if rules.is_empty() {
+        return Vec::new();
+    }
+
+    let expected = rules.first().map(|(_, expected)| *expected).unwrap_or("ผม");
+    let names = rules
+        .iter()
+        .take(3)
+        .map(|(name, _)| name.as_str())
+        .collect::<Vec<_>>()
+        .join(" / ");
+
+    vec![format!(
+        "POV/pronoun roster conflict: SOURCE_JP uses `俺` and translated_text uses `ฉัน`, but scoped CHARACTERS.md says `{names}` uses `{expected}` and does not use `ฉัน`; replace that narrator/speaker's self-reference and register with `{expected}` unless the line belongs to a different explicitly allowed speaker"
+    )]
+}
+
 /// Soft Reviewer signals, not hard gates; false positives must never force reject.
 /// Catches dropped multi-digit numbers and severe length shortfalls.
 pub fn advisory_findings(source_jp: &str, thai: &str) -> Vec<String> {
@@ -319,6 +373,86 @@ fn reciprocal_bond_rendered_as_gift(source: &str, translated: &str) -> bool {
 
 fn has_any(text: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| text.contains(needle))
+}
+
+fn explicit_male_ore_pronoun_rule(character: &Character) -> Option<&'static str> {
+    if !is_male_character(character) {
+        return None;
+    }
+
+    let mut rule_text = String::new();
+    if let Some(style) = character.speech_style.as_deref() {
+        rule_text.push_str(style);
+    }
+    if let Some(notes) = character.notes.as_deref() {
+        rule_text.push('\n');
+        rule_text.push_str(notes);
+    }
+
+    let normalized = normalize_pronoun_rule_text(&rule_text);
+    if normalized.contains('俺')
+        && normalized.contains("ผม")
+        && (normalized.contains("ไม่ใช้ฉัน")
+            || normalized.contains("ห้ามใช้ฉัน")
+            || normalized.contains("notuseฉัน")
+            || normalized.contains("doesnotuseฉัน"))
+    {
+        Some("ผม")
+    } else {
+        None
+    }
+}
+
+fn character_voice_anchor(character: &Character, source: &str, current_pov: Option<&str>) -> bool {
+    character_jp_surface_in(character, source)
+        || current_pov.is_some_and(|pov| {
+            character_jp_surface_in(character, pov)
+                || contains_nonempty(pov, character.thai_name.trim())
+                || character
+                    .romaji
+                    .as_deref()
+                    .is_some_and(|romaji| contains_nonempty(pov, romaji.trim()))
+                || contains_nonempty(pov, character.id.trim())
+        })
+}
+
+fn character_jp_surface_in(character: &Character, text: &str) -> bool {
+    contains_nonempty(text, character.jp_name.trim())
+        || character
+            .aliases
+            .iter()
+            .any(|alias| contains_nonempty(text, alias.trim()))
+        || character
+            .also_called
+            .iter()
+            .any(|alt| contains_nonempty(text, alt.jp.trim()))
+}
+
+fn contains_nonempty(text: &str, needle: &str) -> bool {
+    !needle.is_empty() && text.contains(needle)
+}
+
+fn is_male_character(character: &Character) -> bool {
+    let Some(gender) = character.gender.as_deref() else {
+        return false;
+    };
+    let gender = gender.trim().to_lowercase();
+    !gender.contains("female")
+        && !gender.contains("หญิง")
+        && (gender.contains("male") || gender.contains("ชาย"))
+}
+
+fn normalize_pronoun_rule_text(text: &str) -> String {
+    text.chars()
+        .filter(|ch| {
+            !ch.is_whitespace()
+                && !matches!(
+                    *ch,
+                    '\'' | '"' | '`' | '“' | '”' | '‘' | '’' | '「' | '」' | '『' | '』'
+                )
+        })
+        .collect::<String>()
+        .to_lowercase()
 }
 
 fn audit_character_names(
@@ -973,6 +1107,36 @@ mod tests {
         }
     }
 
+    fn character_with_voice(id: &str, style: &str) -> Character {
+        character_with_named_voice(id, "上原祐", "อุเอฮาระ ทาสุคุ", style)
+    }
+
+    fn character_with_named_voice(
+        id: &str,
+        jp_name: &str,
+        thai_name: &str,
+        style: &str,
+    ) -> Character {
+        Character {
+            id: id.to_string(),
+            jp_name: jp_name.to_string(),
+            thai_name: thai_name.to_string(),
+            romaji: None,
+            gender: Some("male".to_string()),
+            honorific: None,
+            speech_style: Some(style.to_string()),
+            relationships: Vec::new(),
+            aliases: if jp_name == "上原祐" {
+                vec!["上原".to_string()]
+            } else {
+                Vec::new()
+            },
+            also_called: Vec::new(),
+            notes: None,
+            first_seen_chapter: None,
+        }
+    }
+
     #[test]
     fn audit_accepts_clean_thai_markdown() {
         let source =
@@ -1305,6 +1469,139 @@ mod tests {
                 .iter()
                 .any(|f| f.contains("`俺`") && f.contains("`ฉัน`")),
             "`俺` rendered with ฉัน should be surfaced for POV review: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn audit_character_pronoun_rule_rejects_chan_against_explicit_roster_voice() {
+        let character = character_with_voice(
+            "uehara",
+            "ผู้บรรยาย/ตัวละครชายวัยรุ่น ใช้สรรพนาม 俺 (Ore); ในไทยให้ใช้ 'ผม' เป็นสรรพนามบุรุษที่ 1 ทั้งในบทบรรยาย/พูดกับตัวเอง น้ำเสียงจริงจังและเป็นผู้ชาย ไม่ใช้ 'ฉัน'",
+        );
+        let source = "俺は大きくため息をついた。";
+        let thai = "ฉันถอนหายใจเฮือกใหญ่";
+
+        let findings = audit_character_pronoun_rules(source, thai, None, &[character]);
+
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.contains("อุเอฮาระ ทาสุคุ") && f.contains("ผม") && f.contains("ฉัน")),
+            "explicit roster voice should make the pronoun mismatch a hard audit finding: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn audit_character_pronoun_rule_allows_explicit_chan_voice() {
+        let character = character_with_voice(
+            "male_chan",
+            "ตัวละครชาย ใช้สรรพนาม 俺 ในญี่ปุ่น แต่ฉบับไทยให้ใช้ 'ฉัน' ตามเสียงประจำตัว",
+        );
+
+        let findings =
+            audit_character_pronoun_rules("俺は首をかしげた。", "ฉันเอียงคอ", None, &[character]);
+
+        assert!(
+            findings.is_empty(),
+            "hard audit requires an explicit not-ฉัน roster rule: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn audit_character_pronoun_rule_ignores_non_ore_source() {
+        let character = character_with_voice(
+            "uehara",
+            "ผู้บรรยายชาย ใช้สรรพนาม 俺 (Ore); ในไทยให้ใช้ 'ผม' ไม่ใช้ 'ฉัน'",
+        );
+
+        let findings =
+            audit_character_pronoun_rules("彼は首をかしげた。", "ฉันเอียงคอ", None, &[character]);
+
+        assert!(
+            findings.is_empty(),
+            "without source `俺`, this roster rule should not infer a first-person mismatch: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn audit_character_pronoun_rule_uses_anchor_when_multiple_roster_rules_match() {
+        let uehara = character_with_voice(
+            "uehara",
+            "ผู้บรรยายชาย ใช้สรรพนาม 俺 (Ore); ในไทยให้ใช้ 'ผม' ไม่ใช้ 'ฉัน'",
+        );
+        let other = character_with_named_voice(
+            "other",
+            "佐藤一郎",
+            "ซาโต้ อิจิโร่",
+            "ตัวละครชาย ใช้สรรพนาม 俺; ในไทยให้ใช้ 'ผม' ไม่ใช้ 'ฉัน'",
+        );
+
+        let findings = audit_character_pronoun_rules(
+            "佐藤一郎は言った。俺は帰る。",
+            "ซาโต้ อิจิโร่พูดว่า “ฉันจะกลับ”",
+            None,
+            &[uehara, other],
+        );
+
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.contains("ซาโต้ อิจิโร่") && !f.contains("อุเอฮาระ ทาสุคุ")),
+            "multi-character hard audit should anchor to the mentioned/current POV character: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn audit_character_pronoun_rule_skips_unanchored_multiple_matches() {
+        let uehara = character_with_voice(
+            "uehara",
+            "ผู้บรรยายชาย ใช้สรรพนาม 俺 (Ore); ในไทยให้ใช้ 'ผม' ไม่ใช้ 'ฉัน'",
+        );
+        let other = character_with_named_voice(
+            "other",
+            "佐藤一郎",
+            "ซาโต้ อิจิโร่",
+            "ตัวละครชาย ใช้สรรพนาม 俺; ในไทยให้ใช้ 'ผม' ไม่ใช้ 'ฉัน'",
+        );
+
+        let findings = audit_character_pronoun_rules(
+            "俺は帰る。",
+            "ฉันจะกลับ",
+            Some("POV: บุคคลไม่ชัดเจน"),
+            &[uehara, other],
+        );
+
+        assert!(
+            findings.is_empty(),
+            "multiple possible roster rules without an anchor should stay out of hard audit: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn audit_character_pronoun_rule_uses_current_pov_anchor() {
+        let uehara = character_with_voice(
+            "uehara",
+            "ผู้บรรยายชาย ใช้สรรพนาม 俺 (Ore); ในไทยให้ใช้ 'ผม' ไม่ใช้ 'ฉัน'",
+        );
+        let other = character_with_named_voice(
+            "other",
+            "佐藤一郎",
+            "ซาโต้ อิจิโร่",
+            "ตัวละครชาย ใช้สรรพนาม 俺; ในไทยให้ใช้ 'ผม' ไม่ใช้ 'ฉัน'",
+        );
+
+        let findings = audit_character_pronoun_rules(
+            "俺は大きくため息をついた。",
+            "ฉันถอนหายใจเฮือกใหญ่",
+            Some("อุเอฮาระ ทาสุคุ / self-pronoun: ผม"),
+            &[uehara, other],
+        );
+
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.contains("อุเอฮาระ ทาสุคุ") && !f.contains("ซาโต้ อิจิโร่")),
+            "current POV should anchor an otherwise surface-free `俺` narration: {findings:?}"
         );
     }
 
