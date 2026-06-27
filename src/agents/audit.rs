@@ -200,6 +200,20 @@ pub fn advisory_findings(source_jp: &str, thai: &str) -> Vec<String> {
         ));
     }
 
+    if ore_source_with_chan_rendering(source, translated) {
+        findings.push(
+            "SOURCE_JP uses masculine/casual first-person `俺`, while translated_text uses `ฉัน`; verify the narrator/speaker's CHARACTERS.md voice explicitly allows `ฉัน`, otherwise use the correct male self-pronoun/register and do not carry a female POV pronoun into this chunk"
+                .to_string(),
+        );
+    }
+
+    if reciprocal_bond_rendered_as_gift(source, translated) {
+        findings.push(
+            "SOURCE_JP uses reciprocal bond wording such as `互い`/`向け合う`/`絆`, but translated_text uses `มอบให้`; verify this does not turn a mutual/shared bond into a one-way gift-like action, and prefer wording like `มีต่อกัน`, `ผูกพันกัน`, or `มีให้กัน` when faithful"
+                .to_string(),
+        );
+    }
+
     // Multi-digit source numbers should survive; single digits are often spelled out.
     let translated_numbers = digit_runs(translated);
     let mut reported: Vec<String> = Vec::new();
@@ -291,6 +305,20 @@ fn is_japanese_residue_punct(ch: char) -> bool {
         ch,
         '。' | '、' | '？' | '！' | '「' | '」' | '『' | '』' | '（' | '）'
     )
+}
+
+fn ore_source_with_chan_rendering(source: &str, translated: &str) -> bool {
+    source.contains('俺') && translated.contains("ฉัน")
+}
+
+fn reciprocal_bond_rendered_as_gift(source: &str, translated: &str) -> bool {
+    has_any(source, &["互い", "お互い", "向け合", "向き合"])
+        && has_any(source, &["絆", "関係", "思い", "気持"])
+        && has_any(translated, &["มอบให้", "มอบแก่", "มอบความ"])
+}
+
+fn has_any(text: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| text.contains(needle))
 }
 
 fn audit_character_names(
@@ -1264,6 +1292,32 @@ mod tests {
         assert!(
             !findings.iter().any(|f| f.contains("casual Thai particle")),
             "preferred particles, Fuwa name, and โธ่เว้ย are not flagged: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn advisory_flags_ore_narration_rendered_with_chan() {
+        let source = "俺は、あの二人を見てそう思わずにはいられなかった。";
+        let thai = "ฉันกลับอดคิดแบบนี้ไม่ได้เมื่อมองสองคนนั้น";
+        let findings = advisory_findings(source, thai);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.contains("`俺`") && f.contains("`ฉัน`")),
+            "`俺` rendered with ฉัน should be surfaced for POV review: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn advisory_flags_reciprocal_bond_rendered_as_gift() {
+        let source = "あの二人が互いに向け合う以上の絆を、俺はそこに感じた。";
+        let thai = "ผมรู้สึกถึงสายสัมพันธ์ที่สองคนนั้นมอบให้กันอยู่ตรงนั้น";
+        let findings = advisory_findings(source, thai);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.contains("reciprocal bond") && f.contains("มอบให้")),
+            "reciprocal bond wording should not silently become a gift-like action: {findings:?}"
         );
     }
 
