@@ -91,6 +91,7 @@ fn translator_request(
     attempt: u32,
 ) -> ChatRequest {
     let mut user = String::new();
+    let retry_feedback = feedback.map(str::trim).filter(|fb| !fb.is_empty());
 
     let rctx = reference_ctx.trim();
     if !rctx.is_empty() {
@@ -102,11 +103,13 @@ fn translator_request(
         prev_thai,
         current_pov,
         raw_chunk,
+        retry_feedback,
+        attempt,
     ));
 
     let mut messages = vec![Message::system(TRANSLATOR_SYSTEM), Message::user(user)];
-    if let Some(fb) = feedback.map(str::trim).filter(|fb| !fb.is_empty()) {
-        messages.push(Message::user(format_retry_feedback(fb, attempt)));
+    if retry_feedback.is_some() {
+        messages.push(Message::user(format_retry_feedback_reminder(attempt)));
     }
 
     ChatRequest {
@@ -126,16 +129,12 @@ fn translator_temperature(feedback: Option<&str>) -> f32 {
     }
 }
 
-fn format_retry_feedback(feedback: &str, attempt: u32) -> String {
+fn format_retry_feedback_reminder(attempt: u32) -> String {
     format!(
-        "<<REVIEWER_FEEDBACK: RETRY {attempt} — แก้ทุกข้อก่อนตอบ JSON>>\n\
-         งานรอบนี้คือแก้คำแปลเดิมอย่างตรงจุด ไม่ใช่แปลใหม่แบบสุ่มจนเกิดข้อผิดพลาดใหม่\n\
-         - อ่าน SOURCE_JP ด้านบนใหม่ แล้วแก้ทุกข้อใน feedback นี้ใน translated_text ฉบับเต็ม\n\
-         - ถ้า feedback พูดถึงชื่อ สรรพนาม POV ผู้พูด หรือความหมายเฉพาะ ให้ตรวจทุกตำแหน่งที่เกี่ยวข้องใน SOURCE_JP ก่อนส่ง\n\
-         - รักษาส่วนที่ผ่านแล้วไว้ อย่าเปลี่ยนน้ำเสียง ย่อหน้า Markdown ชื่อเฉพาะ หรือคำศัพท์ที่ไม่ได้ถูกตีกลับ\n\
-         - ห้ามเขียนคำอธิบายการแก้ ให้ตอบเป็น JSON schema เท่านั้น\n\n\
-         {feedback}\n\
-         <<END_REVIEWER_FEEDBACK>>"
+        "<<RETRY_CONFIRMATION: RETRY {attempt}>>\n\
+         ก่อนตอบ JSON ให้ตรวจ translated_text กับ REVIEWER_FEEDBACK ในข้อความก่อนหน้าอีกครั้ง: \
+         ทุกข้อที่ถูกตีกลับต้องถูกแก้จริง ห้ามปล่อยความผิดเดิมค้าง และห้ามเขียนคำอธิบายการแก้\n\
+         <<END_RETRY_CONFIRMATION>>"
     )
 }
 
@@ -145,7 +144,7 @@ mod tests {
     use crate::model::AgentModel;
 
     #[test]
-    fn retry_feedback_is_last_user_message() {
+    fn retry_feedback_is_in_primary_payload_and_reminder_is_last() {
         let req = translator_request(
             &AgentModel::openrouter("test/model"),
             "",
@@ -157,24 +156,21 @@ mod tests {
         );
 
         assert_eq!(req.messages.len(), 3);
+        let payload = req.messages[1].content.as_deref().expect("user payload");
+        assert!(payload.contains("<<SOURCE_JP>>"));
+        assert!(payload.contains("<<REVIEWER_FEEDBACK: RETRY 3"));
+        assert!(payload.contains("POV pronoun wrong"));
         assert!(
-            req.messages[1]
-                .content
-                .as_deref()
-                .is_some_and(|s| s.contains("<<SOURCE_JP>>"))
+            payload
+                .find("<<REVIEWER_FEEDBACK")
+                .expect("feedback marker")
+                < payload.find("<<SOURCE_JP>>").expect("source marker")
         );
-        assert!(
-            req.messages[2]
-                .content
-                .as_deref()
-                .is_some_and(|s| s.contains("RETRY 3"))
-        );
-        assert!(
-            req.messages[2]
-                .content
-                .as_deref()
-                .is_some_and(|s| s.contains("POV pronoun wrong"))
-        );
+
+        let reminder = req.messages[2].content.as_deref().expect("retry reminder");
+        assert!(reminder.contains("RETRY_CONFIRMATION"));
+        assert!(reminder.contains("RETRY 3"));
+        assert!(!reminder.contains("POV pronoun wrong"));
         assert_eq!(req.temperature, Some(0.15));
     }
 

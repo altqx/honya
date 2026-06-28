@@ -101,6 +101,8 @@ pub fn build_translator_user_msg(
     prev_thai: &[String],
     current_pov: Option<&str>,
     raw_chunk: &str,
+    retry_feedback: Option<&str>,
+    attempt: u32,
 ) -> String {
     let mut s = String::new();
 
@@ -127,6 +129,7 @@ pub fn build_translator_user_msg(
     s.push_str(
         "<<TASK: แปลเฉพาะข้อความใน SOURCE_JP เป็นภาษาไทยเท่านั้น>>\n\
          - ใช้ CONTINUITY/REFERENCE/REVIEWER_FEEDBACK เป็นบริบท ห้ามคัดลอกลง translated_text\n\
+         - ถ้ามี REVIEWER_FEEDBACK ให้ถือเป็นเงื่อนไขผ่าน/ตกของรอบนี้ ไม่ใช่คำแนะนำเสริม: translated_text ใหม่ต้องแก้ทุกข้อที่ถูกตีกลับจริง และห้ามย้อนกลับไปใช้รูปที่ Reviewer เพิ่งบอกว่าผิด\n\
          - translated_text ต้องเป็น Markdown ภาษาไทยฉบับสุดท้าย ไม่มีหัวข้อ \"คำแปล:\" ไม่มีคำเกริ่น และไม่มีคำอธิบายงาน\n\
          - อย่าใส่วงเล็บคำอ่าน/คำเดิมหลังคำไทยสำหรับชื่อหรือคำธรรมดา เช่น \"สุดาตะ (さかた)\", \"ชมรม (同好会)\", \"รับทราบ (โอส)!\", \"รักแรกพบ (ฮิโตเมะโบเระ)\" หรือ \"เพอร์เฟกต์ (Perfect)\"; อ้างรูปเดิมเฉพาะเมื่อเป็นข้อมูลพล็อตที่จำเป็นจริง ๆ\n\
          - เลี่ยง \"วะ\" และ \"ว่ะ\" เป็นคำลงท้าย/คำอุทานทั่วไป ให้ใช้ \"ฟะ\" แทน; \"เว้ย\" ใช้ได้แบบหายากเมื่อเป็นคำอุทานแรง ๆ ที่จำเป็น เช่น \"โธ่เว้ย\" ถ้าเป็นเสียงโวยวายทั่วไปให้ใช้ \"เฟ้ย\"\n\
@@ -144,6 +147,19 @@ pub fn build_translator_user_msg(
          <<END_TASK>>\n\n",
     );
 
+    if let Some(feedback) = retry_feedback.map(str::trim).filter(|fb| !fb.is_empty()) {
+        s.push_str(&format!(
+            "<<REVIEWER_FEEDBACK: RETRY {attempt} — ต้องแก้ให้ครบก่อนตอบ JSON>>\n\
+             ข้อความนี้เป็นเงื่อนไขบังคับของ translated_text รอบนี้ ไม่ใช่คำแนะนำเสริม\n\
+             - ทำ checklist จากทุกบรรทัดของ feedback แล้วแก้ในคำแปลฉบับเต็ม\n\
+             - อ่าน SOURCE_JP ที่เกี่ยวข้องใหม่ ห้ามแก้จากความจำหรือแค่แทนคำแบบเดาสุ่ม\n\
+             - Feedback ล่าสุดมีน้ำหนักเหนือ CONTINUITY/คำแปลรอบก่อนในจุดที่ถูกตีกลับ แต่ห้ามละเมิด REFERENCE/CHARACTERS/GLOSSARY\n\
+             - ถ้า feedback เดิมอยู่ในประวัติ ให้ตรวจซ้ำว่าไม่มีความผิดเดิมหลงเหลือ\n\n\
+             {feedback}\n\
+             <<END_REVIEWER_FEEDBACK>>\n\n"
+        ));
+    }
+
     s.push_str("<<SOURCE_JP>>\n");
     s.push_str(raw_chunk);
     if !raw_chunk.ends_with('\n') {
@@ -159,7 +175,7 @@ mod tests {
 
     #[test]
     fn translator_user_msg_carries_quality_reminders() {
-        let msg = build_translator_user_msg(&[], None, "雨野君は笑った。");
+        let msg = build_translator_user_msg(&[], None, "雨野君は笑った。", None, 1);
 
         assert!(msg.contains("เรียกอีกชื่อ"));
         assert!(msg.contains("ครบทุกบรรทัด"));
@@ -171,5 +187,19 @@ mod tests {
         assert!(msg.contains("互いへの"));
         assert!(msg.contains("場の空気が冷えた"));
         assert!(msg.contains("<<SOURCE_JP>>"));
+    }
+
+    #[test]
+    fn translator_user_msg_embeds_retry_feedback_before_source() {
+        let msg =
+            build_translator_user_msg(&[], None, "亜玖璃さんは笑った。", Some("use คุณอากุริ"), 4);
+
+        assert!(msg.contains("RETRY 4"));
+        assert!(msg.contains("use คุณอากุริ"));
+        assert!(
+            msg.find("<<REVIEWER_FEEDBACK").expect("feedback marker")
+                < msg.find("<<SOURCE_JP>>").expect("source marker")
+        );
+        assert!(msg.contains("เงื่อนไขผ่าน/ตก"));
     }
 }

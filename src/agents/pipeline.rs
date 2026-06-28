@@ -1534,7 +1534,10 @@ async fn process_chunk(
                             max,
                             REPETITION_RETRY_FEEDBACK,
                         );
-                        feedback = Some(REPETITION_RETRY_FEEDBACK.to_string());
+                        feedback = Some(retry_feedback_preserving_reviews(
+                            &past_reviews,
+                            REPETITION_RETRY_FEEDBACK,
+                        ));
                         continue;
                     }
 
@@ -1578,7 +1581,7 @@ async fn process_chunk(
                                 PARTIAL_STREAM_RETRY_FEEDBACK
                             };
                             emit_attempt_failed_retry(ctx, chapter, chunk, attempt, max, fb);
-                            feedback = Some(fb.to_string());
+                            feedback = Some(retry_feedback_preserving_reviews(&past_reviews, fb));
                             continue;
                         }
                         // Prefer an earlier complete translation; otherwise salvage
@@ -1624,7 +1627,10 @@ async fn process_chunk(
                                 max,
                                 REFUSAL_RETRY_FEEDBACK,
                             );
-                            feedback = Some(REFUSAL_RETRY_FEEDBACK.to_string());
+                            feedback = Some(retry_feedback_preserving_reviews(
+                                &past_reviews,
+                                REFUSAL_RETRY_FEEDBACK,
+                            ));
                         } else if length_trunc {
                             emit_attempt_failed_retry(
                                 ctx,
@@ -1634,7 +1640,10 @@ async fn process_chunk(
                                 max,
                                 LENGTH_RETRY_FEEDBACK,
                             );
-                            feedback = Some(LENGTH_RETRY_FEEDBACK.to_string());
+                            feedback = Some(retry_feedback_preserving_reviews(
+                                &past_reviews,
+                                LENGTH_RETRY_FEEDBACK,
+                            ));
                         } else {
                             emit_attempt_failed_retry(
                                 ctx,
@@ -1697,7 +1706,10 @@ async fn process_chunk(
                         max,
                         REPETITION_RETRY_FEEDBACK,
                     );
-                    feedback = Some(REPETITION_RETRY_FEEDBACK.to_string());
+                    feedback = Some(retry_feedback_preserving_reviews(
+                        &past_reviews,
+                        REPETITION_RETRY_FEEDBACK,
+                    ));
                     continue;
                 }
 
@@ -1740,7 +1752,10 @@ async fn process_chunk(
                         max,
                         STALL_RETRY_FEEDBACK,
                     );
-                    feedback = Some(STALL_RETRY_FEEDBACK.to_string());
+                    feedback = Some(retry_feedback_preserving_reviews(
+                        &past_reviews,
+                        STALL_RETRY_FEEDBACK,
+                    ));
                     continue;
                 }
 
@@ -1804,7 +1819,7 @@ async fn process_chunk(
         if let Some(fb) = refusal_feedback {
             if attempt < max {
                 emit_attempt_failed_retry(ctx, chapter, chunk, attempt, max, fb);
-                feedback = Some(fb.to_string());
+                feedback = Some(retry_feedback_preserving_reviews(&past_reviews, fb));
                 continue;
             }
 
@@ -1909,7 +1924,10 @@ async fn process_chunk(
                                 max,
                                 STALL_RETRY_FEEDBACK,
                             );
-                            feedback = Some(STALL_RETRY_FEEDBACK.to_string());
+                            feedback = Some(retry_feedback_preserving_reviews(
+                                &past_reviews,
+                                STALL_RETRY_FEEDBACK,
+                            ));
                             continue 'attempts;
                         }
                         return commit_chunk_needs_review(
@@ -2088,6 +2106,26 @@ fn combine_review_feedback(past: &[String], latest: &str) -> String {
         for (idx, fb) in past.iter().enumerate().skip(start) {
             s.push_str(&format!("[รอบที่ {}]\n{}\n\n", idx + 1, fb.trim()));
         }
+    }
+    s
+}
+
+fn retry_feedback_preserving_reviews(past_reviews: &[String], retry_reason: &str) -> String {
+    let reason = retry_reason.trim();
+    if past_reviews.is_empty() {
+        return reason.to_string();
+    }
+
+    let mut s = format!(
+        "รอบถัดไปต้องแก้ปัญหารอบล่าสุดและยังต้องทำตาม Reviewer feedback ที่ค้างอยู่ก่อนส่ง JSON ใหม่\n\n\
+         [ปัญหารอบล่าสุด]\n{reason}\n\n\
+         [Reviewer feedback ที่ยังต้องแก้ ห้ามทำผิดซ้ำ]\n"
+    );
+    let start = past_reviews
+        .len()
+        .saturating_sub(REVIEW_FEEDBACK_HISTORY_LIMIT);
+    for (idx, fb) in past_reviews.iter().enumerate().skip(start) {
+        s.push_str(&format!("[รอบที่ {}]\n{}\n\n", idx + 1, fb.trim()));
     }
     s
 }
@@ -2570,6 +2608,27 @@ mod tests {
         assert!(out.contains("ถูกตีกลับหลายรอบ"));
     }
 
+    #[test]
+    fn generic_retry_feedback_preserves_pending_review_context() {
+        assert_eq!(
+            retry_feedback_preserving_reviews(&[], LENGTH_RETRY_FEEDBACK),
+            LENGTH_RETRY_FEEDBACK
+        );
+
+        let past = vec![
+            "round 1".into(),
+            "round 2".into(),
+            "round 3".into(),
+            "Reviewer says use คุณอากุริ".into(),
+        ];
+        let out = retry_feedback_preserving_reviews(&past, REPETITION_RETRY_FEEDBACK);
+
+        assert!(out.contains("started repeating inside this chunk"));
+        assert!(out.contains("Reviewer says use คุณอากุริ"));
+        assert!(out.contains("round 2"));
+        assert!(!out.contains("round 1"));
+    }
+
     fn temp_ws(tag: &str) -> (std::path::PathBuf, Workspace) {
         let base = std::env::temp_dir().join(format!("honya_ctx_{tag}_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
@@ -2715,6 +2774,122 @@ mod tests {
 
             Ok(crate::llm::ChatResponse {
                 id: Some("audit-retry-client".to_string()),
+                model: Some("honya/test".to_string()),
+                choices: vec![crate::llm::Choice {
+                    index: 0,
+                    message: crate::llm::ResponseMessage {
+                        role: Some("assistant".to_string()),
+                        content: Some(content),
+                        tool_calls: None,
+                    },
+                    finish_reason: Some("stop".to_string()),
+                }],
+                usage: Some(crate::llm::Usage {
+                    prompt_tokens: 1,
+                    completion_tokens: 1,
+                    total_tokens: 2,
+                    cost: 0.0,
+                    cost_details: None,
+                    ..Default::default()
+                }),
+                service_tier: None,
+            })
+        }
+    }
+
+    struct ReviewRetryContextClient {
+        schemas: std::sync::Mutex<Vec<Option<String>>>,
+        translations: std::sync::Mutex<Vec<String>>,
+        translator_prompts: std::sync::Mutex<Vec<String>>,
+        reviewer_calls: std::sync::Mutex<usize>,
+    }
+
+    impl ReviewRetryContextClient {
+        fn new(translations: Vec<&str>) -> Self {
+            Self {
+                schemas: std::sync::Mutex::new(Vec::new()),
+                translations: std::sync::Mutex::new(
+                    translations.into_iter().map(str::to_string).collect(),
+                ),
+                translator_prompts: std::sync::Mutex::new(Vec::new()),
+                reviewer_calls: std::sync::Mutex::new(0),
+            }
+        }
+
+        fn schema_calls(&self, name: &str) -> usize {
+            self.schemas
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|schema| schema.as_deref() == Some(name))
+                .count()
+        }
+
+        fn translator_prompt(&self, index: usize) -> String {
+            self.translator_prompts.lock().unwrap()[index].clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::llm::client::LlmClient for ReviewRetryContextClient {
+        async fn chat(
+            &self,
+            req: &crate::llm::ChatRequest,
+        ) -> crate::llm::client::Result<crate::llm::ChatResponse> {
+            let schema_name = match &req.response_format {
+                Some(crate::llm::ResponseFormat::JsonSchema { json_schema }) => {
+                    Some(json_schema.name.clone())
+                }
+                _ => None,
+            };
+            self.schemas.lock().unwrap().push(schema_name.clone());
+
+            let content = match schema_name.as_deref() {
+                Some("translation_result") => {
+                    let prompt = req
+                        .messages
+                        .iter()
+                        .filter_map(|message| message.content.as_deref())
+                        .collect::<Vec<_>>()
+                        .join("\n--- message ---\n");
+                    self.translator_prompts.lock().unwrap().push(prompt);
+
+                    let next = self.translations.lock().unwrap().remove(0);
+                    serde_json::json!({
+                        "thought_process": {
+                            "scene_analysis": "(test)",
+                            "glossary_check": "(test)"
+                        },
+                        "translated_text": next,
+                        "pov": "",
+                        "new_characters": [],
+                        "new_terms": [],
+                        "continuity_notes": []
+                    })
+                    .to_string()
+                }
+                Some("review_result") => {
+                    let mut calls = self.reviewer_calls.lock().unwrap();
+                    *calls += 1;
+                    if *calls == 1 {
+                        serde_json::json!({
+                            "status": "reject",
+                            "feedback": ["Reviewer says use คุณอากุริ"]
+                        })
+                        .to_string()
+                    } else {
+                        serde_json::json!({
+                            "status": "approve",
+                            "feedback": []
+                        })
+                        .to_string()
+                    }
+                }
+                _ => "(test orchestrator: no tools)".to_string(),
+            };
+
+            Ok(crate::llm::ChatResponse {
+                id: Some("review-retry-context-client".to_string()),
                 model: Some("honya/test".to_string()),
                 choices: vec![crate::llm::Choice {
                     index: 0,
@@ -3000,6 +3175,60 @@ mod tests {
             !saw_chapter_loop,
             "repetition must not wipe and retranslate the whole chapter"
         );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn translator_retry_keeps_review_feedback_after_generic_retry() {
+        let (base, ws) = temp_ws("review_feedback_after_repeat");
+        let looped = "ก็ได้ครับ".repeat(20);
+        let client = std::sync::Arc::new(ReviewRetryContextClient::new(vec![
+            "อากุริยิ้ม",
+            &looped,
+            "คุณอากุริยิ้ม",
+        ]));
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = PipelineCtx {
+            clients: ClientSet::single(
+                client.clone() as std::sync::Arc<dyn crate::llm::client::LlmClient>
+            ),
+            ws: ws.clone(),
+            models: crate::model::ModelSet::default(),
+            cfg: crate::model::AppConfig {
+                max_attempts: 3,
+                ..crate::model::AppConfig::default()
+            },
+            tx: crate::model::EventTx(tx),
+            ctl: RunControl::new(),
+            queue: ChapterQueue::new(vec![]),
+        };
+        let chunk = Chunk {
+            index: 0,
+            text: "亜玖璃さんは笑った。".to_string(),
+            est_tokens: 1,
+        };
+        let wd = Watchdog::new(&ctx.cfg);
+        let mut acc = Acc::default();
+
+        match process_chunk(&ctx, 1, &chunk, &mut acc, &wd, &mut None, None)
+            .await
+            .expect("process_chunk")
+        {
+            ChunkOutcome::Committed => {}
+            ChunkOutcome::NeedsReview => panic!("final retry should be approved"),
+        }
+
+        assert_eq!(client.schema_calls("translation_result"), 3);
+        assert_eq!(client.schema_calls("review_result"), 2);
+
+        let third_prompt = client.translator_prompt(2);
+        assert!(third_prompt.contains("started repeating inside this chunk"));
+        assert!(third_prompt.contains("Reviewer says use คุณอากุริ"));
+        assert!(third_prompt.contains("<<REVIEWER_FEEDBACK: RETRY 3"));
+
+        let translated = translation::read_translated(&ws, 1).await;
+        assert!(translated.contains("คุณอากุริยิ้ม"));
 
         let _ = std::fs::remove_dir_all(&base);
     }
