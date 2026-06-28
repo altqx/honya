@@ -1539,6 +1539,38 @@ mod tests {
     }
 
     #[test]
+    fn advisory_allows_hwa_realization_and_mild_discourse_endings() {
+        let source = "そうだったのか。何だったっけ。";
+        let allowed = [
+            "นี่หว่า",
+            "นี่หวา",
+            "อะไรหว่า",
+            "ทำไมหว่า",
+            "ยังไงหว่า",
+            "ไหนหว่า",
+            "ใครหว่า",
+            "เมื่อไหร่หว่า",
+            "เท่าไหร่หว่า",
+            "ใช่ไหมหว่า",
+            "ใช่มั้ยหว่า",
+            "งั้นเหรอหว่า",
+            "แฮะ",
+            "นี่นา",
+            "สินะ",
+            "ล่ะมั้ง",
+        ];
+
+        for ending in allowed {
+            let thai = format!("เรื่องนั้นคงเป็นแบบนี้{ending}");
+            let findings = advisory_findings(source, &thai);
+            assert!(
+                !findings.iter().any(|f| f.contains("casual Thai particle")),
+                "{ending} should not be treated as banned วะ/ว่ะ: {findings:?}"
+            );
+        }
+    }
+
+    #[test]
     fn advisory_flags_ore_narration_rendered_with_chan() {
         let source = "俺は、あの二人を見てそう思わずにはいられなかった。";
         let thai = "ฉันกลับอดคิดแบบนี้ไม่ได้เมื่อมองสองคนนั้น";
