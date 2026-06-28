@@ -409,6 +409,28 @@ impl ImportState {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct ImageSourceState {
+    pub vol: u32,
+    pub files: Vec<(PathBuf, u64)>,
+    pub sel: usize,
+}
+
+impl ImageSourceState {
+    fn new(files: Vec<(PathBuf, u64)>, vol: u32) -> Self {
+        Self { vol, files, sel: 0 }
+    }
+
+    fn selected_file(&self) -> Option<&PathBuf> {
+        self.files.get(self.sel).map(|(p, _)| p)
+    }
+
+    pub fn set_files(&mut self, files: Vec<(PathBuf, u64)>) {
+        self.files = files;
+        self.sel = self.sel.min(self.files.len().saturating_sub(1));
+    }
+}
+
 /// One focusable Settings field. The order of [`SETTINGS_ORDER`] is the on-screen
 /// order and the index space `SettingsState::field` walks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1167,6 +1189,7 @@ pub enum Overlay {
     /// First-run getting-started overlay (sample / import / key / dismiss).
     Welcome(WelcomeState),
     Import(ImportState),
+    ImageSource(ImageSourceState),
     Settings(SettingsState),
     /// Live-preview color theme picker.
     Theme(ThemePickerState),
@@ -1227,6 +1250,10 @@ impl Overlay {
     ) -> Self {
         let refs = projects.iter().map(ProjectRef::of).collect();
         Overlay::Import(ImportState::new_append(files, refs, title, vol))
+    }
+
+    pub fn image_source(files: Vec<(PathBuf, u64)>, vol: u32) -> Self {
+        Overlay::ImageSource(ImageSourceState::new(files, vol))
     }
 
     /// Welcome overlay seeded with live key / sample status.
@@ -1446,6 +1473,12 @@ impl Overlay {
         }
     }
 
+    pub fn set_image_source_files(&mut self, files: Vec<(PathBuf, u64)>) {
+        if let Overlay::ImageSource(st) = self {
+            st.set_files(files);
+        }
+    }
+
     pub fn set_export_progress(&mut self, done: usize, total: usize, label: &str) {
         if let Overlay::Export(st) = self {
             st.progress = Some((done, total, label.to_string()));
@@ -1516,6 +1549,7 @@ impl Overlay {
             Overlay::None => Action::None,
             Overlay::Welcome(_) => self.handle_welcome_key(key),
             Overlay::Import(_) => self.handle_import_key(key),
+            Overlay::ImageSource(_) => self.handle_image_source_key(key),
             Overlay::Settings(_) => self.handle_settings_key(key),
             Overlay::Theme(_) => self.handle_theme_key(key),
             Overlay::Palette(_) => self.handle_palette_key(key),
@@ -1599,6 +1633,7 @@ impl Overlay {
             // One size for every wizard step (the modal must not jump around as
             // the user advances); mirrors render_import.
             Overlay::Import(_) => centered_modal(78, 24, area),
+            Overlay::ImageSource(_) => centered_modal(78, 24, area),
             // Must mirror render_settings' centered_modal(72, 26, …) so clicks
             // near the modal's top/bottom hit-test inside it (not as a dismiss).
             Overlay::Settings(_) => centered_modal(72, 26, area),
@@ -1730,6 +1765,24 @@ impl Overlay {
             // Import wizard: in the file-pick step a click selects the row under
             // it; a double click (or a click on the current pick) advances.
             Overlay::Import(st) if st.step == 0 => {
+                let top = inner.y + IMPORT_HEADER_ROWS + IMPORT_PICK_LIST_OFFSET;
+                let list_h = inner
+                    .height
+                    .saturating_sub(IMPORT_HEADER_ROWS + IMPORT_PICK_LIST_OFFSET);
+                if m.row >= top && (m.row - top) < list_h {
+                    let start = windowed_start(st.sel, list_h);
+                    let idx = start + (m.row - top) as usize;
+                    if idx < st.files.len() {
+                        let already = st.sel == idx;
+                        st.sel = idx;
+                        if double || already {
+                            return ClickOutcome::Key(KeyCode::Enter);
+                        }
+                    }
+                }
+                ClickOutcome::Nothing
+            }
+            Overlay::ImageSource(st) => {
                 let top = inner.y + IMPORT_HEADER_ROWS + IMPORT_PICK_LIST_OFFSET;
                 let list_h = inner
                     .height
@@ -2043,6 +2096,47 @@ impl Overlay {
                 KeyCode::Esc => Action::CloseOverlay,
                 _ => Action::None,
             },
+        }
+    }
+
+    fn handle_image_source_key(&mut self, key: KeyEvent) -> Action {
+        let Overlay::ImageSource(st) = self else {
+            return Action::None;
+        };
+        match key.code {
+            KeyCode::Esc => Action::CloseOverlay,
+            KeyCode::Char('r') | KeyCode::Char('R') => Action::RescanImageSources { vol: st.vol },
+            KeyCode::Up | KeyCode::Char('k') => {
+                if st.sel > 0 {
+                    st.sel -= 1;
+                }
+                Action::None
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if st.sel + 1 < st.files.len() {
+                    st.sel += 1;
+                }
+                Action::None
+            }
+            KeyCode::Home | KeyCode::Char('g') => {
+                st.sel = 0;
+                Action::None
+            }
+            KeyCode::End | KeyCode::Char('G') => {
+                st.sel = st.files.len().saturating_sub(1);
+                Action::None
+            }
+            KeyCode::Enter => {
+                if st.files.is_empty() {
+                    Action::CloseOverlay
+                } else {
+                    Action::RefreshVolumeImagesFromFile {
+                        vol: st.vol,
+                        source: st.selected_file().cloned().unwrap_or_default(),
+                    }
+                }
+            }
+            _ => Action::None,
         }
     }
 
@@ -2555,6 +2649,12 @@ impl Overlay {
                 4 => synopsis_hints(&st.syn, true),
                 _ => &[("Esc", "close")],
             },
+            Overlay::ImageSource(_) => &[
+                ("↑↓", "pick"),
+                ("↵", "update"),
+                ("r", "rescan"),
+                ("Esc", "cancel"),
+            ],
             Overlay::Synopsis(st) => synopsis_hints(&st.syn, false),
             Overlay::ProjectTitle(st) => title_hints(&st.syn),
             Overlay::Settings(_) => &[("Tab", "field"), ("type", "edit"), ("Esc/↵", "close")],
@@ -2626,6 +2726,7 @@ impl Overlay {
             Overlay::None => {}
             Overlay::Welcome(st) => self.render_welcome(f, area, theme, st),
             Overlay::Import(st) => self.render_import(f, area, theme, st),
+            Overlay::ImageSource(st) => self.render_image_source(f, area, theme, st),
             Overlay::Settings(st) => self.render_settings(f, area, theme, cfg, st),
             Overlay::Theme(st) => self.render_theme(f, area, theme, st),
             Overlay::Palette(st) => self.render_palette(f, area, theme, st),
@@ -2787,6 +2888,107 @@ impl Overlay {
             4 => render_synopsis_body(f, rows[3], theme, &st.syn, "start import"),
             _ => self.render_import_progress(f, rows[3], theme, st),
         }
+    }
+
+    fn render_image_source(&self, f: &mut Frame, area: Rect, theme: &Theme, st: &ImageSourceState) {
+        let modal = centered_modal(78, 24, area);
+        f.render_widget(Clear, modal);
+        let title = format!("Update images — Vol.{:02}", st.vol);
+        let block = self.modal_block(&title, theme);
+        let inner = block.inner(modal);
+        f.render_widget(block, modal);
+
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Min(0),
+            ])
+            .split(inner);
+
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(
+                    "  Source EPUB missing from VOLUME.md",
+                    Style::default().fg(theme.status_warn),
+                ),
+                Span::styled(
+                    "  choose the volume's original file",
+                    Style::default().fg(theme.ink_faint),
+                ),
+            ]))
+            .style(Style::default().bg(theme.bg_panel)),
+            rows[0],
+        );
+
+        if st.files.is_empty() {
+            let p = Paragraph::new(vec![
+                Line::raw(""),
+                Line::from(Span::styled(
+                    "  No EPUB files found in this folder.",
+                    Style::default().fg(theme.ink_soft),
+                )),
+                Line::raw(""),
+                Line::from(Span::styled(
+                    "  Drop the source EPUB into this folder, then press r to rescan.",
+                    Style::default().fg(theme.ink_faint),
+                )),
+            ])
+            .style(Style::default().bg(theme.bg_panel));
+            f.render_widget(p, rows[3]);
+            return;
+        }
+
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(
+                    "  Choose a source EPUB",
+                    Style::default().fg(theme.ink_soft),
+                ),
+                Span::styled(
+                    format!("  ({} found · r rescan)", st.files.len()),
+                    Style::default().fg(theme.ink_faint),
+                ),
+            ]))
+            .style(Style::default().bg(theme.bg_panel)),
+            rows[2],
+        );
+
+        let cap = rows[3].height.max(1);
+        let start = windowed_start(st.sel, cap);
+        let end = (start + cap as usize).min(st.files.len());
+        let size_w = 9usize;
+        let name_w = (rows[3].width as usize).saturating_sub(6 + size_w);
+
+        let mut lines = Vec::with_capacity(end - start);
+        for (i, (p, size)) in st.files.iter().enumerate().take(end).skip(start) {
+            let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("?");
+            let selected = i == st.sel;
+            let bar = if selected {
+                theme::SELECT_BAR.to_string()
+            } else {
+                " ".to_string()
+            };
+            let style = if selected {
+                Style::default().fg(theme.ink).bg(theme.accent_bg)
+            } else {
+                Style::default().fg(theme.ink_soft)
+            };
+            lines.push(Line::from(vec![
+                Span::styled(format!(" {bar} "), Style::default().fg(theme.accent)),
+                Span::styled(pad_to_cols(&thai_display_safe(name), name_w), style),
+                Span::styled(
+                    format!("{:>size_w$}", super::shelf::human_size(*size)),
+                    Style::default().fg(theme.ink_faint),
+                ),
+            ]));
+        }
+        f.render_widget(
+            Paragraph::new(lines).style(Style::default().bg(theme.bg_panel)),
+            rows[3],
+        );
     }
 
     /// Standalone synopsis editor modal (re-opened from the Project screen).

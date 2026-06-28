@@ -143,6 +143,13 @@ pub enum Action {
     RefreshVolumeImages {
         vol: u32,
     },
+    RefreshVolumeImagesFromFile {
+        vol: u32,
+        source: PathBuf,
+    },
+    RescanImageSources {
+        vol: u32,
+    },
     /// Delete the given chapters' raw/translated/reruns files from `vol`. Raised
     /// behind a confirm dialog.
     DeleteChapters {
@@ -2419,6 +2426,20 @@ impl App {
             Action::RefreshVolumeImages { vol } => {
                 self.refresh_volume_images(vol);
             }
+            Action::RefreshVolumeImagesFromFile { vol, source } => {
+                self.start_volume_image_refresh(vol, source);
+            }
+            Action::RescanImageSources { vol } => {
+                let files = epub_source_files();
+                self.overlay.set_image_source_files(files.clone());
+                if !matches!(self.overlay, Overlay::ImageSource(_)) {
+                    self.overlay = Overlay::image_source(files.clone(), vol);
+                }
+                self.toast = Some(Toast::info(format!(
+                    "{} source EPUB file(s) found",
+                    files.len()
+                )));
+            }
             Action::DeleteChapters { vol, chapters } => {
                 self.delete_chapters(vol, &chapters);
             }
@@ -2944,18 +2965,35 @@ impl App {
             self.toast = Some(Toast::warn("no project open"));
             return;
         };
-        let project_id = active.project.id.clone();
-        let project_dir = active.project.dir.clone();
-        let ws = Workspace::new(project_dir.clone(), vol);
+        let ws = Workspace::new(active.project.dir.clone(), vol);
         let Some(source) = volume_source_file(&ws) else {
-            self.toast = Some(Toast::warn(format!(
-                "Vol.{vol:02} has no source EPUB path in VOLUME.md"
-            )));
+            self.open_image_source_picker(vol);
             return;
         };
+        self.start_volume_image_refresh(vol, source);
+    }
+
+    fn open_image_source_picker(&mut self, vol: u32) {
+        let files = epub_source_files();
+        self.overlay = Overlay::image_source(files, vol);
+        self.toast = Some(Toast::info(format!("choose source EPUB for Vol.{vol:02}")));
+    }
+
+    fn start_volume_image_refresh(&mut self, vol: u32, source: PathBuf) {
+        if self.run_active {
+            self.toast = Some(Toast::warn("a run is already in progress"));
+            return;
+        }
+        let Some(active) = self.active.as_ref() else {
+            self.toast = Some(Toast::warn("no project open"));
+            return;
+        };
+        let project_id = active.project.id.clone();
+        let project_dir = active.project.dir.clone();
         if !source.exists() {
-            self.toast = Some(Toast::error(format!(
-                "source EPUB not found: {}",
+            self.open_image_source_picker(vol);
+            self.toast = Some(Toast::warn(format!(
+                "source EPUB not found; choose it again: {}",
                 source.display()
             )));
             return;
@@ -2968,6 +3006,7 @@ impl App {
         }
 
         let tx = self.tx.clone();
+        self.overlay = Overlay::None;
         self.run_active = true;
         self.toast = Some(Toast::info(format!("updating Vol.{vol:02} images …")));
         tokio::spawn(async move {
@@ -5418,6 +5457,10 @@ fn volume_source_file(ws: &Workspace) -> Option<PathBuf> {
         })
 }
 
+fn epub_source_files() -> Vec<(PathBuf, u64)> {
+    crate::workspace::scan::find_unimported_epubs(&working_root())
+}
+
 fn volume_image_prefix(vol: u32) -> String {
     format!("vol{vol}_")
 }
@@ -5749,7 +5792,8 @@ mod img_src_tests {
 
 #[cfg(test)]
 mod image_refresh_tests {
-    use super::{markdown_image_basenames, rewrite_markdown_image_links, volume_image_prefix};
+    use super::*;
+    use crate::model::Volume;
 
     #[test]
     fn volume_image_prefix_matches_import_contract() {
@@ -5777,6 +5821,46 @@ mod image_refresh_tests {
             "![remote](https://example.com/images/image.png)\n![local](../../images/vol1_a.png)";
 
         assert_eq!(markdown_image_basenames(md), vec!["vol1_a.png"]);
+    }
+
+    #[test]
+    fn missing_source_file_opens_image_source_picker() {
+        let base =
+            std::env::temp_dir().join(format!("honya_image_source_picker_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("Vol_01")).unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(EventTx(tx), AppConfig::default());
+        let project = Project {
+            id: "old-project".to_string(),
+            dir: base.clone(),
+            title: "Old Project".to_string(),
+            title_th: String::new(),
+            created: None,
+            touched: None,
+            volumes: vec![Volume {
+                number: 1,
+                dir: base.join("Vol_01"),
+                label: None,
+                chapters: Vec::new(),
+            }],
+            models: None,
+        };
+        app.active = Some(ActiveProject {
+            project,
+            workspace: Workspace::new(base.clone(), 1),
+            clients: None,
+            models: ModelSet::default(),
+            vol: 1,
+        });
+
+        app.refresh_volume_images(1);
+
+        match app.overlay {
+            Overlay::ImageSource(st) => assert_eq!(st.vol, 1),
+            other => panic!("expected image source picker, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
 
