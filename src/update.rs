@@ -372,8 +372,10 @@ async fn install_dev_build(sha: &str) -> Result<()> {
     let src_root = find_cargo_root(&tmp)
         .ok_or_else(|| anyhow!("the source archive did not contain a Cargo.toml"))?;
 
+    let target_dir = dev_build_target_dir()?;
     let out = tokio::process::Command::new("cargo")
         .args(["build", "--release", "--locked"])
+        .env("CARGO_TARGET_DIR", &target_dir)
         .env("HONYA_BUILD_COMMIT", sha)
         .current_dir(&src_root)
         .output()
@@ -386,8 +388,7 @@ async fn install_dev_build(sha: &str) -> Result<()> {
         bail!("`cargo build --release` failed:\n{}", tail.join("\n"));
     }
 
-    let new_bin = src_root
-        .join("target")
+    let new_bin = target_dir
         .join("release")
         .join(format!("honya{}", std::env::consts::EXE_SUFFIX));
     if !new_bin.is_file() {
@@ -674,6 +675,37 @@ fn private_staging_dir(tag: &str) -> Result<std::path::PathBuf> {
         "could not create a unique staging dir under {}",
         base.display()
     );
+}
+
+fn dev_build_target_dir() -> Result<std::path::PathBuf> {
+    let dir = user_cache_dir().join("dev-update-target");
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("creating the dev build cache at {}", dir.display()))?;
+    Ok(dir)
+}
+
+fn user_cache_dir() -> std::path::PathBuf {
+    if let Some(xdg) = env_path("XDG_CACHE_HOME") {
+        return xdg.join("honya");
+    }
+    #[cfg(windows)]
+    {
+        if let Some(local) = env_path("LOCALAPPDATA") {
+            return local.join("honya").join("Cache");
+        }
+        if let Some(appdata) = env_path("APPDATA") {
+            return appdata.join("honya").join("Cache");
+        }
+    }
+    if let Some(home) = env_path("HOME") {
+        return home.join(".cache").join("honya");
+    }
+    std::env::temp_dir().join("honya-cache")
+}
+
+fn env_path(key: &str) -> Option<std::path::PathBuf> {
+    let path = std::path::PathBuf::from(std::env::var_os(key)?);
+    (!path.as_os_str().is_empty()).then_some(path)
 }
 
 /// Locate the honya binary inside the extracted tree, including nested archive layouts.
