@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use crate::agents::audit::{
     advisory_findings_with_references, audit_character_pronoun_rules, audit_translation_with_terms,
-    strip_copied_continuity,
+    normalize_japanese_punctuation_residue, strip_copied_continuity,
 };
 use crate::agents::chunk::{Chunk, chunk_chapter};
 use crate::agents::coherence;
@@ -1767,8 +1767,10 @@ async fn process_chunk(
             }
         };
 
-        // Drop echoed continuity before audit/review/append; no retry needed.
+        // Drop echoed continuity and normalize mechanical punctuation residue
+        // before audit/review/append; neither needs another model turn.
         let thai = strip_copied_continuity(&prev_thai, &out.translated_text);
+        let thai = normalize_japanese_punctuation_residue(&thai);
         let refusal_feedback = refusal_retry_feedback(&thai);
         if refusal_feedback.is_none() && !thai.trim().is_empty() {
             candidate = Some(thai.clone());
@@ -2863,6 +2865,65 @@ mod tests {
             saw_audit_feedback,
             "retry feedback should include local audit findings"
         );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn punctuation_residue_is_normalized_before_audit_retry() {
+        let (base, ws) = temp_ws("punctuation_residue");
+        let raw = "彼女は小さく（本当に小さく）頷いた。";
+        translation::write_raw(&ws, 1, raw).unwrap();
+
+        let client =
+            std::sync::Arc::new(AuditRetryClient::new(vec!["เธอพยักหน้า（เบาจริง ๆ）อย่างลังเล"]));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = PipelineCtx {
+            clients: ClientSet::single(
+                client.clone() as std::sync::Arc<dyn crate::llm::client::LlmClient>
+            ),
+            ws: ws.clone(),
+            models: crate::model::ModelSet::default(),
+            cfg: crate::model::AppConfig {
+                max_attempts: 1,
+                ..crate::model::AppConfig::default()
+            },
+            tx: crate::model::EventTx(tx),
+            ctl: RunControl::new(),
+            queue: ChapterQueue::new(vec![]),
+        };
+        let mut acc = Acc::default();
+        let chunk = Chunk {
+            index: 0,
+            text: raw.to_string(),
+            est_tokens: 1,
+        };
+
+        let wd = Watchdog::new(&ctx.cfg);
+        match process_chunk(&ctx, 1, &chunk, &mut acc, &wd, &mut None, None)
+            .await
+            .expect("process_chunk")
+        {
+            ChunkOutcome::Committed => {}
+            ChunkOutcome::NeedsReview => panic!("normalized punctuation should be approved"),
+        }
+
+        assert_eq!(client.schema_calls("translation_result"), 1);
+        assert_eq!(client.schema_calls("review_result"), 1);
+
+        let translated = translation::read_translated(&ws, 1).await;
+        assert!(translated.contains("(เบาจริง ๆ)"));
+        assert!(!translated.contains('（'));
+        assert!(!translated.contains('）'));
+
+        while let Ok(ev) = rx.try_recv() {
+            if let AppEvent::ChunkRetry { feedback, .. } = ev {
+                assert!(
+                    !feedback.contains("Japanese punctuation"),
+                    "normalization should not spend a retry on punctuation residue: {feedback}"
+                );
+            }
+        }
 
         let _ = std::fs::remove_dir_all(&base);
     }

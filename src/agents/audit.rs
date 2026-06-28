@@ -357,6 +357,22 @@ fn hard_japanese_punctuation_residue(text: &str) -> Option<String> {
     (!found.is_empty()).then(|| found.into_iter().collect())
 }
 
+pub fn normalize_japanese_punctuation_residue(text: &str) -> String {
+    text.chars()
+        .map(|ch| match ch {
+            '。' => '.',
+            '、' => ',',
+            '？' => '?',
+            '！' => '!',
+            '（' => '(',
+            '）' => ')',
+            '「' | '」' => '"',
+            '『' | '』' => '\'',
+            _ => ch,
+        })
+        .collect()
+}
+
 fn is_japanese_residue_punct(ch: char) -> bool {
     matches!(
         ch,
@@ -1423,6 +1439,21 @@ mod tests {
                 .iter()
                 .any(|f| f.contains("reading/original gloss")),
             "Thai meaning explanation should be allowed: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn normalize_rewrites_japanese_punctuation_residue() {
+        let raw = "เธอพึมพำว่า「ใช่（เบามาก）！」";
+
+        let normalized = normalize_japanese_punctuation_residue(raw);
+
+        assert_eq!(normalized, "เธอพึมพำว่า\"ใช่(เบามาก)!\"");
+        assert!(
+            audit_translation_with_terms("彼女は小さく頷いた。", &normalized, &[], &[])
+                .iter()
+                .all(|f| !f.contains("Japanese punctuation")),
+            "normalization should remove mechanical Japanese punctuation residue"
         );
     }
 
