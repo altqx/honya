@@ -762,7 +762,12 @@ impl ReviewerOut {
     }
     /// Itemized feedback collapsed to one string for retry prompts / log lines.
     pub fn feedback_text(&self) -> String {
-        self.feedback.join("; ")
+        self.feedback
+            .iter()
+            .map(|item| item.trim())
+            .filter(|item| !item.is_empty())
+            .collect::<Vec<_>>()
+            .join("; ")
     }
 }
 
@@ -1708,5 +1713,20 @@ mod provider_model_tests {
             e = Effort::cycled(e);
             assert_eq!(e, want);
         }
+    }
+
+    #[test]
+    fn reviewer_feedback_text_drops_empty_items() {
+        let review = ReviewerOut {
+            status: ReviewVerdict::Reject,
+            feedback: vec![
+                "  fix honorific  ".to_string(),
+                String::new(),
+                "   ".to_string(),
+                "fix pronoun".to_string(),
+            ],
+        };
+
+        assert_eq!(review.feedback_text(), "fix honorific; fix pronoun");
     }
 }

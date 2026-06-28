@@ -1279,6 +1279,13 @@ fn effective_feedback_text(audit_findings: &[String], review: &ReviewerOut) -> S
     feedback.join("; ")
 }
 
+fn reviewer_rejected_without_actionable_feedback(
+    review: &ReviewerOut,
+    audit_findings: &[String],
+) -> bool {
+    !review.approved() && audit_findings.is_empty() && review.feedback_text().trim().is_empty()
+}
+
 const REFUSAL_RETRY_FEEDBACK: &str = "The previous output was a refusal or policy notice, not a translation. Treat this as neutral literary translation work: translate only SOURCE_JP into Thai, preserve Markdown, do not add explicit detail or commentary, and return the final Thai story text in translated_text.";
 const PARTIAL_STREAM_RETRY_FEEDBACK: &str = "The previous stream stopped after an incomplete translated_text. Discard that partial output and translate the entire SOURCE_JP again from scratch. Keep neutral literary wording, preserve Markdown, do not add commentary, and return complete final Thai story text in valid translated_text JSON.";
 const LENGTH_RETRY_FEEDBACK: &str = "The previous attempt ran out of output tokens before completing translated_text. Be far more concise: keep thought_process to a few short words or leave it empty, never draft the translation there, and spend the budget on translated_text only. Translate the ENTIRE SOURCE_JP without omitting anything and return the complete final Thai in valid JSON.";
@@ -1905,7 +1912,35 @@ async fn process_chunk(
                     }
                 };
                 match result {
-                    ReviewerAttemptRun::Finished(Ok(r)) => break r,
+                    ReviewerAttemptRun::Finished(Ok(r)) => {
+                        if reviewer_rejected_without_actionable_feedback(&r.0, &audit_findings) {
+                            if review_attempt < max {
+                                ctx.tx.send(AppEvent::ChunkRetry {
+                                    chapter,
+                                    chunk: chunk.index,
+                                    attempt: review_attempt,
+                                    max,
+                                    feedback:
+                                        "reviewer rejected without feedback, retrying reviewer for an actionable correction list"
+                                            .to_string(),
+                                });
+                                review_attempt += 1;
+                                continue;
+                            }
+                            return commit_chunk_needs_review(
+                                ctx,
+                                chapter,
+                                chunk,
+                                &thai,
+                                attempt,
+                                format!(
+                                    "reviewer rejected without feedback after {review_attempt} attempts; committed without review"
+                                ),
+                            )
+                            .await;
+                        }
+                        break r;
+                    }
                     ReviewerAttemptRun::Stalled(reason) => {
                         ctx.tx.send(AppEvent::Log {
                             level: LogLevel::Warn,
@@ -2629,6 +2664,40 @@ mod tests {
         assert!(!out.contains("round 1"));
     }
 
+    #[test]
+    fn empty_reviewer_reject_is_not_actionable_without_audit_feedback() {
+        let empty_reject = ReviewerOut {
+            status: ReviewVerdict::Reject,
+            feedback: Vec::new(),
+        };
+        assert!(reviewer_rejected_without_actionable_feedback(
+            &empty_reject,
+            &[]
+        ));
+        assert!(!reviewer_rejected_without_actionable_feedback(
+            &empty_reject,
+            &["Local audit: fix punctuation".to_string()]
+        ));
+
+        let whitespace_reject = ReviewerOut {
+            status: ReviewVerdict::Reject,
+            feedback: vec![String::new(), "   ".to_string()],
+        };
+        assert!(reviewer_rejected_without_actionable_feedback(
+            &whitespace_reject,
+            &[]
+        ));
+
+        let actionable_reject = ReviewerOut {
+            status: ReviewVerdict::Reject,
+            feedback: vec!["fix honorific".to_string()],
+        };
+        assert!(!reviewer_rejected_without_actionable_feedback(
+            &actionable_reject,
+            &[]
+        ));
+    }
+
     fn temp_ws(tag: &str) -> (std::path::PathBuf, Workspace) {
         let base = std::env::temp_dir().join(format!("honya_ctx_{tag}_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
@@ -2801,18 +2870,33 @@ mod tests {
         schemas: std::sync::Mutex<Vec<Option<String>>>,
         translations: std::sync::Mutex<Vec<String>>,
         translator_prompts: std::sync::Mutex<Vec<String>>,
-        reviewer_calls: std::sync::Mutex<usize>,
+        reviewer_responses: std::sync::Mutex<std::collections::VecDeque<Option<Vec<String>>>>,
     }
 
     impl ReviewRetryContextClient {
         fn new(translations: Vec<&str>) -> Self {
+            Self::with_review_responses(translations, vec![Some(vec!["Reviewer says use คุณอากุริ"])])
+        }
+
+        fn with_review_responses(
+            translations: Vec<&str>,
+            reviewer_responses: Vec<Option<Vec<&str>>>,
+        ) -> Self {
             Self {
                 schemas: std::sync::Mutex::new(Vec::new()),
                 translations: std::sync::Mutex::new(
                     translations.into_iter().map(str::to_string).collect(),
                 ),
                 translator_prompts: std::sync::Mutex::new(Vec::new()),
-                reviewer_calls: std::sync::Mutex::new(0),
+                reviewer_responses: std::sync::Mutex::new(
+                    reviewer_responses
+                        .into_iter()
+                        .map(|response| {
+                            response
+                                .map(|feedback| feedback.into_iter().map(str::to_string).collect())
+                        })
+                        .collect(),
+                ),
             }
         }
 
@@ -2869,20 +2953,23 @@ mod tests {
                     .to_string()
                 }
                 Some("review_result") => {
-                    let mut calls = self.reviewer_calls.lock().unwrap();
-                    *calls += 1;
-                    if *calls == 1 {
-                        serde_json::json!({
+                    let next = self
+                        .reviewer_responses
+                        .lock()
+                        .unwrap()
+                        .pop_front()
+                        .unwrap_or(None);
+                    match next {
+                        Some(feedback) => serde_json::json!({
                             "status": "reject",
-                            "feedback": ["Reviewer says use คุณอากุริ"]
+                            "feedback": feedback
                         })
-                        .to_string()
-                    } else {
-                        serde_json::json!({
+                        .to_string(),
+                        None => serde_json::json!({
                             "status": "approve",
                             "feedback": []
                         })
-                        .to_string()
+                        .to_string(),
                     }
                 }
                 _ => "(test orchestrator: no tools)".to_string(),
@@ -3229,6 +3316,66 @@ mod tests {
 
         let translated = translation::read_translated(&ws, 1).await;
         assert!(translated.contains("คุณอากุริยิ้ม"));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn empty_reviewer_reject_retries_reviewer_not_translator() {
+        let (base, ws) = temp_ws("empty_reviewer_reject");
+        let client = std::sync::Arc::new(ReviewRetryContextClient::with_review_responses(
+            vec!["คุณอากุริยิ้ม"],
+            vec![Some(vec![]), None],
+        ));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = PipelineCtx {
+            clients: ClientSet::single(
+                client.clone() as std::sync::Arc<dyn crate::llm::client::LlmClient>
+            ),
+            ws: ws.clone(),
+            models: crate::model::ModelSet::default(),
+            cfg: crate::model::AppConfig {
+                max_attempts: 2,
+                ..crate::model::AppConfig::default()
+            },
+            tx: crate::model::EventTx(tx),
+            ctl: RunControl::new(),
+            queue: ChapterQueue::new(vec![]),
+        };
+        let chunk = Chunk {
+            index: 0,
+            text: "亜玖璃さんは笑った。".to_string(),
+            est_tokens: 1,
+        };
+        let wd = Watchdog::new(&ctx.cfg);
+        let mut acc = Acc::default();
+
+        match process_chunk(&ctx, 1, &chunk, &mut acc, &wd, &mut None, None)
+            .await
+            .expect("process_chunk")
+        {
+            ChunkOutcome::Committed => {}
+            ChunkOutcome::NeedsReview => panic!("reviewer retry should approve"),
+        }
+
+        assert_eq!(client.schema_calls("translation_result"), 1);
+        assert_eq!(client.schema_calls("review_result"), 2);
+
+        let translated = translation::read_translated(&ws, 1).await;
+        assert!(translated.contains("คุณอากุริยิ้ม"));
+
+        let mut saw_empty_reject_retry = false;
+        while let Ok(ev) = rx.try_recv() {
+            if let AppEvent::ChunkRetry { feedback, .. } = ev
+                && feedback.contains("rejected without feedback")
+            {
+                saw_empty_reject_retry = true;
+            }
+        }
+        assert!(
+            saw_empty_reject_retry,
+            "empty reviewer reject should be retried as a reviewer problem"
+        );
 
         let _ = std::fs::remove_dir_all(&base);
     }

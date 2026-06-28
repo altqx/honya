@@ -33,10 +33,12 @@ pub async fn review_chunk(
     let mut messages = vec![Message::system(REVIEWER_SYSTEM), Message::user(user)];
     if attempt > 1 {
         messages.push(Message::user(
-            "Your previous reply was not a valid review_result (it was missing the required \
-             \"status\" field). Respond with ONLY a JSON object of the exact form \
+            "Your previous reply was not an actionable review_result: it either missed required \
+             fields or set status=\"reject\" without any correction in feedback. Respond with \
+             ONLY a JSON object of the exact form \
              {\"status\":\"approve\"|\"reject\",\"feedback\":[...]} and nothing else. \
-             feedback MUST be empty when status is \"approve\".",
+             feedback MUST contain at least one concise correction when status is \"reject\", \
+             and MUST be empty when status is \"approve\".",
         ));
     }
 
