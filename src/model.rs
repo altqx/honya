@@ -1376,6 +1376,13 @@ pub enum AppEvent {
         /// import is Vol.01; an "add volume" lands on the new volume).
         vol: u32,
     },
+    VolumeImagesUpdated {
+        project_id: String,
+        vol: u32,
+        images: usize,
+        raw_files: usize,
+        translated_files: usize,
+    },
 
     /// A volume-synopsis translation finished — folded into the open synopsis
     /// editor (import wizard step or standalone overlay).

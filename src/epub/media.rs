@@ -29,7 +29,24 @@ pub fn relocate_images(
     images_dir: &Path,
     images_rel: &str,
 ) -> Result<MediaRelocation> {
-    relocate_inner(manifest, work_dir, images_dir, images_rel, false)
+    relocate_inner(manifest, work_dir, images_dir, images_rel, "", false)
+}
+
+pub fn relocate_images_with_prefix(
+    manifest: &[ManifestItem],
+    work_dir: &Path,
+    images_dir: &Path,
+    images_rel: &str,
+    basename_prefix: &str,
+) -> Result<MediaRelocation> {
+    relocate_inner(
+        manifest,
+        work_dir,
+        images_dir,
+        images_rel,
+        basename_prefix,
+        false,
+    )
 }
 
 /// Like `relocate_images` but MOVES each source file (rename, falling back to copy+remove).
@@ -40,7 +57,7 @@ pub fn relocate_images_move(
     images_dir: &Path,
     images_rel: &str,
 ) -> Result<MediaRelocation> {
-    relocate_inner(manifest, work_dir, images_dir, images_rel, true)
+    relocate_inner(manifest, work_dir, images_dir, images_rel, "", true)
 }
 
 fn relocate_inner(
@@ -48,6 +65,7 @@ fn relocate_inner(
     work_dir: &Path,
     images_dir: &Path,
     _images_rel: &str,
+    basename_prefix: &str,
     move_files: bool,
 ) -> Result<MediaRelocation> {
     let mut reloc = MediaRelocation::default();
@@ -71,8 +89,8 @@ fn relocate_inner(
             continue;
         }
 
-        let raw_basename = basename_of(&item.resolved_path);
-        let unique = dedup_name(raw_basename, &mut used);
+        let raw_basename = prefixed_basename(basename_of(&item.resolved_path), basename_prefix);
+        let unique = dedup_name(&raw_basename, &mut used);
         let dest_path = images_dir.join(&unique);
 
         if move_files {
@@ -109,6 +127,14 @@ fn join_archive_path(base: &Path, archive_path: &str) -> PathBuf {
 
 fn basename_of(archive_path: &str) -> &str {
     archive_path.rsplit('/').next().unwrap_or(archive_path)
+}
+
+fn prefixed_basename(basename: &str, prefix: &str) -> String {
+    if prefix.is_empty() || basename.starts_with(prefix) {
+        basename.to_string()
+    } else {
+        format!("{prefix}{basename}")
+    }
 }
 
 fn existing_basenames(dir: &Path) -> Result<HashSet<String>> {
@@ -181,6 +207,15 @@ mod tests {
     }
 
     #[test]
+    fn prefix_is_applied_before_dedup() {
+        let mut used = HashSet::new();
+        assert_eq!(prefixed_basename("x.png", "vol1_"), "vol1_x.png");
+        assert_eq!(prefixed_basename("vol1_x.png", "vol1_"), "vol1_x.png");
+        assert_eq!(dedup_name("vol1_x.png", &mut used), "vol1_x.png");
+        assert_eq!(dedup_name("vol1_x.png", &mut used), "vol1_x_1.png");
+    }
+
+    #[test]
     fn relocate_copies_and_dedups() {
         let tmp = std::env::temp_dir().join(format!("honya_media_test_{}", std::process::id()));
         let work = tmp.join("work");
@@ -215,6 +250,32 @@ mod tests {
         assert!(images.join("a.png").exists());
         assert!(images.join("a_1.png").exists());
         assert_eq!(reloc.written.len(), 2);
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn relocate_prefixes_written_images() {
+        let tmp =
+            std::env::temp_dir().join(format!("honya_media_prefix_test_{}", std::process::id()));
+        let work = tmp.join("work");
+        let images = tmp.join("images");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(work.join("OEBPS/Images")).unwrap();
+        fs::write(work.join("OEBPS/Images/a.png"), b"image").unwrap();
+
+        let manifest = vec![img("i1", "Images/a.png", "OEBPS/Images/a.png")];
+
+        let reloc = relocate_images_with_prefix(&manifest, &work, &images, "images", "vol1_")
+            .expect("relocate with prefix");
+        assert_eq!(
+            reloc
+                .by_resolved_path
+                .get("OEBPS/Images/a.png")
+                .map(|s| s.as_str()),
+            Some("vol1_a.png")
+        );
+        assert!(images.join("vol1_a.png").exists());
 
         let _ = fs::remove_dir_all(&tmp);
     }

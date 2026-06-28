@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use super::extract::{extract_all, locate_opf_from_dir, open_archive, read_entry_to_string};
-use super::media::{MediaRelocation, relocate_images};
+use super::media::{MediaRelocation, relocate_images, relocate_images_with_prefix};
 use super::opf::{ParsedOpf, parse_opf};
 use super::toc::{parse_nav_xhtml, parse_ncx};
 use super::{EpubBook, Result, TocEntry};
@@ -26,11 +26,22 @@ pub fn import_epub(epub_path: &Path, work_dir: &Path) -> Result<EpubBook> {
 
 /// Import an EPUB and relocate its images into `images_dir`. Returns the book
 /// plus the media rewrite maps the cleanse step consumes.
+#[allow(dead_code)]
 pub fn import_with_media(
     epub_path: &Path,
     work_dir: &Path,
     images_dir: &Path,
     images_rel: &str,
+) -> Result<(EpubBook, MediaRelocation)> {
+    import_with_media_prefixed(epub_path, work_dir, images_dir, images_rel, "")
+}
+
+pub fn import_with_media_prefixed(
+    epub_path: &Path,
+    work_dir: &Path,
+    images_dir: &Path,
+    images_rel: &str,
+    image_name_prefix: &str,
 ) -> Result<(EpubBook, MediaRelocation)> {
     let mut archive = open_archive(epub_path)?;
     extract_all(&mut archive, work_dir)?;
@@ -41,7 +52,17 @@ pub fn import_with_media(
 
     let toc = build_toc(&mut archive, work_dir, &opf_path, &parsed)?;
 
-    let reloc = relocate_images(&parsed.manifest, work_dir, images_dir, images_rel)?;
+    let reloc = if image_name_prefix.is_empty() {
+        relocate_images(&parsed.manifest, work_dir, images_dir, images_rel)?
+    } else {
+        relocate_images_with_prefix(
+            &parsed.manifest,
+            work_dir,
+            images_dir,
+            images_rel,
+            image_name_prefix,
+        )?
+    };
 
     let book = assemble_book(work_dir, opf_path, parsed, toc);
     Ok((book, reloc))

@@ -228,6 +228,16 @@ impl ProjectScreen {
                 let vol = self.selected_volume(active).unwrap_or(active.vol);
                 Action::AddChapters { vol }
             }
+            KeyCode::Char('M') => {
+                let vol = self.selected_volume(active).unwrap_or(active.vol);
+                Action::show_overlay(Overlay::confirm(
+                    "Update volume images",
+                    format!(
+                        "Re-import the source EPUB for Vol.{vol:02}, copy images as vol{vol}_*, and rewrite image links in raw/ and translated/ Markdown. Translation prose stays unchanged."
+                    ),
+                    Action::RefreshVolumeImages { vol },
+                ))
+            }
             KeyCode::Char('d') => {
                 let vol = self.selected_volume(active).unwrap_or(active.vol);
                 let marked = self.marked_chapters(active);
@@ -717,12 +727,20 @@ impl ProjectScreen {
                 " t translate ",
                 Style::default().fg(theme.accent),
             )]));
+            lines.push(Line::from(vec![Span::styled(
+                " M update images ",
+                Style::default().fg(theme.accent),
+            )]));
         } else {
             lines.push(usage_line("project", &active.project.usage_total(), theme));
             lines.push(Line::raw(""));
             lines.push(Line::from(Span::styled(
                 " Select a chapter to see its detail.",
                 Style::default().fg(theme.ink_faint),
+            )));
+            lines.push(Line::from(Span::styled(
+                " M update volume images.",
+                Style::default().fg(theme.accent),
             )));
         }
         f.render_widget(
@@ -739,6 +757,7 @@ impl ProjectScreen {
             ("A", "whole project"),
             ("V", "add vol"),
             ("i", "add chapters"),
+            ("M", "update images"),
             ("d", "delete"),
             ("x", "export"),
             ("Space", "mark"),

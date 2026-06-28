@@ -4273,6 +4273,7 @@ impl Overlay {
                     ("R", "project name (translate/reroll)"),
                     ("V", "add volume (import wizard)"),
                     ("i", "add chapters to volume (append import)"),
+                    ("M", "update volume images from source EPUB"),
                     ("d", "delete marked/current chapter(s)"),
                     ("Q", "QA review (flagged issues)"),
                 ],

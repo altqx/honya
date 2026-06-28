@@ -13,7 +13,7 @@ pub mod shelf;
 pub mod translate;
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use ratatui::Frame;
@@ -138,6 +138,9 @@ pub enum Action {
     /// Open the import wizard in append mode: its chapters are appended after
     /// `vol`'s last chapter (e.g. importing a bonus short-story EPUB into Vol.III).
     AddChapters {
+        vol: u32,
+    },
+    RefreshVolumeImages {
         vol: u32,
     },
     /// Delete the given chapters' raw/translated/reruns files from `vol`. Raised
@@ -793,7 +796,7 @@ impl App {
                 );
             }
             AppEvent::Error { context, msg } => {
-                if context == "import" {
+                if context == "import" || context == "image refresh" {
                     self.run_active = false;
                 }
                 // An export failure clears its guard and dismisses the export overlay
@@ -828,6 +831,23 @@ impl App {
                 // volume for an add-volume), keeping the cursor and active volume in
                 // sync so auto-follow doesn't flip it on the next keystroke.
                 self.focus_active_volume(*vol);
+            }
+            AppEvent::VolumeImagesUpdated {
+                project_id,
+                vol,
+                images,
+                raw_files,
+                translated_files,
+            } => {
+                self.run_active = false;
+                self.refresh_projects();
+                self.open_project(project_id.clone());
+                self.focus_active_volume(*vol);
+                let msg = format!(
+                    "updated Vol.{vol:02} images · {images} image(s), {raw_files} raw file(s), {translated_files} translated file(s)"
+                );
+                self.toast = Some(Toast::info(msg.clone()));
+                self.push_log(LogLevel::Info, msg);
             }
             AppEvent::ExportProgress { done, total, label } => {
                 self.overlay.set_export_progress(*done, *total, label);
@@ -2396,6 +2416,9 @@ impl App {
             Action::AddChapters { vol } => {
                 self.open_add_chapters(vol);
             }
+            Action::RefreshVolumeImages { vol } => {
+                self.refresh_volume_images(vol);
+            }
             Action::DeleteChapters { vol, chapters } => {
                 self.delete_chapters(vol, &chapters);
             }
@@ -2910,6 +2933,58 @@ impl App {
         let title = active.project.title.clone();
         let files = crate::workspace::scan::find_importable_files(&working_root());
         self.overlay = Overlay::import_append(files, &self.projects, title, vol);
+    }
+
+    fn refresh_volume_images(&mut self, vol: u32) {
+        if self.run_active {
+            self.toast = Some(Toast::warn("a run is already in progress"));
+            return;
+        }
+        let Some(active) = self.active.as_ref() else {
+            self.toast = Some(Toast::warn("no project open"));
+            return;
+        };
+        let project_id = active.project.id.clone();
+        let project_dir = active.project.dir.clone();
+        let ws = Workspace::new(project_dir.clone(), vol);
+        let Some(source) = volume_source_file(&ws) else {
+            self.toast = Some(Toast::warn(format!(
+                "Vol.{vol:02} has no source EPUB path in VOLUME.md"
+            )));
+            return;
+        };
+        if !source.exists() {
+            self.toast = Some(Toast::error(format!(
+                "source EPUB not found: {}",
+                source.display()
+            )));
+            return;
+        }
+        if !crate::document_import::is_epub_path(&source) {
+            self.toast = Some(Toast::warn(
+                "image refresh currently supports EPUB sources only",
+            ));
+            return;
+        }
+
+        let tx = self.tx.clone();
+        self.run_active = true;
+        self.toast = Some(Toast::info(format!("updating Vol.{vol:02} images …")));
+        tokio::spawn(async move {
+            match run_volume_image_refresh(source, project_dir, vol, &tx).await {
+                Ok(report) => tx.send(AppEvent::VolumeImagesUpdated {
+                    project_id,
+                    vol,
+                    images: report.images,
+                    raw_files: report.raw_files,
+                    translated_files: report.translated_files,
+                }),
+                Err(e) => tx.send(AppEvent::Error {
+                    context: "image refresh".to_string(),
+                    msg: e.to_string(),
+                }),
+            }
+        });
     }
 
     /// Remove chapters' raw/translated/reruns files from the active project's `vol`,
@@ -4999,7 +5074,56 @@ async fn run_epub_import(
     append: bool,
     tx: &EventTx,
 ) -> anyhow::Result<()> {
-    use crate::epub::import::import_with_media;
+    let prepared = prepare_epub_import(
+        epub.clone(),
+        dest.join(".epub_work"),
+        dest.join("images"),
+        vol,
+        tx,
+    )
+    .await?;
+    let ws = Workspace::new(dest.clone(), vol);
+    let base = if append {
+        crate::workspace::translation::max_chapter_number(&ws)
+    } else {
+        crate::workspace::volume::set_source_metadata(
+            &ws,
+            epub_source_metadata(&prepared.metadata, &epub),
+        )?;
+        0
+    };
+
+    for (idx, chapter) in prepared.chapters.iter().enumerate() {
+        write_import_chapter(
+            &ws,
+            base + (idx + 1) as u32,
+            &chapter.body,
+            chapter.image_only,
+        )?;
+    }
+
+    Ok(())
+}
+
+struct PreparedEpubImport {
+    metadata: crate::epub::Metadata,
+    image_count: usize,
+    chapters: Vec<PreparedImportChapter>,
+}
+
+struct PreparedImportChapter {
+    body: String,
+    image_only: bool,
+}
+
+async fn prepare_epub_import(
+    epub: PathBuf,
+    work_dir: PathBuf,
+    images_dir: PathBuf,
+    vol: u32,
+    tx: &EventTx,
+) -> anyhow::Result<PreparedEpubImport> {
+    use crate::epub::import::import_with_media_prefixed;
     use crate::epub::paths::{dir_of, resolve_href};
 
     tx.send(AppEvent::ImportProgress {
@@ -5008,38 +5132,27 @@ async fn run_epub_import(
         label: "extracting epub".to_string(),
     });
 
-    // work_dir lives under the project so the archive stays reprocessable.
-    let work_dir = dest.join(".epub_work");
-    let images_dir = dest.join("images");
+    let image_prefix = volume_image_prefix(vol);
     let (book, media) = {
         let epub = epub.clone();
         let work_dir = work_dir.clone();
         let images_dir = images_dir.clone();
         tokio::task::spawn_blocking(move || {
-            import_with_media(&epub, &work_dir, &images_dir, "images")
+            import_with_media_prefixed(&epub, &work_dir, &images_dir, "images", &image_prefix)
         })
         .await?
         .map_err(|e| anyhow::anyhow!("epub: {e}"))?
     };
 
+    let metadata = book.metadata.clone();
+    let image_count = media.written.len();
     let doc_paths: Vec<String> = book
         .reading_order_paths()
         .into_iter()
         .map(|s| s.to_string())
         .collect();
     let total = doc_paths.len();
-    let ws = Workspace::new(dest.clone(), vol);
-    // Append continues after the volume's last chapter; a fresh import starts at 1
-    // and overwrites the volume's source metadata.
-    let base = if append {
-        crate::workspace::translation::max_chapter_number(&ws)
-    } else {
-        crate::workspace::volume::set_source_metadata(&ws, epub_source_metadata(&book.metadata))?;
-        0
-    };
 
-    // TOC title per content doc (first entry wins); prepended as a `# ` heading on prose
-    // so real chapter names survive instead of the generic "Chapter NNN".
     let mut toc_titles: HashMap<String, String> = HashMap::new();
     for t in &book.toc {
         let title = t.title.trim();
@@ -5067,8 +5180,6 @@ async fn run_epub_import(
             }
         };
 
-        // Per-doc image map: raw <img src> -> relocated basename (empty map still
-        // yields correct links via cleanse's raw-basename fallback).
         let base_dir = dir_of(archive_path);
         let image_map: HashMap<String, String> = collect_img_srcs(&html)
             .into_iter()
@@ -5101,30 +5212,84 @@ async fn run_epub_import(
             total,
             label: format!("cleansing {}/{}", i + 1, total),
         });
-        // Yield so the UI ticks the gauge between docs.
         tokio::task::yield_now().await;
     }
 
     let chapters = crate::epub::segment::segment(&docs);
-    for (idx, lc) in chapters.iter().enumerate() {
-        let ch_number = base + (idx + 1) as u32;
-        match lc.kind {
-            crate::epub::segment::LogicalKind::ImageOnly => {
-                write_import_chapter(&ws, ch_number, &lc.body, true)?;
-            }
-            crate::epub::segment::LogicalKind::Prose => {
-                // Title heading goes ABOVE the leading m### image so scan.rs's
-                // first_md_heading recovers it.
-                let titled = match &lc.title {
+    let chapters = chapters
+        .iter()
+        .map(|lc| match lc.kind {
+            crate::epub::segment::LogicalKind::ImageOnly => PreparedImportChapter {
+                body: lc.body.clone(),
+                image_only: true,
+            },
+            crate::epub::segment::LogicalKind::Prose => PreparedImportChapter {
+                body: match &lc.title {
                     Some(t) => format!("# {t}\n\n{}", lc.body),
                     None => lc.body.clone(),
-                };
-                write_import_chapter(&ws, ch_number, &titled, false)?;
+                },
+                image_only: false,
+            },
+        })
+        .collect();
+
+    Ok(PreparedEpubImport {
+        metadata,
+        image_count,
+        chapters,
+    })
+}
+
+#[derive(Default)]
+struct RefreshImageReport {
+    images: usize,
+    raw_files: usize,
+    translated_files: usize,
+}
+
+async fn run_volume_image_refresh(
+    source: PathBuf,
+    dest: PathBuf,
+    vol: u32,
+    tx: &EventTx,
+) -> anyhow::Result<RefreshImageReport> {
+    let work_dir = dest
+        .join(".epub_image_refresh")
+        .join(format!("Vol_{vol:02}"));
+    let _ = tokio::fs::remove_dir_all(&work_dir).await;
+    let prepared =
+        prepare_epub_import(source.clone(), work_dir, dest.join("images"), vol, tx).await?;
+    let ws = Workspace::new(dest, vol);
+    crate::workspace::volume::set_source_metadata(
+        &ws,
+        epub_source_metadata(&prepared.metadata, &source),
+    )?;
+
+    let mut report = RefreshImageReport {
+        images: prepared.image_count,
+        ..Default::default()
+    };
+    let total = prepared.chapters.len();
+    for (idx, chapter) in prepared.chapters.iter().enumerate() {
+        let ch = (idx + 1) as u32;
+        let images = markdown_image_basenames(&chapter.body);
+        if !images.is_empty() {
+            if rewrite_markdown_image_file(&ws.raw(ch), &images)? {
+                report.raw_files += 1;
+            }
+            if rewrite_markdown_image_file(&ws.translated(ch), &images)? {
+                report.translated_files += 1;
             }
         }
+        tx.send(AppEvent::ImportProgress {
+            done: idx + 1,
+            total,
+            label: format!("rewriting image links {}/{}", idx + 1, total),
+        });
+        tokio::task::yield_now().await;
     }
 
-    Ok(())
+    Ok(report)
 }
 
 async fn run_markitdown_import(
@@ -5202,8 +5367,17 @@ fn write_import_chapter(
     Ok(())
 }
 
-fn epub_source_metadata(metadata: &crate::epub::Metadata) -> BTreeMap<String, String> {
+const SOURCE_FILE_METADATA_KEY: &str = "Source file";
+
+fn epub_source_metadata(
+    metadata: &crate::epub::Metadata,
+    source: &Path,
+) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
+    out.insert(
+        SOURCE_FILE_METADATA_KEY.to_string(),
+        source_file_display(source),
+    );
     insert_metadata(&mut out, "Title", metadata.title.as_deref());
     if metadata.authors.is_empty() {
         insert_metadata(&mut out, "Authors", metadata.creator.as_deref());
@@ -5221,6 +5395,140 @@ fn epub_source_metadata(metadata: &crate::epub::Metadata) -> BTreeMap<String, St
         metadata.cover_image_path.as_deref(),
     );
     out
+}
+
+fn source_file_display(source: &Path) -> String {
+    std::fs::canonicalize(source)
+        .unwrap_or_else(|_| source.to_path_buf())
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn volume_source_file(ws: &Workspace) -> Option<PathBuf> {
+    let data = crate::workspace::volume::load(ws);
+    data.source_metadata
+        .get(SOURCE_FILE_METADATA_KEY)
+        .map(PathBuf::from)
+        .map(|path| {
+            if path.is_absolute() {
+                path
+            } else {
+                ws.root.join(path)
+            }
+        })
+}
+
+fn volume_image_prefix(vol: u32) -> String {
+    format!("vol{vol}_")
+}
+
+fn rewrite_markdown_image_file(path: &Path, image_names: &[String]) -> std::io::Result<bool> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    let (updated, rewrites) = rewrite_markdown_image_links(&text, image_names);
+    if rewrites == 0 || updated == text {
+        return Ok(false);
+    }
+    std::fs::write(path, updated)?;
+    Ok(true)
+}
+
+fn markdown_image_basenames(markdown: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    for target in markdown_image_targets(markdown) {
+        if let Some(name) = image_target_basename(target) {
+            names.push(name.to_string());
+        }
+    }
+    names
+}
+
+fn rewrite_markdown_image_links(markdown: &str, image_names: &[String]) -> (String, usize) {
+    let mut out = String::with_capacity(markdown.len());
+    let mut cursor = 0;
+    let mut search = 0;
+    let mut image_idx = 0;
+    let mut rewrites = 0;
+
+    while let Some(rel_start) = markdown[search..].find("![") {
+        let start = search + rel_start;
+        let Some(label_end_rel) = markdown[start + 2..].find("](") else {
+            break;
+        };
+        let target_start = start + 2 + label_end_rel + 2;
+        let Some(target_end_rel) = markdown[target_start..].find(')') else {
+            break;
+        };
+        let target_end = target_start + target_end_rel;
+        let target = &markdown[target_start..target_end];
+        if image_target_basename(target).is_some() {
+            if let Some(new_name) = image_names.get(image_idx) {
+                out.push_str(&markdown[cursor..target_start]);
+                out.push_str(&rewrite_image_target(target, new_name));
+                cursor = target_end;
+                rewrites += 1;
+            }
+            image_idx += 1;
+        }
+        search = target_end + 1;
+    }
+
+    out.push_str(&markdown[cursor..]);
+    (out, rewrites)
+}
+
+fn markdown_image_targets(markdown: &str) -> Vec<&str> {
+    let mut targets = Vec::new();
+    let mut search = 0;
+    while let Some(rel_start) = markdown[search..].find("![") {
+        let start = search + rel_start;
+        let Some(label_end_rel) = markdown[start + 2..].find("](") else {
+            break;
+        };
+        let target_start = start + 2 + label_end_rel + 2;
+        let Some(target_end_rel) = markdown[target_start..].find(')') else {
+            break;
+        };
+        let target_end = target_start + target_end_rel;
+        targets.push(&markdown[target_start..target_end]);
+        search = target_end + 1;
+    }
+    targets
+}
+
+fn image_target_basename(target: &str) -> Option<&str> {
+    let path = target_path_part(target);
+    let lower = path.to_ascii_lowercase();
+    if lower.contains("://") || (!lower.contains("/images/") && !lower.starts_with("images/")) {
+        return None;
+    }
+    let name = path.rsplit('/').next().unwrap_or(path);
+    (!name.is_empty()).then_some(name)
+}
+
+fn rewrite_image_target(target: &str, new_basename: &str) -> String {
+    let path = target_path_part(target);
+    let suffix = &target[path.len()..];
+    let prefix = path
+        .rfind('/')
+        .map(|idx| &path[..=idx])
+        .unwrap_or("../../images/");
+    format!("{prefix}{new_basename}{suffix}")
+}
+
+fn target_path_part(target: &str) -> &str {
+    let query = target.find('?');
+    let fragment = target.find('#');
+    let end = match (query, fragment) {
+        (Some(q), Some(f)) => q.min(f),
+        (Some(q), None) => q,
+        (None, Some(f)) => f,
+        (None, None) => target.len(),
+    };
+    &target[..end]
 }
 
 fn insert_metadata(out: &mut BTreeMap<String, String>, key: &str, value: Option<&str>) {
@@ -5436,6 +5744,39 @@ mod img_src_tests {
             srcs.contains(&"bare.png".to_string()),
             "svg bare href: {srcs:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod image_refresh_tests {
+    use super::{markdown_image_basenames, rewrite_markdown_image_links, volume_image_prefix};
+
+    #[test]
+    fn volume_image_prefix_matches_import_contract() {
+        assert_eq!(volume_image_prefix(1), "vol1_");
+        assert_eq!(volume_image_prefix(12), "vol12_");
+    }
+
+    #[test]
+    fn markdown_image_links_rewrite_by_position() {
+        let md = "ก่อน ![ภาพ](../../images/old.png) กลาง ![x](../../images/old_2.jpg#frag) หลัง";
+        let names = vec!["vol2_a.png".to_string(), "vol2_b.jpg".to_string()];
+
+        let (out, rewrites) = rewrite_markdown_image_links(md, &names);
+
+        assert_eq!(rewrites, 2);
+        assert_eq!(
+            out,
+            "ก่อน ![ภาพ](../../images/vol2_a.png) กลาง ![x](../../images/vol2_b.jpg#frag) หลัง"
+        );
+    }
+
+    #[test]
+    fn markdown_image_basenames_ignores_non_project_images() {
+        let md =
+            "![remote](https://example.com/images/image.png)\n![local](../../images/vol1_a.png)";
+
+        assert_eq!(markdown_image_basenames(md), vec!["vol1_a.png"]);
     }
 }
 
