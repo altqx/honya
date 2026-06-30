@@ -16,6 +16,8 @@ use crate::model::{AgentModel, AppConfig, Provider, ServiceTier};
 pub const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
 pub const TOKENROUTER_BASE_URL: &str = "https://api.tokenrouter.com/v1";
 pub const GOOGLE_INTERACTIONS_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta";
+pub const CLOUDFLARE_WORKERS_AI_BASE_URL_PREFIX: &str =
+    "https://api.cloudflare.com/client/v4/accounts";
 
 use super::{ChatRequest, ChatResponse, Choice, FunctionCall, ResponseMessage, ToolCall, Usage};
 
@@ -165,6 +167,17 @@ impl ClientConfig {
         Self::for_endpoint(cfg, OPENROUTER_BASE_URL, api_key)
     }
 
+    pub fn for_cloudflare_workers_ai(cfg: &AppConfig, account_id: &str, api_token: String) -> Self {
+        let account_id = account_id.trim().trim_matches('/');
+        let mut cfg = Self::for_endpoint(
+            cfg,
+            format!("{CLOUDFLARE_WORKERS_AI_BASE_URL_PREFIX}/{account_id}/ai/v1"),
+            api_token,
+        );
+        cfg.service_tier = None;
+        cfg
+    }
+
     fn endpoint(&self) -> String {
         let base = self.base_url.trim_end_matches('/');
         format!("{base}/chat/completions")
@@ -206,6 +219,7 @@ pub struct ClientSet {
     openrouter: Option<Arc<dyn LlmClient>>,
     tokenrouter: Option<Arc<dyn LlmClient>>,
     google: Option<Arc<dyn LlmClient>>,
+    cloudflare: Option<Arc<dyn LlmClient>>,
     codex: Option<Arc<dyn LlmClient>>,
 }
 
@@ -233,6 +247,12 @@ impl ClientSet {
             )?) as Arc<dyn LlmClient>),
             None => None,
         };
+        let cloudflare = match crate::config::resolve_cloudflare_credentials(cfg) {
+            Some((account_id, api_token)) => Some(Arc::new(OpenRouterClient::new(
+                ClientConfig::for_cloudflare_workers_ai(cfg, &account_id, api_token),
+            )?) as Arc<dyn LlmClient>),
+            None => None,
+        };
         let codex = match &cfg.codex_auth {
             Some(auth) => {
                 Some(Arc::new(super::codex::CodexClient::new(auth.clone())?) as Arc<dyn LlmClient>)
@@ -243,6 +263,7 @@ impl ClientSet {
             openrouter,
             tokenrouter,
             google,
+            cloudflare,
             codex,
         })
     }
@@ -254,6 +275,7 @@ impl ClientSet {
             Provider::OpenRouter => self.openrouter.clone(),
             Provider::Tokenrouter => self.tokenrouter.clone(),
             Provider::Google => self.google.clone(),
+            Provider::Cloudflare => self.cloudflare.clone(),
             Provider::Codex => self.codex.clone(),
         }
     }
@@ -268,6 +290,7 @@ impl ClientSet {
         self.openrouter.is_none()
             && self.tokenrouter.is_none()
             && self.google.is_none()
+            && self.cloudflare.is_none()
             && self.codex.is_none()
     }
 
@@ -278,6 +301,7 @@ impl ClientSet {
             openrouter: Some(client),
             tokenrouter: None,
             google: None,
+            cloudflare: None,
             codex: None,
         }
     }
@@ -289,6 +313,7 @@ impl ClientSet {
             Provider::OpenRouter => self.openrouter = Some(client),
             Provider::Tokenrouter => self.tokenrouter = Some(client),
             Provider::Google => self.google = Some(client),
+            Provider::Cloudflare => self.cloudflare = Some(client),
             Provider::Codex => self.codex = Some(client),
         }
         self
@@ -804,6 +829,21 @@ mod tests {
         assert_eq!(cc.api_key, "k");
         assert_eq!(cc.service_tier, cfg.service_tier);
         assert_eq!(cc.referer, cfg.referer);
+    }
+
+    #[test]
+    fn cloudflare_config_uses_account_scoped_endpoint_without_service_tier() {
+        let cfg = AppConfig {
+            service_tier: Some(ServiceTier::Flex),
+            ..AppConfig::default()
+        };
+        let cc = ClientConfig::for_cloudflare_workers_ai(&cfg, " acct ", "tok".into());
+        assert_eq!(
+            cc.base_url,
+            "https://api.cloudflare.com/client/v4/accounts/acct/ai/v1"
+        );
+        assert_eq!(cc.api_key, "tok");
+        assert_eq!(cc.service_tier, None);
     }
 
     #[test]

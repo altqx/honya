@@ -447,10 +447,10 @@ fn settings_retries_field_is_digit_only_and_clamped() {
     let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::empty());
 
     let mk = || {
-        // Focus the "Retry attempts" numeric field (index 15) with an empty buffer.
+        // Focus the "Retry attempts" numeric field (index 17) with an empty buffer.
         Overlay::Settings(SettingsState {
             max_attempts: String::new(),
-            ..SettingsState::for_test(15)
+            ..SettingsState::for_test(17)
         })
     };
 

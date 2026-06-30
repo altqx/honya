@@ -137,12 +137,72 @@ pub fn google_key_from_env() -> Option<String> {
     None
 }
 
+pub fn resolve_cloudflare_account_id(cfg: &AppConfig) -> Option<String> {
+    cloudflare_account_id_from_env().or_else(|| {
+        cfg.cloudflare_account_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string)
+    })
+}
+
+pub fn cloudflare_account_id_from_env() -> Option<String> {
+    for var in [
+        "HONYA_CLOUDFLARE_ACCOUNT_ID",
+        "CLOUDFLARE_ACCOUNT_ID",
+        "CF_ACCOUNT_ID",
+    ] {
+        if let Ok(v) = std::env::var(var) {
+            let v = v.trim();
+            if !v.is_empty() {
+                return Some(v.to_string());
+            }
+        }
+    }
+    None
+}
+
+pub fn resolve_cloudflare_api_token(cfg: &AppConfig) -> Option<String> {
+    cloudflare_api_token_from_env().or_else(|| {
+        cfg.cloudflare_api_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string)
+    })
+}
+
+pub fn cloudflare_api_token_from_env() -> Option<String> {
+    for var in [
+        "HONYA_CLOUDFLARE_API_TOKEN",
+        "CLOUDFLARE_API_TOKEN",
+        "CLOUDFLARE_API_KEY",
+        "CF_API_TOKEN",
+    ] {
+        if let Ok(v) = std::env::var(var) {
+            let v = v.trim();
+            if !v.is_empty() {
+                return Some(v.to_string());
+            }
+        }
+    }
+    None
+}
+
+pub fn resolve_cloudflare_credentials(cfg: &AppConfig) -> Option<(String, String)> {
+    let account_id = resolve_cloudflare_account_id(cfg)?;
+    let api_token = resolve_cloudflare_api_token(cfg)?;
+    Some((account_id, api_token))
+}
+
 /// Whether any provider has a usable key configured.
 /// Used to gate "no API key" prompts now that agents can route per-provider.
 pub fn any_provider_key(cfg: &AppConfig) -> bool {
     resolve_api_key(cfg).is_some()
         || resolve_tokenrouter_key(cfg).is_some()
         || resolve_google_key(cfg).is_some()
+        || resolve_cloudflare_credentials(cfg).is_some()
         || cfg.codex_auth.is_some()
 }
 

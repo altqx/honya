@@ -266,9 +266,9 @@ pub enum ChunkState {
     NeedsReview, // committed unreviewed after exhausting attempts (flagged in-file)
 }
 
-/// LLM provider an agent routes to. OpenRouter and Tokenrouter share the
-/// chat/completions client; Google uses the Gemini Interactions API; Codex uses
-/// ChatGPT's Responses API.
+/// LLM provider an agent routes to. OpenRouter, Tokenrouter, and Cloudflare
+/// Workers AI share the chat/completions client; Google uses the Gemini
+/// Interactions API; Codex uses ChatGPT's Responses API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Provider {
@@ -276,6 +276,7 @@ pub enum Provider {
     OpenRouter,
     Tokenrouter,
     Google,
+    Cloudflare,
     Codex,
 }
 
@@ -285,6 +286,7 @@ impl Provider {
             Provider::OpenRouter => "OpenRouter",
             Provider::Tokenrouter => "Tokenrouter",
             Provider::Google => "Google",
+            Provider::Cloudflare => "Cloudflare",
             Provider::Codex => "Codex",
         }
     }
@@ -293,7 +295,8 @@ impl Provider {
         match self {
             Provider::OpenRouter => Provider::Tokenrouter,
             Provider::Tokenrouter => Provider::Google,
-            Provider::Google => Provider::Codex,
+            Provider::Google => Provider::Cloudflare,
+            Provider::Cloudflare => Provider::Codex,
             Provider::Codex => Provider::OpenRouter,
         }
     }
@@ -595,6 +598,16 @@ pub struct AppConfig {
     /// / GOOGLE_API_KEY override this when set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub google_api_key: Option<String>,
+    /// Persisted Cloudflare account id for Workers AI. Env
+    /// HONYA_CLOUDFLARE_ACCOUNT_ID / CLOUDFLARE_ACCOUNT_ID / CF_ACCOUNT_ID
+    /// override this when set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloudflare_account_id: Option<String>,
+    /// Persisted Cloudflare API token for Workers AI. Env
+    /// HONYA_CLOUDFLARE_API_TOKEN / CLOUDFLARE_API_TOKEN / CLOUDFLARE_API_KEY /
+    /// CF_API_TOKEN override this when set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloudflare_api_token: Option<String>,
     /// Active color theme (serde default keeps pre-theme configs loading).
     #[serde(default)]
     pub theme: ThemeId,
@@ -682,6 +695,8 @@ impl Default for AppConfig {
             api_key: None,
             tokenrouter_api_key: None,
             google_api_key: None,
+            cloudflare_account_id: None,
+            cloudflare_api_token: None,
             theme: ThemeId::default(),
             onboarded: false,
             update_mode: UpdateMode::default(),
@@ -1667,6 +1682,16 @@ mod provider_model_tests {
         // Provider serializes kebab-case, effort lowercase.
         assert!(json.contains("\"tokenrouter\""));
         assert!(json.contains("\"high\""));
+    }
+
+    #[test]
+    fn cloudflare_provider_round_trips() {
+        let a = AgentModel::new(Provider::Cloudflare, "@cf/meta/llama-3.1-8b-instruct", None);
+        let json = serde_json::to_string(&a).unwrap();
+        let back: AgentModel = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.provider, Provider::Cloudflare);
+        assert_eq!(back.model, "@cf/meta/llama-3.1-8b-instruct");
+        assert!(json.contains("\"cloudflare\""));
     }
 
     #[test]

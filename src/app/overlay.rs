@@ -450,6 +450,8 @@ enum SField {
     OpenRouterKey,
     TokenrouterKey,
     GoogleKey,
+    CloudflareAccount,
+    CloudflareToken,
     MaxAttempts,
     LoopStall,
     Retranslates,
@@ -458,7 +460,7 @@ enum SField {
     ReleaseChannelField,
 }
 
-const SETTINGS_ORDER: [SField; 21] = [
+const SETTINGS_ORDER: [SField; 23] = [
     SField::OrchProvider,
     SField::OrchModel,
     SField::OrchEffort,
@@ -474,6 +476,8 @@ const SETTINGS_ORDER: [SField; 21] = [
     SField::OpenRouterKey,
     SField::TokenrouterKey,
     SField::GoogleKey,
+    SField::CloudflareAccount,
+    SField::CloudflareToken,
     SField::MaxAttempts,
     SField::LoopStall,
     SField::Retranslates,
@@ -526,9 +530,9 @@ impl SettingsTab {
     fn field_range(self) -> Option<(u8, u8)> {
         Some(match self {
             SettingsTab::Agents => (0, 12),
-            SettingsTab::Providers => (12, 15),
-            SettingsTab::Pipeline => (15, 19),
-            SettingsTab::Appearance => (19, 21),
+            SettingsTab::Providers => (12, 17),
+            SettingsTab::Pipeline => (17, 21),
+            SettingsTab::Appearance => (21, 23),
             SettingsTab::Account => return None,
         })
     }
@@ -564,6 +568,8 @@ impl SField {
                 | SField::OpenRouterKey
                 | SField::TokenrouterKey
                 | SField::GoogleKey
+                | SField::CloudflareAccount
+                | SField::CloudflareToken
                 | SField::MaxAttempts
                 | SField::LoopStall
                 | SField::Retranslates
@@ -582,7 +588,10 @@ impl SField {
     fn is_secret(self) -> bool {
         matches!(
             self,
-            SField::OpenRouterKey | SField::TokenrouterKey | SField::GoogleKey
+            SField::OpenRouterKey
+                | SField::TokenrouterKey
+                | SField::GoogleKey
+                | SField::CloudflareToken
         )
     }
 }
@@ -615,6 +624,14 @@ pub struct SettingsState {
     pub google_key: String,
     /// True when an env var supplies the Google key (shown read-only).
     pub google_key_env: bool,
+    /// Cloudflare Workers AI account id, editable unless supplied by env.
+    pub cloudflare_account_id: String,
+    /// True when an env var supplies the Cloudflare account id (shown read-only).
+    pub cloudflare_account_id_env: bool,
+    /// Cloudflare Workers AI API token, editable unless supplied by env.
+    pub cloudflare_api_token: String,
+    /// True when an env var supplies the Cloudflare API token (shown read-only).
+    pub cloudflare_api_token_env: bool,
     /// Startup update behavior (cycle field; also Ctrl-U).
     pub update_mode: UpdateMode,
     /// Update channel (cycle field; also Ctrl-G).
@@ -653,6 +670,10 @@ impl SettingsState {
             tokenrouter_key_env: crate::config::tokenrouter_key_from_env().is_some(),
             google_key: cfg.google_api_key.clone().unwrap_or_default(),
             google_key_env: crate::config::google_key_from_env().is_some(),
+            cloudflare_account_id: cfg.cloudflare_account_id.clone().unwrap_or_default(),
+            cloudflare_account_id_env: crate::config::cloudflare_account_id_from_env().is_some(),
+            cloudflare_api_token: cfg.cloudflare_api_token.clone().unwrap_or_default(),
+            cloudflare_api_token_env: crate::config::cloudflare_api_token_from_env().is_some(),
             update_mode: cfg.update_mode,
             release_channel: cfg.release_channel,
             service_tier: cfg.service_tier,
@@ -697,6 +718,8 @@ impl SettingsState {
             SField::OpenRouterKey => &mut self.openrouter_key,
             SField::TokenrouterKey => &mut self.tokenrouter_key,
             SField::GoogleKey => &mut self.google_key,
+            SField::CloudflareAccount => &mut self.cloudflare_account_id,
+            SField::CloudflareToken => &mut self.cloudflare_api_token,
             SField::MaxAttempts => &mut self.max_attempts,
             SField::LoopStall => &mut self.loop_stall_secs,
             SField::Retranslates => &mut self.max_chapter_retranslates,
@@ -1438,6 +1461,10 @@ impl Overlay {
             tokenrouter_key_env: false,
             google_key: String::new(),
             google_key_env: false,
+            cloudflare_account_id: String::new(),
+            cloudflare_account_id_env: false,
+            cloudflare_api_token: String::new(),
+            cloudflare_api_token_env: false,
             update_mode: UpdateMode::default(),
             release_channel: ReleaseChannel::default(),
             service_tier: None,
@@ -2224,6 +2251,16 @@ impl Overlay {
                 } else {
                     Some(st.google_key.clone())
                 },
+                cloudflare_account_id: if st.cloudflare_account_id_env {
+                    None
+                } else {
+                    Some(st.cloudflare_account_id.clone())
+                },
+                cloudflare_api_token: if st.cloudflare_api_token_env {
+                    None
+                } else {
+                    Some(st.cloudflare_api_token.clone())
+                },
                 update_mode: st.update_mode,
                 release_channel: st.release_channel,
                 service_tier: st.service_tier,
@@ -2263,7 +2300,9 @@ impl Overlay {
                     let env = match cur {
                         SField::OpenRouterKey => st.api_key_env,
                         SField::TokenrouterKey => st.tokenrouter_key_env,
-                        _ => st.google_key_env,
+                        SField::GoogleKey => st.google_key_env,
+                        SField::CloudflareToken => st.cloudflare_api_token_env,
+                        _ => false,
                     };
                     if env {
                         return Action::None; // env key is read-only
@@ -2287,6 +2326,9 @@ impl Overlay {
                     return Action::None;
                 }
                 if !st.current_is_editable_text() {
+                    return Action::None;
+                }
+                if cur == SField::CloudflareAccount && st.cloudflare_account_id_env {
                     return Action::None;
                 }
                 let opts = EditOpts {
@@ -3952,6 +3994,15 @@ impl Overlay {
                 mask_secret(val)
             }
         };
+        let plain_setting = |val: &str, env: bool| -> String {
+            if env {
+                "via environment (read-only)".to_string()
+            } else if val.trim().is_empty() {
+                "— not set —".to_string()
+            } else {
+                val.to_string()
+            }
+        };
 
         let mut lines: Vec<Line<'static>> = Vec::new();
         let mut focus_line = 0usize;
@@ -4052,6 +4103,28 @@ impl Overlay {
                 ),
                 st.field == 14,
             );
+            push(
+                &mut lines,
+                &mut focus_line,
+                row(
+                    15,
+                    "Cloudflare account",
+                    plain_setting(&st.cloudflare_account_id, st.cloudflare_account_id_env),
+                    !st.cloudflare_account_id_env,
+                ),
+                st.field == 15,
+            );
+            push(
+                &mut lines,
+                &mut focus_line,
+                row(
+                    16,
+                    "Cloudflare token",
+                    mask(&st.cloudflare_api_token, st.cloudflare_api_token_env),
+                    false,
+                ),
+                st.field == 16,
+            );
             let (codex_status, codex_color, codex_hint) = match &cfg.codex_auth {
                 Some(_) => ("signed in", theme.status_done, "Ctrl-X sign out"),
                 None => ("not signed in", theme.ink_soft, "Ctrl-X sign in"),
@@ -4072,8 +4145,8 @@ impl Overlay {
             push(
                 &mut lines,
                 &mut focus_line,
-                row(15, "Retry attempts", st.max_attempts.clone(), true),
-                st.field == 15,
+                row(17, "Retry attempts", st.max_attempts.clone(), true),
+                st.field == 17,
             );
             lines.push(Line::from(Span::styled(
                 "      ↳ Translator↔Reviewer loop per chunk (1–20)",
@@ -4082,8 +4155,8 @@ impl Overlay {
             push(
                 &mut lines,
                 &mut focus_line,
-                row(16, "Loop watchdog (s)", st.loop_stall_secs.clone(), true),
-                st.field == 16,
+                row(18, "Loop watchdog (s)", st.loop_stall_secs.clone(), true),
+                st.field == 18,
             );
             lines.push(Line::from(Span::styled(
                 "      ↳ quiet pipeline stalls after N s; active model calls retry chunk first",
@@ -4093,12 +4166,12 @@ impl Overlay {
                 &mut lines,
                 &mut focus_line,
                 row(
-                    17,
+                    19,
                     "Loop re-translates",
                     st.max_chapter_retranslates.clone(),
                     true,
                 ),
-                st.field == 17,
+                st.field == 19,
             );
             lines.push(Line::from(Span::styled(
                 "      ↳ stalled-chapter re-translates before the run aborts (0–10)",
@@ -4108,12 +4181,12 @@ impl Overlay {
                 &mut lines,
                 &mut focus_line,
                 row(
-                    18,
+                    20,
                     "Service tier",
                     ServiceTier::label(st.service_tier).to_string(),
                     false,
                 ),
-                st.field == 18,
+                st.field == 20,
             );
             lines.push(Line::from(Span::styled(
                 format!("      ↳ {}", ServiceTier::desc(st.service_tier)),
@@ -4124,19 +4197,19 @@ impl Overlay {
             push(
                 &mut lines,
                 &mut focus_line,
-                row(19, "Auto-update", st.update_mode.label().to_string(), false),
-                st.field == 19,
+                row(21, "Auto-update", st.update_mode.label().to_string(), false),
+                st.field == 21,
             );
             push(
                 &mut lines,
                 &mut focus_line,
                 row(
-                    20,
+                    22,
                     "Update channel",
                     st.release_channel.label().to_string(),
                     false,
                 ),
-                st.field == 20,
+                st.field == 22,
             );
             lines.push(Line::from(vec![
                 Span::styled(
@@ -5941,9 +6014,13 @@ mod tests {
         st.next_field();
         assert_eq!(st.field, 14);
         st.next_field();
+        assert_eq!(st.field, 15);
+        st.next_field();
+        assert_eq!(st.field, 16);
+        st.next_field();
         assert_eq!(st.field, 12, "field nav wraps within the tab");
 
-        let st = SettingsState::for_test(15); // Retry attempts
+        let st = SettingsState::for_test(17); // Retry attempts
         assert_eq!(st.tab, SettingsTab::Pipeline);
 
         let mut st = SettingsState::for_test(0);
@@ -5957,7 +6034,8 @@ mod tests {
         let mut st = SettingsState::for_test(0); // Orchestrator · provider
         st.cycle(true); // OpenRouter → Tokenrouter
         st.cycle(true); // Tokenrouter → Google
-        st.cycle(true); // Google → Codex
+        st.cycle(true); // Google → Cloudflare
+        st.cycle(true); // Cloudflare → Codex
         assert_eq!(
             st.models.orchestrator.provider,
             crate::model::Provider::Codex

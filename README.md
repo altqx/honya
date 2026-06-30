@@ -18,16 +18,16 @@ Drop an EPUB, PDF, DOCX, HTML, or text-based file into a folder and honya turns 
 
 For EPUBs, honya reads the book
 in true spine order, relocates the illustrations, cleanses the XHTML into tidy Markdown, then runs
-a three-agent LLM pipeline — **Orchestrator · Translator · Reviewer** — over an OpenRouter-compatible
-API. The agents keep your character roster, glossary, and volume notes current **through tool calls**,
+a three-agent LLM pipeline — **Orchestrator · Translator · Reviewer** — over an OpenAI-compatible
+provider. The agents keep your character roster, glossary, and volume notes current **through tool calls**,
 and every token and dollar is accounted for as the run progresses.
 
 It's a single static binary, built on [Ratatui](https://ratatui.rs). No Electron, no browser, no
 telemetry — just a quiet workspace in your terminal.
 
 > [!IMPORTANT]
-> honya needs an **OpenRouter API key**. On first launch it prompts you to paste one and saves it,
-> so you're only asked once. Grab a key at <https://openrouter.ai/keys>.
+> honya needs a provider key. On first launch it can prompt for an OpenRouter key, or you can
+> configure another provider in Settings.
 
 ## Highlights
 
@@ -129,7 +129,8 @@ subdirectory, and any loose supported source files (`*.epub`, `*.pdf`, `*.docx`,
 tab, press `i` to import a file into a new project, then `t` / `T` on the **棚 Project** tab to
 translate a chapter or a whole volume.
 
-On first run, honya prompts for your OpenRouter key and saves it — see [API key & models](#api-key--models).
+On first run, honya can prompt for an OpenRouter key and save it; other providers are configured in
+Settings — see [API key & models](#api-key--models).
 
 ## The five screens
 
@@ -150,8 +151,8 @@ On the **Project** tab, `l` expands/focuses the tree; use backtick (`` ` ``) for
 
 ## API key & models
 
-honya talks to OpenRouter (`https://openrouter.ai/api/v1` by default — configurable in **Settings**),
-so it needs a key. Resolution order:
+honya supports OpenRouter, Tokenrouter, Google Gemini, Cloudflare Workers AI, and Codex. For
+OpenRouter, key resolution order is:
 
 1. `HONYA_API_KEY`, then `OPENROUTER_API_KEY` from the environment (these always win).
 2. Otherwise, the key saved at `~/.config/honya/config.json` (or `$XDG_CONFIG_HOME/honya/config.json`).
@@ -159,7 +160,10 @@ so it needs a key. Resolution order:
 If neither is present, honya prompts for the key at startup (hidden input) and writes it to that
 config file (`0600` on Unix) so subsequent launches don't ask again.
 
-The three agents have **independently configurable models** (a `ModelSet`, overridable per project);
+Cloudflare Workers AI uses Cloudflare's OpenAI-compatible endpoint and requires both an account id
+and API token. Use a Workers AI model id such as `@cf/meta/llama-3.1-8b-instruct`.
+
+The three agents have **independently configurable providers and models** (a `ModelSet`, overridable per project);
 the defaults are:
 
 | Agent | Default model |
@@ -168,7 +172,9 @@ the defaults are:
 | **Translator** | `google/gemini-3-flash-preview` |
 | **Reviewer** | `google/gemini-3.1-flash-lite` |
 
-Open **Settings** (`:` → *Settings*) to change the API base URL, swap models per agent, set the **retry attempts** per chunk (1–20), pick an OpenRouter **service tier** (Off / Flex / Priority, `Ctrl-Y`), and choose a **release channel** (stable / dev, `Ctrl-G`).
+Open **Settings** (`:` → *Settings*) to pick each agent's provider/model, add provider credentials,
+set the **retry attempts** per chunk (1–20), pick an OpenRouter **service tier** (Off / Flex /
+Priority, `Ctrl-Y`), and choose a **release channel** (stable / dev, `Ctrl-G`).
 
 <details>
 <summary>All environment variables</summary>
@@ -177,6 +183,10 @@ Open **Settings** (`:` → *Settings*) to change the API base URL, swap models p
 |----------|--------|
 | `HONYA_API_KEY` | OpenRouter API key (checked first). |
 | `OPENROUTER_API_KEY` | OpenRouter API key (fallback). |
+| `HONYA_TOKENROUTER_API_KEY` / `TOKENROUTER_API_KEY` | Tokenrouter API key. |
+| `HONYA_GOOGLE_API_KEY` / `GEMINI_API_KEY` / `GOOGLE_API_KEY` | Google Gemini API key. |
+| `HONYA_CLOUDFLARE_ACCOUNT_ID` / `CLOUDFLARE_ACCOUNT_ID` / `CF_ACCOUNT_ID` | Cloudflare account id for Workers AI. |
+| `HONYA_CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_API_KEY` / `CF_API_TOKEN` | Cloudflare Workers AI API token. |
 | `XDG_CONFIG_HOME` | Override the config directory root (`$XDG_CONFIG_HOME/honya`). |
 | `HONYA_NO_UPDATE_CHECK` | Set to any value to skip the startup update check. |
 | `HONYA_SESSION_FILE` | Override the crash-recovery checkpoint path (absolute). |

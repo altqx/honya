@@ -263,6 +263,10 @@ pub enum Action {
         tokenrouter_key: Option<String>,
         /// New Google key (same `Some`/`None` semantics as `openrouter_key`).
         google_key: Option<String>,
+        /// New Cloudflare account id (same `Some`/`None` semantics as `openrouter_key`).
+        cloudflare_account_id: Option<String>,
+        /// New Cloudflare API token (same `Some`/`None` semantics as `openrouter_key`).
+        cloudflare_api_token: Option<String>,
         /// Startup update behavior (auto-install vs. notify only).
         update_mode: crate::model::UpdateMode,
         /// Update channel: stable releases vs latest git built from source.
@@ -2654,6 +2658,8 @@ impl App {
                 openrouter_key,
                 tokenrouter_key,
                 google_key,
+                cloudflare_account_id,
+                cloudflare_api_token,
                 update_mode,
                 release_channel,
                 service_tier,
@@ -2666,6 +2672,8 @@ impl App {
                     openrouter_key,
                     tokenrouter_key,
                     google_key,
+                    cloudflare_account_id,
+                    cloudflare_api_token,
                     update_mode,
                     release_channel,
                     service_tier,
@@ -4059,6 +4067,8 @@ impl App {
         openrouter_key: Option<String>,
         tokenrouter_key: Option<String>,
         google_key: Option<String>,
+        cloudflare_account_id: Option<String>,
+        cloudflare_api_token: Option<String>,
         update_mode: crate::model::UpdateMode,
         release_channel: crate::model::ReleaseChannel,
         service_tier: Option<crate::model::ServiceTier>,
@@ -4094,6 +4104,18 @@ impl App {
             let next = (!k.is_empty()).then(|| k.to_string());
             keys_changed |= next != self.cfg.google_api_key;
             self.cfg.google_api_key = next;
+        }
+        if let Some(id) = cloudflare_account_id {
+            let id = id.trim();
+            let next = (!id.is_empty()).then(|| id.to_string());
+            keys_changed |= next != self.cfg.cloudflare_account_id;
+            self.cfg.cloudflare_account_id = next;
+        }
+        if let Some(token) = cloudflare_api_token {
+            let token = token.trim();
+            let next = (!token.is_empty()).then(|| token.to_string());
+            keys_changed |= next != self.cfg.cloudflare_api_token;
+            self.cfg.cloudflare_api_token = next;
         }
         // Propagate the working model set to the active project so an in-flight
         // session's next chapter / refine turn uses the new selection.

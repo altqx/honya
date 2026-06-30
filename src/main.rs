@@ -221,6 +221,10 @@ fn print_help() {
         "    HONYA_TOKENROUTER_API_KEY / TOKENROUTER_API_KEY   Tokenrouter key (overrides saved config)"
     );
     println!("    HONYA_GOOGLE_API_KEY / GEMINI_API_KEY / GOOGLE_API_KEY   Google Gemini key");
+    println!("    HONYA_CLOUDFLARE_ACCOUNT_ID / CLOUDFLARE_ACCOUNT_ID     Cloudflare account id");
+    println!(
+        "    HONYA_CLOUDFLARE_API_TOKEN / CLOUDFLARE_API_TOKEN       Cloudflare Workers AI token"
+    );
     println!(
         "    HONYA_NO_UPDATE_CHECK                Disable the startup update check / auto-update"
     );
