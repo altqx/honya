@@ -494,6 +494,33 @@ const CODEX_MODELS: [&str; 3] = ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini"];
 fn default_codex_models() -> Vec<String> {
     CODEX_MODELS.iter().map(|s| s.to_string()).collect()
 }
+
+fn provider_model_fallback(
+    current: crate::model::Provider,
+    next: crate::model::Provider,
+    current_model: &str,
+    codex_models: &[String],
+) -> String {
+    if matches!(
+        (current, next),
+        (
+            crate::model::Provider::OpenRouter,
+            crate::model::Provider::Tokenrouter
+        ) | (
+            crate::model::Provider::Tokenrouter,
+            crate::model::Provider::OpenRouter
+        )
+    ) && !current_model.trim().is_empty()
+    {
+        return current_model.to_string();
+    }
+    if next == crate::model::Provider::Codex
+        && let Some(first) = codex_models.first()
+    {
+        return first.clone();
+    }
+    next.default_model().to_string()
+}
 /// Index of the OpenRouter API-key field (callers open Settings focused here).
 const SETTINGS_KEY_FIELD: u8 = 12;
 
@@ -790,7 +817,7 @@ impl SettingsState {
                     Some(i) => step(i, models.len(), forward),
                     None => 0,
                 };
-                a.model = models[next].clone();
+                a.set_model(models[next].clone());
             }
             return;
         }
@@ -801,14 +828,10 @@ impl SettingsState {
             | SField::ReviewProvider
             | SField::RefineProvider => {
                 if let Some(a) = self.agent_for(cur) {
-                    a.provider = a.provider.cycled();
-                    // Snap to a valid Codex model id when switching onto Codex.
-                    if a.provider == crate::model::Provider::Codex
-                        && !codex_models.contains(&a.model)
-                        && let Some(first) = codex_models.first()
-                    {
-                        a.model = first.clone();
-                    }
+                    let current = a.provider;
+                    let next = a.provider.cycled(forward);
+                    let fallback = provider_model_fallback(current, next, &a.model, &codex_models);
+                    a.switch_provider(next, Some(&fallback));
                 }
             }
             SField::OrchEffort
@@ -2233,41 +2256,45 @@ impl Overlay {
                     Action::None
                 }
             }
-            KeyCode::Enter => Action::SaveSettings {
-                models: Box::new(st.models.clone()),
-                // Env keys must not overwrite saved config.
-                openrouter_key: if st.api_key_env {
-                    None
-                } else {
-                    Some(st.openrouter_key.clone())
-                },
-                tokenrouter_key: if st.tokenrouter_key_env {
-                    None
-                } else {
-                    Some(st.tokenrouter_key.clone())
-                },
-                google_key: if st.google_key_env {
-                    None
-                } else {
-                    Some(st.google_key.clone())
-                },
-                cloudflare_account_id: if st.cloudflare_account_id_env {
-                    None
-                } else {
-                    Some(st.cloudflare_account_id.clone())
-                },
-                cloudflare_api_token: if st.cloudflare_api_token_env {
-                    None
-                } else {
-                    Some(st.cloudflare_api_token.clone())
-                },
-                update_mode: st.update_mode,
-                release_channel: st.release_channel,
-                service_tier: st.service_tier,
-                max_attempts: st.max_attempts_value(),
-                loop_stall_secs: st.loop_stall_secs_value(),
-                max_chapter_retranslates: st.max_chapter_retranslates_value(),
-            },
+            KeyCode::Enter => {
+                let mut models = st.models.clone();
+                models.remember_active_models();
+                Action::SaveSettings {
+                    models: Box::new(models),
+                    // Env keys must not overwrite saved config.
+                    openrouter_key: if st.api_key_env {
+                        None
+                    } else {
+                        Some(st.openrouter_key.clone())
+                    },
+                    tokenrouter_key: if st.tokenrouter_key_env {
+                        None
+                    } else {
+                        Some(st.tokenrouter_key.clone())
+                    },
+                    google_key: if st.google_key_env {
+                        None
+                    } else {
+                        Some(st.google_key.clone())
+                    },
+                    cloudflare_account_id: if st.cloudflare_account_id_env {
+                        None
+                    } else {
+                        Some(st.cloudflare_account_id.clone())
+                    },
+                    cloudflare_api_token: if st.cloudflare_api_token_env {
+                        None
+                    } else {
+                        Some(st.cloudflare_api_token.clone())
+                    },
+                    update_mode: st.update_mode,
+                    release_channel: st.release_channel,
+                    service_tier: st.service_tier,
+                    max_attempts: st.max_attempts_value(),
+                    loop_stall_secs: st.loop_stall_secs_value(),
+                    max_chapter_retranslates: st.max_chapter_retranslates_value(),
+                }
+            }
             // Tab switches between Settings tabs; Up/Down move fields within a tab.
             KeyCode::Tab => {
                 st.switch_tab(true);
@@ -6049,6 +6076,37 @@ mod tests {
         st.cycle(true);
         assert_ne!(st.models.orchestrator.model, before);
         assert!(CODEX_MODELS.contains(&st.models.orchestrator.model.as_str()));
+    }
+
+    #[test]
+    fn provider_cycle_restores_remembered_model_for_each_provider() {
+        let mut st = SettingsState::for_test(0); // Orchestrator · provider
+        st.models.orchestrator.set_model("openrouter/custom");
+
+        st.cycle(true); // OpenRouter → Tokenrouter
+        st.models.orchestrator.set_model("tokenrouter/custom");
+
+        st.cycle(true); // Tokenrouter → Google
+        st.models.orchestrator.set_model("google/custom");
+
+        st.cycle(true); // Google → Cloudflare
+        st.models.orchestrator.set_model("@cf/custom/model");
+
+        st.cycle(true); // Cloudflare → Codex
+        st.cycle(true); // Codex → OpenRouter
+        assert_eq!(st.models.orchestrator.model, "openrouter/custom");
+
+        st.cycle(true); // OpenRouter → Tokenrouter
+        assert_eq!(st.models.orchestrator.model, "tokenrouter/custom");
+
+        st.cycle(true); // Tokenrouter → Google
+        assert_eq!(st.models.orchestrator.model, "google/custom");
+
+        st.cycle(true); // Google → Cloudflare
+        assert_eq!(st.models.orchestrator.model, "@cf/custom/model");
+
+        st.cycle(false); // Cloudflare → Google
+        assert_eq!(st.models.orchestrator.model, "google/custom");
     }
 
     /// The redesigned Settings overlay must render at every focus position

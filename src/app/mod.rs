@@ -1301,9 +1301,9 @@ impl App {
             return;
         }
         if let Some(active) = self.active.as_mut() {
-            active.models.refine.model = model.clone();
+            active.models.refine.set_model(model.clone());
         }
-        self.cfg.models.refine.model = model.clone();
+        self.cfg.models.refine.set_model(model.clone());
         self.refine
             .set_context_max(crate::agents::refine::model_max_context(&model));
         if let Err(e) = crate::config::save(&self.cfg) {

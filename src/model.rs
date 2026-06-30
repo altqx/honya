@@ -269,7 +269,7 @@ pub enum ChunkState {
 /// LLM provider an agent routes to. OpenRouter, Tokenrouter, and Cloudflare
 /// Workers AI share the chat/completions client; Google uses the Gemini
 /// Interactions API; Codex uses ChatGPT's Responses API.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Provider {
     #[default]
@@ -291,13 +291,27 @@ impl Provider {
         }
     }
 
-    pub fn cycled(self) -> Self {
+    pub fn cycled(self, forward: bool) -> Self {
+        match (self, forward) {
+            (Provider::OpenRouter, true) => Provider::Tokenrouter,
+            (Provider::Tokenrouter, true) => Provider::Google,
+            (Provider::Google, true) => Provider::Cloudflare,
+            (Provider::Cloudflare, true) => Provider::Codex,
+            (Provider::Codex, true) => Provider::OpenRouter,
+            (Provider::OpenRouter, false) => Provider::Codex,
+            (Provider::Tokenrouter, false) => Provider::OpenRouter,
+            (Provider::Google, false) => Provider::Tokenrouter,
+            (Provider::Cloudflare, false) => Provider::Google,
+            (Provider::Codex, false) => Provider::Cloudflare,
+        }
+    }
+
+    pub fn default_model(self) -> &'static str {
         match self {
-            Provider::OpenRouter => Provider::Tokenrouter,
-            Provider::Tokenrouter => Provider::Google,
-            Provider::Google => Provider::Cloudflare,
-            Provider::Cloudflare => Provider::Codex,
-            Provider::Codex => Provider::OpenRouter,
+            Provider::OpenRouter | Provider::Tokenrouter => "google/gemini-3.5-flash",
+            Provider::Google => "gemini-3.5-flash",
+            Provider::Cloudflare => "@cf/meta/llama-3.1-8b-instruct",
+            Provider::Codex => "gpt-5.5",
         }
     }
 }
@@ -346,22 +360,28 @@ impl Effort {
     }
 }
 
-/// One agent's provider + model id + optional reasoning effort.
+/// One agent's active provider/model plus remembered model ids per provider.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AgentModel {
     pub provider: Provider,
     pub model: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub provider_models: BTreeMap<Provider, String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effort: Option<Effort>,
 }
 
 impl AgentModel {
     pub fn new(provider: Provider, model: impl Into<String>, effort: Option<Effort>) -> Self {
-        Self {
+        let model = model.into();
+        let mut this = Self {
             provider,
-            model: model.into(),
+            model,
+            provider_models: BTreeMap::new(),
             effort,
-        }
+        };
+        this.remember_active_model();
+        this
     }
 
     /// A plain OpenRouter model with no reasoning effort (the legacy/default shape).
@@ -373,6 +393,42 @@ impl AgentModel {
     pub fn reasoning_param(&self) -> Option<serde_json::Value> {
         self.effort
             .map(|e| serde_json::json!({ "effort": e.as_str() }))
+    }
+
+    pub fn remember_active_model(&mut self) {
+        let model = self.model.trim();
+        if !model.is_empty() {
+            self.provider_models
+                .insert(self.provider, model.to_string());
+        }
+    }
+
+    pub fn set_model(&mut self, model: impl Into<String>) {
+        self.model = model.into();
+        self.remember_active_model();
+    }
+
+    pub fn switch_provider(&mut self, next: Provider, fallback: Option<&str>) {
+        self.remember_active_model();
+        self.provider = next;
+        let model = self
+            .provider_models
+            .get(&next)
+            .filter(|m| !m.trim().is_empty())
+            .cloned()
+            .or_else(|| fallback.map(str::to_string))
+            .unwrap_or_else(|| next.default_model().to_string());
+        self.model = model;
+        self.remember_active_model();
+    }
+}
+
+impl ModelSet {
+    pub fn remember_active_models(&mut self) {
+        self.orchestrator.remember_active_model();
+        self.translator.remember_active_model();
+        self.reviewer.remember_active_model();
+        self.refine.remember_active_model();
     }
 }
 
@@ -392,6 +448,8 @@ impl<'de> Deserialize<'de> for AgentModel {
                 provider: Provider,
                 model: String,
                 #[serde(default)]
+                provider_models: BTreeMap<Provider, String>,
+                #[serde(default)]
                 effort: Option<Effort>,
             },
         }
@@ -400,12 +458,18 @@ impl<'de> Deserialize<'de> for AgentModel {
             Raw::Obj {
                 provider,
                 model,
+                mut provider_models,
                 effort,
-            } => AgentModel {
-                provider,
-                model,
-                effort,
-            },
+            } => {
+                let mut agent = AgentModel {
+                    provider,
+                    model,
+                    provider_models: std::mem::take(&mut provider_models),
+                    effort,
+                };
+                agent.remember_active_model();
+                agent
+            }
         })
     }
 }
@@ -1692,6 +1756,42 @@ mod provider_model_tests {
         assert_eq!(back.provider, Provider::Cloudflare);
         assert_eq!(back.model, "@cf/meta/llama-3.1-8b-instruct");
         assert!(json.contains("\"cloudflare\""));
+    }
+
+    #[test]
+    fn agent_model_remembers_model_per_provider() {
+        let mut a = AgentModel::openrouter("openrouter/model");
+        a.switch_provider(Provider::Cloudflare, None);
+        assert_eq!(a.model, Provider::Cloudflare.default_model());
+
+        a.set_model("@cf/custom/model");
+        a.switch_provider(Provider::OpenRouter, None);
+        assert_eq!(a.model, "openrouter/model");
+
+        a.switch_provider(Provider::Cloudflare, None);
+        assert_eq!(a.model, "@cf/custom/model");
+    }
+
+    #[test]
+    fn provider_model_memory_round_trips() {
+        let mut a = AgentModel::openrouter("openrouter/model");
+        a.switch_provider(Provider::Cloudflare, None);
+        a.set_model("@cf/custom/model");
+
+        let json = serde_json::to_string(&a).unwrap();
+        let back: AgentModel = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            back.provider_models
+                .get(&Provider::OpenRouter)
+                .map(String::as_str),
+            Some("openrouter/model")
+        );
+        assert_eq!(
+            back.provider_models
+                .get(&Provider::Cloudflare)
+                .map(String::as_str),
+            Some("@cf/custom/model")
+        );
     }
 
     #[test]
