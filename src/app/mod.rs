@@ -1106,6 +1106,7 @@ impl App {
         if let Some(c) = &self.refine_cancel {
             c.store(true, std::sync::atomic::Ordering::Relaxed);
         }
+        self.refine_interact.cancel_all();
         self.clear_refine_steering();
         self.refine.cancel();
     }
@@ -2198,6 +2199,15 @@ impl App {
 
     /// Decide what a key means given the current overlay / screen / focus state.
     fn route_key(&mut self, k: KeyEvent) -> Action {
+        if k.modifiers.contains(KeyModifiers::CONTROL)
+            && k.code == KeyCode::Char('c')
+            && matches!(self.overlay, Overlay::None)
+            && matches!(self.screen, Screen::Refine)
+            && self.refine.is_in_flight()
+        {
+            return self.route_to_screen(k);
+        }
+
         // First Ctrl-C arms; a second inside the window quits.
         if k.modifiers.contains(KeyModifiers::CONTROL) && k.code == KeyCode::Char('c') {
             if self.quit_armed() {
@@ -2258,7 +2268,6 @@ impl App {
             KeyCode::Char('l') | KeyCode::Char('`') => {
                 return Action::show_overlay(Overlay::Log(0));
             }
-            KeyCode::Char('q') => return Action::Quit,
             KeyCode::Esc | KeyCode::Backspace if self.toast.is_some() => {
                 self.toast = None;
                 return Action::None;

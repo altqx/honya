@@ -1846,16 +1846,17 @@ fn whole_volume_translate_requeues_legacy_partial_chapter() {
 
 #[test]
 fn refine_tab_gated_without_project() {
-    // No project open: the Refine tab is reachable but does not capture, so a
-    // single-letter global like `q` still quits.
+    // No project open: the Refine tab is reachable but does not capture. `q`
+    // is not a quit shortcut; Ctrl-C is the only quit key.
     let mut app = fresh_app();
     app.on_key(KeyEvent::new(KeyCode::Char('6'), KeyModifiers::empty()));
     assert_eq!(app.screen, Screen::Refine);
     app.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::empty()));
-    assert!(
-        !app.running,
-        "q quits — Refine does not capture without a project"
-    );
+    assert!(app.running, "q must not quit");
+    app.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+    assert!(app.running, "first Ctrl-C only arms quit");
+    app.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+    assert!(!app.running, "second Ctrl-C quits");
 }
 
 #[test]
@@ -1869,7 +1870,21 @@ fn refine_tab_captures_then_releases_on_esc() {
 
     app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
     app.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::empty()));
-    assert!(!app.running, "q quits once the input is unfocused");
+    assert!(app.running, "q must not quit once the input is unfocused");
+    let _ = std::fs::remove_dir_all(app.active.as_ref().unwrap().project.dir.clone());
+}
+
+#[test]
+fn refine_ctrl_c_interrupts_in_flight_turn_before_quit() {
+    let mut app = refine_app_with_project("refine_ctrl_c_cancel");
+    app.on_key(KeyEvent::new(KeyCode::Char('6'), KeyModifiers::empty()));
+    assert_eq!(app.screen, Screen::Refine);
+    app.refine.begin_turn();
+
+    app.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+
+    assert!(app.running, "Ctrl-C interrupts Refine before app quit");
+    assert!(!app.refine.is_in_flight(), "Refine turn is canceled");
     let _ = std::fs::remove_dir_all(app.active.as_ref().unwrap().project.dir.clone());
 }
 
@@ -1943,15 +1958,13 @@ fn refine_slash_clear_resets_conversation() {
 #[test]
 fn refine_renders_at_several_widths() {
     // No project: the Refine tab shows the "open a project" placeholder and does
-    // not capture input (digits/q etc. stay global).
+    // not capture input.
     let mut app = fresh_app();
     app.screen = Screen::Refine;
     assert!(
         !app.refine.is_capturing() || app.active.is_none(),
         "Refine must not capture without a project"
     );
-    app.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::empty()));
-    assert!(!app.running, "globals still work on the gated Refine tab");
     for w in [24u16, 40, 80, 132] {
         let mut term = Terminal::new(TestBackend::new(w, 24)).unwrap();
         term.draw(|f| app.render(f)).unwrap();

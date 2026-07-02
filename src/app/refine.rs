@@ -11,7 +11,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
 use crate::llm::{Message, Role};
-use crate::model::{AppEvent, PlanStep, PlanStepStatus, Project};
+use crate::model::{AppEvent, PlanStep, PlanStepStatus, Project, RefineSubagentStatus};
 use crate::theme::{self, Theme};
 use crate::ui::input::{self, EditOpts, Edited};
 use crate::ui::mouse::{MouseGesture, MouseInput};
@@ -283,6 +283,14 @@ enum RefinePending {
     },
 }
 
+#[derive(Debug, Clone)]
+struct SubagentRun {
+    id: String,
+    title: String,
+    status: RefineSubagentStatus,
+    summary: String,
+}
+
 pub struct RefineScreen {
     pub conversation: Vec<Turn>,
     input: String,
@@ -300,6 +308,7 @@ pub struct RefineScreen {
     pending: Option<RefinePending>,
     approval_mode: crate::agents::refine::ApprovalMode,
     plan: Vec<PlanStep>,
+    subagents: Vec<SubagentRun>,
     expanded: bool,
     in_flight: bool,
     turn_started: Option<std::time::Instant>,
@@ -338,6 +347,7 @@ impl RefineScreen {
             pending: None,
             approval_mode: crate::agents::refine::ApprovalMode::default(),
             plan: Vec::new(),
+            subagents: Vec::new(),
             expanded: false,
             in_flight: false,
             turn_started: None,
@@ -368,6 +378,7 @@ impl RefineScreen {
         self.scroll = 0;
         self.follow = true;
         self.plan.clear();
+        self.subagents.clear();
         self.reset_meters();
     }
 
@@ -435,10 +446,18 @@ impl RefineScreen {
         self.scroll = 0;
         self.follow = true;
         self.plan.clear();
+        self.subagents.clear();
         self.reset_meters();
     }
 
     pub fn cancel(&mut self) {
+        self.pending = None;
+        for run in &mut self.subagents {
+            if run.status == RefineSubagentStatus::Running {
+                run.status = RefineSubagentStatus::Canceled;
+                run.summary = "cancelled by the user".to_string();
+            }
+        }
         self.streaming = false;
         self.finish_turn();
     }
@@ -508,6 +527,13 @@ impl RefineScreen {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent, project: Option<&Project>) -> Action {
+        if self.in_flight
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+            && key.code == KeyCode::Char('c')
+        {
+            return Action::RefineCancel;
+        }
+
         if let Some(sel) = self.picker {
             return self.handle_picker_key(key, sel);
         }
@@ -526,12 +552,6 @@ impl RefineScreen {
         // Ctrl+Tab cycles always-approve → ask → auto.
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Tab {
             return Action::RefineCycleApprovalMode;
-        }
-        if self.in_flight
-            && key.modifiers.contains(KeyModifiers::CONTROL)
-            && key.code == KeyCode::Char('c')
-        {
-            return Action::RefineCancel;
         }
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::End {
             self.jump_bottom();
@@ -888,6 +908,14 @@ impl RefineScreen {
                     .push(Turn::tool(format!("{tool} — {summary}")));
                 self.follow = true;
             }
+            AppEvent::RefineSubagentUpdated {
+                id,
+                status,
+                summary,
+            } => {
+                self.update_subagent(id, *status, summary);
+                self.follow = true;
+            }
             AppEvent::RefineEditApplied { kind, summary } => {
                 self.settle_reasoning();
                 self.conversation
@@ -910,6 +938,30 @@ impl RefineScreen {
             }
             _ => {}
         }
+    }
+
+    fn update_subagent(&mut self, id: &str, status: RefineSubagentStatus, summary: &str) {
+        if let Some(run) = self.subagents.iter_mut().find(|run| run.id == id) {
+            run.status = status;
+            if status == RefineSubagentStatus::Running {
+                run.title = summary.to_string();
+            } else {
+                run.summary = summary.to_string();
+            }
+            return;
+        }
+
+        let (title, run_summary) = if status == RefineSubagentStatus::Running {
+            (summary.to_string(), String::new())
+        } else {
+            ("sub-agent".to_string(), summary.to_string())
+        };
+        self.subagents.push(SubagentRun {
+            id: id.to_string(),
+            title,
+            status,
+            summary: run_summary,
+        });
     }
 
     fn push_delta(&mut self, delta: &str) {
@@ -1049,6 +1101,10 @@ impl RefineScreen {
             let plan_h = (self.plan.len() as u16 + 2).clamp(4, 10);
             constraints.push(Constraint::Length(plan_h));
         }
+        if !self.subagents.is_empty() {
+            let subagent_h = (self.subagents.len() as u16 + 2).clamp(3, 7);
+            constraints.push(Constraint::Length(subagent_h));
+        }
         if status.is_some() {
             constraints.push(Constraint::Length(1));
         }
@@ -1064,6 +1120,10 @@ impl RefineScreen {
         let mut next = 1;
         if !self.plan.is_empty() {
             self.render_plan(f, rows[next], theme);
+            next += 1;
+        }
+        if !self.subagents.is_empty() {
+            self.render_subagents(f, rows[next], frame, theme);
             next += 1;
         }
         if let Some(status) = status {
@@ -1232,6 +1292,71 @@ impl RefineScreen {
                 };
                 Line::from(Span::styled(
                     truncate_cols(&format!("{mark}{}", s.step.trim()), w),
+                    style,
+                ))
+            })
+            .collect();
+        f.render_widget(
+            Paragraph::new(lines).style(Style::default().bg(theme.bg_panel)),
+            inner,
+        );
+    }
+
+    fn render_subagents(&self, f: &mut Frame, area: Rect, frame: u64, theme: &Theme) {
+        let running = self
+            .subagents
+            .iter()
+            .filter(|run| run.status == RefineSubagentStatus::Running)
+            .count();
+        let title = if running == 0 {
+            format!(" ◇ sub-agents · {} ", self.subagents.len())
+        } else {
+            format!(" ◇ sub-agents · {running} running ")
+        };
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_set(theme::hairline_set())
+            .border_style(Style::default().fg(theme.rule))
+            .title(Span::styled(title, Style::default().fg(theme.ink_soft)))
+            .style(Style::default().bg(theme.bg_panel));
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+        if inner.width == 0 || inner.height == 0 {
+            return;
+        }
+
+        let w = inner.width as usize;
+        let lines: Vec<Line> = self
+            .subagents
+            .iter()
+            .rev()
+            .take(inner.height as usize)
+            .map(|run| {
+                let (mark, status, style) = match run.status {
+                    RefineSubagentStatus::Running => (
+                        theme::refine_spinner_frame(frame),
+                        "running",
+                        Style::default()
+                            .fg(theme.accent)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    RefineSubagentStatus::Succeeded => {
+                        ("✓", "done", Style::default().fg(theme.status_done))
+                    }
+                    RefineSubagentStatus::Failed => {
+                        ("!", "failed", Style::default().fg(theme.status_failed))
+                    }
+                    RefineSubagentStatus::Canceled => {
+                        ("×", "canceled", Style::default().fg(theme.ink_faint))
+                    }
+                };
+                let detail = if run.summary.trim().is_empty() {
+                    status.to_string()
+                } else {
+                    format!("{status} · {}", run.summary.trim())
+                };
+                Line::from(Span::styled(
+                    truncate_cols(&format!("{mark} {} — {detail}", run.title.trim()), w),
                     style,
                 ))
             })
@@ -2076,6 +2201,35 @@ mod tests {
         let md = s.transcript_markdown();
         assert!(md.contains("context summarized"));
         assert!(md.contains("4 old message"));
+    }
+
+    #[test]
+    fn subagent_events_populate_panel_state_and_clear() {
+        let mut s = RefineScreen::new();
+
+        s.on_app_event(&AppEvent::RefineSubagentUpdated {
+            id: "call_1".to_string(),
+            status: RefineSubagentStatus::Running,
+            summary: "audit volume 2".to_string(),
+        });
+
+        assert_eq!(s.subagents.len(), 1);
+        assert_eq!(s.subagents[0].title, "audit volume 2");
+        assert_eq!(s.subagents[0].status, RefineSubagentStatus::Running);
+
+        s.on_app_event(&AppEvent::RefineSubagentUpdated {
+            id: "call_1".to_string(),
+            status: RefineSubagentStatus::Succeeded,
+            summary: "sub-agent finished (3 tool call(s))".to_string(),
+        });
+
+        assert_eq!(s.subagents.len(), 1);
+        assert_eq!(s.subagents[0].title, "audit volume 2");
+        assert_eq!(s.subagents[0].status, RefineSubagentStatus::Succeeded);
+        assert!(s.subagents[0].summary.contains("3 tool"));
+
+        s.clear();
+        assert!(s.subagents.is_empty());
     }
 
     #[test]

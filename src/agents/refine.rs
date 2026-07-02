@@ -2,6 +2,7 @@
 //! Chapter-text edits archive the prior version before overwriting.
 
 use std::collections::{HashMap, VecDeque};
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -18,11 +19,12 @@ use crate::llm::tool_loop::ToolExecutor;
 use crate::llm::{ChatRequest, Message, Role, Tool};
 use crate::model::{
     AppEvent, Character, ContinuityNote, EventTx, GlossaryTerm, LogLevel, PlanStep, RefineRequest,
-    Relationship, StyleExample, TermPolicy, ToolResult,
+    RefineSubagentStatus, Relationship, StyleExample, TermPolicy, ToolResult,
 };
 use crate::workspace::{Workspace, characters, glossary, style, translation, volume};
 
 const READ_CAP: usize = 12_000;
+const CANCEL_POLL: std::time::Duration = std::time::Duration::from_millis(50);
 
 pub fn refine_tools_schema() -> serde_json::Value {
     json!([
@@ -592,6 +594,14 @@ impl RefineInteract {
             let _ = tx.send(answer);
         }
     }
+
+    pub fn cancel_all(&self) {
+        if let Ok(mut map) = self.pending.lock() {
+            for (_, tx) in map.drain() {
+                let _ = tx.send(String::new());
+            }
+        }
+    }
 }
 
 pub struct UserTurn {
@@ -764,6 +774,52 @@ struct RefineTurnRuntime<'a> {
     steering: &'a Arc<Mutex<VecDeque<UserTurn>>>,
 }
 
+struct RefineCancelled;
+
+async fn wait_cancelled(cancel: &AtomicBool) {
+    while !cancel.load(Ordering::Relaxed) {
+        tokio::time::sleep(CANCEL_POLL).await;
+    }
+}
+
+async fn cancellable<T>(
+    cancel: &AtomicBool,
+    fut: impl Future<Output = T>,
+) -> Result<T, RefineCancelled> {
+    tokio::select! {
+        out = fut => Ok(out),
+        _ = wait_cancelled(cancel) => Err(RefineCancelled),
+    }
+}
+
+fn cancelled_tool_result(name: &str) -> String {
+    json!({
+        "ok": false,
+        "message": format!("tool '{name}' was cancelled by the user")
+    })
+    .to_string()
+}
+
+fn push_cancelled_tool_results(
+    req: &mut ChatRequest,
+    calls: &[crate::llm::ToolCall],
+    tx: &EventTx,
+) {
+    for call in calls {
+        if call.function.name == "task" {
+            tx.send(AppEvent::RefineSubagentUpdated {
+                id: call.id.clone(),
+                status: RefineSubagentStatus::Canceled,
+                summary: "cancelled by the user".to_string(),
+            });
+        }
+        req.messages.push(Message::tool_result(
+            call.id.clone(),
+            cancelled_tool_result(&call.function.name),
+        ));
+    }
+}
+
 /// Streams one user turn and executes tool calls until the model stops.
 async fn run_refine_turn(
     client: &dyn LlmClient,
@@ -791,10 +847,14 @@ async fn run_refine_turn(
                 delta: s.to_string(),
             }),
         };
-        let resp = match client.chat_stream(req, &mut on_delta).await {
-            Ok(r) => r,
-            Err(e) => {
+        let resp = match cancellable(runtime.cancel, client.chat_stream(req, &mut on_delta)).await {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => {
                 tx.send(AppEvent::RefineError { msg: e.to_string() });
+                return;
+            }
+            Err(_) => {
+                tx.send(AppEvent::RefineMessageDone);
                 return;
             }
         };
@@ -855,9 +915,21 @@ async fn run_refine_turn(
             name: None,
         });
 
-        for call in &tool_calls {
+        for (idx, call) in tool_calls.iter().enumerate() {
+            if runtime.cancel.load(Ordering::Relaxed) {
+                push_cancelled_tool_results(req, &tool_calls[idx..], tx);
+                tx.send(AppEvent::RefineMessageDone);
+                return;
+            }
             if call.function.name == "update_plan" {
                 latest_plan = parse_plan_steps(&call.function.arguments);
+            }
+            if call.function.name == "task" {
+                tx.send(AppEvent::RefineSubagentUpdated {
+                    id: call.id.clone(),
+                    status: RefineSubagentStatus::Running,
+                    summary: summarize_task_args(&call.function.arguments),
+                });
             }
             // Plan calls render in the pinned panel, not the transcript.
             if call.function.name != "update_plan" {
@@ -866,17 +938,31 @@ async fn run_refine_turn(
                     summary: summarize_args(&call.function.arguments),
                 });
             }
-            let result = match tools
-                .execute(&call.function.name, &call.function.arguments)
-                .await
+            let result = match cancellable(
+                runtime.cancel,
+                tools.execute(&call.function.name, &call.function.arguments),
+            )
+            .await
             {
-                Ok(p) => p,
-                Err(e) => json!({
+                Ok(Ok(p)) => p,
+                Ok(Err(e)) => json!({
                     "ok": false,
                     "message": format!("tool '{}' failed: {e}", call.function.name)
                 })
                 .to_string(),
+                Err(_) => {
+                    push_cancelled_tool_results(req, &tool_calls[idx..], tx);
+                    tx.send(AppEvent::RefineMessageDone);
+                    return;
+                }
             };
+            if call.function.name == "task" {
+                tx.send(AppEvent::RefineSubagentUpdated {
+                    id: call.id.clone(),
+                    status: subagent_status_from_result(&result),
+                    summary: tool_result_first_line(&result),
+                });
+            }
             if let Some(summary) = tool_summary_for_final(&call.function.name, &result) {
                 turn_tool_summaries.push(summary);
             }
@@ -905,6 +991,33 @@ fn summarize_args(args_json: &str) -> String {
         flat
     } else {
         flat.chars().take(70).collect::<String>() + "…"
+    }
+}
+
+fn summarize_task_args(args_json: &str) -> String {
+    #[derive(Deserialize)]
+    struct Args {
+        description: String,
+        #[serde(default)]
+        scope: Option<String>,
+    }
+
+    let summary = serde_json::from_str::<Args>(args_json)
+        .map(|a| match a.scope {
+            Some(scope) if !scope.trim().is_empty() => {
+                format!("{} · {}", scope.trim(), a.description.trim())
+            }
+            _ => a.description.trim().to_string(),
+        })
+        .unwrap_or_else(|_| summarize_args(args_json));
+    truncate_chars(&summary, 90)
+}
+
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        s.chars().take(max).collect::<String>() + "…"
     }
 }
 
@@ -953,17 +1066,40 @@ fn tool_summary_for_final(name: &str, result_json: &str) -> Option<String> {
         return None;
     }
     let label = name.replace('_', " ");
-    let msg = serde_json::from_str::<ToolResult>(result_json)
-        .map(|r| {
-            let prefix = if r.ok { "" } else { "failed: " };
-            format!("{prefix}{}", r.message)
-        })
-        .unwrap_or_else(|_| result_json.to_string());
+    let msg = tool_result_message(result_json);
     let first_line = msg.lines().next().unwrap_or("").trim();
     if first_line.is_empty() {
         None
     } else {
         Some(format!("{label}: {first_line}"))
+    }
+}
+
+fn tool_result_message(result_json: &str) -> String {
+    serde_json::from_str::<ToolResult>(result_json)
+        .map(|r| {
+            let prefix = if r.ok { "" } else { "failed: " };
+            format!("{prefix}{}", r.message)
+        })
+        .unwrap_or_else(|_| result_json.to_string())
+}
+
+fn tool_result_first_line(result_json: &str) -> String {
+    let msg = tool_result_message(result_json);
+    let first = msg.lines().next().unwrap_or("").trim();
+    if first.is_empty() {
+        "(no summary returned)".to_string()
+    } else {
+        truncate_chars(first, 90)
+    }
+}
+
+fn subagent_status_from_result(result_json: &str) -> RefineSubagentStatus {
+    match serde_json::from_str::<ToolResult>(result_json) {
+        Ok(r) if r.ok => RefineSubagentStatus::Succeeded,
+        Ok(r) if r.message.to_lowercase().contains("cancel") => RefineSubagentStatus::Canceled,
+        Ok(_) => RefineSubagentStatus::Failed,
+        Err(_) => RefineSubagentStatus::Failed,
     }
 }
 
@@ -2319,6 +2455,7 @@ mod tests {
     use crate::llm::client::Result as LlmResult;
     use crate::llm::{Choice, FunctionCall, ResponseMessage, ToolCall};
     use std::collections::VecDeque;
+    use std::sync::atomic::AtomicUsize;
     use std::sync::{Arc, Mutex};
 
     #[test]
@@ -2667,6 +2804,98 @@ mod tests {
             }
         }
         assert!(saw_done, "a cancelled turn still emits MessageDone");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    struct BlockingTaskClient {
+        calls: AtomicUsize,
+        subagent_started: tokio::sync::Notify,
+    }
+
+    #[async_trait]
+    impl LlmClient for BlockingTaskClient {
+        async fn chat(&self, _req: &ChatRequest) -> LlmResult<crate::llm::ChatResponse> {
+            if self.calls.fetch_add(1, Ordering::Relaxed) == 0 {
+                return Ok(tool_call_turn(
+                    "task",
+                    r#"{"description":"audit the whole volume"}"#,
+                ));
+            }
+            self.subagent_started.notify_waiters();
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test]
+    async fn refine_turn_cancel_unblocks_long_running_task_tool() {
+        let root = temp_root("canceltask");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let etx = EventTx(tx);
+        let client = Arc::new(BlockingTaskClient {
+            calls: AtomicUsize::new(0),
+            subagent_started: tokio::sync::Notify::new(),
+        });
+        let tools = RefineTools::with_agent(
+            root.clone(),
+            1,
+            etx.clone(),
+            client.clone(),
+            crate::model::AgentModel::openrouter("m"),
+            RefineInteract::default(),
+        );
+        let mut req = ChatRequest::new("m", vec![Message::system("sys")]);
+        req.messages.push(Message::user("do a long task"));
+        let cancel = AtomicBool::new(false);
+        let interact = RefineInteract::default();
+        let steering = empty_steering();
+        let runtime = test_runtime(&etx, &cancel, &interact, &steering);
+
+        {
+            let turn = run_refine_turn(client.as_ref(), &mut req, &tools, &runtime);
+            tokio::pin!(turn);
+            tokio::select! {
+                _ = client.subagent_started.notified() => {}
+                _ = &mut turn => panic!("turn finished before sub-agent blocked"),
+            }
+
+            cancel.store(true, Ordering::Relaxed);
+            tokio::time::timeout(std::time::Duration::from_millis(300), &mut turn)
+                .await
+                .expect("cancel must unblock a long-running task tool");
+        }
+
+        let mut saw_done = false;
+        let mut subagent_statuses = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            match ev {
+                AppEvent::RefineMessageDone => saw_done = true,
+                AppEvent::RefineSubagentUpdated { status, .. } => {
+                    subagent_statuses.push(status);
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_done, "cancelled long task still emits MessageDone");
+        assert_eq!(
+            subagent_statuses,
+            vec![
+                RefineSubagentStatus::Running,
+                RefineSubagentStatus::Canceled
+            ],
+            "UI sees sub-agent start and cancellation"
+        );
+        let tool_result = req
+            .messages
+            .iter()
+            .find(|m| m.role == Role::Tool)
+            .expect("cancelled tool call is closed with a tool result");
+        assert!(
+            tool_result
+                .content
+                .as_deref()
+                .is_some_and(|c| c.contains("was cancelled by the user")),
+            "tool result records the cancellation"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

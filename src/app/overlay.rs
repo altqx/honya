@@ -1028,10 +1028,6 @@ impl PaletteState {
                 label: "Activity log",
                 action: Action::show_overlay(Overlay::Log(0)),
             },
-            PaletteItem {
-                label: "Quit",
-                action: Action::Quit,
-            },
         ];
         Self {
             query: String::new(),
@@ -4551,7 +4547,7 @@ impl Overlay {
                     ("` / l", "activity log (Project keeps l)"),
                     ("Esc / Backspace", "close overlay / dismiss toast"),
                     ("Mouse", "click tabs/rows · wheel scrolls · dbl-click opens"),
-                    ("q", "quit        Ctrl-C quit"),
+                    ("Ctrl-C", "quit"),
                 ],
             ),
             (

@@ -1262,6 +1262,14 @@ pub struct ChapterRun {
     pub archived: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefineSubagentStatus {
+    Running,
+    Succeeded,
+    Failed,
+    Canceled,
+}
+
 /// The background -> UI channel payload, sent over `tokio::sync::mpsc`. Raw crossterm
 /// input is NOT here (crossterm::Event isn't Serialize); it's matched in the select! arm.
 #[derive(Debug, Clone)]
@@ -1562,6 +1570,11 @@ pub enum AppEvent {
     RefineMessageDone,
     RefineToolInvoked {
         tool: String,
+        summary: String,
+    },
+    RefineSubagentUpdated {
+        id: String,
+        status: RefineSubagentStatus,
         summary: String,
     },
     RefineEditApplied {

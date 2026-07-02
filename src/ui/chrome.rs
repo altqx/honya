@@ -227,9 +227,9 @@ pub fn render_tabbar(
 }
 
 /// Render the footer hint bar: each `(key, label)` then the always-present
-/// right-aligned global cluster `?help  :cmd  q quit`. When the row is too
-/// narrow, screen-specific hints are dropped before the global cluster — the
-/// contract every screen relies on.
+/// right-aligned global cluster. When the row is too narrow, screen-specific
+/// hints are dropped before the global cluster — the contract every screen
+/// relies on.
 pub fn render_footer(
     f: &mut Frame,
     area: Rect,
@@ -280,7 +280,7 @@ pub fn render_footer(
         Span::styled("help  ", lbl_style),
         Span::styled(":", key_style),
         Span::styled("cmd  ", lbl_style),
-        Span::styled("q", key_style),
+        Span::styled("Ctrl-C", key_style),
         Span::styled(" quit", lbl_style),
     ]);
     let global_cols: usize = global.iter().map(|s| col_width(s.content.as_ref())).sum();
