@@ -15,8 +15,8 @@ use tokio::sync::oneshot;
 
 use crate::app::refine::{MentionTarget, parse_scope};
 use crate::llm::client::LlmClient;
-use crate::llm::tool_loop::ToolExecutor;
-use crate::llm::{ChatRequest, Message, Role, Tool};
+use crate::llm::tool_loop::{ToolExecutor, ToolLoopOutcome};
+use crate::llm::{ChatRequest, LlmError, Message, Role, Tool, ToolCall, Usage};
 use crate::model::{
     AppEvent, Character, ContinuityNote, EventTx, GlossaryTerm, LogLevel, PlanStep, RefineRequest,
     RefineSubagentStatus, Relationship, StyleExample, TermPolicy, ToolResult,
@@ -296,6 +296,7 @@ pub fn refine_tools_schema() -> serde_json::Value {
 const MAX_TOOL_ROUNDS: usize = 40;
 const COMPACT_FRACTION: f64 = 0.8;
 const KEEP_RECENT_TURNS: usize = 3;
+const KEEP_RECENT_TOOL_ROUNDS: usize = 2;
 const COMPACT_SUMMARY_PREFIX: &str = "[Earlier conversation, compacted to fit the context window]";
 
 /// Conservative context-window guess for arbitrary model ids.
@@ -339,20 +340,9 @@ fn maybe_compact(req: &mut ChatRequest, tx: &EventTx, force: bool) {
         return;
     }
 
-    // Start of the kept tail, on a user-message boundary.
-    let user_idxs: Vec<usize> = req
-        .messages
-        .iter()
-        .enumerate()
-        .filter(|(i, m)| *i > 0 && m.role == Role::User)
-        .map(|(i, _)| i)
-        .collect();
-    let keep_from = user_idxs
-        .iter()
-        .rev()
-        .nth(KEEP_RECENT_TURNS - 1)
-        .copied()
-        .unwrap_or(1);
+    let Some(keep_from) = compact_keep_from(&req.messages) else {
+        return;
+    };
     if keep_from <= 1 {
         return;
     }
@@ -378,6 +368,39 @@ fn maybe_compact(req: &mut ChatRequest, tx: &EventTx, force: bool) {
         token_estimate: est,
         context_max: max,
     });
+}
+
+fn compact_keep_from(messages: &[Message]) -> Option<usize> {
+    // Prefer user-message boundaries for the main Refine thread.
+    let user_idxs: Vec<usize> = messages
+        .iter()
+        .enumerate()
+        .filter(|(i, m)| *i > 0 && m.role == Role::User)
+        .map(|(i, _)| i)
+        .collect();
+    if let Some(keep_from) = user_idxs
+        .iter()
+        .rev()
+        .nth(KEEP_RECENT_TURNS - 1)
+        .copied()
+        .filter(|i| *i > 1)
+    {
+        return Some(keep_from);
+    }
+
+    // Sub-agents usually have one user task followed by many assistant/tool
+    // rounds. Keep the latest complete tool rounds instead of never compacting.
+    messages
+        .iter()
+        .enumerate()
+        .filter(|(i, m)| *i > 1 && m.role == Role::Assistant)
+        .map(|(i, _)| i)
+        .collect::<Vec<_>>()
+        .iter()
+        .rev()
+        .nth(KEEP_RECENT_TOOL_ROUNDS - 1)
+        .copied()
+        .filter(|i| *i > 1)
 }
 
 /// Diff preview clipped for transcript display.
@@ -983,6 +1006,67 @@ async fn run_refine_turn(
         msg: format!("stopped after {MAX_TOOL_ROUNDS} tool rounds"),
     });
     tx.send(AppEvent::RefineMessageDone);
+}
+
+async fn run_compacting_tool_loop(
+    client: &dyn LlmClient,
+    mut req: ChatRequest,
+    executor: &dyn ToolExecutor,
+    tx: &EventTx,
+    max_rounds: usize,
+) -> crate::llm::client::Result<ToolLoopOutcome> {
+    let mut usage = Usage::default();
+    let mut tool_call_count = 0usize;
+    for _round in 0..max_rounds {
+        maybe_compact(&mut req, tx, false);
+
+        let resp = client.chat(&req).await?;
+        if let Some(u) = &resp.usage {
+            usage.add(u);
+        }
+
+        let choice = resp.choices.first().ok_or(LlmError::EmptyChoices)?;
+        let tool_calls: Vec<ToolCall> = choice.message.tool_calls.clone().unwrap_or_default();
+
+        if tool_calls.is_empty() {
+            return Ok(ToolLoopOutcome {
+                response: resp,
+                usage,
+                tool_calls: tool_call_count,
+            });
+        }
+        tool_call_count += tool_calls.len();
+
+        req.messages.push(Message {
+            role: Role::Assistant,
+            content: choice.message.content.clone(),
+            tool_calls: Some(tool_calls.clone()),
+            tool_call_id: None,
+            name: None,
+        });
+
+        for call in &tool_calls {
+            let result = match executor
+                .execute(&call.function.name, &call.function.arguments)
+                .await
+            {
+                Ok(payload) => payload,
+                Err(e) => json!({
+                    "ok": false,
+                    "message": format!("tool '{}' failed: {e}", call.function.name)
+                })
+                .to_string(),
+            };
+
+            req.messages
+                .push(Message::tool_result(call.id.clone(), result));
+        }
+    }
+
+    Err(LlmError::Api {
+        status: 0,
+        message: format!("tool loop exceeded {max_rounds} rounds without finishing"),
+    })
 }
 
 fn summarize_args(args_json: &str) -> String {
@@ -2402,7 +2486,7 @@ impl RefineTools {
             msg: format!("Refine sub-agent started: {preview}"),
         });
 
-        match crate::llm::tool_loop::run_tool_loop(client.as_ref(), req, &self.child(), 30).await {
+        match run_compacting_tool_loop(client.as_ref(), req, &self.child(), &self.tx, 30).await {
             Ok(outcome) => {
                 let report = outcome
                     .response
@@ -2513,6 +2597,57 @@ mod tests {
                 .as_deref()
                 .unwrap()
                 .contains("ans 29")
+        );
+    }
+
+    #[test]
+    fn compaction_summarizes_tool_rounds_without_extra_user_turns() {
+        let mut req = ChatRequest::new("subagent-test", vec![Message::system("sys")]);
+        req.messages.push(Message::user("audit a whole volume"));
+        let big = "x".repeat(90_000);
+        for i in 0..6 {
+            req.messages.push(Message {
+                role: Role::Assistant,
+                content: None,
+                tool_calls: Some(vec![ToolCall {
+                    id: format!("call_{i}"),
+                    kind: "function".to_string(),
+                    function: FunctionCall {
+                        name: "read_chapter".to_string(),
+                        arguments: format!(r#"{{"ch":{i}}}"#),
+                    },
+                }]),
+                tool_call_id: None,
+                name: None,
+            });
+            req.messages
+                .push(Message::tool_result(format!("call_{i}"), big.clone()));
+        }
+        let before = req.messages.len();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        maybe_compact(&mut req, &EventTx(tx), false);
+
+        assert!(
+            req.messages.len() < before,
+            "old tool rounds were compacted"
+        );
+        assert_eq!(req.messages[0].role, Role::System);
+        assert_eq!(req.messages[1].role, Role::User);
+        assert!(
+            req.messages[1]
+                .content
+                .as_deref()
+                .is_some_and(|c| c.contains("compacted"))
+        );
+        assert_eq!(
+            req.messages[2].role,
+            Role::Assistant,
+            "tail starts at a complete assistant/tool round"
+        );
+        assert!(
+            rx.try_recv()
+                .is_ok_and(|ev| matches!(ev, AppEvent::Log { .. }))
         );
     }
 
@@ -2636,6 +2771,19 @@ mod tests {
         }
     }
 
+    struct HugeExecutor {
+        payload: String,
+    }
+
+    #[async_trait]
+    impl ToolExecutor for HugeExecutor {
+        async fn execute(&self, _name: &str, _arguments_json: &str) -> anyhow::Result<String> {
+            Ok(serde_json::to_string(&ToolResult::ok(
+                self.payload.clone(),
+            ))?)
+        }
+    }
+
     fn empty_steering() -> Arc<Mutex<VecDeque<UserTurn>>> {
         Arc::new(Mutex::new(VecDeque::new()))
     }
@@ -2700,6 +2848,48 @@ mod tests {
         assert!(req.messages.len() >= 4);
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn subagent_tool_loop_auto_compacts_large_tool_history() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let etx = EventTx(tx);
+        let client = ScriptedClient {
+            responses: Mutex::new(VecDeque::from(vec![
+                tool_call_turn("read_chapter", r#"{"ch":1}"#),
+                tool_call_turn("read_chapter", r#"{"ch":2}"#),
+                tool_call_turn("read_chapter", r#"{"ch":3}"#),
+                tool_call_turn("read_chapter", r#"{"ch":4}"#),
+                stop_turn("done"),
+            ])),
+        };
+        let mut req = ChatRequest::new(
+            "subagent-test",
+            vec![
+                Message::system(SUBAGENT_SYSTEM),
+                Message::user("audit the volume"),
+            ],
+        );
+        req.tools = Some(refine_tools_vec());
+        let executor = HugeExecutor {
+            payload: "x".repeat(180_000),
+        };
+
+        let outcome = run_compacting_tool_loop(&client, req, &executor, &etx, 8)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.tool_calls, 4);
+        let mut saw_compaction = false;
+        while let Ok(ev) = rx.try_recv() {
+            if matches!(ev, AppEvent::RefineContextCompacted { .. }) {
+                saw_compaction = true;
+            }
+        }
+        assert!(
+            saw_compaction,
+            "sub-agent loop compacts growing tool history"
+        );
     }
 
     #[tokio::test]
