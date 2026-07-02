@@ -109,7 +109,6 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/context", "show context-window usage"),
     ("/export", "export this conversation to markdown"),
     ("/fix-review-needed", "triage and fix review-needed chunks"),
-    ("/fix-needed-reviews", "triage and fix review-needed chunks"),
     ("/grep", "search the project for text"),
     ("/resume", "pick a session to resume"),
 ];
