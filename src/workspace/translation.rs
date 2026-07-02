@@ -180,6 +180,41 @@ pub fn replace_chunk_body(text: &str, chunk: u32, new_prose: &str) -> Option<Str
     Some(out)
 }
 
+/// Clear review-needed scaffolding for flagged chunks whose block changed between
+/// `before` and `after`. Used by Refine's surgical edits: editing a flagged chunk
+/// means the human/agent has resolved that chunk, while untouched flagged chunks
+/// must stay visible.
+pub fn clear_review_needed_for_changed_chunks(before: &str, after: &str) -> String {
+    let after_ranges = chunk_block_ranges(after);
+    let mut changed = Vec::new();
+    for (idx, start, end) in chunk_block_ranges(before) {
+        let before_block = &before[start..end];
+        if !before_block.contains(REVIEW_NEEDED_MARKER) {
+            continue;
+        }
+        let Some((_, after_start, after_end)) = after_ranges
+            .iter()
+            .find(|(after_idx, _, _)| *after_idx == idx)
+        else {
+            continue;
+        };
+        let after_block = &after[*after_start..*after_end];
+        if after_block.contains(REVIEW_NEEDED_MARKER) && after_block != before_block {
+            changed.push(idx);
+        }
+    }
+
+    let mut out = after.to_string();
+    for idx in changed {
+        if let Some(prose) = chunk_prose_in(&out, idx)
+            && let Some(cleaned) = replace_chunk_body(&out, idx, &prose)
+        {
+            out = cleaned;
+        }
+    }
+    out
+}
+
 /// Return the indices of review-needed chunks that were *skipped*: committed with
 /// the flag but no usable Thai (only the marker + `[REVIEW NEEDED]` banner). A
 /// chapter with any of these is partially translated, not merely unreviewed. We
@@ -613,6 +648,31 @@ mod tests {
         assert!(updated.contains("แก้ไขแล้ว"));
         assert!(updated.contains("สวัสดีชาวโลก"));
         assert_eq!(chunk_review_reason_in(&updated, 1), None);
+    }
+
+    #[test]
+    fn clear_review_needed_for_changed_chunks_preserves_untouched_flags() {
+        let text = format!(
+            "{total}\n\n{m0}\n{rn}\n> ⚠️ **[REVIEW NEEDED]** chunk 1\n>\n> เหตุผลจากผู้ตรวจ: tone drift\n\nร่างเก่า\n\n{m1}\n{rn}\n> ⚠️ **[REVIEW NEEDED]** chunk 2\n>\n> เหตุผลจากผู้ตรวจ: missing line\n\nอีกจุด\n",
+            total = total_marker(2),
+            m0 = chunk_marker(0),
+            m1 = chunk_marker(1),
+            rn = REVIEW_NEEDED_MARKER,
+        );
+        let edited = text.replacen("ร่างเก่า", "แก้แล้ว", 1);
+
+        let cleaned = clear_review_needed_for_changed_chunks(&text, &edited);
+
+        assert_eq!(
+            review_needed_chunk_indices_in(&cleaned),
+            BTreeSet::from([1])
+        );
+        assert_eq!(chunk_prose_in(&cleaned, 0).as_deref(), Some("แก้แล้ว"));
+        assert_eq!(chunk_review_reason_in(&cleaned, 0), None);
+        assert_eq!(
+            chunk_review_reason_in(&cleaned, 1).as_deref(),
+            Some("missing line")
+        );
     }
 
     fn temp_ws(tag: &str) -> (std::path::PathBuf, Workspace) {

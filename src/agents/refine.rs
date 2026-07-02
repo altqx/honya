@@ -274,7 +274,7 @@ pub fn refine_tools_schema() -> serde_json::Value {
         }},
         {"type":"function","function":{
             "name":"task",
-            "description":"Spawn a focused sub-agent to carry out a self-contained chunk of work (e.g. \"normalize every honorific in volume 2\") using the same project tools, then report back. Use for large or parallelizable sub-tasks so the main thread stays focused. The sub-agent runs to completion and returns a summary; it cannot spawn further sub-agents.",
+            "description":"Spawn a focused sub-agent to carry out a self-contained chunk of work (e.g. \"normalize every honorific in volume 2\") using the same project tools, then report back. Use for large or parallelizable sub-tasks so the current thread stays focused. Sub-agents may delegate smaller self-contained work to their own sub-agents; nesting is bounded by the app.",
             "parameters":{"type":"object","additionalProperties":false,"required":["description"],
                 "properties":{
                     "description":{"type":"string","description":"The complete, self-contained task for the sub-agent."},
@@ -294,6 +294,7 @@ pub fn refine_tools_schema() -> serde_json::Value {
 }
 
 const MAX_TOOL_ROUNDS: usize = 40;
+const MAX_SUBAGENT_DEPTH: usize = 3;
 const COMPACT_FRACTION: f64 = 0.8;
 const KEEP_RECENT_TURNS: usize = 3;
 const KEEP_RECENT_TOOL_ROUNDS: usize = 2;
@@ -647,7 +648,7 @@ fn seed_messages(root: &Path, id: &str) -> Vec<Message> {
         .unwrap_or_default()
 }
 
-const SUBAGENT_SYSTEM: &str = "You are a focused sub-agent inside honya's Refine system, completing ONE self-contained task delegated by the main agent. You have the same project tools (read/search chapters and the lexicon; edit chapter text; update characters, glossary, style, recaps, summaries). Work autonomously — do not ask questions. Gather the context you need, make the surgical changes the task requires, verify them, then reply with a concise report of exactly what you did: chapters touched, terms/characters changed, and anything the main agent should know. Keep Thai idiomatic and preserve scene breaks, image links, and Markdown. You cannot spawn further sub-agents.";
+const SUBAGENT_SYSTEM: &str = "You are a focused sub-agent inside honya's Refine system, completing ONE self-contained task delegated by a parent agent. You have the same project tools (read/search chapters and the lexicon; edit chapter text; update characters, glossary, style, recaps, summaries). Work autonomously — do not ask questions. Gather the context you need, make the surgical changes the task requires, verify them, then reply with a concise report of exactly what you did: chapters touched, terms/characters changed, and anything the parent agent should know. Keep Thai idiomatic and preserve scene breaks, image links, and Markdown. For large independent chunks, you may spawn your own focused sub-agent with the task tool; nesting is bounded by the app, so delegate only when it clearly reduces complexity.";
 
 fn refine_system_prompt() -> String {
     r#"You are honya's Refine agent — an autonomous, expert engineering assistant for a Japanese→Thai light-novel translation project, working through a chat tab inside the honya TUI. You read, fix, and refine anything in the project: any volume or chapter's Thai translation, the character roster, the glossary, the style guide, the volume recap/synopsis, and chapter summaries. Your tools read and write the project on disk; treat the on-disk files as the single source of truth.
@@ -827,20 +828,49 @@ fn push_cancelled_tool_results(
     req: &mut ChatRequest,
     calls: &[crate::llm::ToolCall],
     tx: &EventTx,
+    parent_path: &str,
+    task_depth: usize,
 ) {
     for call in calls {
         if call.function.name == "task" {
-            tx.send(AppEvent::RefineSubagentUpdated {
-                id: call.id.clone(),
-                status: RefineSubagentStatus::Canceled,
-                summary: "cancelled by the user".to_string(),
-            });
+            send_subagent_update(
+                tx,
+                parent_path,
+                call,
+                task_depth,
+                RefineSubagentStatus::Canceled,
+                "cancelled by the user".to_string(),
+            );
         }
         req.messages.push(Message::tool_result(
             call.id.clone(),
             cancelled_tool_result(&call.function.name),
         ));
     }
+}
+
+fn subagent_event_id(parent_path: &str, call_id: &str) -> String {
+    if parent_path.is_empty() {
+        call_id.to_string()
+    } else {
+        format!("{parent_path}/{call_id}")
+    }
+}
+
+fn send_subagent_update(
+    tx: &EventTx,
+    parent_path: &str,
+    call: &crate::llm::ToolCall,
+    depth: usize,
+    status: RefineSubagentStatus,
+    summary: String,
+) {
+    tx.send(AppEvent::RefineSubagentUpdated {
+        id: subagent_event_id(parent_path, &call.id),
+        depth,
+        status,
+        summary,
+    });
 }
 
 /// Streams one user turn and executes tool calls until the model stops.
@@ -940,7 +970,7 @@ async fn run_refine_turn(
 
         for (idx, call) in tool_calls.iter().enumerate() {
             if runtime.cancel.load(Ordering::Relaxed) {
-                push_cancelled_tool_results(req, &tool_calls[idx..], tx);
+                push_cancelled_tool_results(req, &tool_calls[idx..], tx, "", 0);
                 tx.send(AppEvent::RefineMessageDone);
                 return;
             }
@@ -948,11 +978,14 @@ async fn run_refine_turn(
                 latest_plan = parse_plan_steps(&call.function.arguments);
             }
             if call.function.name == "task" {
-                tx.send(AppEvent::RefineSubagentUpdated {
-                    id: call.id.clone(),
-                    status: RefineSubagentStatus::Running,
-                    summary: summarize_task_args(&call.function.arguments),
-                });
+                send_subagent_update(
+                    tx,
+                    "",
+                    call,
+                    0,
+                    RefineSubagentStatus::Running,
+                    summarize_task_args(&call.function.arguments),
+                );
             }
             // Plan calls render in the pinned panel, not the transcript.
             if call.function.name != "update_plan" {
@@ -961,12 +994,7 @@ async fn run_refine_turn(
                     summary: summarize_args(&call.function.arguments),
                 });
             }
-            let result = match cancellable(
-                runtime.cancel,
-                tools.execute(&call.function.name, &call.function.arguments),
-            )
-            .await
-            {
+            let result = match cancellable(runtime.cancel, tools.execute_call(call)).await {
                 Ok(Ok(p)) => p,
                 Ok(Err(e)) => json!({
                     "ok": false,
@@ -974,17 +1002,20 @@ async fn run_refine_turn(
                 })
                 .to_string(),
                 Err(_) => {
-                    push_cancelled_tool_results(req, &tool_calls[idx..], tx);
+                    push_cancelled_tool_results(req, &tool_calls[idx..], tx, "", 0);
                     tx.send(AppEvent::RefineMessageDone);
                     return;
                 }
             };
             if call.function.name == "task" {
-                tx.send(AppEvent::RefineSubagentUpdated {
-                    id: call.id.clone(),
-                    status: subagent_status_from_result(&result),
-                    summary: tool_result_first_line(&result),
-                });
+                send_subagent_update(
+                    tx,
+                    "",
+                    call,
+                    0,
+                    subagent_status_from_result(&result),
+                    tool_result_first_line(&result),
+                );
             }
             if let Some(summary) = tool_summary_for_final(&call.function.name, &result) {
                 turn_tool_summaries.push(summary);
@@ -1014,6 +1045,8 @@ async fn run_compacting_tool_loop(
     executor: &dyn ToolExecutor,
     tx: &EventTx,
     max_rounds: usize,
+    task_depth: usize,
+    parent_path: &str,
 ) -> crate::llm::client::Result<ToolLoopOutcome> {
     let mut usage = Usage::default();
     let mut tool_call_count = 0usize;
@@ -1046,10 +1079,17 @@ async fn run_compacting_tool_loop(
         });
 
         for call in &tool_calls {
-            let result = match executor
-                .execute(&call.function.name, &call.function.arguments)
-                .await
-            {
+            if call.function.name == "task" {
+                send_subagent_update(
+                    tx,
+                    parent_path,
+                    call,
+                    task_depth,
+                    RefineSubagentStatus::Running,
+                    summarize_task_args(&call.function.arguments),
+                );
+            }
+            let result = match executor.execute_call(call).await {
                 Ok(payload) => payload,
                 Err(e) => json!({
                     "ok": false,
@@ -1058,6 +1098,16 @@ async fn run_compacting_tool_loop(
                 .to_string(),
             };
 
+            if call.function.name == "task" {
+                send_subagent_update(
+                    tx,
+                    parent_path,
+                    call,
+                    task_depth,
+                    subagent_status_from_result(&result),
+                    tool_result_first_line(&result),
+                );
+            }
             req.messages
                 .push(Message::tool_result(call.id.clone(), result));
         }
@@ -2133,6 +2183,7 @@ pub async fn dispatch_refine_tool(
                 }
                 Err(EditError::Other(msg)) => return ToolResult::err(msg),
             };
+            let updated = translation::clear_review_needed_for_changed_chunks(&content, &updated);
             if let Err(e) = archive_chapter(&w, a.ch) {
                 return ToolResult::err(format!("could not archive prior version: {e}"));
             }
@@ -2166,6 +2217,7 @@ pub async fn dispatch_refine_tool(
             if content.is_empty() {
                 return ToolResult::err(format!("chapter {} has no translation yet", a.ch));
             }
+            let original = content.clone();
             let mut total = 0usize;
             for (i, e) in a.edits.iter().enumerate() {
                 match apply_edit(&content, &e.old, &e.new, e.replace_all) {
@@ -2182,6 +2234,7 @@ pub async fn dispatch_refine_tool(
                     }
                 }
             }
+            content = translation::clear_review_needed_for_changed_chunks(&original, &content);
             if let Err(e) = archive_chapter(&w, a.ch) {
                 return ToolResult::err(format!("could not archive prior version: {e}"));
             }
@@ -2368,6 +2421,8 @@ pub struct RefineTools {
     client: Option<std::sync::Arc<dyn LlmClient>>,
     model: crate::model::AgentModel,
     can_spawn: bool,
+    depth: usize,
+    path: String,
     interact: RefineInteract,
 }
 
@@ -2381,6 +2436,8 @@ impl RefineTools {
             client: None,
             model: crate::model::AgentModel::openrouter(""),
             can_spawn: false,
+            depth: 0,
+            path: String::new(),
             interact: RefineInteract::default(),
         }
     }
@@ -2400,18 +2457,22 @@ impl RefineTools {
             client: Some(client),
             model,
             can_spawn: true,
+            depth: 0,
+            path: String::new(),
             interact,
         }
     }
 
-    fn child(&self) -> Self {
+    fn child(&self, path: String) -> Self {
         Self {
             root: self.root.clone(),
             default_vol: self.default_vol,
             tx: self.tx.clone(),
             client: self.client.clone(),
             model: self.model.clone(),
-            can_spawn: false,
+            can_spawn: self.can_spawn && self.depth + 1 < MAX_SUBAGENT_DEPTH,
+            depth: self.depth + 1,
+            path,
             interact: self.interact.clone(),
         }
     }
@@ -2452,9 +2513,9 @@ impl RefineTools {
         }
     }
 
-    async fn run_subagent(&self, arguments_json: &str) -> ToolResult {
+    async fn run_subagent(&self, call_id: &str, arguments_json: &str) -> ToolResult {
         if !self.can_spawn {
-            return ToolResult::err("nested sub-agents are not allowed");
+            return ToolResult::err("sub-agent nesting limit reached");
         }
         let Some(client) = self.client.clone() else {
             return ToolResult::err("sub-agents are unavailable (no client wired)");
@@ -2479,6 +2540,7 @@ impl RefineTools {
         );
         req.tools = Some(refine_tools_vec());
         req.reasoning = self.model.reasoning_param();
+        let event_id = subagent_event_id(&self.path, call_id);
 
         let preview: String = a.description.chars().take(80).collect();
         self.tx.send(AppEvent::Log {
@@ -2486,7 +2548,17 @@ impl RefineTools {
             msg: format!("Refine sub-agent started: {preview}"),
         });
 
-        match run_compacting_tool_loop(client.as_ref(), req, &self.child(), &self.tx, 30).await {
+        match run_compacting_tool_loop(
+            client.as_ref(),
+            req,
+            &self.child(event_id.clone()),
+            &self.tx,
+            30,
+            self.depth + 1,
+            &event_id,
+        )
+        .await
+        {
             Ok(outcome) => {
                 let report = outcome
                     .response
@@ -2509,7 +2581,7 @@ impl ToolExecutor for RefineTools {
     async fn execute(&self, name: &str, arguments_json: &str) -> anyhow::Result<String> {
         if name == "task" {
             return Ok(serde_json::to_string(
-                &self.run_subagent(arguments_json).await,
+                &self.run_subagent("direct", arguments_json).await,
             )?);
         }
         if name == "ask_user" {
@@ -2530,6 +2602,16 @@ impl ToolExecutor for RefineTools {
             dispatch_refine_tool(&self.root, self.default_vol, &self.tx, name, arguments_json)
                 .await;
         Ok(serde_json::to_string(&result)?)
+    }
+
+    async fn execute_call(&self, call: &ToolCall) -> anyhow::Result<String> {
+        if call.function.name == "task" {
+            return Ok(serde_json::to_string(
+                &self.run_subagent(&call.id, &call.function.arguments).await,
+            )?);
+        }
+        self.execute(&call.function.name, &call.function.arguments)
+            .await
     }
 }
 
@@ -2875,7 +2957,7 @@ mod tests {
             payload: "x".repeat(180_000),
         };
 
-        let outcome = run_compacting_tool_loop(&client, req, &executor, &etx, 8)
+        let outcome = run_compacting_tool_loop(&client, req, &executor, &etx, 8, 0, "")
             .await
             .unwrap();
 
@@ -2890,6 +2972,76 @@ mod tests {
             saw_compaction,
             "sub-agent loop compacts growing tool history"
         );
+    }
+
+    #[tokio::test]
+    async fn subagent_tool_loop_namespaces_nested_task_events() {
+        let root = temp_root("nestedtask");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let etx = EventTx(tx);
+        let client: Arc<dyn LlmClient> = Arc::new(ScriptedClient {
+            responses: Mutex::new(VecDeque::from(vec![
+                tool_call_turn("task", r#"{"description":"nested audit"}"#),
+                stop_turn("nested done"),
+                stop_turn("parent done"),
+            ])),
+        });
+        let mut req = ChatRequest::new(
+            "subagent-test",
+            vec![
+                Message::system(SUBAGENT_SYSTEM),
+                Message::user("audit the volume"),
+            ],
+        );
+        req.tools = Some(refine_tools_vec());
+        let tools = RefineTools::with_agent(
+            root.clone(),
+            1,
+            etx.clone(),
+            client.clone(),
+            crate::model::AgentModel::openrouter("m"),
+            RefineInteract::default(),
+        );
+        let executor = tools.child("root_call".to_string());
+
+        let outcome =
+            run_compacting_tool_loop(client.as_ref(), req, &executor, &etx, 8, 1, "root_call")
+                .await
+                .unwrap();
+
+        assert_eq!(outcome.tool_calls, 1);
+        let mut updates = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            if let AppEvent::RefineSubagentUpdated {
+                id,
+                depth,
+                status,
+                summary,
+            } = ev
+            {
+                updates.push((id, depth, status, summary));
+            }
+        }
+        assert!(
+            updates.iter().any(|(id, depth, status, summary)| {
+                id == "root_call/call_1"
+                    && *depth == 1
+                    && *status == RefineSubagentStatus::Running
+                    && summary.contains("nested audit")
+            }),
+            "nested task start should be namespaced under the parent path: {updates:?}"
+        );
+        assert!(
+            updates.iter().any(|(id, depth, status, summary)| {
+                id == "root_call/call_1"
+                    && *depth == 1
+                    && *status == RefineSubagentStatus::Succeeded
+                    && summary.contains("sub-agent finished")
+            }),
+            "nested task completion should update the same namespaced row: {updates:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[tokio::test]
@@ -3331,6 +3483,62 @@ mod tests {
         assert!(r.ok, "{}", r.message);
         let now = translation::prose_only(&translation::read_translated(&ws, 1).await);
         assert_eq!(now, "สุนัขสีดำ และ สุนัขสีขาว");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn edit_chapter_clears_review_marker_for_touched_chunk_only() {
+        let root = temp_root("editflag");
+        let ws = Workspace::new(root.clone(), 1);
+        std::fs::create_dir_all(ws.translated(1).parent().unwrap()).unwrap();
+        translation::append_chunk_needs_review(&ws, 1, 0, "ร่างเก่า", 3, "tone drift")
+            .await
+            .unwrap();
+        translation::append_chunk_needs_review(&ws, 1, 1, "อีกจุด", 3, "missing line")
+            .await
+            .unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let tx = EventTx(tx);
+
+        let r = dispatch_refine_tool(
+            &root,
+            1,
+            &tx,
+            "edit_chapter",
+            r#"{"ch":1,"old":"ร่างเก่า","new":"แก้แล้ว"}"#,
+        )
+        .await;
+        assert!(r.ok, "{}", r.message);
+        let now = translation::read_translated(&ws, 1).await;
+        assert_eq!(
+            translation::review_needed_chunk_indices_in(&now),
+            std::collections::BTreeSet::from([1])
+        );
+        assert_eq!(
+            translation::chunk_prose_in(&now, 0).as_deref(),
+            Some("แก้แล้ว")
+        );
+        assert_eq!(
+            crate::workspace::scan::derive_status(&ws.vol_dir, 1, crate::model::ChapterKind::Prose),
+            crate::model::ChapterStatus::NeedsReview
+        );
+
+        let r = dispatch_refine_tool(
+            &root,
+            1,
+            &tx,
+            "edit_chapter",
+            r#"{"ch":1,"old":"อีกจุด","new":"แก้ครบแล้ว"}"#,
+        )
+        .await;
+        assert!(r.ok, "{}", r.message);
+        let now = translation::read_translated(&ws, 1).await;
+        assert!(translation::review_needed_chunk_indices_in(&now).is_empty());
+        assert_eq!(
+            crate::workspace::scan::derive_status(&ws.vol_dir, 1, crate::model::ChapterKind::Prose),
+            crate::model::ChapterStatus::Done
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }

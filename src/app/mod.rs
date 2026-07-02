@@ -998,6 +998,7 @@ impl App {
             AppEvent::RefineChapterEdited { vol, ch } => {
                 self.refine_last_edit = Some((*vol, *ch));
                 self.refine_dirty = true;
+                self.refresh_active_project();
                 if matches!(self.screen, Screen::Reader)
                     && self.active.as_ref().map(|a| a.vol) == Some(*vol)
                 {

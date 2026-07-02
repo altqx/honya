@@ -109,26 +109,12 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/context", "show context-window usage"),
     ("/export", "export this conversation to markdown"),
     ("/fix-review-needed", "triage and fix review-needed chunks"),
-    ("/fix-short-names", "fix expanded short name surfaces"),
+    ("/fix-needed-reviews", "triage and fix review-needed chunks"),
     ("/grep", "search the project for text"),
     ("/resume", "pick a session to resume"),
 ];
 
 const COMPACT_SUMMARY_PREFIX: &str = "[Earlier conversation, compacted to fit the context window]";
-
-const FIX_SHORT_NAMES_PROMPT: &str = r#"Fix over-expanded character names across the requested scope.
-
-Problem: some Thai translations use a full canonical character name even when SOURCE_JP uses only a short surface such as a surname, given name, nickname, title, or alias. Example: if CHARACTERS has `天道カレン → เทนโด คาเรน` but the source line says only `天道`, the Thai should use `เทนโด`, not `เทนโด คาเรน`.
-
-Workflow:
-1. Use `update_plan`, then read the character roster with `read_lexicon`.
-2. Find candidate chapters by searching translated text for full canonical Thai names. For each candidate, read the matching Japanese source and Thai lines together.
-3. Only edit when the source mention is actually short and the Thai expanded it to the full canonical name. Do not change cases where SOURCE_JP uses the full name, where the full name is needed for clarity, or where the Thai line is already natural.
-4. Prefer existing `also_called` mappings for the replacement. If a verified short source surface lacks one, infer the natural short Thai surface from the canonical Thai name or existing usage, then update CHARACTERS with `also_called` (for example `天道→เทนโด`) so future translation/review preserves that surface.
-5. Apply surgical chapter edits with `multi_edit_chapter` where possible. Do not run a blind project-wide replacement.
-6. Verify changed regions by re-reading or grepping them, then report every chapter touched and every character mapping added or changed.
-
-Default scope: the whole project unless the user supplied an explicit @volume/@chapter scope."#;
 
 const FIX_REVIEW_NEEDED_PROMPT: &str = r#"Investigate and fix `honya:review-needed` chunks across the requested scope.
 
@@ -286,6 +272,7 @@ enum RefinePending {
 #[derive(Debug, Clone)]
 struct SubagentRun {
     id: String,
+    depth: usize,
     title: String,
     status: RefineSubagentStatus,
     summary: String,
@@ -727,16 +714,7 @@ impl RefineScreen {
                     self.submit()
                 }
             }
-            "/fix-short-names" => {
-                self.input = if rest.is_empty() {
-                    FIX_SHORT_NAMES_PROMPT.to_string()
-                } else {
-                    format!("{FIX_SHORT_NAMES_PROMPT}\n\nScope hint: {rest}")
-                };
-                self.cursor = self.input.len();
-                self.submit()
-            }
-            "/fix-review-needed" => {
+            "/fix-review-needed" | "/fix-needed-reviews" => {
                 self.input = if rest.is_empty() {
                     FIX_REVIEW_NEEDED_PROMPT.to_string()
                 } else {
@@ -915,10 +893,11 @@ impl RefineScreen {
             }
             AppEvent::RefineSubagentUpdated {
                 id,
+                depth,
                 status,
                 summary,
             } => {
-                self.update_subagent(id, *status, summary);
+                self.update_subagent(id, *depth, *status, summary);
                 self.follow = true;
             }
             AppEvent::RefineEditApplied { kind, summary } => {
@@ -945,8 +924,15 @@ impl RefineScreen {
         }
     }
 
-    fn update_subagent(&mut self, id: &str, status: RefineSubagentStatus, summary: &str) {
+    fn update_subagent(
+        &mut self,
+        id: &str,
+        depth: usize,
+        status: RefineSubagentStatus,
+        summary: &str,
+    ) {
         if let Some(run) = self.subagents.iter_mut().find(|run| run.id == id) {
+            run.depth = depth;
             run.status = status;
             if status == RefineSubagentStatus::Running {
                 run.title = summary.to_string();
@@ -963,6 +949,7 @@ impl RefineScreen {
         };
         self.subagents.push(SubagentRun {
             id: id.to_string(),
+            depth,
             title,
             status,
             summary: run_summary,
@@ -1360,8 +1347,12 @@ impl RefineScreen {
                 } else {
                     format!("{status} · {}", run.summary.trim())
                 };
+                let indent = "  ".repeat(run.depth.min(4));
                 Line::from(Span::styled(
-                    truncate_cols(&format!("{mark} {} — {detail}", run.title.trim()), w),
+                    truncate_cols(
+                        &format!("{indent}{mark} {} — {detail}", run.title.trim()),
+                        w,
+                    ),
                     style,
                 ))
             })
@@ -1981,37 +1972,22 @@ mod tests {
     }
 
     #[test]
-    fn fix_short_names_slash_submits_cleanup_prompt_with_scope() {
-        let mut s = RefineScreen::new();
-
-        let action = s.run_slash("/fix-short-names @v1/c3");
-
-        match action {
-            Action::RefineSubmit { text } => {
-                assert!(text.contains("Fix over-expanded character names"));
-                assert!(text.contains("read_lexicon"));
-                assert!(text.contains("also_called"));
-                assert!(text.contains("Scope hint: @v1/c3"));
-            }
-            other => panic!("expected RefineSubmit, got {other:?}"),
-        }
-    }
-
-    #[test]
     fn fix_review_needed_slash_submits_triage_prompt_with_scope() {
-        let mut s = RefineScreen::new();
+        for cmd in ["/fix-review-needed", "/fix-needed-reviews"] {
+            let mut s = RefineScreen::new();
 
-        let action = s.run_slash("/fix-review-needed @v5/c3");
+            let action = s.run_slash(&format!("{cmd} @v5/c3"));
 
-        match action {
-            Action::RefineSubmit { text } => {
-                assert!(text.contains("Investigate and fix `honya:review-needed` chunks"));
-                assert!(text.contains("dialogue/POV/pronoun/register"));
-                assert!(text.contains("`自分` inside dialogue"));
-                assert!(text.contains("Treat the reviewer reason as a clue"));
-                assert!(text.contains("Scope hint: @v5/c3"));
+            match action {
+                Action::RefineSubmit { text } => {
+                    assert!(text.contains("Investigate and fix `honya:review-needed` chunks"));
+                    assert!(text.contains("dialogue/POV/pronoun/register"));
+                    assert!(text.contains("`自分` inside dialogue"));
+                    assert!(text.contains("Treat the reviewer reason as a clue"));
+                    assert!(text.contains("Scope hint: @v5/c3"));
+                }
+                other => panic!("expected RefineSubmit for {cmd}, got {other:?}"),
             }
-            other => panic!("expected RefineSubmit, got {other:?}"),
         }
     }
 
@@ -2214,16 +2190,19 @@ mod tests {
 
         s.on_app_event(&AppEvent::RefineSubagentUpdated {
             id: "call_1".to_string(),
+            depth: 1,
             status: RefineSubagentStatus::Running,
             summary: "audit volume 2".to_string(),
         });
 
         assert_eq!(s.subagents.len(), 1);
+        assert_eq!(s.subagents[0].depth, 1);
         assert_eq!(s.subagents[0].title, "audit volume 2");
         assert_eq!(s.subagents[0].status, RefineSubagentStatus::Running);
 
         s.on_app_event(&AppEvent::RefineSubagentUpdated {
             id: "call_1".to_string(),
+            depth: 1,
             status: RefineSubagentStatus::Succeeded,
             summary: "sub-agent finished (3 tool call(s))".to_string(),
         });

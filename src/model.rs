@@ -1574,6 +1574,7 @@ pub enum AppEvent {
     },
     RefineSubagentUpdated {
         id: String,
+        depth: usize,
         status: RefineSubagentStatus,
         summary: String,
     },

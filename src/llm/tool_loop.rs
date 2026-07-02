@@ -10,6 +10,13 @@ use super::{ChatRequest, ChatResponse, Message, Role, ToolCall, Usage};
 pub trait ToolExecutor: Send + Sync {
     /// Run `name` with the model's raw JSON-string args; return a JSON-string result.
     async fn execute(&self, name: &str, arguments_json: &str) -> anyhow::Result<String>;
+
+    /// Run a full tool call. Implementors that need the provider call id can
+    /// override this; most tools only care about name and arguments.
+    async fn execute_call(&self, call: &ToolCall) -> anyhow::Result<String> {
+        self.execute(&call.function.name, &call.function.arguments)
+            .await
+    }
 }
 
 /// Outcome of a completed tool loop: the final tool-call-free response, the
@@ -63,10 +70,7 @@ pub async fn run_tool_loop(
         });
 
         for call in &tool_calls {
-            let result = match executor
-                .execute(&call.function.name, &call.function.arguments)
-                .await
-            {
+            let result = match executor.execute_call(call).await {
                 Ok(payload) => payload,
                 // Surface executor errors to the model as a tool result so it can react, not abort.
                 Err(e) => serde_json::json!({
