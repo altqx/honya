@@ -1634,8 +1634,10 @@ impl RefineScreen {
             return;
         }
 
-        let max_rows = rows.len().min(6) as u16;
-        let height = max_rows + 2;
+        let max_rows = rows.len().min(6);
+        let selected = rows.iter().position(|(_, selected)| *selected).unwrap_or(0);
+        let offset = popup_window_start(rows.len(), selected, max_rows);
+        let height = max_rows as u16 + 2;
         let width = body.width.min(52);
         let x = body.x + 1;
         let y = input_top.saturating_sub(height);
@@ -1658,7 +1660,8 @@ impl RefineScreen {
         let label_w = inner.width as usize;
         let lines: Vec<Line> = rows
             .iter()
-            .take(max_rows as usize)
+            .skip(offset)
+            .take(max_rows)
             .map(|(label, selected)| {
                 let style = if *selected {
                     Style::default()
@@ -1675,6 +1678,17 @@ impl RefineScreen {
             inner,
         );
     }
+}
+
+fn popup_window_start(row_count: usize, selected: usize, max_rows: usize) -> usize {
+    if row_count <= max_rows || max_rows == 0 {
+        return 0;
+    }
+    let selected = selected.min(row_count - 1);
+    selected
+        .saturating_add(1)
+        .saturating_sub(max_rows)
+        .min(row_count - max_rows)
 }
 
 fn wrapped_line_count(lines: &[Line<'_>], width: usize) -> u16 {
@@ -1826,6 +1840,14 @@ mod tests {
             }
             _ => panic!("expected a slash popup"),
         }
+    }
+
+    #[test]
+    fn popup_window_follows_selection_past_first_page() {
+        assert_eq!(popup_window_start(17, 0, 6), 0);
+        assert_eq!(popup_window_start(17, 5, 6), 0);
+        assert_eq!(popup_window_start(17, 6, 6), 1);
+        assert_eq!(popup_window_start(17, 16, 6), 11);
     }
 
     #[test]
