@@ -298,7 +298,7 @@ pub fn render_context_blurb(chars: &[Character]) -> String {
         return String::new();
     }
     let mut s = String::new();
-    s.push_str("ตัวละคร — ชื่อไทยหลัง → คือการสะกดที่ตายตัว (canonical) ต้องใช้ให้ตรงตัวทุกครั้งที่เอ่ยถึงตัวละครนั้น ห้ามสะกดต่าง ห้ามบัญญัติชื่อไทยใหม่ และต้องใช้สรรพนาม/น้ำเสียงที่กำหนดให้สอดคล้อง:\n");
+    s.push_str("ตัวละคร — ชื่อไทยหลัง → คือรูปเต็ม/รูปหลักและการสะกดที่ตายตัว (canonical) ห้ามสะกดต่างหรือบัญญัติชื่อไทยใหม่ แต่ห้ามขยายผิวคำสั้นใน SOURCE_JP ให้เป็นชื่อเต็มโดยอัตโนมัติ: ถ้าต้นฉบับใช้แค่นามสกุล/ชื่อ/alias ให้ใช้รูปไทยสั้นที่ตรงผิวคำนั้นอย่างเป็นธรรมชาติ; ถ้ามีรายการ \"เรียกอีกชื่อ\" ให้ใช้ mapping นั้นตรงตัว:\n");
     for c in chars {
         let jp = c.jp_name.trim();
         if jp.is_empty() {
@@ -314,7 +314,7 @@ pub fn render_context_blurb(chars: &[Character]) -> String {
             .filter(|a| source_side_alias(a))
             .collect();
         if !aliases.is_empty() {
-            s.push_str(&format!(" (={})", aliases.join(", ")));
+            s.push_str(&format!(" (=คนเดียวกัน: {})", aliases.join(", ")));
         }
         s.push_str(" → ");
         s.push_str(if c.thai_name.trim().is_empty() {
@@ -848,6 +848,32 @@ mod tests {
         assert!(
             !blurb.contains("เคตะ") && !blurb.contains("อามาโนะคุง"),
             "Thai target variants must not be shown as source aliases:\n{blurb}"
+        );
+    }
+
+    #[test]
+    fn context_blurb_marks_aliases_as_identity_not_full_name_commands() {
+        let mut karen = ch(
+            "tendou-karen",
+            "天道カレン",
+            "เทนโด คาเรน",
+            Some("Tendou Karen"),
+        );
+        karen.aliases = vec!["天道".into()];
+
+        let blurb = render_context_blurb(&[karen]);
+
+        assert!(
+            blurb.contains("天道カレン (=คนเดียวกัน: 天道) → เทนโด คาเรน"),
+            "alias should be shown as same-person context:\n{blurb}"
+        );
+        assert!(
+            blurb.contains("ห้ามขยายผิวคำสั้น"),
+            "context must tell agents not to expand short source surfaces to full names:\n{blurb}"
+        );
+        assert!(
+            blurb.contains("รูปไทยสั้น"),
+            "context must allow short Thai surfaces for short source mentions:\n{blurb}"
         );
     }
 

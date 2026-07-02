@@ -648,6 +648,16 @@ Keep working until the user's request is fully resolved before yielding the turn
 - Keep Thai natural, idiomatic, and consistent with the established glossary policies and each character's voice/pronouns. Preserve scene-break dividers (`---`), image links, and Markdown. Don't introduce raw Japanese kana or `(furigana)` parentheticals.
 - When you fix a term or name across the project, also update the glossary/character entry so future translation stays consistent — and use search_project to catch every occurrence.
 
+# Character name-surface cleanup
+Canonical Thai names in CHARACTERS are spelling/identity anchors, not automatic full-name expansion commands. When the Japanese source uses a shorter surface — surname only, given name only, nickname, title, or alias — the Thai should usually use the corresponding short Thai surface, not the full canonical Thai name, unless the source itself uses the full name or the Thai scene needs the full name for clarity. Example: if CHARACTERS has `天道カレン → เทนโด คาเรน` and the source line says only `天道`, translate that mention as `เทนโด`, not `เทนโด คาเรน`.
+
+For bulk fixes of this bug:
+- Read the character roster first. Treat `also_called` entries as exact per-surface mappings. Treat aliases as same-person signals only; verify the source before deciding whether the visible Thai should be short.
+- Search for full canonical Thai names in translated chapters, then read the matching Japanese source region. Fix only cases where the source region uses a short surface and the Thai expanded it to the full canonical name.
+- Do not blindly replace a full Thai name everywhere; full names are correct when SOURCE_JP uses the full name, an introduction needs it, or the Thai sentence would become ambiguous.
+- When you verify a short source surface should have its own stable Thai rendering, update that character with an `also_called` mapping such as `天道→เทนโด` so future translation/review uses the right surface.
+- Prefer multi_edit_chapter for several fixes in one chapter. After editing, grep or read the changed regions again and report chapters touched plus character mappings added.
+
 # Safety
 Mature source material may appear; handle characters, terms, and text neutrally and faithfully without moralizing or censoring. Do not invent facts about the story that the source/translation does not support."#
         .to_string()

@@ -108,11 +108,26 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/compact", "compact the conversation now"),
     ("/context", "show context-window usage"),
     ("/export", "export this conversation to markdown"),
+    ("/fix-short-names", "fix expanded short name surfaces"),
     ("/grep", "search the project for text"),
     ("/resume", "pick a session to resume"),
 ];
 
 const COMPACT_SUMMARY_PREFIX: &str = "[Earlier conversation, compacted to fit the context window]";
+
+const FIX_SHORT_NAMES_PROMPT: &str = r#"Fix over-expanded character names across the requested scope.
+
+Problem: some Thai translations use a full canonical character name even when SOURCE_JP uses only a short surface such as a surname, given name, nickname, title, or alias. Example: if CHARACTERS has `天道カレン → เทนโด คาเรน` but the source line says only `天道`, the Thai should use `เทนโด`, not `เทนโด คาเรน`.
+
+Workflow:
+1. Use `update_plan`, then read the character roster with `read_lexicon`.
+2. Find candidate chapters by searching translated text for full canonical Thai names. For each candidate, read the matching Japanese source and Thai lines together.
+3. Only edit when the source mention is actually short and the Thai expanded it to the full canonical name. Do not change cases where SOURCE_JP uses the full name, where the full name is needed for clarity, or where the Thai line is already natural.
+4. Prefer existing `also_called` mappings for the replacement. If a verified short source surface lacks one, infer the natural short Thai surface from the canonical Thai name or existing usage, then update CHARACTERS with `also_called` (for example `天道→เทนโด`) so future translation/review preserves that surface.
+5. Apply surgical chapter edits with `multi_edit_chapter` where possible. Do not run a blind project-wide replacement.
+6. Verify changed regions by re-reading or grepping them, then report every chapter touched and every character mapping added or changed.
+
+Default scope: the whole project unless the user supplied an explicit @volume/@chapter scope."#;
 
 const RESOURCE_CANDS: &[(&str, &str)] = &[
     ("@lexicon", "cast + glossary"),
@@ -666,6 +681,15 @@ impl RefineScreen {
                     self.cursor = self.input.len();
                     self.submit()
                 }
+            }
+            "/fix-short-names" => {
+                self.input = if rest.is_empty() {
+                    FIX_SHORT_NAMES_PROMPT.to_string()
+                } else {
+                    format!("{FIX_SHORT_NAMES_PROMPT}\n\nScope hint: {rest}")
+                };
+                self.cursor = self.input.len();
+                self.submit()
             }
             "/context" => {
                 let pct = if self.context_max > 0 {
@@ -1772,6 +1796,23 @@ mod tests {
                 assert_eq!(SLASH_COMMANDS[items[0]].0, "/clear");
             }
             _ => panic!("expected a slash popup"),
+        }
+    }
+
+    #[test]
+    fn fix_short_names_slash_submits_cleanup_prompt_with_scope() {
+        let mut s = RefineScreen::new();
+
+        let action = s.run_slash("/fix-short-names @v1/c3");
+
+        match action {
+            Action::RefineSubmit { text } => {
+                assert!(text.contains("Fix over-expanded character names"));
+                assert!(text.contains("read_lexicon"));
+                assert!(text.contains("also_called"));
+                assert!(text.contains("Scope hint: @v1/c3"));
+            }
+            other => panic!("expected RefineSubmit, got {other:?}"),
         }
     }
 
