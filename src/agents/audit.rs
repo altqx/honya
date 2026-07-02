@@ -587,7 +587,12 @@ fn contains_discouraged_particle(text: &str, particle: &str) -> bool {
         let end = idx + particle.len();
         let embedded_name_syllable =
             matches!(particle, "วะ" | "ว่ะ") && previous_char(text, idx).is_some_and(is_thai_mark);
-        if !embedded_name_syllable && has_particle_boundary_after(text, end) {
+        let embedded_masked_name =
+            matches!(particle, "วะ" | "ว่ะ") && previous_char(text, idx).is_some_and(is_mask_char);
+        if !embedded_name_syllable
+            && !embedded_masked_name
+            && has_particle_boundary_after(text, end)
+        {
             return true;
         }
         start = end;
@@ -610,6 +615,10 @@ fn previous_char(text: &str, idx: usize) -> Option<char> {
 
 fn is_thai_mark(ch: char) -> bool {
     matches!(ch as u32, 0x0E31 | 0x0E34..=0x0E3A | 0x0E47..=0x0E4E)
+}
+
+fn is_mask_char(ch: char) -> bool {
+    matches!(ch, '○' | '〇' | '●' | '・' | '＊' | '*')
 }
 
 fn is_particle_boundary_char(ch: char) -> bool {
@@ -1530,11 +1539,11 @@ mod tests {
     #[test]
     fn advisory_allows_preferred_particles_fuwa_name_and_tho_woei() {
         let source = "不破さんは叫んだ。";
-        let thai = "คุณฟูวะตะโกนว่า “นี่มันอะไรกันฟะ เฟ้ย! โธ่เว้ย!”";
+        let thai = "คุณฟูวะตะโกนว่า “นี่มันอะไรกันฟะ เฟ้ย! โธ่เว้ย!” จากนั้นพูดถึงจิโกกุ มิ○วะ";
         let findings = advisory_findings(source, thai);
         assert!(
             !findings.iter().any(|f| f.contains("casual Thai particle")),
-            "preferred particles, Fuwa name, and โธ่เว้ย are not flagged: {findings:?}"
+            "preferred particles, Fuwa name, masked titles, and โธ่เว้ย are not flagged: {findings:?}"
         );
     }
 

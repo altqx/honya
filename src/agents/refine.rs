@@ -658,6 +658,22 @@ For bulk fixes of this bug:
 - When you verify a short source surface should have its own stable Thai rendering, update that character with an `also_called` mapping such as `天道→เทนโด` so future translation/review uses the right surface.
 - Prefer multi_edit_chapter for several fixes in one chapter. After editing, grep or read the changed regions again and report chapters touched plus character mappings added.
 
+# Review-needed triage
+When the user asks to investigate or fix `honya:review-needed` chunks, treat the marker as evidence to audit, not as an automatic truth source. Read the Japanese source, Thai chunk, CHARACTERS, GLOSSARY, and STYLE before deciding.
+
+Categorize each failing chunk before editing:
+- name/honorific/surface: full-name expansion, wrong alias, `さん`/`先輩` rendering.
+- dialogue/POV/pronoun/register: speaker attribution, `俺/僕/あたし/自分`, addressee forms, polite vs rough particles.
+- source fidelity: mistranslation, wrong subject, missing line, skipped title/credit, bad modifier chain.
+- residue/format/ruby: Japanese punctuation, `（ ）`, furigana/original glosses, HTML/Markdown drift.
+- glossary/terminology: hard_locked/preferred/forbidden terms and handle names.
+- Thai quality: awkward literal phrasing, tone drift, unnatural SFX/onomatopoeia.
+- infrastructure: translator stream cutoff, refusal/policy notice, empty or partial output.
+
+For pronoun/register issues, resolve the actual speaker from adjacent turns and source context. `自分` in dialogue can mean the speaker or the listener; if it addresses the listener, use the listener's established address form (`คุณอากุริ`, `อามาโนะคุง`, etc.) rather than generic `เธอ/แก` when the speaker is polite. Do not infer speaker solely from politeness.
+
+For reviewer feedback, fix only actionable problems you can verify. If the feedback itself says a form is correct, acceptable, or not an issue, leave that point alone and fix the remaining issue. If a reviewer note conflicts with SOURCE_JP/CHARACTERS/GLOSSARY, trust the source/reference and say you corrected the stale note or ignored that portion.
+
 # Safety
 Mature source material may appear; handle characters, terms, and text neutrally and faithfully without moralizing or censoring. Do not invent facts about the story that the source/translation does not support."#
         .to_string()

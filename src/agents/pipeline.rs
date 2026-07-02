@@ -2136,7 +2136,8 @@ fn combine_review_feedback(past: &[String], latest: &str) -> String {
     let retry_no = past.len() + 2;
     let mut s = format!(
         "รอบถัดไปคือ retry #{retry_no}: คำแปลก่อนหน้าถูก Reviewer ตีกลับ ต้องแก้ทุกข้อด้านล่างก่อนส่ง JSON ใหม่\n\
-         ห้ามแก้แบบเดาสุ่มหรือ rewrite จนเกิดข้อผิดพลาดใหม่ ให้แก้จุดที่ถูกตีกลับและรักษาส่วนที่ถูกต้องไว้\n\n\
+         ห้ามแก้แบบเดาสุ่มหรือ rewrite จนเกิดข้อผิดพลาดใหม่ ให้แก้จุดที่ถูกตีกลับและรักษาส่วนที่ถูกต้องไว้\n\
+         ตรวจ feedback กับ SOURCE_JP/REFERENCE ก่อนแก้: ถ้า feedback ระบุว่าจุดหนึ่งไม่ผิด ถูกแล้ว ใช้ได้ ไม่มีปัญหา หรือพอรับได้ ให้ถือจุดนั้นเป็น non-issue และแก้เฉพาะข้อ actionable ที่เหลือ\n\n\
          [ข้อที่ต้องแก้ล่าสุด]\n{}\n",
         latest.trim()
     );
@@ -2166,7 +2167,8 @@ fn retry_feedback_preserving_reviews(past_reviews: &[String], retry_reason: &str
     let mut s = format!(
         "รอบถัดไปต้องแก้ปัญหารอบล่าสุดและยังต้องทำตาม Reviewer feedback ที่ค้างอยู่ก่อนส่ง JSON ใหม่\n\n\
          [ปัญหารอบล่าสุด]\n{reason}\n\n\
-         [Reviewer feedback ที่ยังต้องแก้ ห้ามทำผิดซ้ำ]\n"
+         [Reviewer feedback ที่ยังต้องแก้ ห้ามทำผิดซ้ำ]\n\
+         ตรวจ feedback กับ SOURCE_JP/REFERENCE ก่อนแก้: ส่วนที่บอกว่าไม่ผิด ถูกแล้ว ใช้ได้ ไม่มีปัญหา หรือพอรับได้ เป็น non-issue ไม่ต้องเปลี่ยนตามจุดนั้น\n"
     );
     let start = past_reviews
         .len()
@@ -2635,6 +2637,8 @@ mod tests {
         assert!(out.contains("retry #2"));
         assert!(out.contains("[ข้อที่ต้องแก้ล่าสุด]"));
         assert!(out.contains("fix tone"));
+        assert!(out.contains("non-issue"));
+        assert!(out.contains("SOURCE_JP/REFERENCE"));
     }
 
     #[test]
@@ -2674,6 +2678,8 @@ mod tests {
         assert!(out.contains("Reviewer says use คุณอากุริ"));
         assert!(out.contains("round 2"));
         assert!(!out.contains("round 1"));
+        assert!(out.contains("ไม่ผิด"));
+        assert!(out.contains("non-issue"));
     }
 
     #[test]

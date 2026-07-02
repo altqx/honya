@@ -108,6 +108,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/compact", "compact the conversation now"),
     ("/context", "show context-window usage"),
     ("/export", "export this conversation to markdown"),
+    ("/fix-review-needed", "triage and fix review-needed chunks"),
     ("/fix-short-names", "fix expanded short name surfaces"),
     ("/grep", "search the project for text"),
     ("/resume", "pick a session to resume"),
@@ -126,6 +127,25 @@ Workflow:
 4. Prefer existing `also_called` mappings for the replacement. If a verified short source surface lacks one, infer the natural short Thai surface from the canonical Thai name or existing usage, then update CHARACTERS with `also_called` (for example `天道→เทนโด`) so future translation/review preserves that surface.
 5. Apply surgical chapter edits with `multi_edit_chapter` where possible. Do not run a blind project-wide replacement.
 6. Verify changed regions by re-reading or grepping them, then report every chapter touched and every character mapping added or changed.
+
+Default scope: the whole project unless the user supplied an explicit @volume/@chapter scope."#;
+
+const FIX_REVIEW_NEEDED_PROMPT: &str = r#"Investigate and fix `honya:review-needed` chunks across the requested scope.
+
+Use `update_plan`. First list/count the flagged chunks, then categorize them before editing:
+- name/honorific/surface: wrong alias, full-name expansion, `さん`/`先輩`.
+- dialogue/POV/pronoun/register: speaker attribution, `俺/僕/あたし/自分`, addressee forms, polite vs rough particles.
+- source fidelity: mistranslation, wrong subject, missing line, skipped title/credit.
+- residue/format/ruby: Japanese punctuation, `（ ）`, furigana/original glosses, Markdown/HTML drift.
+- glossary/terminology: hard_locked/preferred/forbidden terms and handles.
+- Thai quality/SFX: awkward literal phrasing, tone drift, unnatural onomatopoeia.
+- infrastructure: translator stream cutoff, refusal/policy notice, empty or partial output.
+
+For each chunk you edit, read the matching SOURCE_JP, Thai chunk, CHARACTERS, GLOSSARY, and STYLE. Treat the reviewer reason as a clue, not as automatic truth. Fix only actionable issues that SOURCE_JP/REFERENCE confirms. If a reviewer note says a point is correct/acceptable/not an issue, leave that point alone and fix the actual remaining issue.
+
+Special dialogue rule: `自分` inside dialogue may mean the speaker or the listener. Resolve from adjacent turns; if it means the listener, use that listener's established address form such as `คุณอากุริ` or `อามาโนะคุง`, not generic `เธอ/แก` when the speaker is polite.
+
+Use surgical `multi_edit_chapter`/`edit_chapter`, verify changed regions, and report counts by category plus files changed.
 
 Default scope: the whole project unless the user supplied an explicit @volume/@chapter scope."#;
 
@@ -687,6 +707,15 @@ impl RefineScreen {
                     FIX_SHORT_NAMES_PROMPT.to_string()
                 } else {
                     format!("{FIX_SHORT_NAMES_PROMPT}\n\nScope hint: {rest}")
+                };
+                self.cursor = self.input.len();
+                self.submit()
+            }
+            "/fix-review-needed" => {
+                self.input = if rest.is_empty() {
+                    FIX_REVIEW_NEEDED_PROMPT.to_string()
+                } else {
+                    format!("{FIX_REVIEW_NEEDED_PROMPT}\n\nScope hint: {rest}")
                 };
                 self.cursor = self.input.len();
                 self.submit()
@@ -1811,6 +1840,24 @@ mod tests {
                 assert!(text.contains("read_lexicon"));
                 assert!(text.contains("also_called"));
                 assert!(text.contains("Scope hint: @v1/c3"));
+            }
+            other => panic!("expected RefineSubmit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fix_review_needed_slash_submits_triage_prompt_with_scope() {
+        let mut s = RefineScreen::new();
+
+        let action = s.run_slash("/fix-review-needed @v5/c3");
+
+        match action {
+            Action::RefineSubmit { text } => {
+                assert!(text.contains("Investigate and fix `honya:review-needed` chunks"));
+                assert!(text.contains("dialogue/POV/pronoun/register"));
+                assert!(text.contains("`自分` inside dialogue"));
+                assert!(text.contains("Treat the reviewer reason as a clue"));
+                assert!(text.contains("Scope hint: @v5/c3"));
             }
             other => panic!("expected RefineSubmit, got {other:?}"),
         }
