@@ -58,19 +58,19 @@ pub async fn chat_structured<T: DeserializeOwned>(
     Err(last_err.unwrap_or(LlmError::EmptyChoices))
 }
 
-/// Run a strict structured-output chat while streaming one string field's value.
-pub async fn chat_structured_stream_field<T, F>(
+/// Run a strict structured-output chat while streaming selected string fields.
+pub async fn chat_structured_stream_fields<T, F>(
     client: &dyn LlmClient,
     mut req: ChatRequest,
     schema_name: &'static str,
     schema: serde_json::Value,
     retries: usize,
-    field_name: &'static str,
+    field_names: &[&'static str],
     mut on_field_delta: F,
 ) -> Result<(T, Usage, bool)>
 where
     T: DeserializeOwned,
-    F: for<'a> FnMut(&'a str) + Send,
+    F: for<'a> FnMut(&'static str, &'a str) + Send,
 {
     req.response_format = Some(ResponseFormat::JsonSchema {
         json_schema: JsonSchemaSpec {
@@ -85,15 +85,21 @@ where
     let mut streamed_any = false;
 
     for _ in 0..=retries {
-        let mut field_stream = JsonStringFieldStream::new(field_name);
+        let mut field_streams = field_names
+            .iter()
+            .copied()
+            .map(JsonStringFieldStream::new)
+            .collect::<Vec<_>>();
         let mut raw_delta = |delta: crate::llm::StreamDelta| {
             let crate::llm::StreamDelta::Content(delta) = delta else {
                 return; // structured outputs ignore reasoning fragments
             };
-            let field_delta = field_stream.push(delta);
-            if !field_delta.is_empty() {
-                streamed_any = true;
-                on_field_delta(&field_delta);
+            for field_stream in &mut field_streams {
+                let field_delta = field_stream.push(delta);
+                if !field_delta.is_empty() {
+                    streamed_any = true;
+                    on_field_delta(field_stream.field_name, &field_delta);
+                }
             }
         };
 
@@ -522,7 +528,7 @@ pub fn coherence_schema() -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{JsonStringFieldStream, chat_structured};
+    use super::{JsonStringFieldStream, chat_structured, chat_structured_stream_fields};
     use crate::llm::client::{LlmClient, LlmError, Result};
     use crate::llm::{ChatRequest, ChatResponse, Choice, FunctionCall, ResponseMessage, ToolCall};
     use async_trait::async_trait;
@@ -571,6 +577,42 @@ mod tests {
             0,
         )
         .await
+    }
+
+    #[tokio::test]
+    async fn stream_fields_emits_multiple_targets() {
+        let client = OneShotClient {
+            message: message(
+                Some(
+                    r#"{"thought_process":{"scene_analysis":"tone","glossary_check":"term"},"translated_text":"ไทย","pov":"","new_characters":[],"new_terms":[],"continuity_notes":[]}"#,
+                ),
+                None,
+            ),
+            finish_reason: Some("stop".to_string()),
+        };
+        let mut got = Vec::new();
+
+        let (_value, _usage, streamed) = chat_structured_stream_fields::<serde_json::Value, _>(
+            &client,
+            ChatRequest::new("m", vec![]),
+            "translation_result",
+            serde_json::json!({}),
+            0,
+            &["scene_analysis", "glossary_check", "translated_text"],
+            |field, delta| got.push((field, delta.to_string())),
+        )
+        .await
+        .expect("structured JSON should parse");
+
+        assert!(streamed);
+        assert_eq!(
+            got,
+            vec![
+                ("scene_analysis", "tone".to_string()),
+                ("glossary_check", "term".to_string()),
+                ("translated_text", "ไทย".to_string()),
+            ]
+        );
     }
 
     #[tokio::test]

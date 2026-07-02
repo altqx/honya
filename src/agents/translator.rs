@@ -3,9 +3,9 @@
 use crate::agents::continuity::build_translator_user_msg;
 use crate::agents::prompts::TRANSLATOR_SYSTEM;
 use crate::llm::client::{LlmClient, LlmError};
-use crate::llm::structured::{chat_structured_stream_field, translator_schema};
+use crate::llm::structured::{chat_structured_stream_fields, translator_schema};
 use crate::llm::{ChatRequest, Message, Usage};
-use crate::model::{AgentModel, TranslatorOut};
+use crate::model::{AgentModel, ThoughtProcessField, TranslatorOut};
 
 #[derive(Debug, thiserror::Error)]
 #[error("{source}")]
@@ -43,6 +43,7 @@ pub async fn translate_chunk_streaming<F>(
     feedback: Option<&str>,
     attempt: u32,
     on_delta: F,
+    on_thought_delta: impl for<'a> FnMut(ThoughtProcessField, &'a str) + Send,
 ) -> std::result::Result<(TranslatorOut, Usage, bool), TranslatorStreamError>
 where
     F: for<'a> FnMut(&'a str) + Send,
@@ -58,27 +59,39 @@ where
     );
     let mut partial_translated_text = String::new();
     let mut on_delta = on_delta;
-    let mut relay_delta = |delta: &str| {
-        partial_translated_text.push_str(delta);
-        on_delta(delta);
+    let mut on_thought_delta = on_thought_delta;
+    let mut streamed_translated_text = false;
+    let mut relay_delta = |field: &'static str, delta: &str| match field {
+        "scene_analysis" => on_thought_delta(ThoughtProcessField::SceneAnalysis, delta),
+        "glossary_check" => on_thought_delta(ThoughtProcessField::GlossaryCheck, delta),
+        "translated_text" => {
+            streamed_translated_text = true;
+            partial_translated_text.push_str(delta);
+            on_delta(delta);
+        }
+        _ => {}
     };
 
     // The pipeline owns Translator retries so it can react to partial streamed
     // `translated_text` instead of silently replaying the same prompt here.
-    chat_structured_stream_field::<TranslatorOut, _>(
+    let res = chat_structured_stream_fields::<TranslatorOut, _>(
         client,
         req,
         "translation_result",
         translator_schema(),
         0,
-        "translated_text",
+        &["scene_analysis", "glossary_check", "translated_text"],
         &mut relay_delta,
     )
-    .await
-    .map_err(|source| TranslatorStreamError {
-        source,
-        partial_translated_text,
-    })
+    .await;
+
+    match res {
+        Ok((out, usage, _)) => Ok((out, usage, streamed_translated_text)),
+        Err(source) => Err(TranslatorStreamError {
+            source,
+            partial_translated_text,
+        }),
+    }
 }
 
 fn translator_request(

@@ -802,6 +802,12 @@ pub struct ThoughtProcess {
     pub glossary_check: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThoughtProcessField {
+    SceneAnalysis,
+    GlossaryCheck,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewCharacter {
     pub jp_name: String,
@@ -1336,6 +1342,7 @@ pub enum AppEvent {
         chapter: u32,
         chunk: usize,
         attempt: u32,
+        thought_process: ThoughtProcess,
         thai_preview: String,
         tokens: TokenUsage,
     },
@@ -1404,6 +1411,13 @@ pub enum AppEvent {
         chapter: u32,
         chunk: usize,
         role: AgentRole,
+        delta: String,
+    },
+    ThoughtProcessDelta {
+        chapter: u32,
+        chunk: usize,
+        attempt: u32,
+        field: ThoughtProcessField,
         delta: String,
     },
     UsageUpdate {

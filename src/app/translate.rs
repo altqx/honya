@@ -9,12 +9,13 @@ use std::hash::{Hash, Hasher};
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 use crate::model::{
-    AgentRole, AppEvent, ChapterKind, ChapterStatus, ReviewVerdict, ServiceTier, UsageStats,
+    AgentRole, AppEvent, ChapterKind, ChapterStatus, ReviewVerdict, ServiceTier, ThoughtProcess,
+    ThoughtProcessField, UsageStats,
 };
 use crate::theme::{self, Theme, agent_badge, agent_spinner_frame, spinner_frame, status_glyph};
 use crate::ui::mouse::{MouseGesture, MouseInput};
@@ -62,6 +63,10 @@ pub struct TranslateScreen {
     /// Accumulated Thai preview text.
     preview: String,
     pending_preview_separator: bool,
+    thought_scene: String,
+    thought_glossary: String,
+    thought_chunk: Option<usize>,
+    thought_attempt: Option<u32>,
     /// Whole-run cumulative usage (tokens / cost / tool calls), from `UsageUpdate`.
     run: UsageStats,
     /// Current chapter's running usage sub-total, from `UsageUpdate`.
@@ -98,6 +103,10 @@ impl TranslateScreen {
             chunk: (0, 0),
             preview: String::new(),
             pending_preview_separator: false,
+            thought_scene: String::new(),
+            thought_glossary: String::new(),
+            thought_chunk: None,
+            thought_attempt: None,
             run: UsageStats::default(),
             chapter: UsageStats::default(),
             retries: 0,
@@ -174,6 +183,7 @@ impl TranslateScreen {
                 self.chapter_title = format!("Vol.{vol:02} pre-scan");
                 self.preview.clear();
                 self.pending_preview_separator = false;
+                self.clear_thought_process();
                 self.scroll = 0;
                 self.chunk = (0, 0);
                 self.active_agent = 1;
@@ -216,6 +226,7 @@ impl TranslateScreen {
                 self.current_chapter = Some(*chapter);
                 self.preview.clear();
                 self.pending_preview_separator = false;
+                self.clear_thought_process();
                 self.scroll = 0;
                 self.chunk = (0, 0);
                 self.agent_lines = [
@@ -249,8 +260,12 @@ impl TranslateScreen {
                 self.agent_lines[1] = format!("requesting chunk {} (attempt {attempt})", chunk + 1);
                 self.pending_preview_separator =
                     !self.preview.is_empty() && !self.preview.ends_with('\n');
+                self.clear_thought_process();
+                self.thought_chunk = Some(chunk + 1);
+                self.thought_attempt = Some(*attempt);
             }
             AppEvent::TranslatorReturned {
+                thought_process,
                 thai_preview,
                 tokens,
                 ..
@@ -258,6 +273,7 @@ impl TranslateScreen {
                 self.active_agent = 1;
                 self.agent_lines[1] =
                     format!("returned · {} tok", tokens.completion.max(tokens.total));
+                self.set_thought_process(thought_process);
                 if !thai_preview.is_empty() {
                     // `thai_preview` now carries the chunk's full multi-line Thai.
                     // Separate successive chunks with a blank line so the preview
@@ -336,6 +352,18 @@ impl TranslateScreen {
                     self.append_preview(delta);
                 }
             }
+            AppEvent::ThoughtProcessDelta {
+                field,
+                delta,
+                chunk,
+                attempt,
+                ..
+            } => {
+                self.active_agent = 1;
+                self.thought_chunk = Some(chunk + 1);
+                self.thought_attempt = Some(*attempt);
+                self.append_thought_process(*field, delta);
+            }
             AppEvent::UsageUpdate { run, chapter } => {
                 self.run = *run;
                 self.chapter = *chapter;
@@ -397,6 +425,32 @@ impl TranslateScreen {
             }
             self.pending_preview_separator = false;
         }
+    }
+
+    fn clear_thought_process(&mut self) {
+        self.thought_scene.clear();
+        self.thought_glossary.clear();
+        self.thought_chunk = None;
+        self.thought_attempt = None;
+    }
+
+    fn set_thought_process(&mut self, thought: &ThoughtProcess) {
+        self.thought_scene = crate::ui::text::thai_display_safe(&thought.scene_analysis);
+        self.thought_glossary = crate::ui::text::thai_display_safe(&thought.glossary_check);
+    }
+
+    fn append_thought_process(&mut self, field: ThoughtProcessField, delta: &str) {
+        let safe = crate::ui::text::thai_display_safe(delta);
+        let target = match field {
+            ThoughtProcessField::SceneAnalysis => &mut self.thought_scene,
+            ThoughtProcessField::GlossaryCheck => &mut self.thought_glossary,
+        };
+        target.push_str(&safe);
+        trim_string_tail(target, 4096, 3072);
+    }
+
+    fn thought_process_is_empty(&self) -> bool {
+        self.thought_scene.trim().is_empty() && self.thought_glossary.trim().is_empty()
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Action {
@@ -619,11 +673,11 @@ impl TranslateScreen {
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Min(40), Constraint::Length(34)])
                 .split(body);
-            self.render_preview(f, cols[0], theme);
+            self.render_translation_body(f, cols[0], theme);
             self.render_queue(f, cols[1], theme);
         } else {
             self.queue_area = Rect::default();
-            self.render_preview(f, body, theme);
+            self.render_translation_body(f, body, theme);
         }
     }
 
@@ -820,6 +874,97 @@ impl TranslateScreen {
             spans.push(Span::styled(size, Style::default().fg(theme.ink_faint)));
         }
         Line::from(spans)
+    }
+
+    fn render_translation_body(&mut self, f: &mut Frame, area: Rect, theme: &Theme) {
+        if self.show_thought_panel(area) {
+            let rows = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(5), Constraint::Min(4)])
+                .split(area);
+            self.render_thought_panel(f, rows[0], theme);
+            self.render_preview(f, rows[1], theme);
+        } else {
+            self.render_preview(f, area, theme);
+        }
+    }
+
+    fn show_thought_panel(&self, area: Rect) -> bool {
+        matches!(self.phase, RunPhase::Running | RunPhase::Paused)
+            && area.width >= 34
+            && area.height >= 11
+    }
+
+    fn render_thought_panel(&self, f: &mut Frame, area: Rect, theme: &Theme) {
+        let border = if self.active_agent == 1 && matches!(self.phase, RunPhase::Running) {
+            theme.accent
+        } else {
+            theme.rule
+        };
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_set(theme::hairline_set())
+            .border_style(Style::default().fg(border))
+            .title(Span::styled(
+                " 思考 · thought_process ",
+                Style::default().fg(theme.ink_soft),
+            ))
+            .style(Style::default().bg(theme.bg_panel));
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+        if inner.height == 0 || inner.width < 8 {
+            return;
+        }
+
+        let mut lines = Vec::new();
+        let width = inner.width as usize;
+        if let Some(context) = self.thought_context_line(width, theme) {
+            lines.push(context);
+        }
+        if self.thought_process_is_empty() {
+            lines.push(Line::from(Span::styled(
+                " waiting for translator analysis",
+                Style::default().fg(theme.ink_faint),
+            )));
+        } else {
+            lines.push(thought_row(
+                "scene",
+                &self.thought_scene,
+                width,
+                theme.accent,
+                theme.ink_soft,
+            ));
+            lines.push(thought_row(
+                "glossary",
+                &self.thought_glossary,
+                width,
+                theme.status_working,
+                theme.ink_soft,
+            ));
+        }
+
+        lines.truncate(inner.height as usize);
+        f.render_widget(
+            Paragraph::new(lines).style(Style::default().bg(theme.bg_panel)),
+            inner,
+        );
+    }
+
+    fn thought_context_line(&self, width: usize, theme: &Theme) -> Option<Line<'static>> {
+        let chunk = self.thought_chunk?;
+        let attempt = self
+            .thought_attempt
+            .map(|n| format!(" · attempt {n}"))
+            .unwrap_or_default();
+        Some(Line::from(Span::styled(
+            format!(
+                " chunk {} / {}{}",
+                chunk,
+                self.chunk.1.max(chunk),
+                truncate_cols(&attempt, width.saturating_sub(16))
+            ),
+            Style::default().fg(theme.ink_faint),
+        )))
     }
 
     fn render_pipeline(&mut self, f: &mut Frame, area: Rect, frame: u64, theme: &Theme) {
@@ -1174,6 +1319,43 @@ fn truncate_one_line(s: &str, max: usize) -> String {
     truncate_cols(&one, max)
 }
 
+fn trim_string_tail(s: &mut String, max: usize, keep: usize) {
+    if s.len() <= max {
+        return;
+    }
+    let cut = s.len().saturating_sub(keep);
+    let mut idx = cut;
+    while idx < s.len() && !s.is_char_boundary(idx) {
+        idx += 1;
+    }
+    *s = s[idx..].to_string();
+}
+
+fn thought_row(
+    label: &str,
+    text: &str,
+    width: usize,
+    label_color: Color,
+    text_color: Color,
+) -> Line<'static> {
+    let prefix = format!(" {label:<8}");
+    let body_budget = width.saturating_sub(col_width(&prefix));
+    let body = if text.trim().is_empty() {
+        "…".to_string()
+    } else {
+        truncate_one_line(text.trim(), body_budget)
+    };
+    Line::from(vec![
+        Span::styled(
+            prefix,
+            Style::default()
+                .fg(label_color)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(body, Style::default().fg(text_color)),
+    ])
+}
+
 fn human_tok(n: u32) -> String {
     if n >= 1_000_000 {
         format!("{:.1}M", n as f64 / 1_000_000.0)
@@ -1300,6 +1482,61 @@ mod queue_panel_tests {
         );
         assert_eq!(screen.chapter.tokens.total, 0);
         assert_eq!(screen.current_chapter, Some(1));
+    }
+
+    #[test]
+    fn thought_process_events_fill_panel_state() {
+        let theme = crate::model::ThemeId::default().build();
+        let mut screen = TranslateScreen::new();
+        screen.on_app_event(&AppEvent::ChapterStarted { chapter: 1 });
+        screen.on_app_event(&AppEvent::ChunkStarted {
+            chapter: 1,
+            chunk: 0,
+            total: 3,
+            est_tokens: 120,
+        });
+        screen.on_app_event(&AppEvent::TranslatorRequested {
+            chapter: 1,
+            chunk: 0,
+            attempt: 1,
+        });
+        screen.on_app_event(&AppEvent::ThoughtProcessDelta {
+            chapter: 1,
+            chunk: 0,
+            attempt: 1,
+            field: ThoughtProcessField::SceneAnalysis,
+            delta: "tone".into(),
+        });
+        screen.on_app_event(&AppEvent::ThoughtProcessDelta {
+            chapter: 1,
+            chunk: 0,
+            attempt: 1,
+            field: ThoughtProcessField::GlossaryCheck,
+            delta: "term".into(),
+        });
+
+        assert_eq!(screen.thought_scene, "tone");
+        assert_eq!(screen.thought_glossary, "term");
+        assert_eq!(screen.thought_chunk, Some(1));
+        assert_eq!(screen.thought_attempt, Some(1));
+
+        screen.on_app_event(&AppEvent::TranslatorReturned {
+            chapter: 1,
+            chunk: 0,
+            attempt: 1,
+            thought_process: ThoughtProcess {
+                scene_analysis: "final tone".into(),
+                glossary_check: "final term".into(),
+            },
+            thai_preview: String::new(),
+            tokens: crate::model::TokenUsage::default(),
+        });
+        assert_eq!(screen.thought_scene, "final tone");
+        assert_eq!(screen.thought_glossary, "final term");
+
+        let mut term = Terminal::new(TestBackend::new(90, 24)).unwrap();
+        term.draw(|f| screen.render(f, f.area(), 0, &theme, None))
+            .unwrap();
     }
 
     #[test]

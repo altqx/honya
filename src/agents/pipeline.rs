@@ -1483,7 +1483,8 @@ async fn process_chunk(
         });
 
         wd.reset_chunk();
-        let tx = ctx.tx.clone();
+        let stream_tx = ctx.tx.clone();
+        let thought_tx = ctx.tx.clone();
         let translator_client = ctx.client_for(&ctx.models.translator)?;
         let translate_res = {
             let _wait = wd.external_wait();
@@ -1500,10 +1501,20 @@ async fn process_chunk(
                     // Feed the watchdog: streaming is progress (resets the stall
                     // timer) and the repetition detector sees the live tail.
                     wd.feed_stream(delta);
-                    tx.send(AppEvent::StreamDelta {
+                    stream_tx.send(AppEvent::StreamDelta {
                         chapter,
                         chunk: chunk.index,
                         role: AgentRole::Translator,
+                        delta: delta.to_string(),
+                    });
+                },
+                move |field, delta| {
+                    wd.feed_stream(delta);
+                    thought_tx.send(AppEvent::ThoughtProcessDelta {
+                        chapter,
+                        chunk: chunk.index,
+                        attempt,
+                        field,
                         delta: delta.to_string(),
                     });
                 },
@@ -1809,6 +1820,7 @@ async fn process_chunk(
             chapter,
             chunk: chunk.index,
             attempt,
+            thought_process: out.thought_process.clone(),
             // If the streaming path emitted translated_text deltas, avoid
             // appending the same chunk again when the final schema lands.
             thai_preview: if streamed_preview {
