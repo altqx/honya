@@ -412,6 +412,11 @@ impl RefineScreen {
         self.in_flight
     }
 
+    #[cfg(test)]
+    pub fn expanded_for_test(&self) -> bool {
+        self.expanded
+    }
+
     pub fn set_plan(&mut self, plan: Vec<PlanStep>) {
         self.plan = plan;
     }

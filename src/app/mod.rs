@@ -2208,6 +2208,15 @@ impl App {
             return self.route_to_screen(k);
         }
 
+        if k.modifiers.contains(KeyModifiers::CONTROL)
+            && k.code == KeyCode::Char('r')
+            && matches!(self.overlay, Overlay::None)
+            && matches!(self.screen, Screen::Refine)
+            && self.active.is_some()
+        {
+            return self.route_to_screen(k);
+        }
+
         // First Ctrl-C arms; a second inside the window quits.
         if k.modifiers.contains(KeyModifiers::CONTROL) && k.code == KeyCode::Char('c') {
             if self.quit_armed() {
@@ -5966,6 +5975,7 @@ mod completeness_tests {
 mod remote_tests {
     use super::*;
     use crate::agents::pipeline::RunControl;
+    use crate::model::Volume;
     use crate::remote::protocol::{RemoteCommand, RemoteDelta, RemoteOutbound};
 
     fn app() -> App {
@@ -6011,6 +6021,43 @@ mod remote_tests {
         app.overlay = Overlay::settings_with_field(&app.cfg, 0);
 
         assert!(matches!(app.route_key(ctrl_r()), Action::StartRemoteLogin));
+    }
+
+    #[test]
+    fn ctrl_r_expands_refine_instead_of_toggling_remote() {
+        let base =
+            std::env::temp_dir().join(format!("honya_refine_ctrl_r_route_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("Vol_01")).unwrap();
+        let mut app = app();
+        app.cfg.account = Some(linked_account());
+        app.screen = Screen::Refine;
+        app.active = Some(ActiveProject {
+            project: Project {
+                id: "novel".to_string(),
+                dir: base.clone(),
+                title: "Novel".to_string(),
+                title_th: String::new(),
+                created: None,
+                touched: None,
+                volumes: vec![Volume {
+                    number: 1,
+                    dir: base.join("Vol_01"),
+                    label: None,
+                    chapters: Vec::new(),
+                }],
+                models: None,
+            },
+            workspace: Workspace::new(base.clone(), 1),
+            clients: None,
+            models: ModelSet::default(),
+            vol: 1,
+        });
+
+        assert!(matches!(app.route_key(ctrl_r()), Action::None));
+        assert!(app.refine.expanded_for_test());
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
