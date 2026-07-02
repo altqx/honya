@@ -13,6 +13,7 @@
 //! dev build and which commit it was built from.
 
 use std::path::Path;
+use std::process::Command;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -678,10 +679,68 @@ fn private_staging_dir(tag: &str) -> Result<std::path::PathBuf> {
 }
 
 fn dev_build_target_dir() -> Result<std::path::PathBuf> {
-    let dir = user_cache_dir().join("dev-update-target");
+    let dir = user_cache_dir()
+        .join("dev-update-target")
+        .join(rustc_cache_key()?);
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("creating the dev build cache at {}", dir.display()))?;
     Ok(dir)
+}
+
+fn rustc_cache_key() -> Result<String> {
+    let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+    let out = Command::new(&rustc).arg("-vV").output().with_context(|| {
+        format!(
+            "querying {} for the dev build cache key",
+            rustc_display(&rustc)
+        )
+    })?;
+    if !out.status.success() {
+        bail!(
+            "{} -vV failed while preparing the dev build cache",
+            rustc_display(&rustc)
+        );
+    }
+    let verbose = String::from_utf8_lossy(&out.stdout);
+    Ok(rustc_cache_key_from_verbose(&verbose))
+}
+
+fn rustc_cache_key_from_verbose(verbose: &str) -> String {
+    let release = rustc_verbose_value(verbose, "release")
+        .unwrap_or_else(|| verbose.lines().next().unwrap_or("rustc").trim().to_string());
+    let host = rustc_verbose_value(verbose, "host")
+        .unwrap_or_else(|| format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS));
+    let commit = rustc_verbose_value(verbose, "commit-hash")
+        .map(|s| s.chars().take(12).collect::<String>())
+        .unwrap_or_else(|| "unknown".to_string());
+    format!(
+        "rustc-{}-{}-{}",
+        cache_component(&release),
+        cache_component(&commit),
+        cache_component(&host)
+    )
+}
+
+fn rustc_verbose_value(verbose: &str, key: &str) -> Option<String> {
+    verbose.lines().find_map(|line| {
+        let (k, v) = line.split_once(':')?;
+        (k.trim() == key).then(|| v.trim().to_string())
+    })
+}
+
+fn cache_component(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'.' | b'-' | b'_' => out.push(b as char),
+            _ => out.push('-'),
+        }
+    }
+    out.trim_matches('-').to_string()
+}
+
+fn rustc_display(rustc: &std::ffi::OsStr) -> String {
+    rustc.to_string_lossy().into_owned()
 }
 
 fn user_cache_dir() -> std::path::PathBuf {
@@ -755,5 +814,32 @@ mod tests {
         // pre-release/build metadata is ignored for the comparison
         assert!(!is_newer("0.1.0-rc1", "0.1.0"));
         assert!(is_newer("0.2.0+build5", "0.1.0"));
+    }
+
+    #[test]
+    fn dev_build_cache_key_tracks_rustc_release_commit_and_host() {
+        let verbose = "\
+rustc 1.96.1 (31fca3adb 2026-06-26)
+binary: rustc
+commit-hash: 31fca3adb493b03f44c9550f752c61af4c154d33
+host: x86_64-unknown-linux-gnu
+release: 1.96.1
+LLVM version: 21.0.0
+";
+
+        assert_eq!(
+            rustc_cache_key_from_verbose(verbose),
+            "rustc-1.96.1-31fca3adb493-x86_64-unknown-linux-gnu"
+        );
+    }
+
+    #[test]
+    fn dev_build_cache_key_sanitizes_fallback_values() {
+        let verbose = "rustc 1.96.1 (local build)\n";
+
+        assert!(
+            rustc_cache_key_from_verbose(verbose)
+                .starts_with("rustc-rustc-1.96.1--local-build-unknown-")
+        );
     }
 }
