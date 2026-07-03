@@ -306,6 +306,13 @@ pub struct RefineScreen {
     context_max: u32,
     transcript_area: Rect,
     input_area: Rect,
+    /// Session-picker list geometry (inner rect + window start), refreshed on
+    /// render while the picker is open, for click hit-testing.
+    picker_area: Rect,
+    picker_start: usize,
+    /// Slash/mention popup list geometry, refreshed on render while open.
+    popup_area: Rect,
+    popup_offset: usize,
     transcript_cache: crate::ui::markdown::RenderCache,
 }
 
@@ -345,6 +352,10 @@ impl RefineScreen {
             context_max: 128_000,
             transcript_area: Rect::default(),
             input_area: Rect::default(),
+            picker_area: Rect::default(),
+            picker_start: 0,
+            popup_area: Rect::default(),
+            popup_offset: 0,
             transcript_cache: crate::ui::markdown::RenderCache::default(),
         }
     }
@@ -649,7 +660,38 @@ impl RefineScreen {
         }
     }
 
+    /// Mouse: while the session picker is open it owns every gesture (wheel walks
+    /// the list, click selects / opens, right-click closes); while a slash/mention
+    /// popup is open the wheel moves its selection and a click on a row accepts
+    /// it. Otherwise the wheel scrolls the transcript and a click focuses input.
     pub fn handle_mouse(&mut self, m: MouseInput) -> Action {
+        if let Some(sel) = self.picker {
+            return self.handle_picker_mouse(m, sel);
+        }
+        if !matches!(self.popup, Popup::None) {
+            match m.gesture {
+                MouseGesture::ScrollUp => {
+                    self.popup_move(-1);
+                    return Action::None;
+                }
+                MouseGesture::ScrollDown => {
+                    self.popup_move(1);
+                    return Action::None;
+                }
+                MouseGesture::Click { .. } if m.in_rect(self.popup_area) => {
+                    let idx = self.popup_offset + (m.row - self.popup_area.y) as usize;
+                    if self.popup_select(idx) {
+                        self.accept_popup();
+                    }
+                    return Action::None;
+                }
+                MouseGesture::RightClick => {
+                    self.popup = Popup::None;
+                    return Action::None;
+                }
+                _ => {}
+            }
+        }
         if m.is_scroll() {
             match m.gesture {
                 MouseGesture::ScrollUp => self.scroll_up(3),
@@ -661,6 +703,61 @@ impl RefineScreen {
             self.focused = true;
         }
         Action::None
+    }
+
+    fn handle_picker_mouse(&mut self, m: MouseInput, sel: usize) -> Action {
+        match m.gesture {
+            MouseGesture::ScrollUp => {
+                self.picker = Some(sel.saturating_sub(1));
+                Action::None
+            }
+            MouseGesture::ScrollDown => {
+                let max = self.sessions.len().saturating_sub(1);
+                self.picker = Some((sel + 1).min(max));
+                Action::None
+            }
+            MouseGesture::Click { double } => {
+                if !m.in_rect(self.picker_area) {
+                    self.picker = None;
+                    return Action::None;
+                }
+                let idx = self.picker_start + (m.row - self.picker_area.y) as usize;
+                if idx >= self.sessions.len() {
+                    return Action::None;
+                }
+                let already = sel == idx;
+                self.picker = Some(idx);
+                if double || already {
+                    let action = self
+                        .sessions
+                        .get(idx)
+                        .map(|s| Action::RefineSwitchSession { id: s.id.clone() })
+                        .unwrap_or(Action::None);
+                    self.picker = None;
+                    return action;
+                }
+                Action::None
+            }
+            MouseGesture::RightClick => {
+                self.picker = None;
+                Action::None
+            }
+        }
+    }
+
+    /// Point the open popup's selection at `idx`; false when out of range.
+    fn popup_select(&mut self, idx: usize) -> bool {
+        match &mut self.popup {
+            Popup::Mention { items, sel } if idx < items.len() => {
+                *sel = idx;
+                true
+            }
+            Popup::Slash { items, sel } if idx < items.len() => {
+                *sel = idx;
+                true
+            }
+            _ => false,
+        }
     }
 
     fn submit(&mut self) -> Action {
@@ -1408,7 +1505,7 @@ impl RefineScreen {
         );
     }
 
-    fn render_session_picker(&self, f: &mut Frame, area: Rect, theme: &Theme) {
+    fn render_session_picker(&mut self, f: &mut Frame, area: Rect, theme: &Theme) {
         let Some(sel) = self.picker else {
             return;
         };
@@ -1434,8 +1531,10 @@ impl RefineScreen {
         let inner = block.inner(modal);
         f.render_widget(Clear, modal);
         f.render_widget(block, modal);
+        self.picker_area = inner;
 
         if self.sessions.is_empty() {
+            self.picker_start = 0;
             f.render_widget(
                 Paragraph::new(Line::from(Span::styled(
                     "no saved conversations yet — press n for a new one",
@@ -1451,6 +1550,7 @@ impl RefineScreen {
         // Window the list so the selected row stays visible past the modal height.
         let visible = (inner.height as usize).max(1);
         let start = if sel >= visible { sel + 1 - visible } else { 0 };
+        self.picker_start = start;
         let lines: Vec<Line> = self
             .sessions
             .iter()
@@ -1747,7 +1847,7 @@ impl RefineScreen {
         );
     }
 
-    fn render_popup(&self, f: &mut Frame, body: Rect, input_top: u16, theme: &Theme) {
+    fn render_popup(&mut self, f: &mut Frame, body: Rect, input_top: u16, theme: &Theme) {
         let rows: Vec<(String, bool)> = match &self.popup {
             Popup::None => return,
             Popup::Mention { items, sel } => items
@@ -1790,6 +1890,8 @@ impl RefineScreen {
         let inner = block.inner(area);
         f.render_widget(Clear, area);
         f.render_widget(block, area);
+        self.popup_area = inner;
+        self.popup_offset = offset;
 
         let label_w = inner.width as usize;
         let lines: Vec<Line> = rows
@@ -2113,6 +2215,71 @@ mod tests {
             Action::RefineSwitchSession { id } => assert_eq!(id, "b"),
             other => panic!("expected switch to b, got {other:?}"),
         }
+        assert!(!s.picker_open());
+    }
+
+    /// The mouse drives the session picker: the wheel walks the list, a click
+    /// selects, a second click on the selection opens it, and a right-click (or a
+    /// click off the modal) closes the picker.
+    #[test]
+    fn picker_mouse_selects_opens_and_dismisses() {
+        use crate::ui::mouse::{MouseGesture, MouseInput};
+
+        let sessions = vec![
+            SessionMeta {
+                id: "a".to_string(),
+                title: "first".to_string(),
+                updated: chrono::Utc::now(),
+                message_count: 2,
+            },
+            SessionMeta {
+                id: "b".to_string(),
+                title: "second".to_string(),
+                updated: chrono::Utc::now(),
+                message_count: 1,
+            },
+        ];
+        let mut s = RefineScreen::new();
+        s.open_picker(sessions.clone(), "a".to_string());
+        // Geometry normally set on render.
+        s.picker_area = Rect {
+            x: 10,
+            y: 5,
+            width: 40,
+            height: 4,
+        };
+        s.picker_start = 0;
+
+        let click = |col, row| MouseInput {
+            gesture: MouseGesture::Click { double: false },
+            col,
+            row,
+        };
+
+        // Wheel walks the selection.
+        s.handle_mouse(MouseInput {
+            gesture: MouseGesture::ScrollDown,
+            col: 0,
+            row: 0,
+        });
+        assert_eq!(s.picker, Some(1));
+
+        // Click row 0 selects it; a second click opens that session.
+        assert!(matches!(s.handle_mouse(click(12, 5)), Action::None));
+        assert_eq!(s.picker, Some(0));
+        match s.handle_mouse(click(12, 5)) {
+            Action::RefineSwitchSession { id } => assert_eq!(id, "a"),
+            other => panic!("expected switch to a, got {other:?}"),
+        }
+        assert!(!s.picker_open());
+
+        // Right-click closes without switching.
+        s.open_picker(sessions, "a".to_string());
+        s.handle_mouse(MouseInput {
+            gesture: MouseGesture::RightClick,
+            col: 0,
+            row: 0,
+        });
         assert!(!s.picker_open());
     }
 

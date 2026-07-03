@@ -33,7 +33,7 @@ use crate::model::{
 use crate::theme::Theme;
 use crate::ui::chrome::{self, StatusTally};
 use crate::ui::layout::{self, Skeleton};
-use crate::ui::mouse::MouseInput;
+use crate::ui::mouse::{MouseGesture, MouseInput};
 use crate::ui::text::{thai_display_safe, truncate_cols};
 use crate::workspace::Workspace;
 
@@ -2146,8 +2146,16 @@ impl App {
             return Action::None;
         };
 
-        // 2) The wheel always scrolls the active screen, wherever the pointer is.
+        // 2) The wheel over the tab bar cycles screens; anywhere else it scrolls
+        // the active screen.
         if m.is_scroll() {
+            if m.in_rect(sk.tabs) {
+                return Action::Goto(if matches!(m.gesture, MouseGesture::ScrollDown) {
+                    self.next_screen()
+                } else {
+                    self.prev_screen()
+                });
+            }
             return self.route_mouse_to_screen(m);
         }
 
@@ -2332,6 +2340,17 @@ impl App {
             Screen::Reader => Screen::Lexicon,
             Screen::Lexicon => Screen::Refine,
             Screen::Refine => Screen::Shelf,
+        }
+    }
+
+    fn prev_screen(&self) -> Screen {
+        match self.screen {
+            Screen::Shelf => Screen::Refine,
+            Screen::Project => Screen::Shelf,
+            Screen::Translate => Screen::Project,
+            Screen::Reader => Screen::Translate,
+            Screen::Lexicon => Screen::Reader,
+            Screen::Refine => Screen::Lexicon,
         }
     }
 
@@ -5771,6 +5790,19 @@ mod mouse_tests {
             click(&mut app, rect.x + rect.width / 2, rect.y);
             assert_eq!(app.screen, target);
         }
+    }
+
+    /// The wheel over the tab bar cycles screens (down = next, up = previous).
+    #[test]
+    fn wheel_over_tab_bar_cycles_screens() {
+        let mut app = app();
+        render(&mut app, 120, 40);
+        let tabs = app.last_skeleton.unwrap().tabs;
+        app.on_mouse(ev(MouseEventKind::ScrollDown, tabs.x + 2, tabs.y));
+        assert_eq!(app.screen, Screen::Project);
+        render(&mut app, 120, 40);
+        app.on_mouse(ev(MouseEventKind::ScrollUp, tabs.x + 2, tabs.y));
+        assert_eq!(app.screen, Screen::Shelf);
     }
 
     /// Clicking the breadcrumb / header goes home to the Shelf.

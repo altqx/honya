@@ -571,17 +571,26 @@ impl TranslateScreen {
         }
     }
 
-    /// Mouse: the wheel scrolls the preview (leaving follow-mode); clicking an
-    /// agent line focuses that agent (its spinner moves there); double-clicking the
-    /// preview opens the result in the Reader, matching Enter.
+    /// Mouse: the wheel scrolls the preview (leaving follow-mode) — or, over the
+    /// queue panel, walks the queue selection; clicking an agent line focuses that
+    /// agent (its spinner moves there); double-clicking the preview opens the
+    /// result in the Reader, matching Enter; right-click drops queue focus (Esc).
     pub fn handle_mouse(&mut self, m: MouseInput) -> Action {
         match m.gesture {
             MouseGesture::ScrollUp => {
-                self.scroll_preview(-3);
+                if m.in_rect(self.queue_area) {
+                    self.queue_scroll(-1);
+                } else {
+                    self.scroll_preview(-3);
+                }
                 Action::None
             }
             MouseGesture::ScrollDown => {
-                self.scroll_preview(3);
+                if m.in_rect(self.queue_area) {
+                    self.queue_scroll(1);
+                } else {
+                    self.scroll_preview(3);
+                }
                 Action::None
             }
             MouseGesture::Click { double } => {
@@ -613,8 +622,23 @@ impl TranslateScreen {
                 }
                 Action::None
             }
-            MouseGesture::RightClick => Action::None,
+            MouseGesture::RightClick => {
+                self.queue_focused = false;
+                Action::None
+            }
         }
+    }
+
+    /// Move the queue cursor by `delta`, focusing the panel (so the highlight is
+    /// visible) and clamping like the j/k key handlers.
+    fn queue_scroll(&mut self, delta: i32) {
+        let pc = self.pending_count();
+        if pc == 0 {
+            return;
+        }
+        self.queue_focused = true;
+        let cur = self.queue_sel.min(pc - 1) as i32;
+        self.queue_sel = (cur + delta).clamp(0, pc as i32 - 1) as usize;
     }
 
     /// Scroll the preview by `delta` lines, dropping follow-mode and resolving the
@@ -1590,5 +1614,37 @@ mod queue_panel_tests {
         assert!(matches!(screen.handle_key(key('j')), Action::None));
         assert!(matches!(screen.handle_key(key('k')), Action::None));
         assert!(!screen.queue_focused);
+    }
+
+    /// The wheel over the queue panel walks (and focuses) the queue selection;
+    /// a right-click drops the focus again, like Esc.
+    #[test]
+    fn wheel_over_queue_moves_selection_and_right_click_unfocuses() {
+        use crate::ui::mouse::{MouseGesture, MouseInput};
+
+        let mut screen = TranslateScreen::new();
+        screen.set_queue(rows());
+        screen.queue_area = Rect {
+            x: 60,
+            y: 2,
+            width: 20,
+            height: 10,
+        };
+        let at = |gesture| MouseInput {
+            gesture,
+            col: 65,
+            row: 4,
+        };
+
+        screen.handle_mouse(at(MouseGesture::ScrollDown));
+        assert!(screen.queue_focused, "wheel over the queue focuses it");
+        assert_eq!(screen.queue_sel, 1);
+        screen.handle_mouse(at(MouseGesture::ScrollDown));
+        assert_eq!(screen.queue_sel, 1, "clamps at the last pending row");
+        screen.handle_mouse(at(MouseGesture::ScrollUp));
+        assert_eq!(screen.queue_sel, 0);
+
+        screen.handle_mouse(at(MouseGesture::RightClick));
+        assert!(!screen.queue_focused, "right-click backs out of the queue");
     }
 }

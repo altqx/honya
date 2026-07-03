@@ -3998,7 +3998,7 @@ mod tests {
                 .iter()
                 .filter(|m| m.role == Role::User)
                 .filter_map(|m| m.content.as_deref())
-                .last()
+                .next_back()
                 .unwrap_or("")
         }
 

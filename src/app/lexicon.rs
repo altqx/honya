@@ -451,7 +451,8 @@ impl LexiconScreen {
                     }
                 }
             }
-            MouseGesture::RightClick => {}
+            // Back out of the form, matching Esc.
+            MouseGesture::RightClick => self.editing = None,
         }
         Action::None
     }
