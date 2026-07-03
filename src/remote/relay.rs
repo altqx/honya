@@ -142,7 +142,7 @@ async fn pump(
                     let _ = sink.send(Message::Close(None)).await;
                     return true;
                 }
-                if sink.send(Message::Ping(Vec::new())).await.is_err() {
+                if sink.send(Message::Ping(Vec::new().into())).await.is_err() {
                     return false;
                 }
             }

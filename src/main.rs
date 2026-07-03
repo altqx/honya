@@ -159,6 +159,9 @@ async fn run(
     Ok(())
 }
 
+/// Full-repaint diff "previous" cell (`\0` panics in ratatui 0.30.2+ debug builds).
+const FULL_REPAINT_DIFF_SENTINEL: &str = "\u{FFFD}";
+
 fn present(terminal: &mut DefaultTerminal, app: &mut App, full: bool) -> anyhow::Result<()> {
     use ratatui::backend::Backend;
     use ratatui::buffer::{Buffer, Cell};
@@ -170,7 +173,7 @@ fn present(terminal: &mut DefaultTerminal, app: &mut App, full: bool) -> anyhow:
     }
     if full {
         let buf = terminal.current_buffer_mut().clone();
-        let sentinel = Buffer::filled(buf.area, Cell::new("\u{0}"));
+        let sentinel = Buffer::filled(buf.area, Cell::new(FULL_REPAINT_DIFF_SENTINEL));
         terminal
             .backend_mut()
             .draw(sentinel.diff(&buf).into_iter())?;
@@ -250,7 +253,7 @@ mod present_tests {
         buf[(1, 0)].set_symbol("の"); // wide: occupies cols 1-2
         // Col 3 is the wide trailing cell; cols 4-5 model stale ghosts.
 
-        let sentinel = Buffer::filled(area, Cell::new("\u{0}"));
+        let sentinel = Buffer::filled(area, Cell::new(super::FULL_REPAINT_DIFF_SENTINEL));
         let cols: Vec<u16> = sentinel.diff(&buf).into_iter().map(|(x, _, _)| x).collect();
 
         assert!(cols.contains(&0), "narrow cell must be emitted");
