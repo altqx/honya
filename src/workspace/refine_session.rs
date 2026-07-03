@@ -1,5 +1,7 @@
 //! Refine chat persistence under `<root>/.honya/refine/<id>.json`.
-//! The App is the sole writer; agents only read sessions and App writes are atomic.
+//! The App is the sole writer for sessions and App writes are atomic. Refine
+//! sub-agents also keep atomic checkpoint files under `.honya/refine/subagents/`
+//! so interrupted delegated work can resume with its tool context intact.
 
 use std::path::{Path, PathBuf};
 
@@ -48,16 +50,68 @@ pub struct SessionMeta {
     pub message_count: usize,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubagentCheckpoint {
+    pub id: String,
+    pub task: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<serde_json::Value>,
+    pub messages: Vec<Message>,
+    #[serde(default)]
+    pub tool_call_count: usize,
+    #[serde(default)]
+    pub max_rounds: usize,
+    #[serde(default)]
+    pub depth: usize,
+    pub created: DateTime<Utc>,
+    pub updated: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SubagentCheckpointMeta {
+    pub id: String,
+    pub task: String,
+    pub scope: Option<String>,
+    pub model: String,
+    pub updated: DateTime<Utc>,
+    pub tool_call_count: usize,
+    pub message_count: usize,
+    pub depth: usize,
+}
+
 fn sessions_dir(root: &Path) -> PathBuf {
     root.join(".honya").join("refine")
+}
+
+fn subagents_dir(root: &Path) -> PathBuf {
+    sessions_dir(root).join("subagents")
 }
 
 fn session_path(root: &Path, id: &str) -> PathBuf {
     sessions_dir(root).join(format!("{id}.json"))
 }
 
+fn subagent_path(root: &Path, id: &str) -> PathBuf {
+    subagents_dir(root).join(format!("{}.json", filesystem_id(id)))
+}
+
 pub fn new_id() -> String {
     Utc::now().format("%Y%m%d-%H%M%S-%3f").to_string()
+}
+
+fn filesystem_id(id: &str) -> String {
+    id.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 pub fn list(root: &Path) -> Vec<SessionMeta> {
@@ -102,6 +156,75 @@ pub fn save(root: &Path, session: &RefineSession) -> std::io::Result<()> {
 
 pub fn delete(root: &Path, id: &str) -> std::io::Result<()> {
     match std::fs::remove_file(session_path(root, id)) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+pub fn list_subagents(root: &Path) -> Vec<SubagentCheckpointMeta> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(subagents_dir(root)) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(cp) = serde_json::from_str::<SubagentCheckpoint>(&text) else {
+            continue;
+        };
+        out.push(SubagentCheckpointMeta {
+            id: cp.id,
+            task: cp.task,
+            scope: cp.scope,
+            model: cp.model,
+            updated: cp.updated,
+            tool_call_count: cp.tool_call_count,
+            message_count: cp.messages.len(),
+            depth: cp.depth,
+        });
+    }
+    out.sort_by_key(|m| std::cmp::Reverse(m.updated));
+    out
+}
+
+pub fn load_subagent(root: &Path, id: &str) -> Option<SubagentCheckpoint> {
+    let text = std::fs::read_to_string(subagent_path(root, id)).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+pub fn find_subagent(
+    root: &Path,
+    task: &str,
+    scope: Option<&str>,
+    model: &str,
+) -> Option<SubagentCheckpoint> {
+    list_subagents(root)
+        .into_iter()
+        .find(|m| {
+            m.task == task
+                && m.model == model
+                && m.scope.as_deref().map(str::trim).filter(|s| !s.is_empty())
+                    == scope.map(str::trim).filter(|s| !s.is_empty())
+        })
+        .and_then(|m| load_subagent(root, &m.id))
+}
+
+pub fn save_subagent(root: &Path, checkpoint: &SubagentCheckpoint) -> std::io::Result<()> {
+    let dir = subagents_dir(root);
+    std::fs::create_dir_all(&dir)?;
+    let json = serde_json::to_string_pretty(checkpoint)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    data_block::atomic_write(&subagent_path(root, &checkpoint.id), &json)
+}
+
+pub fn delete_subagent(root: &Path, id: &str) -> std::io::Result<()> {
+    match std::fs::remove_file(subagent_path(root, id)) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e),

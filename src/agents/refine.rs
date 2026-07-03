@@ -287,6 +287,17 @@ pub fn refine_tools_schema() -> serde_json::Value {
                 }}
         }},
         {"type":"function","function":{
+            "name":"list_interrupted_subagents",
+            "description":"List durable checkpoints for sub-agents interrupted by user cancellation, process exit, power loss, or provider failure. Use before resume_subagent when the user asks to continue previous delegated work.",
+            "parameters":{"type":"object","additionalProperties":false,"properties":{}}
+        }},
+        {"type":"function","function":{
+            "name":"resume_subagent",
+            "description":"Resume an interrupted sub-agent checkpoint by id, preserving its accumulated messages and tool results. Use after list_interrupted_subagents or when the user asks to continue a specific saved sub-agent.",
+            "parameters":{"type":"object","additionalProperties":false,"required":["id"],
+                "properties":{"id":{"type":"string","description":"Checkpoint id returned by list_interrupted_subagents."}}}
+        }},
+        {"type":"function","function":{
             "name":"ask_user",
             "description":"Ask the user a question and wait for their answer when a decision is genuinely theirs to make and you cannot resolve it from the project or sensible defaults (e.g. choosing between two valid Thai renderings, or confirming a risky bulk change). Provide options for a multiple-choice decision, or omit them for a free-text answer. Use sparingly — prefer acting on a reasonable default and saying so.",
             "parameters":{"type":"object","additionalProperties":false,"required":["question"],
@@ -673,6 +684,7 @@ Keep working until the user's request is fully resolved before yielding the turn
 2. Gather context BEFORE editing. Use list_volumes / list_chapters to learn structure, read_chapter to see real text, grep_chapter to locate exact strings, search_project to find a term across chapters, read_lexicon and read_meta to check established names/terminology/style, and list_flagged_chunks to find spots that failed QA ([REVIEW NEEDED]). Issue independent read-only calls together rather than one at a time.
 3. For any multi-step or multi-chapter task, call update_plan to lay out the steps, then keep it current: mark exactly one step in_progress as you work it, flip it to completed when done, and add steps you discover. The plan is a persistent TODO list that survives across turns — at the start of a turn, resume from any unfinished steps rather than restarting, and call update_plan with an empty list once the whole task is finished. Skip the plan for a single trivial edit.
 4. For large, self-contained, or parallelizable work (e.g. "normalize every honorific across volume 2", "rewrite the action scenes in chapters 5–9"), delegate with the `task` tool. Split cleanly independent work by volume/chapter/range and issue multiple `task` calls in the same tool-call turn; honya runs those sub-agents in parallel. Keep scopes disjoint so sub-agents do not overwrite each other's edits. Do the work inline for anything small.
+   If the user asks to continue after interruption, cancellation, crash, or power loss, first call list_interrupted_subagents, then resume_subagent for the matching checkpoint. If you repeat the exact same task call, honya may also resume the saved checkpoint automatically.
 5. Make changes surgically. Prefer the smallest edit that fixes the issue:
    - edit_chapter for a targeted wording fix (exact unique match; the safe default).
    - multi_edit_chapter to apply several fixes to one chapter atomically in a single call.
@@ -1094,6 +1106,126 @@ async fn subagent_chat_resuming_after_rate_limit(
     }
 }
 
+struct SubagentCheckpointState {
+    root: PathBuf,
+    checkpoint: crate::workspace::refine_session::SubagentCheckpoint,
+}
+
+impl SubagentCheckpointState {
+    fn for_request(
+        root: PathBuf,
+        id: String,
+        task: String,
+        scope: Option<String>,
+        req: &ChatRequest,
+        max_rounds: usize,
+        depth: usize,
+    ) -> Self {
+        let now = chrono::Utc::now();
+        Self {
+            root,
+            checkpoint: crate::workspace::refine_session::SubagentCheckpoint {
+                id,
+                task,
+                scope,
+                model: req.model.clone(),
+                reasoning: req.reasoning.clone(),
+                messages: req.messages.clone(),
+                tool_call_count: 0,
+                max_rounds,
+                depth,
+                created: now,
+                updated: now,
+            },
+        }
+    }
+
+    fn from_existing(
+        root: PathBuf,
+        checkpoint: crate::workspace::refine_session::SubagentCheckpoint,
+    ) -> Self {
+        Self { root, checkpoint }
+    }
+
+    fn id(&self) -> &str {
+        &self.checkpoint.id
+    }
+
+    fn save(&mut self, req: &ChatRequest, tool_call_count: usize, tx: &EventTx) {
+        self.checkpoint.model = req.model.clone();
+        self.checkpoint.reasoning = req.reasoning.clone();
+        self.checkpoint.messages = req.messages.clone();
+        self.checkpoint.tool_call_count = tool_call_count;
+        self.checkpoint.updated = chrono::Utc::now();
+        if let Err(e) =
+            crate::workspace::refine_session::save_subagent(&self.root, &self.checkpoint)
+        {
+            tx.send(AppEvent::Log {
+                level: LogLevel::Warn,
+                msg: format!("could not save Refine sub-agent checkpoint: {e}"),
+            });
+        }
+    }
+
+    fn delete(self, tx: &EventTx) {
+        if let Err(e) =
+            crate::workspace::refine_session::delete_subagent(&self.root, &self.checkpoint.id)
+        {
+            tx.send(AppEvent::Log {
+                level: LogLevel::Warn,
+                msg: format!("could not remove completed Refine sub-agent checkpoint: {e}"),
+            });
+        }
+    }
+}
+
+fn save_subagent_checkpoint(
+    checkpoint: Option<&mut SubagentCheckpointState>,
+    req: &ChatRequest,
+    tool_call_count: usize,
+    tx: &EventTx,
+) {
+    if let Some(checkpoint) = checkpoint {
+        checkpoint.save(req, tool_call_count, tx);
+    }
+}
+
+fn finish_subagent_checkpoint(checkpoint: &mut Option<SubagentCheckpointState>, tx: &EventTx) {
+    if let Some(checkpoint) = checkpoint.take() {
+        checkpoint.delete(tx);
+    }
+}
+
+struct SubagentLoopOptions {
+    max_rounds: usize,
+    task_depth: usize,
+    parent_path: String,
+    initial_tool_call_count: usize,
+    checkpoint: Option<SubagentCheckpointState>,
+}
+
+impl SubagentLoopOptions {
+    fn new(max_rounds: usize, task_depth: usize, parent_path: impl Into<String>) -> Self {
+        Self {
+            max_rounds,
+            task_depth,
+            parent_path: parent_path.into(),
+            initial_tool_call_count: 0,
+            checkpoint: None,
+        }
+    }
+
+    fn initial_tool_call_count(mut self, count: usize) -> Self {
+        self.initial_tool_call_count = count;
+        self
+    }
+
+    fn checkpoint(mut self, checkpoint: SubagentCheckpointState) -> Self {
+        self.checkpoint = Some(checkpoint);
+        self
+    }
+}
+
 fn subagent_budget_summary(max_rounds: usize, tool_call_count: usize) -> String {
     format!(
         "Sub-agent reached the {max_rounds}-round tool budget after {tool_call_count} tool call(s). It stopped to avoid an infinite loop. Treat any edits already written to disk as applied, then continue with a smaller follow-up task if more work remains."
@@ -1313,14 +1445,18 @@ async fn run_compacting_tool_loop(
     mut req: ChatRequest,
     executor: &dyn ToolExecutor,
     tx: &EventTx,
-    max_rounds: usize,
-    task_depth: usize,
-    parent_path: &str,
+    options: SubagentLoopOptions,
 ) -> crate::llm::client::Result<ToolLoopOutcome> {
     let mut usage = Usage::default();
-    let mut tool_call_count = 0usize;
+    let max_rounds = options.max_rounds;
+    let task_depth = options.task_depth;
+    let parent_path = options.parent_path;
+    let parent_path = parent_path.as_str();
+    let mut checkpoint = options.checkpoint;
+    let mut tool_call_count = options.initial_tool_call_count;
     for _round in 0..max_rounds {
         maybe_compact(&mut req, tx, false);
+        save_subagent_checkpoint(checkpoint.as_mut(), &req, tool_call_count, tx);
 
         emit_subagent_activity(tx, parent_path, task_depth, "thinking".to_string());
         let resp = subagent_chat_resuming_after_rate_limit(
@@ -1346,6 +1482,7 @@ async fn run_compacting_tool_loop(
                 task_depth,
                 "writing final report".to_string(),
             );
+            finish_subagent_checkpoint(&mut checkpoint, tx);
             return Ok(ToolLoopOutcome {
                 response: resp,
                 usage,
@@ -1401,6 +1538,7 @@ async fn run_compacting_tool_loop(
                 .push(Message::tool_result(call.id.clone(), result));
             idx += 1;
         }
+        save_subagent_checkpoint(checkpoint.as_mut(), &req, tool_call_count, tx);
     }
 
     tx.send(AppEvent::Log {
@@ -1415,6 +1553,7 @@ async fn run_compacting_tool_loop(
 
     for _ in 0..SUBAGENT_FINALIZE_ROUNDS {
         maybe_compact(&mut req, tx, false);
+        save_subagent_checkpoint(checkpoint.as_mut(), &req, tool_call_count, tx);
 
         emit_subagent_activity(
             tx,
@@ -1445,6 +1584,7 @@ async fn run_compacting_tool_loop(
                 .as_deref()
                 .is_some_and(|c| !c.trim().is_empty())
             {
+                finish_subagent_checkpoint(&mut checkpoint, tx);
                 return Ok(ToolLoopOutcome {
                     response: resp,
                     usage,
@@ -2883,6 +3023,62 @@ impl RefineTools {
         }
     }
 
+    fn list_interrupted_subagents(&self) -> ToolResult {
+        let checkpoints = crate::workspace::refine_session::list_subagents(&self.root);
+        let items: Vec<_> = checkpoints
+            .iter()
+            .map(|cp| {
+                json!({
+                    "id": cp.id,
+                    "task": cp.task,
+                    "scope": cp.scope,
+                    "model": cp.model,
+                    "updated": cp.updated.to_rfc3339(),
+                    "tool_calls": cp.tool_call_count,
+                    "messages": cp.message_count,
+                    "depth": cp.depth,
+                })
+            })
+            .collect();
+        ToolResult::data(
+            format!("{} interrupted sub-agent checkpoint(s)", items.len()),
+            json!({ "checkpoints": items }),
+        )
+    }
+
+    async fn run_saved_subagent(&self, call_id: &str, arguments_json: &str) -> ToolResult {
+        if !self.can_spawn {
+            return ToolResult::err("sub-agent nesting limit reached");
+        }
+        let Some(client) = self.client.clone() else {
+            return ToolResult::err("sub-agents are unavailable (no client wired)");
+        };
+        #[derive(serde::Deserialize)]
+        struct Args {
+            id: String,
+        }
+        let a: Args = match serde_json::from_str(arguments_json) {
+            Ok(a) => a,
+            Err(e) => return ToolResult::err(format!("bad resume_subagent args: {e}")),
+        };
+        let Some(checkpoint) = crate::workspace::refine_session::load_subagent(&self.root, &a.id)
+        else {
+            return ToolResult::err(format!("no interrupted sub-agent checkpoint `{}`", a.id));
+        };
+        let event_id = subagent_event_id(&self.path, call_id);
+        self.tx.send(AppEvent::RefineSubagentUpdated {
+            id: event_id.clone(),
+            depth: self.depth,
+            status: RefineSubagentStatus::Running,
+            summary: format!(
+                "resume {}",
+                checkpoint.task.chars().take(80).collect::<String>()
+            ),
+        });
+        self.continue_subagent_checkpoint(client, event_id, checkpoint, true)
+            .await
+    }
+
     async fn run_subagent(&self, call_id: &str, arguments_json: &str) -> ToolResult {
         if !self.can_spawn {
             return ToolResult::err("sub-agent nesting limit reached");
@@ -2900,6 +3096,34 @@ impl RefineTools {
             Ok(a) => a,
             Err(e) => return ToolResult::err(format!("bad task args: {e}")),
         };
+        let event_id = subagent_event_id(&self.path, call_id);
+        let preview: String = a.description.chars().take(80).collect();
+        self.tx.send(AppEvent::Log {
+            level: LogLevel::Info,
+            msg: format!("Refine sub-agent started: {preview}"),
+        });
+
+        if let Some(checkpoint) =
+            crate::workspace::refine_session::load_subagent(&self.root, &event_id).or_else(|| {
+                crate::workspace::refine_session::find_subagent(
+                    &self.root,
+                    &a.description,
+                    a.scope.as_deref(),
+                    &self.model.model,
+                )
+            })
+        {
+            emit_subagent_activity(
+                &self.tx,
+                &event_id,
+                self.depth + 1,
+                format!("resuming saved context · {}", checkpoint.id),
+            );
+            return self
+                .continue_subagent_checkpoint(client, event_id, checkpoint, true)
+                .await;
+        }
+
         let user = match &a.scope {
             Some(s) if !s.trim().is_empty() => format!("Scope: {s}\n\nTask: {}", a.description),
             _ => a.description.clone(),
@@ -2910,22 +3134,65 @@ impl RefineTools {
         );
         req.tools = Some(refine_tools_vec());
         req.reasoning = self.model.reasoning_param();
-        let event_id = subagent_event_id(&self.path, call_id);
+        let checkpoint = SubagentCheckpointState::for_request(
+            self.root.clone(),
+            event_id.clone(),
+            a.description,
+            a.scope,
+            &req,
+            SUBAGENT_MAX_TOOL_ROUNDS,
+            self.depth + 1,
+        );
 
-        let preview: String = a.description.chars().take(80).collect();
-        self.tx.send(AppEvent::Log {
-            level: LogLevel::Info,
-            msg: format!("Refine sub-agent started: {preview}"),
-        });
+        self.run_subagent_loop(client, event_id, req, 0, checkpoint)
+            .await
+    }
 
+    async fn continue_subagent_checkpoint(
+        &self,
+        client: std::sync::Arc<dyn LlmClient>,
+        event_id: String,
+        checkpoint: crate::workspace::refine_session::SubagentCheckpoint,
+        resumed: bool,
+    ) -> ToolResult {
+        let mut req = ChatRequest::new(checkpoint.model.clone(), checkpoint.messages.clone());
+        req.tools = Some(refine_tools_vec());
+        req.reasoning = checkpoint
+            .reasoning
+            .clone()
+            .or_else(|| self.model.reasoning_param());
+        let initial_tool_call_count = checkpoint.tool_call_count;
+        let checkpoint_id = checkpoint.id.clone();
+        let state = SubagentCheckpointState::from_existing(self.root.clone(), checkpoint);
+        if resumed {
+            emit_subagent_activity(
+                &self.tx,
+                &event_id,
+                self.depth + 1,
+                format!("resuming checkpoint · {checkpoint_id}"),
+            );
+        }
+        self.run_subagent_loop(client, event_id, req, initial_tool_call_count, state)
+            .await
+    }
+
+    async fn run_subagent_loop(
+        &self,
+        client: std::sync::Arc<dyn LlmClient>,
+        event_id: String,
+        req: ChatRequest,
+        initial_tool_call_count: usize,
+        checkpoint: SubagentCheckpointState,
+    ) -> ToolResult {
+        let checkpoint_id = checkpoint.id().to_string();
         match run_compacting_tool_loop(
             client.as_ref(),
             req,
             &self.child(event_id.clone()),
             &self.tx,
-            SUBAGENT_MAX_TOOL_ROUNDS,
-            self.depth + 1,
-            &event_id,
+            SubagentLoopOptions::new(SUBAGENT_MAX_TOOL_ROUNDS, self.depth + 1, &event_id)
+                .initial_tool_call_count(initial_tool_call_count)
+                .checkpoint(checkpoint),
         )
         .await
         {
@@ -2941,7 +3208,9 @@ impl RefineTools {
                     outcome.tool_calls
                 ))
             }
-            Err(e) => ToolResult::err(format!("sub-agent failed: {e}")),
+            Err(e) => ToolResult::err(format!(
+                "sub-agent interrupted; checkpoint `{checkpoint_id}` kept for resume: {e}"
+            )),
         }
     }
 }
@@ -2952,6 +3221,14 @@ impl ToolExecutor for RefineTools {
         if name == "task" {
             return Ok(serde_json::to_string(
                 &self.run_subagent("direct", arguments_json).await,
+            )?);
+        }
+        if name == "list_interrupted_subagents" {
+            return Ok(serde_json::to_string(&self.list_interrupted_subagents())?);
+        }
+        if name == "resume_subagent" {
+            return Ok(serde_json::to_string(
+                &self.run_saved_subagent("direct", arguments_json).await,
             )?);
         }
         if name == "ask_user" {
@@ -2978,6 +3255,13 @@ impl ToolExecutor for RefineTools {
         if call.function.name == "task" {
             return Ok(serde_json::to_string(
                 &self.run_subagent(&call.id, &call.function.arguments).await,
+            )?);
+        }
+        if call.function.name == "resume_subagent" {
+            return Ok(serde_json::to_string(
+                &self
+                    .run_saved_subagent(&call.id, &call.function.arguments)
+                    .await,
             )?);
         }
         self.execute(&call.function.name, &call.function.arguments)
@@ -3317,6 +3601,23 @@ mod tests {
         }
     }
 
+    struct FailingAfterToolClient {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl LlmClient for FailingAfterToolClient {
+        async fn chat(&self, _req: &ChatRequest) -> LlmResult<crate::llm::ChatResponse> {
+            match self.calls.fetch_add(1, Ordering::Relaxed) {
+                0 => Ok(tool_call_turn("read_chapter", r#"{"ch":1}"#)),
+                _ => Err(LlmError::Api {
+                    status: 500,
+                    message: "provider unavailable".to_string(),
+                }),
+            }
+        }
+    }
+
     fn empty_steering() -> Arc<Mutex<VecDeque<UserTurn>>> {
         Arc::new(Mutex::new(VecDeque::new()))
     }
@@ -3471,9 +3772,15 @@ mod tests {
             payload: "x".repeat(180_000),
         };
 
-        let outcome = run_compacting_tool_loop(&client, req, &executor, &etx, 8, 0, "")
-            .await
-            .unwrap();
+        let outcome = run_compacting_tool_loop(
+            &client,
+            req,
+            &executor,
+            &etx,
+            SubagentLoopOptions::new(8, 0, ""),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(outcome.tool_calls, 4);
         let mut saw_compaction = false;
@@ -3511,9 +3818,15 @@ mod tests {
             payload: "ok".to_string(),
         };
 
-        let outcome = run_compacting_tool_loop(&client, req, &executor, &etx, 2, 0, "")
-            .await
-            .unwrap();
+        let outcome = run_compacting_tool_loop(
+            &client,
+            req,
+            &executor,
+            &etx,
+            SubagentLoopOptions::new(2, 0, ""),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(outcome.tool_calls, 2);
         let report = outcome.response.choices[0]
@@ -3551,9 +3864,15 @@ mod tests {
             payload: "ok".to_string(),
         };
 
-        let outcome = run_compacting_tool_loop(&client, req, &executor, &etx, 8, 1, "call_1")
-            .await
-            .unwrap();
+        let outcome = run_compacting_tool_loop(
+            &client,
+            req,
+            &executor,
+            &etx,
+            SubagentLoopOptions::new(8, 1, "call_1"),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(outcome.tool_calls, 1);
         assert_eq!(
@@ -3573,6 +3892,91 @@ mod tests {
             saw_rate_limit_activity,
             "sub-agent panel reports the retry instead of showing a hard failure"
         );
+    }
+
+    #[tokio::test]
+    async fn subagent_checkpoint_resumes_after_interrupted_tool_loop() {
+        let root = temp_root("resumecheckpoint");
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let etx = EventTx(tx);
+        let client = FailingAfterToolClient {
+            calls: AtomicUsize::new(0),
+        };
+        let mut req = ChatRequest::new(
+            "subagent-test",
+            vec![
+                Message::system(SUBAGENT_SYSTEM),
+                Message::user("audit the volume"),
+            ],
+        );
+        req.tools = Some(refine_tools_vec());
+        let checkpoint = SubagentCheckpointState::for_request(
+            root.clone(),
+            "call_1".to_string(),
+            "audit the volume".to_string(),
+            None,
+            &req,
+            SUBAGENT_MAX_TOOL_ROUNDS,
+            1,
+        );
+        let executor = HugeExecutor {
+            payload: "ok".to_string(),
+        };
+
+        let err = match run_compacting_tool_loop(
+            &client,
+            req,
+            &executor,
+            &etx,
+            SubagentLoopOptions::new(8, 1, "call_1").checkpoint(checkpoint),
+        )
+        .await
+        {
+            Ok(_) => panic!("interrupted sub-agent should fail before resume"),
+            Err(e) => e,
+        };
+        assert!(err.to_string().contains("provider unavailable"));
+
+        let saved = crate::workspace::refine_session::load_subagent(&root, "call_1")
+            .expect("interrupted sub-agent checkpoint remains on disk");
+        assert_eq!(saved.messages.len(), 4);
+        assert_eq!(saved.tool_call_count, 1);
+
+        let resume_client: Arc<dyn LlmClient> = Arc::new(ScriptedClient {
+            responses: Mutex::new(VecDeque::from(vec![stop_turn("resumed and done")])),
+        });
+        let tools = RefineTools::with_agent(
+            root.clone(),
+            1,
+            etx.clone(),
+            resume_client,
+            crate::model::AgentModel::openrouter("subagent-test"),
+            RefineInteract::default(),
+        );
+        let out = tools
+            .execute_call(&ToolCall {
+                id: "resume_call".to_string(),
+                kind: "function".to_string(),
+                function: FunctionCall {
+                    name: "resume_subagent".to_string(),
+                    arguments: r#"{"id":"call_1"}"#.to_string(),
+                },
+            })
+            .await
+            .unwrap();
+        let result: ToolResult = serde_json::from_str(&out).unwrap();
+        assert!(result.ok, "{result:?}");
+        assert!(
+            result.message.contains("resumed and done"),
+            "{}",
+            result.message
+        );
+        assert!(
+            crate::workspace::refine_session::load_subagent(&root, "call_1").is_none(),
+            "completed resume removes the checkpoint"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[tokio::test]
@@ -3603,9 +4007,15 @@ mod tests {
         req.tools = Some(refine_tools_vec());
         let executor = ConcurrentExecutor::new();
 
-        let outcome = run_compacting_tool_loop(&client, req, &executor, &etx, 8, 1, "root_call")
-            .await
-            .unwrap();
+        let outcome = run_compacting_tool_loop(
+            &client,
+            req,
+            &executor,
+            &etx,
+            SubagentLoopOptions::new(8, 1, "root_call"),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(outcome.tool_calls, 2);
         assert!(
@@ -3648,10 +4058,15 @@ mod tests {
         );
         let executor = tools.child("root_call".to_string());
 
-        let outcome =
-            run_compacting_tool_loop(client.as_ref(), req, &executor, &etx, 8, 1, "root_call")
-                .await
-                .unwrap();
+        let outcome = run_compacting_tool_loop(
+            client.as_ref(),
+            req,
+            &executor,
+            &etx,
+            SubagentLoopOptions::new(8, 1, "root_call"),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(outcome.tool_calls, 1);
         let mut updates = Vec::new();
@@ -3890,6 +4305,15 @@ mod tests {
                 .as_deref()
                 .is_some_and(|c| c.contains("was cancelled by the user")),
             "tool result records the cancellation"
+        );
+        let checkpoints = crate::workspace::refine_session::list_subagents(&root);
+        assert_eq!(checkpoints.len(), 1);
+        assert_eq!(checkpoints[0].id, "call_1");
+        let saved = crate::workspace::refine_session::load_subagent(&root, "call_1").unwrap();
+        assert_eq!(
+            saved.messages.len(),
+            2,
+            "user cancellation leaves the sub-agent's current context resumable"
         );
         let _ = std::fs::remove_dir_all(&root);
     }
