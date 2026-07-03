@@ -1268,14 +1268,16 @@ impl TranslateScreen {
         }
 
         // Resolve the "tail-follow" sentinel scroll into a concrete offset.
-        let total_lines = lines.len() as u16;
+        // Count display rows after soft-wrap, not logical markdown lines.
+        let total_lines = crate::ui::markdown::wrapped_rows(&lines, inner.width as usize)
+            .min(u16::MAX as usize) as u16;
         let view_h = inner.height;
         // Remember the real bottom so the key handlers can normalize the sentinel.
         self.last_bottom = total_lines.saturating_sub(view_h);
         let scroll = if self.follow {
             self.last_bottom
         } else {
-            self.scroll.min(total_lines.saturating_sub(1))
+            self.scroll.min(self.last_bottom)
         };
 
         let para = Paragraph::new(lines)
