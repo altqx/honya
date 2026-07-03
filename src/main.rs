@@ -40,7 +40,7 @@ use crate::app::App;
 use crate::llm::client::LlmClient;
 use crate::model::{AppConfig, AppEvent, EventTx};
 
-#[tokio::main(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::main(flavor = "multi_thread")]
 async fn main() -> anyhow::Result<()> {
     // Reap a stale Windows self-update sidecar; no-op elsewhere.
     update::cleanup_stale_old_exe();

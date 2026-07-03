@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use futures::{StreamExt, stream};
 use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -277,7 +278,7 @@ pub fn refine_tools_schema() -> serde_json::Value {
         }},
         {"type":"function","function":{
             "name":"task",
-            "description":"Spawn a focused sub-agent to carry out a self-contained chunk of work (e.g. \"normalize every honorific in volume 2\") using the same project tools, then report back. Use for large or parallelizable sub-tasks so the current thread stays focused. Sub-agents may delegate smaller self-contained work to their own sub-agents; nesting is bounded by the app.",
+            "description":"Spawn a focused sub-agent to carry out a self-contained chunk of work (e.g. \"normalize every honorific in volume 2\") using the same project tools, then report back. Use for large or parallelizable sub-tasks so the current thread stays focused. Multiple task calls in the same assistant turn run in parallel; use disjoint scopes. Sub-agents may delegate smaller self-contained work to their own sub-agents; nesting is bounded by the app.",
             "parameters":{"type":"object","additionalProperties":false,"required":["description"],
                 "properties":{
                     "description":{"type":"string","description":"The complete, self-contained task for the sub-agent."},
@@ -653,7 +654,7 @@ fn seed_messages(root: &Path, id: &str) -> Vec<Message> {
         .unwrap_or_default()
 }
 
-const SUBAGENT_SYSTEM: &str = "You are a focused sub-agent inside honya's Refine system, completing ONE self-contained task delegated by a parent agent. You have the same project tools (read/search chapters and the lexicon; edit chapter text; update characters, glossary, style, recaps, summaries). Work autonomously — do not ask questions. Gather the context you need, make the surgical changes the task requires, verify them, then reply with a concise report of exactly what you did: chapters touched, terms/characters changed, and anything the parent agent should know. Keep Thai idiomatic and preserve scene breaks, image links, and Markdown. For large independent chunks, you may spawn your own focused sub-agent with the task tool; nesting is bounded by the app, so delegate only when it clearly reduces complexity.";
+const SUBAGENT_SYSTEM: &str = "You are a focused sub-agent inside honya's Refine system, completing ONE self-contained task delegated by a parent agent. You have the same project tools (read/search chapters and the lexicon; edit chapter text; update characters, glossary, style, recaps, summaries). Work autonomously — do not ask questions. Gather the context you need, make the surgical changes the task requires, verify them, then reply with a concise report of exactly what you did: chapters touched, terms/characters changed, and anything the parent agent should know. Keep Thai idiomatic and preserve scene breaks, image links, and Markdown. For large independent chunks, you may spawn multiple focused sub-agents in the same tool turn with disjoint scopes; honya runs them in parallel. Nesting is bounded by the app, so delegate only when it clearly reduces complexity.";
 
 fn refine_system_prompt() -> String {
     r#"You are honya's Refine agent — an autonomous, expert engineering assistant for a Japanese→Thai light-novel translation project, working through a chat tab inside the honya TUI. You read, fix, and refine anything in the project: any volume or chapter's Thai translation, the character roster, the glossary, the style guide, the volume recap/synopsis, and chapter summaries. Your tools read and write the project on disk; treat the on-disk files as the single source of truth.
@@ -670,7 +671,7 @@ Keep working until the user's request is fully resolved before yielding the turn
 1. Understand the request and its scope. The user may tag targets with `@` (e.g. `@v1/c3`, `@glossary`, `@characters`, `@style`, `@recap`); a scope hint is appended to their message. Tools without an explicit `vol` act on the active volume.
 2. Gather context BEFORE editing. Use list_volumes / list_chapters to learn structure, read_chapter to see real text, grep_chapter to locate exact strings, search_project to find a term across chapters, read_lexicon and read_meta to check established names/terminology/style, and list_flagged_chunks to find spots that failed QA ([REVIEW NEEDED]). Issue independent read-only calls together rather than one at a time.
 3. For any multi-step or multi-chapter task, call update_plan to lay out the steps, then keep it current: mark exactly one step in_progress as you work it, flip it to completed when done, and add steps you discover. The plan is a persistent TODO list that survives across turns — at the start of a turn, resume from any unfinished steps rather than restarting, and call update_plan with an empty list once the whole task is finished. Skip the plan for a single trivial edit.
-4. For a large, self-contained, or parallelizable chunk of work (e.g. "normalize every honorific across volume 2", "rewrite the action scenes in chapters 5–9"), delegate it with the `task` tool — a focused sub-agent runs it to completion with the same tools and reports back, keeping this thread clean. Do the work inline for anything small.
+4. For large, self-contained, or parallelizable work (e.g. "normalize every honorific across volume 2", "rewrite the action scenes in chapters 5–9"), delegate with the `task` tool. Split cleanly independent work by volume/chapter/range and issue multiple `task` calls in the same tool-call turn; honya runs those sub-agents in parallel. Keep scopes disjoint so sub-agents do not overwrite each other's edits. Do the work inline for anything small.
 5. Make changes surgically. Prefer the smallest edit that fixes the issue:
    - edit_chapter for a targeted wording fix (exact unique match; the safe default).
    - multi_edit_chapter to apply several fixes to one chapter atomically in a single call.
@@ -878,6 +879,116 @@ fn send_subagent_update(
     });
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ParallelToolBatch {
+    ReadOnly,
+    Task,
+}
+
+struct ToolExecution {
+    call: ToolCall,
+    result: String,
+}
+
+fn refine_tool_parallelism() -> usize {
+    std::env::var("HONYA_REFINE_PARALLELISM")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4)
+        })
+}
+
+fn parallel_tool_batch(call: &ToolCall) -> Option<ParallelToolBatch> {
+    match call.function.name.as_str() {
+        "list_volumes"
+        | "list_chapters"
+        | "read_chapter"
+        | "grep_chapter"
+        | "read_meta"
+        | "list_flagged_chunks"
+        | "read_lexicon"
+        | "search_project" => Some(ParallelToolBatch::ReadOnly),
+        "replace_across_project" if replace_across_project_is_dry_run(&call.function.arguments) => {
+            Some(ParallelToolBatch::ReadOnly)
+        }
+        "task" => Some(ParallelToolBatch::Task),
+        _ => None,
+    }
+}
+
+fn replace_across_project_is_dry_run(args: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(args)
+        .ok()
+        .and_then(|v| v.get("dry_run").and_then(|x| x.as_bool()))
+        .unwrap_or(false)
+}
+
+fn emit_tool_call_started(tx: &EventTx, parent_path: &str, call: &ToolCall, task_depth: usize) {
+    if call.function.name == "task" {
+        send_subagent_update(
+            tx,
+            parent_path,
+            call,
+            task_depth,
+            RefineSubagentStatus::Running,
+            summarize_task_args(&call.function.arguments),
+        );
+    }
+}
+
+fn emit_tool_call_finished(
+    tx: &EventTx,
+    parent_path: &str,
+    call: &ToolCall,
+    task_depth: usize,
+    result: &str,
+) {
+    if call.function.name == "task" {
+        send_subagent_update(
+            tx,
+            parent_path,
+            call,
+            task_depth,
+            subagent_status_from_result(result),
+            tool_result_first_line(result),
+        );
+    }
+}
+
+fn tool_call_failure_payload(call: &ToolCall, e: anyhow::Error) -> String {
+    json!({
+        "ok": false,
+        "message": format!("tool '{}' failed: {e}", call.function.name)
+    })
+    .to_string()
+}
+
+async fn execute_tool_call_result(executor: &dyn ToolExecutor, call: &ToolCall) -> String {
+    match executor.execute_call(call).await {
+        Ok(payload) => payload,
+        Err(e) => tool_call_failure_payload(call, e),
+    }
+}
+
+async fn execute_tool_calls_parallel(
+    executor: &dyn ToolExecutor,
+    calls: &[ToolCall],
+) -> Vec<ToolExecution> {
+    let limit = refine_tool_parallelism().min(calls.len()).max(1);
+    stream::iter(calls.iter().cloned())
+        .map(|call| async move {
+            let result = execute_tool_call_result(executor, &call).await;
+            ToolExecution { call, result }
+        })
+        .buffered(limit)
+        .collect()
+        .await
+}
+
 fn subagent_budget_summary(max_rounds: usize, tool_call_count: usize) -> String {
     format!(
         "Sub-agent reached the {max_rounds}-round tool budget after {tool_call_count} tool call(s). It stopped to avoid an infinite loop. Treat any edits already written to disk as applied, then continue with a smaller follow-up task if more work remains."
@@ -997,25 +1108,61 @@ async fn run_refine_turn(
             name: None,
         });
 
-        for (idx, call) in tool_calls.iter().enumerate() {
+        let mut idx = 0;
+        while idx < tool_calls.len() {
             if runtime.cancel.load(Ordering::Relaxed) {
                 push_cancelled_tool_results(req, &tool_calls[idx..], tx, "", 0);
                 tx.send(AppEvent::RefineMessageDone);
                 return;
             }
+
+            if let Some(kind) = parallel_tool_batch(&tool_calls[idx]) {
+                let start = idx;
+                let mut end = idx + 1;
+                while end < tool_calls.len() && parallel_tool_batch(&tool_calls[end]) == Some(kind)
+                {
+                    end += 1;
+                }
+
+                for call in &tool_calls[start..end] {
+                    emit_tool_call_started(tx, "", call, 0);
+                    tx.send(AppEvent::RefineToolInvoked {
+                        tool: call.function.name.clone(),
+                        summary: summarize_args(&call.function.arguments),
+                    });
+                }
+
+                let results = match cancellable(
+                    runtime.cancel,
+                    execute_tool_calls_parallel(tools, &tool_calls[start..end]),
+                )
+                .await
+                {
+                    Ok(results) => results,
+                    Err(_) => {
+                        push_cancelled_tool_results(req, &tool_calls[start..], tx, "", 0);
+                        tx.send(AppEvent::RefineMessageDone);
+                        return;
+                    }
+                };
+
+                for ToolExecution { call, result } in results {
+                    emit_tool_call_finished(tx, "", &call, 0, &result);
+                    if let Some(summary) = tool_summary_for_final(&call.function.name, &result) {
+                        turn_tool_summaries.push(summary);
+                    }
+                    req.messages.push(Message::tool_result(call.id, result));
+                }
+
+                idx = end;
+                continue;
+            }
+
+            let call = &tool_calls[idx];
             if call.function.name == "update_plan" {
                 latest_plan = parse_plan_steps(&call.function.arguments);
             }
-            if call.function.name == "task" {
-                send_subagent_update(
-                    tx,
-                    "",
-                    call,
-                    0,
-                    RefineSubagentStatus::Running,
-                    summarize_task_args(&call.function.arguments),
-                );
-            }
+            emit_tool_call_started(tx, "", call, 0);
             // Plan calls render in the pinned panel, not the transcript.
             if call.function.name != "update_plan" {
                 tx.send(AppEvent::RefineToolInvoked {
@@ -1023,34 +1170,22 @@ async fn run_refine_turn(
                     summary: summarize_args(&call.function.arguments),
                 });
             }
-            let result = match cancellable(runtime.cancel, tools.execute_call(call)).await {
-                Ok(Ok(p)) => p,
-                Ok(Err(e)) => json!({
-                    "ok": false,
-                    "message": format!("tool '{}' failed: {e}", call.function.name)
-                })
-                .to_string(),
-                Err(_) => {
-                    push_cancelled_tool_results(req, &tool_calls[idx..], tx, "", 0);
-                    tx.send(AppEvent::RefineMessageDone);
-                    return;
-                }
-            };
-            if call.function.name == "task" {
-                send_subagent_update(
-                    tx,
-                    "",
-                    call,
-                    0,
-                    subagent_status_from_result(&result),
-                    tool_result_first_line(&result),
-                );
-            }
+            let result =
+                match cancellable(runtime.cancel, execute_tool_call_result(tools, call)).await {
+                    Ok(result) => result,
+                    Err(_) => {
+                        push_cancelled_tool_results(req, &tool_calls[idx..], tx, "", 0);
+                        tx.send(AppEvent::RefineMessageDone);
+                        return;
+                    }
+                };
+            emit_tool_call_finished(tx, "", call, 0, &result);
             if let Some(summary) = tool_summary_for_final(&call.function.name, &result) {
                 turn_tool_summaries.push(summary);
             }
             req.messages
                 .push(Message::tool_result(call.id.clone(), result));
+            idx += 1;
         }
 
         drain_steering(
@@ -1107,38 +1242,37 @@ async fn run_compacting_tool_loop(
             name: None,
         });
 
-        for call in &tool_calls {
-            if call.function.name == "task" {
-                send_subagent_update(
-                    tx,
-                    parent_path,
-                    call,
-                    task_depth,
-                    RefineSubagentStatus::Running,
-                    summarize_task_args(&call.function.arguments),
-                );
-            }
-            let result = match executor.execute_call(call).await {
-                Ok(payload) => payload,
-                Err(e) => json!({
-                    "ok": false,
-                    "message": format!("tool '{}' failed: {e}", call.function.name)
-                })
-                .to_string(),
-            };
+        let mut idx = 0;
+        while idx < tool_calls.len() {
+            if let Some(kind) = parallel_tool_batch(&tool_calls[idx]) {
+                let start = idx;
+                let mut end = idx + 1;
+                while end < tool_calls.len() && parallel_tool_batch(&tool_calls[end]) == Some(kind)
+                {
+                    end += 1;
+                }
 
-            if call.function.name == "task" {
-                send_subagent_update(
-                    tx,
-                    parent_path,
-                    call,
-                    task_depth,
-                    subagent_status_from_result(&result),
-                    tool_result_first_line(&result),
-                );
+                for call in &tool_calls[start..end] {
+                    emit_tool_call_started(tx, parent_path, call, task_depth);
+                }
+
+                let results = execute_tool_calls_parallel(executor, &tool_calls[start..end]).await;
+                for ToolExecution { call, result } in results {
+                    emit_tool_call_finished(tx, parent_path, &call, task_depth, &result);
+                    req.messages.push(Message::tool_result(call.id, result));
+                }
+
+                idx = end;
+                continue;
             }
+
+            let call = &tool_calls[idx];
+            emit_tool_call_started(tx, parent_path, call, task_depth);
+            let result = execute_tool_call_result(executor, call).await;
+            emit_tool_call_finished(tx, parent_path, call, task_depth, &result);
             req.messages
                 .push(Message::tool_result(call.id.clone(), result));
+            idx += 1;
         }
     }
 
@@ -2719,6 +2853,8 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     use std::sync::{Arc, Mutex};
 
+    static REFINE_PARALLELISM_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     #[test]
     fn model_max_context_by_family() {
         assert_eq!(model_max_context("google/gemini-3-flash"), 1_000_000);
@@ -2906,6 +3042,10 @@ mod tests {
     }
 
     fn tool_call_turn(name: &str, args: &str) -> crate::llm::ChatResponse {
+        tool_call_turn_many(&[(name, args)])
+    }
+
+    fn tool_call_turn_many(calls: &[(&str, &str)]) -> crate::llm::ChatResponse {
         crate::llm::ChatResponse {
             id: None,
             model: None,
@@ -2917,14 +3057,20 @@ mod tests {
                 message: ResponseMessage {
                     role: Some("assistant".to_string()),
                     content: None,
-                    tool_calls: Some(vec![ToolCall {
-                        id: "call_1".to_string(),
-                        kind: "function".to_string(),
-                        function: FunctionCall {
-                            name: name.to_string(),
-                            arguments: args.to_string(),
-                        },
-                    }]),
+                    tool_calls: Some(
+                        calls
+                            .iter()
+                            .enumerate()
+                            .map(|(idx, (name, args))| ToolCall {
+                                id: format!("call_{}", idx + 1),
+                                kind: "function".to_string(),
+                                function: FunctionCall {
+                                    name: (*name).to_string(),
+                                    arguments: (*args).to_string(),
+                                },
+                            })
+                            .collect(),
+                    ),
                 },
             }],
         }
@@ -2958,6 +3104,42 @@ mod tests {
             Ok(serde_json::to_string(&ToolResult::ok(
                 self.payload.clone(),
             ))?)
+        }
+    }
+
+    struct ConcurrentExecutor {
+        active: AtomicUsize,
+        max_seen: AtomicUsize,
+    }
+
+    impl ConcurrentExecutor {
+        fn new() -> Self {
+            Self {
+                active: AtomicUsize::new(0),
+                max_seen: AtomicUsize::new(0),
+            }
+        }
+
+        fn max_seen(&self) -> usize {
+            self.max_seen.load(Ordering::Relaxed)
+        }
+    }
+
+    #[async_trait]
+    impl ToolExecutor for ConcurrentExecutor {
+        async fn execute_call(&self, call: &ToolCall) -> anyhow::Result<String> {
+            let active = self.active.fetch_add(1, Ordering::Relaxed) + 1;
+            self.max_seen.fetch_max(active, Ordering::Relaxed);
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            self.active.fetch_sub(1, Ordering::Relaxed);
+            Ok(serde_json::to_string(&ToolResult::ok(format!(
+                "finished {}",
+                call.id
+            )))?)
+        }
+
+        async fn execute(&self, _name: &str, _arguments_json: &str) -> anyhow::Result<String> {
+            unreachable!("tests call execute_call")
         }
     }
 
@@ -3024,6 +3206,69 @@ mod tests {
         );
         assert!(req.messages.len() >= 4);
 
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn refine_turn_runs_batched_tasks_in_parallel() {
+        let _env = REFINE_PARALLELISM_ENV_LOCK.lock().await;
+        unsafe {
+            std::env::set_var("HONYA_REFINE_PARALLELISM", "2");
+        }
+
+        let root = temp_root("paralleltasks");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let etx = EventTx(tx);
+        let client = ScriptedClient {
+            responses: Mutex::new(VecDeque::from(vec![
+                tool_call_turn_many(&[
+                    ("task", r#"{"description":"audit chapter 1"}"#),
+                    ("task", r#"{"description":"audit chapter 2"}"#),
+                ]),
+                stop_turn("done"),
+            ])),
+        };
+        let tools = ConcurrentExecutor::new();
+        let mut req = ChatRequest::new("m", vec![Message::system("sys")]);
+        req.messages.push(Message::user("audit two chapters"));
+        let cancel = AtomicBool::new(false);
+        let interact = RefineInteract::default();
+        let steering = empty_steering();
+        let runtime = test_runtime(&etx, &cancel, &interact, &steering);
+
+        run_refine_turn(&client, &mut req, &tools, &runtime).await;
+
+        assert!(
+            tools.max_seen() >= 2,
+            "batched task calls should execute concurrently"
+        );
+        let tool_ids: Vec<_> = req
+            .messages
+            .iter()
+            .filter(|m| m.role == Role::Tool)
+            .filter_map(|m| m.tool_call_id.as_deref())
+            .collect();
+        assert_eq!(tool_ids, vec!["call_1", "call_2"]);
+
+        let statuses: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|ev| match ev {
+                AppEvent::RefineSubagentUpdated { status, .. } => Some(status),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            statuses,
+            vec![
+                RefineSubagentStatus::Running,
+                RefineSubagentStatus::Running,
+                RefineSubagentStatus::Succeeded,
+                RefineSubagentStatus::Succeeded
+            ]
+        );
+
+        unsafe {
+            std::env::remove_var("HONYA_REFINE_PARALLELISM");
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -3113,6 +3358,49 @@ mod tests {
             }
         }
         assert!(saw_budget_log, "budget finalization should be logged");
+    }
+
+    #[tokio::test]
+    async fn subagent_tool_loop_runs_batched_tasks_in_parallel() {
+        let _env = REFINE_PARALLELISM_ENV_LOCK.lock().await;
+        unsafe {
+            std::env::set_var("HONYA_REFINE_PARALLELISM", "2");
+        }
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let etx = EventTx(tx);
+        let client = ScriptedClient {
+            responses: Mutex::new(VecDeque::from(vec![
+                tool_call_turn_many(&[
+                    ("task", r#"{"description":"nested audit 1"}"#),
+                    ("task", r#"{"description":"nested audit 2"}"#),
+                ]),
+                stop_turn("done"),
+            ])),
+        };
+        let mut req = ChatRequest::new(
+            "subagent-test",
+            vec![
+                Message::system(SUBAGENT_SYSTEM),
+                Message::user("audit the volume"),
+            ],
+        );
+        req.tools = Some(refine_tools_vec());
+        let executor = ConcurrentExecutor::new();
+
+        let outcome = run_compacting_tool_loop(&client, req, &executor, &etx, 8, 1, "root_call")
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.tool_calls, 2);
+        assert!(
+            executor.max_seen() >= 2,
+            "sub-agent task batches should execute concurrently"
+        );
+
+        unsafe {
+            std::env::remove_var("HONYA_REFINE_PARALLELISM");
+        }
     }
 
     #[tokio::test]
