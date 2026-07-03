@@ -832,25 +832,29 @@ impl ProjectScreen {
                 ));
             }
             lines.push(Line::raw(""));
-            lines.push(Line::from(Span::styled(
-                truncate_cols(" t queue ", inner_w),
+            lines.push(side_indented_line(
+                "t queue",
+                inner_w,
                 Style::default().fg(theme.accent),
-            )));
-            lines.push(Line::from(Span::styled(
-                truncate_cols(" M images ", inner_w),
+            ));
+            lines.push(side_indented_line(
+                "M images",
+                inner_w,
                 Style::default().fg(theme.accent),
-            )));
+            ));
         } else {
             lines.push(usage_line("project", &active.project.usage_total(), inner_w, theme));
             lines.push(Line::raw(""));
-            lines.push(Line::from(Span::styled(
-                truncate_cols(" Select a chapter to see its detail.", inner_w),
+            lines.push(side_indented_line(
+                "Select a chapter to see its detail.",
+                inner_w,
                 faint,
-            )));
-            lines.push(Line::from(Span::styled(
-                truncate_cols(" M update volume images.", inner_w),
+            ));
+            lines.push(side_indented_line(
+                "M update volume images.",
+                inner_w,
                 Style::default().fg(theme.accent),
-            )));
+            ));
         }
         f.render_widget(
             Paragraph::new(lines).style(Style::default().bg(theme.bg_panel)),
@@ -1060,14 +1064,45 @@ fn context_file_line(
     let lead = format!(" {glyph} ");
     let lead_w = col_width(&lead);
     let name_w = context_name_cols(inner_w);
-    let note_w = inner_w.saturating_sub(lead_w + name_w);
+    let note_w = inner_w.saturating_sub(lead_w + name_w + 1);
     Line::from(vec![
         Span::styled(lead, Style::default().fg(color)),
         Span::styled(pad_to_cols(name, name_w), Style::default().fg(theme.ink)),
+        Span::raw(" "),
         Span::styled(
             truncate_cols(note, note_w),
             Style::default().fg(theme.ink_faint),
         ),
+    ])
+}
+
+fn side_label_part(label: &str) -> String {
+    format!(" {:<7}", label)
+}
+
+fn side_labeled_line(
+    label: &str,
+    value: &str,
+    width: usize,
+    label_style: Style,
+    value_style: Style,
+) -> Line<'static> {
+    let label_part = side_label_part(label);
+    let budget = width.saturating_sub(col_width(&label_part) + 1);
+    Line::from(vec![
+        Span::styled(label_part, label_style),
+        Span::raw(" "),
+        Span::styled(truncate_cols(value, budget), value_style),
+    ])
+}
+
+fn side_indented_line(value: &str, width: usize, style: Style) -> Line<'static> {
+    let indent = side_label_part("");
+    let budget = width.saturating_sub(col_width(&indent) + 1);
+    Line::from(vec![
+        Span::raw(indent),
+        Span::raw(" "),
+        Span::styled(truncate_cols(value, budget), style),
     ])
 }
 
@@ -1078,20 +1113,15 @@ fn side_field_line(
     label_style: Style,
     value_style: Style,
 ) -> Line<'static> {
-    let prefix = format!(" {label:<7}");
-    let value = truncate_cols(value, width.saturating_sub(col_width(&prefix)));
-    Line::from(vec![
-        Span::styled(prefix, label_style),
-        Span::styled(value, value_style),
-    ])
+    side_labeled_line(label, value, width, label_style, value_style)
 }
 
 /// One labelled usage line for the detail card: `label  N tok · M tools · $C`.
 fn usage_line(label: &str, u: &UsageStats, width: usize, theme: &Theme) -> Line<'static> {
     let label_style = Style::default().fg(theme.ink_faint);
     let value_style = Style::default().fg(theme.ink_soft);
-    let prefix = format!(" {label:<7}");
-    let budget = width.saturating_sub(col_width(&prefix));
+    let label_part = side_label_part(label);
+    let budget = width.saturating_sub(col_width(&label_part) + 1);
     let full = format!(
         "{} tok · {} tools · ${:.4}",
         human_num(u.tokens.total),
@@ -1121,7 +1151,8 @@ fn usage_line(label: &str, u: &UsageStats, width: usize, theme: &Theme) -> Line<
         }
     };
     Line::from(vec![
-        Span::styled(prefix, label_style),
+        Span::styled(label_part, label_style),
+        Span::raw(" "),
         Span::styled(value, value_style),
     ])
 }
