@@ -450,7 +450,7 @@ impl ProjectScreen {
 
         let cols = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Fill(1), Constraint::Max(36)])
+            .constraints([Constraint::Fill(1), Constraint::Min(45)])
             .split(panes[1]);
 
         self.side_area = cols[1];
@@ -587,14 +587,16 @@ impl ProjectScreen {
         crate::ui::widgets::render_panel_scrollbar(f, area, n, self.tree.offset(), theme);
     }
 
-    /// Context + detail card heights: sized to their content, not the full column.
+    /// Context + detail card heights: content-sized with a comfortable floor so the
+    /// cards don't feel cramped, but without stretching the detail border to the
+    /// bottom of the column.
     fn side_layout_heights(&self, active: &ActiveProject, area_h: u16) -> (u16, u16) {
         const CONTEXT_H: u16 = 7; // 5 rows + border
-        let detail_body = if self
+        let has_chapter = self
             .selected_chapter(active)
             .and_then(|n| find_chapter(active, n))
-            .is_some()
-        {
+            .is_some();
+        let detail_body = if has_chapter {
             let mut n = 3u16; // status · chunks · source
             if !self.selected.is_empty() {
                 n += 1;
@@ -603,7 +605,16 @@ impl ProjectScreen {
         } else {
             4 // usage · blank · 2 prompts
         };
-        let detail_h = detail_body + 2;
+        let content_h = detail_body + 2;
+        let detail_floor = if has_chapter { 22 } else { 14 };
+        let remainder = area_h.saturating_sub(CONTEXT_H);
+        let detail_target = (remainder * 2 / 5)
+            .max(content_h)
+            .max(detail_floor);
+        let detail_cap = ((area_h * 55) / 100)
+            .max(content_h)
+            .min(remainder);
+        let detail_h = detail_target.min(detail_cap);
         if CONTEXT_H + detail_h >= area_h {
             (
                 CONTEXT_H.min(area_h),
@@ -1031,10 +1042,10 @@ fn block_inner_width(area: Rect) -> usize {
 fn context_name_cols(inner_w: usize) -> usize {
     let lead_w = col_width(" ● ");
     let avail = inner_w.saturating_sub(lead_w);
-    if avail <= 18 {
-        avail.saturating_sub(6).clamp(6, 10)
+    if avail <= 20 {
+        avail.saturating_sub(6).clamp(8, 12)
     } else {
-        13.min(avail.saturating_sub(8))
+        15.min(avail.saturating_sub(10))
     }
 }
 
@@ -1560,6 +1571,18 @@ mod tests {
             col_width(&rendered) <= 30,
             "context row should fit the panel: {rendered} ({})",
             col_width(&rendered)
+        );
+    }
+
+    #[test]
+    fn side_layout_gives_detail_a_comfortable_minimum() {
+        let active = active_project();
+        let mut screen = ProjectScreen::new();
+        screen.handle_key(key(KeyCode::Down), Some(&active));
+        let (_, detail_h) = screen.side_layout_heights(&active, 40);
+        assert!(
+            detail_h >= 22,
+            "selected chapter detail should not feel cramped: {detail_h}"
         );
     }
 
