@@ -7,6 +7,7 @@ use sha2::{Digest, Sha256};
 
 pub mod auth;
 pub mod models;
+pub mod usage_log;
 
 /// Persisted Codex credentials (stored inside honya's `config.json`, mode 0600).
 /// `expires_at` is the access-token JWT `exp` (Unix seconds; 0 = unknown).

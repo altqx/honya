@@ -121,7 +121,23 @@ impl CodexClient {
                 message: err,
             });
         }
-        Ok(acc.into_response())
+        #[cfg(not(test))]
+        let turn_usage = {
+            let turn = crate::codex::usage_log::TurnUsage {
+                input_tokens: acc.usage.prompt_tokens,
+                cached_input_tokens: acc.cached_input_tokens,
+                output_tokens: acc.usage.completion_tokens,
+                reasoning_output_tokens: acc.reasoning_output_tokens,
+                total_tokens: acc.usage.total_tokens,
+            };
+            (!turn.is_empty()).then_some(turn)
+        };
+        let response = acc.into_response();
+        #[cfg(not(test))]
+        if let (Some(model), Some(turn)) = (response.model.as_deref(), turn_usage) {
+            crate::codex::usage_log::UsageLog::shared().record_turn(model, turn);
+        }
+        Ok(response)
     }
 
     async fn run(
@@ -265,6 +281,8 @@ struct Acc {
     text: String,
     tool_calls: Vec<ToolCall>,
     usage: Usage,
+    cached_input_tokens: u32,
+    reasoning_output_tokens: u32,
     id: Option<String>,
     model: Option<String>,
     error: Option<String>,
@@ -379,6 +397,17 @@ fn apply_event(
                         u.get("total_tokens").and_then(Value::as_u64).unwrap_or(
                             (acc.usage.prompt_tokens + acc.usage.completion_tokens) as u64,
                         ) as u32;
+                    acc.cached_input_tokens = u
+                        .get("input_token_details")
+                        .and_then(|d| d.get("cached_tokens"))
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0) as u32;
+                    acc.reasoning_output_tokens = u
+                        .get("output_tokens_details")
+                        .or_else(|| u.get("output_token_details"))
+                        .and_then(|d| d.get("reasoning_tokens"))
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0) as u32;
                 }
             }
         }
@@ -479,12 +508,14 @@ mod tests {
             r#"data: {"type":"response.output_text.delta","delta":"hello "}"#,
             r#"data: {"type":"response.output_text.delta","delta":"world"}"#,
             r#"data: {"type":"response.output_item.done","item":{"type":"function_call","name":"f","arguments":"{}","call_id":"c1"}}"#,
-            r#"data: {"type":"response.completed","response":{"id":"r1","model":"gpt-5.5","usage":{"input_tokens":10,"output_tokens":5}}}"#,
+            r#"data: {"type":"response.completed","response":{"id":"r1","model":"gpt-5.5","usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15,"input_token_details":{"cached_tokens":3},"output_tokens_details":{"reasoning_tokens":2}}}}"#,
         ] {
             handle_event_line(line.as_bytes(), &mut on, &mut acc).unwrap();
         }
         assert_eq!(text, "hello world");
         assert_eq!(reasoning, "think more ");
+        assert_eq!(acc.cached_input_tokens, 3);
+        assert_eq!(acc.reasoning_output_tokens, 2);
         let resp = acc.into_response();
         assert_eq!(resp.id.as_deref(), Some("r1"));
         let choice = &resp.choices[0];
