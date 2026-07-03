@@ -450,7 +450,7 @@ impl ProjectScreen {
 
         let cols = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Min(40), Constraint::Length(34)])
+            .constraints([Constraint::Min(24), Constraint::Min(28)])
             .split(panes[1]);
 
         self.side_area = cols[1];
@@ -609,6 +609,7 @@ impl ProjectScreen {
             .style(Style::default().bg(theme.bg_panel));
         let inner = block.inner(area);
         f.render_widget(block, area);
+        let inner_w = inner.width as usize;
 
         let chars = crate::workspace::characters::load(&active.workspace).len();
         let terms = crate::workspace::glossary::load(&active.workspace).len();
@@ -638,7 +639,7 @@ impl ProjectScreen {
         let vols = active.project.volumes.len();
         let vol_note = format!("{vols} vol{}", if vols == 1 { "" } else { "s" });
 
-        let files = [
+        let files: [(&str, &str, String, ratatui::style::Color); 4] = [
             ("●", "PROJECT.md", vol_note, theme.status_done),
             (
                 "●",
@@ -656,22 +657,18 @@ impl ProjectScreen {
         ];
         let mut lines = Vec::new();
         for (glyph, name, note, color) in files {
-            lines.push(Line::from(vec![
-                Span::styled(format!(" {glyph} "), Style::default().fg(color)),
-                Span::styled(pad_to_cols(name, 15), Style::default().fg(theme.ink)),
-                Span::styled(note, Style::default().fg(theme.ink_faint)),
-            ]));
+            lines.push(context_file_line(inner_w, glyph, name, &note, color, theme));
         }
         // Always-visible project usage roll-up (sum of every volume's chapters).
         let pu = active.project.usage_total();
-        lines.push(Line::from(vec![
-            Span::styled(" Σ ", Style::default().fg(theme.accent)),
-            Span::styled(pad_to_cols("project", 15), Style::default().fg(theme.ink)),
-            Span::styled(
-                format!("${:.4} · {} tok", pu.cost_usd, human_num(pu.tokens.total)),
-                Style::default().fg(theme.ink_faint),
-            ),
-        ]));
+        lines.push(context_file_line(
+            inner_w,
+            "Σ",
+            "project",
+            &format!("${:.4} · {} tok", pu.cost_usd, human_num(pu.tokens.total)),
+            theme.accent,
+            theme,
+        ));
         f.render_widget(
             Paragraph::new(lines).style(Style::default().bg(theme.bg_panel)),
             inner,
@@ -681,13 +678,15 @@ impl ProjectScreen {
     fn render_detail(&self, f: &mut Frame, area: Rect, active: &ActiveProject, theme: &Theme) {
         let ch_no = self.selected_chapter(active);
         let chapter = ch_no.and_then(|n| find_chapter(active, n));
+        let inner_w = block_inner_width(area);
 
         let title = match &chapter {
             Some(c) if !c.title.is_empty() => {
-                format!(
-                    " Selected — {} ",
-                    truncate_cols(&thai_display_safe(&c.title), 16)
-                )
+                let body = truncate_cols(
+                    &thai_display_safe(&c.title),
+                    area.width.saturating_sub(14) as usize,
+                );
+                format!(" Selected — {body} ")
             }
             _ => " Selected ".to_string(),
         };
@@ -695,27 +694,30 @@ impl ProjectScreen {
             .borders(Borders::ALL)
             .border_set(theme::hairline_set())
             .border_style(Style::default().fg(theme.rule))
-            .title(Span::styled(title, Style::default().fg(theme.ink_soft)))
+            .title(Span::styled(
+                truncate_cols(&title, area.width.saturating_sub(2) as usize),
+                Style::default().fg(theme.ink_soft),
+            ))
             .style(Style::default().bg(theme.bg_panel));
         let inner = block.inner(area);
         f.render_widget(block, area);
 
+        let faint = Style::default().fg(theme.ink_faint);
+        let soft = Style::default().fg(theme.ink_soft);
         let mut lines = Vec::new();
         if let Some(c) = chapter {
             let (glyph, color) = status_glyph(c.kind, c.status, theme);
-            let mut status_spans = vec![
-                Span::styled(" status  ", Style::default().fg(theme.ink_faint)),
-                Span::styled(glyph.to_string(), Style::default().fg(color)),
-                Span::raw(" "),
-                Span::styled(status_word(c.status), Style::default().fg(color)),
-            ];
+            let mut status = format!("{glyph} {}", status_word(c.status));
             if c.is_partial_review() {
-                status_spans.push(Span::styled(
-                    " · partial",
-                    Style::default().fg(theme.status_warn),
-                ));
+                status.push_str(" · partial");
             }
-            lines.push(Line::from(status_spans));
+            lines.push(side_field_line(
+                "status",
+                &status,
+                inner_w,
+                faint,
+                Style::default().fg(color),
+            ));
             let chunk_progress = if c.total_chunks == 0 {
                 format!("{} done", c.committed_chunks)
             } else if c.skipped_chunks > 0 {
@@ -732,24 +734,21 @@ impl ProjectScreen {
                     c.total_chunks
                 )
             };
-            lines.push(Line::from(vec![
-                Span::styled(" chunks  ", Style::default().fg(theme.ink_faint)),
-                Span::styled(chunk_progress, Style::default().fg(theme.ink_soft)),
-            ]));
-            lines.push(Line::from(vec![
-                Span::styled(" source  ", Style::default().fg(theme.ink_faint)),
-                Span::styled(
-                    format!("{} 句", c.source_segments),
-                    Style::default().fg(theme.ink_soft),
-                ),
-            ]));
+            lines.push(side_field_line("chunks", &chunk_progress, inner_w, faint, soft));
+            lines.push(side_field_line(
+                "source",
+                &format!("{} 句", c.source_segments),
+                inner_w,
+                faint,
+                soft,
+            ));
             // Lifetime usage at all three levels (chapter → volume → project).
             lines.push(Line::raw(""));
-            lines.push(usage_line("chapter", &c.usage, theme));
+            lines.push(usage_line("chapter", &c.usage, inner_w, theme));
             if let Some(vol) = find_volume(active, c.number) {
-                lines.push(usage_line("volume", &vol.usage_total(), theme));
+                lines.push(usage_line("volume", &vol.usage_total(), inner_w, theme));
             }
-            lines.push(usage_line("project", &active.project.usage_total(), theme));
+            lines.push(usage_line("project", &active.project.usage_total(), inner_w, theme));
             if !self.selected.is_empty() {
                 let nvols = self
                     .selected
@@ -766,29 +765,32 @@ impl ProjectScreen {
                 } else {
                     format!("{} chapter(s)", self.selected.len())
                 };
-                lines.push(Line::from(vec![
-                    Span::styled(" marked  ", Style::default().fg(theme.ink_faint)),
-                    Span::styled(label, Style::default().fg(theme.accent)),
-                ]));
+                lines.push(side_field_line(
+                    "marked",
+                    &label,
+                    inner_w,
+                    faint,
+                    Style::default().fg(theme.accent),
+                ));
             }
             lines.push(Line::raw(""));
-            lines.push(Line::from(vec![Span::styled(
-                " t translate ",
-                Style::default().fg(theme.accent),
-            )]));
-            lines.push(Line::from(vec![Span::styled(
-                " M update images ",
-                Style::default().fg(theme.accent),
-            )]));
-        } else {
-            lines.push(usage_line("project", &active.project.usage_total(), theme));
-            lines.push(Line::raw(""));
             lines.push(Line::from(Span::styled(
-                " Select a chapter to see its detail.",
-                Style::default().fg(theme.ink_faint),
+                truncate_cols(" t queue ", inner_w),
+                Style::default().fg(theme.accent),
             )));
             lines.push(Line::from(Span::styled(
-                " M update volume images.",
+                truncate_cols(" M images ", inner_w),
+                Style::default().fg(theme.accent),
+            )));
+        } else {
+            lines.push(usage_line("project", &active.project.usage_total(), inner_w, theme));
+            lines.push(Line::raw(""));
+            lines.push(Line::from(Span::styled(
+                truncate_cols(" Select a chapter to see its detail.", inner_w),
+                faint,
+            )));
+            lines.push(Line::from(Span::styled(
+                truncate_cols(" M update volume images.", inner_w),
                 Style::default().fg(theme.accent),
             )));
         }
@@ -974,19 +976,95 @@ fn human_num(n: u32) -> String {
     }
 }
 
-/// One labelled usage line for the detail card: `label  N tok · M tools · $C`.
-fn usage_line(label: &str, u: &UsageStats, theme: &Theme) -> Line<'static> {
+/// Inner width of a bordered side-panel block (left + right border).
+fn block_inner_width(area: Rect) -> usize {
+    area.width.saturating_sub(2) as usize
+}
+
+fn context_name_cols(inner_w: usize) -> usize {
+    let lead_w = col_width(" ● ");
+    let avail = inner_w.saturating_sub(lead_w);
+    if avail <= 18 {
+        avail.saturating_sub(6).clamp(6, 10)
+    } else {
+        13.min(avail.saturating_sub(8))
+    }
+}
+
+fn context_file_line(
+    inner_w: usize,
+    glyph: &str,
+    name: &str,
+    note: &str,
+    color: ratatui::style::Color,
+    theme: &Theme,
+) -> Line<'static> {
+    let lead = format!(" {glyph} ");
+    let lead_w = col_width(&lead);
+    let name_w = context_name_cols(inner_w);
+    let note_w = inner_w.saturating_sub(lead_w + name_w);
     Line::from(vec![
-        Span::styled(format!(" {label:<8}"), Style::default().fg(theme.ink_faint)),
+        Span::styled(lead, Style::default().fg(color)),
+        Span::styled(pad_to_cols(name, name_w), Style::default().fg(theme.ink)),
         Span::styled(
-            format!(
-                "{} tok · {} tools · ${:.4}",
-                human_num(u.tokens.total),
-                u.tool_calls,
-                u.cost_usd
-            ),
-            Style::default().fg(theme.ink_soft),
+            truncate_cols(note, note_w),
+            Style::default().fg(theme.ink_faint),
         ),
+    ])
+}
+
+fn side_field_line(
+    label: &str,
+    value: &str,
+    width: usize,
+    label_style: Style,
+    value_style: Style,
+) -> Line<'static> {
+    let prefix = format!(" {label:<7}");
+    let value = truncate_cols(value, width.saturating_sub(col_width(&prefix)));
+    Line::from(vec![
+        Span::styled(prefix, label_style),
+        Span::styled(value, value_style),
+    ])
+}
+
+/// One labelled usage line for the detail card: `label  N tok · M tools · $C`.
+fn usage_line(label: &str, u: &UsageStats, width: usize, theme: &Theme) -> Line<'static> {
+    let label_style = Style::default().fg(theme.ink_faint);
+    let value_style = Style::default().fg(theme.ink_soft);
+    let prefix = format!(" {label:<7}");
+    let budget = width.saturating_sub(col_width(&prefix));
+    let full = format!(
+        "{} tok · {} tools · ${:.4}",
+        human_num(u.tokens.total),
+        u.tool_calls,
+        u.cost_usd
+    );
+    let value = if col_width(&full) <= budget {
+        full
+    } else {
+        let mid = format!(
+            "{} tok · {} tools",
+            human_num(u.tokens.total),
+            u.tool_calls,
+        );
+        if col_width(&mid) <= budget {
+            truncate_cols(&mid, budget)
+        } else {
+            truncate_cols(
+                &format!(
+                    "{}·{}·${:.1}",
+                    human_num(u.tokens.total),
+                    u.tool_calls,
+                    u.cost_usd
+                ),
+                budget,
+            )
+        }
+    };
+    Line::from(vec![
+        Span::styled(prefix, label_style),
+        Span::styled(value, value_style),
     ])
 }
 
@@ -1389,6 +1467,53 @@ mod tests {
         ));
         assert!(screen.collapsed.is_empty());
         assert_eq!(screen.rows(&active).len(), 6, "both volumes show chapters again");
+    }
+
+    #[test]
+    fn usage_line_truncates_for_narrow_side_panel() {
+        let theme = crate::model::ThemeId::default().build();
+        let u = UsageStats {
+            tokens: crate::model::TokenUsage {
+                total: 164_600_000,
+                ..Default::default()
+            },
+            tool_calls: 4709,
+            cost_usd: 70.3614,
+        };
+        let line = usage_line("project", &u, 30, &theme);
+        let rendered: String = line
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(
+            col_width(&rendered) <= 30,
+            "usage line should fit the panel: {rendered} ({})",
+            col_width(&rendered)
+        );
+    }
+
+    #[test]
+    fn context_file_line_truncates_long_notes() {
+        let theme = crate::model::ThemeId::default().build();
+        let line = context_file_line(
+            30,
+            "●",
+            "STYLE.md",
+            "in progress · 999/999 ch",
+            theme.status_working,
+            &theme,
+        );
+        let rendered: String = line
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(
+            col_width(&rendered) <= 30,
+            "context row should fit the panel: {rendered} ({})",
+            col_width(&rendered)
+        );
     }
 
     #[test]
