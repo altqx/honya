@@ -105,22 +105,54 @@ impl ProjectScreen {
         }
     }
 
-    fn marked_chapters(&self, active: &ActiveProject) -> Vec<u32> {
-        let known: HashSet<u32> = active
+    fn marked_ids(&self, active: &ActiveProject) -> Vec<(u32, u32)> {
+        let known: HashSet<(u32, u32)> = active
             .project
             .volumes
             .iter()
-            .find(|v| v.number == active.vol)
-            .map(|v| v.chapters.iter().map(|ch| ch.number).collect())
-            .unwrap_or_default();
+            .flat_map(|v| v.chapters.iter().map(|ch| (v.number, ch.number)))
+            .collect();
+        let mut ids: Vec<(u32, u32)> = self
+            .selected
+            .iter()
+            .copied()
+            .filter(|id| known.contains(id))
+            .collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    fn marked_chapters_in_vol(&self, vol: u32) -> Vec<u32> {
         let mut chapters: Vec<u32> = self
             .selected
             .iter()
-            .filter(|(vol, ch)| *vol == active.vol && known.contains(ch))
+            .filter(|(v, _)| *v == vol)
             .map(|(_, ch)| *ch)
             .collect();
         chapters.sort_unstable();
         chapters
+    }
+
+    fn volume_header_index(&self, active: &ActiveProject, vol: u32) -> Option<usize> {
+        self.rows(active).iter().position(|r| {
+            matches!(r, Row::Volume(v) if v.number == vol)
+        })
+    }
+
+    fn collapse_all_volumes(&mut self, active: &ActiveProject) {
+        let follow = self.selected_volume(active);
+        for vol in &active.project.volumes {
+            self.collapsed.insert(vol.number);
+        }
+        if let Some(vol) = follow
+            && let Some(idx) = self.volume_header_index(active, vol)
+        {
+            self.tree.select(Some(idx));
+        }
+    }
+
+    fn expand_all_volumes(&mut self) {
+        self.collapsed.clear();
     }
 
     pub fn handle_key(&mut self, key: KeyEvent, active: Option<&ActiveProject>) -> Action {
@@ -186,18 +218,16 @@ impl ProjectScreen {
                 Action::None
             }
             KeyCode::Char('t') | KeyCode::Char('a') => {
-                let marked = self.marked_chapters(active);
-                let chapters = if !marked.is_empty() {
+                let marked = self.marked_ids(active);
+                if !marked.is_empty() {
                     self.selected.clear();
-                    marked
-                } else if let Some(ch) = self.selected_chapter(active) {
-                    vec![ch]
+                    Action::EnqueueChapters { chapters: marked }
+                } else if let Some(id) = self.selected_chapter_id(active) {
+                    Action::EnqueueChapters {
+                        chapters: vec![id],
+                    }
                 } else {
-                    Vec::new()
-                };
-                match (chapters.is_empty(), self.selected_volume(active)) {
-                    (false, Some(vol)) => Action::EnqueueChapters { vol, chapters },
-                    _ => Action::None,
+                    Action::None
                 }
             }
             KeyCode::Char('T') => {
@@ -240,7 +270,7 @@ impl ProjectScreen {
             }
             KeyCode::Char('d') => {
                 let vol = self.selected_volume(active).unwrap_or(active.vol);
-                let marked = self.marked_chapters(active);
+                let marked = self.marked_chapters_in_vol(vol);
                 let chapters = if !marked.is_empty() {
                     marked
                 } else if let Some(ch) = self.selected_chapter(active) {
@@ -256,7 +286,9 @@ impl ProjectScreen {
                     } else {
                         format!("Delete {} chapters from Vol.{vol:02}?", chapters.len())
                     };
-                    self.selected.clear();
+                    for ch in &chapters {
+                        self.selected.remove(&(vol, *ch));
+                    }
                     Action::show_overlay(Overlay::confirm(
                         "Delete chapters",
                         body,
@@ -268,6 +300,14 @@ impl ProjectScreen {
                 let vol = self.selected_volume(active).unwrap_or(active.vol);
                 Action::show_overlay(Overlay::export(vol))
             }
+            KeyCode::Char('z') => {
+                self.collapse_all_volumes(active);
+                Action::None
+            }
+            KeyCode::Char('Z') => {
+                self.expand_all_volumes();
+                Action::None
+            }
             _ => Action::None,
         };
 
@@ -276,7 +316,6 @@ impl ProjectScreen {
             && let Some(v) = self.selected_volume(active)
             && v != active.vol
         {
-            self.selected.clear();
             return Action::SetActiveVolume { vol: v };
         }
         action
@@ -329,7 +368,6 @@ impl ProjectScreen {
                         // Opening resolves against the active volume, so a cross-
                         // volume click first switches volumes (a second click opens).
                         if vol != active.vol {
-                            self.selected.clear();
                             return Action::SetActiveVolume { vol };
                         }
                         if activate {
@@ -346,7 +384,6 @@ impl ProjectScreen {
                             }
                         }
                         if vnum != active.vol {
-                            self.selected.clear();
                             return Action::SetActiveVolume { vol: vnum };
                         }
                         Action::None
@@ -368,13 +405,11 @@ impl ProjectScreen {
         self.tree.select(Some(next));
     }
 
-    /// Auto-follow the cursor's volume (mirrors `handle_key`'s tail): switch the
-    /// active volume when the cursor lands in a different one, clearing marks.
+    /// Auto-follow the cursor's volume (mirrors `handle_key`'s tail).
     fn follow_volume(&mut self, active: &ActiveProject) -> Action {
         if let Some(v) = self.selected_volume(active)
             && v != active.vol
         {
-            self.selected.clear();
             return Action::SetActiveVolume { vol: v };
         }
         Action::None
@@ -716,12 +751,24 @@ impl ProjectScreen {
             }
             lines.push(usage_line("project", &active.project.usage_total(), theme));
             if !self.selected.is_empty() {
+                let nvols = self
+                    .selected
+                    .iter()
+                    .map(|(v, _)| *v)
+                    .collect::<HashSet<_>>()
+                    .len();
+                let label = if nvols > 1 {
+                    format!(
+                        "{} chapter(s) · {} vols",
+                        self.selected.len(),
+                        nvols
+                    )
+                } else {
+                    format!("{} chapter(s)", self.selected.len())
+                };
                 lines.push(Line::from(vec![
                     Span::styled(" marked  ", Style::default().fg(theme.ink_faint)),
-                    Span::styled(
-                        format!("{} chapter(s)", self.selected.len()),
-                        Style::default().fg(theme.accent),
-                    ),
+                    Span::styled(label, Style::default().fg(theme.accent)),
                 ]));
             }
             lines.push(Line::raw(""));
@@ -754,18 +801,13 @@ impl ProjectScreen {
     pub fn hints(&self) -> &'static [(&'static str, &'static str)] {
         &[
             ("↵", "read"),
-            ("t", "translate/queue"),
-            ("T", "whole vol"),
-            ("A", "whole project"),
-            ("V", "add vol"),
-            ("i", "add chapters"),
-            ("M", "update images"),
-            ("d", "delete"),
-            ("x", "export"),
             ("Space", "mark"),
-            ("h/l", "tree/focus"),
-            ("e", "thai name"),
-            ("y", "synopsis"),
+            ("t", "queue"),
+            ("T", "vol"),
+            ("A", "project"),
+            ("d", "delete"),
+            ("h/l", "nav"),
+            ("z/Z", "fold"),
         ]
     }
 }
@@ -1096,7 +1138,7 @@ mod tests {
             Action::None
         ));
         match screen.handle_key(key(KeyCode::Char('t')), Some(&active)) {
-            Action::EnqueueChapters { chapters, .. } => assert_eq!(chapters, vec![1]),
+            Action::EnqueueChapters { chapters, .. } => assert_eq!(chapters, vec![(1, 1)]),
             other => panic!("expected EnqueueChapters, got {other:?}"),
         }
         assert!(
@@ -1106,7 +1148,7 @@ mod tests {
 
         // With no marks, `t` remains the single-chapter shortcut for the cursor row.
         match screen.handle_key(key(KeyCode::Char('t')), Some(&active)) {
-            Action::EnqueueChapters { chapters, .. } => assert_eq!(chapters, vec![2]),
+            Action::EnqueueChapters { chapters, .. } => assert_eq!(chapters, vec![(1, 2)]),
             other => panic!("expected EnqueueChapters, got {other:?}"),
         }
     }
@@ -1133,7 +1175,7 @@ mod tests {
     }
 
     #[test]
-    fn switching_volume_clears_marks() {
+    fn switching_volume_preserves_marks() {
         let active = two_vol_project();
         let mut screen = ProjectScreen::new();
 
@@ -1142,13 +1184,40 @@ mod tests {
         screen.handle_key(key(KeyCode::Char(' ')), Some(&active));
         assert!(screen.selected.contains(&(1, 1)));
 
-        // Crossing into Vol.02 clears the marks (they key off per-volume numbers).
+        // Crossing into Vol.02 keeps the marks so cross-volume queueing works.
         screen.handle_key(key(KeyCode::Down), Some(&active));
         let action = screen.handle_key(key(KeyCode::Down), Some(&active));
         assert!(matches!(action, Action::SetActiveVolume { vol: 2 }));
         assert!(
+            screen.selected.contains(&(1, 1)),
+            "marks persist when leaving a volume"
+        );
+    }
+
+    #[test]
+    fn cross_volume_mark_and_queue() {
+        let active = two_vol_project();
+        let mut screen = ProjectScreen::new();
+
+        // Mark Vol.01 ch 1.
+        screen.handle_key(key(KeyCode::Down), Some(&active));
+        screen.handle_key(key(KeyCode::Char(' ')), Some(&active));
+
+        // Move to Vol.02 ch 1 and mark it too.
+        screen.handle_key(key(KeyCode::Down), Some(&active));
+        screen.handle_key(key(KeyCode::Down), Some(&active));
+        screen.handle_key(key(KeyCode::Down), Some(&active));
+        screen.handle_key(key(KeyCode::Char(' ')), Some(&active));
+
+        match screen.handle_key(key(KeyCode::Char('t')), Some(&active)) {
+            Action::EnqueueChapters { chapters, .. } => {
+                assert_eq!(chapters, vec![(1, 1), (2, 1)]);
+            }
+            other => panic!("expected EnqueueChapters, got {other:?}"),
+        }
+        assert!(
             screen.selected.is_empty(),
-            "marks clear when leaving a volume"
+            "marks clear after queueing translation"
         );
     }
 
@@ -1234,6 +1303,92 @@ mod tests {
             Action::SetActiveVolume { vol } => assert_eq!(vol, 2),
             other => panic!("expected SetActiveVolume, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn chapter_tree_draws_a_scrollbar_when_overflowing() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut active = active_project();
+        for i in 3..=40 {
+            active
+                .project
+                .volumes
+                .iter_mut()
+                .next()
+                .unwrap()
+                .chapters
+                .push(chapter(i));
+        }
+        let mut screen = ProjectScreen::new();
+        let theme = crate::model::ThemeId::default().build();
+        let mut term = Terminal::new(TestBackend::new(100, 12)).unwrap();
+        term.draw(|f| screen.render(f, f.area(), Some(&active), &theme))
+            .unwrap();
+
+        let outer_right = screen.tree_area.x + screen.tree_area.width;
+        let mut saw_bar = false;
+        for row in screen.tree_area.y..screen.tree_area.y + screen.tree_area.height {
+            let cell = term.backend().buffer()[(outer_right, row)].symbol();
+            if cell == "┃" || cell == "│" {
+                saw_bar = true;
+                break;
+            }
+        }
+        assert!(saw_bar, "overflowing chapter tree should render a scrollbar");
+    }
+
+    #[test]
+    fn z_collapses_all_volumes_and_snaps_to_volume_header() {
+        let active = two_vol_project();
+        let mut screen = ProjectScreen::new();
+
+        screen.focus_volume(&active, 2);
+        screen.handle_key(key(KeyCode::Down), Some(&active));
+        assert_eq!(screen.selected_chapter(&active), Some(1));
+        assert_eq!(screen.selected_volume(&active), Some(2));
+
+        let action = screen.handle_key(key(KeyCode::Char('z')), Some(&active));
+        assert!(
+            matches!(action, Action::None | Action::SetActiveVolume { vol: 2 }),
+            "unexpected action: {action:?}"
+        );
+        assert!(
+            active
+                .project
+                .volumes
+                .iter()
+                .all(|v| screen.collapsed.contains(&v.number)),
+            "every volume should be collapsed"
+        );
+        assert_eq!(
+            screen.rows(&active).len(),
+            active.project.volumes.len(),
+            "only volume headers remain visible"
+        );
+        assert_eq!(
+            screen.selected_volume(&active),
+            Some(2),
+            "cursor snaps to the current volume header"
+        );
+        assert!(screen.selected_chapter(&active).is_none());
+    }
+
+    #[test]
+    fn shift_z_expands_all_volumes() {
+        let active = two_vol_project();
+        let mut screen = ProjectScreen::new();
+
+        screen.handle_key(key(KeyCode::Char('z')), Some(&active));
+        assert_eq!(screen.rows(&active).len(), 2);
+
+        assert!(matches!(
+            screen.handle_key(key(KeyCode::Char('Z')), Some(&active)),
+            Action::None
+        ));
+        assert!(screen.collapsed.is_empty());
+        assert_eq!(screen.rows(&active).len(), 6, "both volumes show chapters again");
     }
 
     #[test]

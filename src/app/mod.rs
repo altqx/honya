@@ -222,9 +222,17 @@ pub enum Action {
     StartProjectTranslation,
     /// Confirmed: begin the whole-project auto-translate run.
     BeginProjectTranslation,
+    /// Queue `(volume, chapter)` pairs — a single volume uses the same shape.
     EnqueueChapters {
-        vol: u32,
-        chapters: Vec<u32>,
+        chapters: Vec<(u32, u32)>,
+    },
+    /// Resume a multi-volume selection without wiping committed chunks.
+    ContinueTranslationMulti {
+        chapters: Vec<(u32, u32)>,
+    },
+    /// Restart a multi-volume selection from scratch.
+    RestartTranslationMulti {
+        chapters: Vec<(u32, u32)>,
     },
     /// Reorder by `(vol, ch)` identity; the running head is not pending.
     QueueMoveUp {
@@ -2589,17 +2597,11 @@ impl App {
             Action::StartTranslation { chapters } => {
                 self.request_translation(chapters);
             }
-            Action::EnqueueChapters { vol, chapters } => {
+            Action::EnqueueChapters { chapters } => {
                 if self.is_live_run() {
-                    self.enqueue_live(vol, chapters);
+                    self.enqueue_live(chapters);
                 } else {
-                    // Idle: a run starts on the active volume, so honor the
-                    // requested volume first (no-op if it is already active or
-                    // absent). Without this an enqueue for another volume — now
-                    // reachable from the dashboard's chapter board — would
-                    // silently translate the active volume instead.
-                    self.set_active_volume(vol);
-                    self.request_translation(chapters);
+                    self.request_translation_ids(chapters);
                 }
             }
             Action::QueueMoveUp { vol, ch } => {
@@ -2638,6 +2640,12 @@ impl App {
             }
             Action::RestartTranslation { chapters } => {
                 self.begin_translation(chapters, true);
+            }
+            Action::ContinueTranslationMulti { chapters } => {
+                self.begin_multi_volume_translation(chapters, false, None);
+            }
+            Action::RestartTranslationMulti { chapters } => {
+                self.begin_multi_volume_translation(chapters, true, None);
             }
             Action::StartVolumeTranslation { vol } => {
                 self.request_volume_translation(vol);
@@ -2923,7 +2931,9 @@ impl App {
             Rc::Pause => Action::PauseRun,
             Rc::Stop => Action::StopRun,
             Rc::StartProject => Action::BeginProjectTranslation,
-            Rc::Enqueue { vol, chapters } => Action::EnqueueChapters { vol, chapters },
+            Rc::Enqueue { vol, chapters } => Action::EnqueueChapters {
+                chapters: chapters.into_iter().map(|ch| (vol, ch)).collect(),
+            },
             Rc::QueueMoveUp { vol, ch } => Action::QueueMoveUp { vol, ch },
             Rc::QueueMoveDown { vol, ch } => Action::QueueMoveDown { vol, ch },
             Rc::Dequeue { vol, ch } => Action::DequeueChapter { vol, ch },
@@ -3335,7 +3345,7 @@ impl App {
                 .unwrap_or(false)
     }
 
-    fn enqueue_live(&mut self, vol: u32, chapters: Vec<u32>) {
+    fn enqueue_live(&mut self, chapters: Vec<(u32, u32)>) {
         let Some(queue) = self.run_queue.clone() else {
             return;
         };
@@ -3348,20 +3358,14 @@ impl App {
             .as_ref()
             .map(|cp| cp.whole_project)
             .unwrap_or(false);
-        if !whole_project {
-            // Single-volume runs resolve raw files through one workspace.
-            let run_vol = self.active_run.as_ref().map(|cp| cp.vol);
-            if Some(vol) != run_vol {
-                self.toast = Some(Toast::warn(format!(
-                    "this run only translates Vol.{:02} — can't queue another volume",
-                    run_vol.unwrap_or(vol)
-                )));
-                return;
-            }
-        }
+        let run_vol = self.active_run.as_ref().map(|cp| cp.vol);
         let mut added = 0u32;
         let mut skipped = 0u32;
-        for ch in chapters {
+        for (vol, ch) in chapters {
+            if !whole_project && Some(vol) != run_vol {
+                skipped += 1;
+                continue;
+            }
             let eligible = self
                 .chapter_in_vol(vol, ch)
                 .map(project::translatable)
@@ -3371,6 +3375,13 @@ impl App {
             } else {
                 skipped += 1;
             }
+        }
+        if !whole_project && skipped > 0 && added == 0 {
+            self.toast = Some(Toast::warn(format!(
+                "this run only translates Vol.{:02} — can't queue another volume",
+                run_vol.unwrap_or(0)
+            )));
+            return;
         }
         self.toast = Some(Toast::info(if skipped > 0 {
             format!("queued {added} · skipped {skipped} (done / running / not prose)")
@@ -3486,6 +3497,55 @@ impl App {
             'r',
             "restart",
             Action::RestartTranslation { chapters },
+        );
+    }
+
+    fn request_translation_ids(&mut self, ids: Vec<(u32, u32)>) {
+        if self.run_active {
+            self.toast = Some(Toast::warn(
+                "a run is in progress — press t to add chapters to the queue",
+            ));
+            return;
+        }
+        if self.active.is_none() {
+            self.toast = Some(Toast::warn("no project open"));
+            return;
+        }
+        if ids.is_empty() {
+            self.toast = Some(Toast::warn("nothing selected"));
+            return;
+        }
+
+        let vols: std::collections::HashSet<u32> = ids.iter().map(|(v, _)| *v).collect();
+        if vols.len() == 1 {
+            let vol = vols.into_iter().next().expect("non-empty");
+            let chapters: Vec<u32> = ids.into_iter().map(|(_, ch)| ch).collect();
+            self.set_active_volume(vol);
+            self.request_translation(chapters);
+            return;
+        }
+
+        let resumable = self.chapters_with_translation_progress_ids(&ids);
+        if resumable.is_empty() {
+            self.begin_multi_volume_translation(ids, false, None);
+            return;
+        }
+
+        let list = chapter_ids_list_preview(&resumable);
+        let body = format!(
+            "{} chapter(s) already have translated chunks or a failed/paused state ({list}). Continue skips committed chunks and resumes at the next gap. Restart deletes translated output for the requested chapter(s) and starts over.",
+            resumable.len()
+        );
+        self.overlay = Overlay::confirm_with_alternate(
+            "Continue previous translation?",
+            body,
+            "continue",
+            Action::ContinueTranslationMulti {
+                chapters: ids.clone(),
+            },
+            'r',
+            "restart",
+            Action::RestartTranslationMulti { chapters: ids },
         );
     }
 
@@ -3867,6 +3927,163 @@ impl App {
         )));
     }
 
+    fn volume_plan_from_ids(&self, ids: &[(u32, u32)]) -> Vec<crate::agents::VolumePlan> {
+        let Some(active) = self.active.as_ref() else {
+            return Vec::new();
+        };
+        let mut by_vol: std::collections::BTreeMap<u32, Vec<u32>> = std::collections::BTreeMap::new();
+        for (vol, ch) in ids {
+            by_vol.entry(*vol).or_default().push(*ch);
+        }
+        by_vol
+            .into_iter()
+            .map(|(vol, mut chapters)| {
+                chapters.sort_unstable();
+                chapters.dedup();
+                let label = active
+                    .project
+                    .volumes
+                    .iter()
+                    .find(|v| v.number == vol)
+                    .and_then(|v| v.label.clone());
+                crate::agents::VolumePlan {
+                    vol,
+                    label,
+                    chapters,
+                }
+            })
+            .collect()
+    }
+
+    fn begin_multi_volume_translation(
+        &mut self,
+        ids: Vec<(u32, u32)>,
+        restart: bool,
+        checkpoint: Option<crate::workspace::session::SessionCheckpoint>,
+    ) {
+        if self.run_active {
+            self.toast = Some(Toast::warn("a run is already in progress"));
+            return;
+        }
+        let plan = self.volume_plan_from_ids(&ids);
+        if plan.is_empty() {
+            self.toast = Some(Toast::warn("nothing selected"));
+            return;
+        }
+        let Some((project_dir, project_id, project_title, models, history_vol)) =
+            self.active.as_ref().map(|active| {
+                let history_vol = ids.iter().map(|(v, _)| *v).min().unwrap_or(active.vol);
+                (
+                    active.project.dir.clone(),
+                    active.project.id.clone(),
+                    active.project.title.clone(),
+                    active.models.clone(),
+                    history_vol,
+                )
+            })
+        else {
+            self.toast = Some(Toast::warn("no project open"));
+            return;
+        };
+        let Some(clients) = self.ensure_active_clients() else {
+            self.toast = Some(if !crate::config::any_provider_key(&self.cfg) {
+                Toast::warn("no API key — open Settings ( : → Settings ) to add one")
+            } else {
+                match crate::build_clients(&self.cfg) {
+                    Err(e) => Toast::error(format!("LLM client unavailable: {e}")),
+                    Ok(_) => Toast::warn("could not start translation"),
+                }
+            });
+            return;
+        };
+
+        if restart {
+            for (vol, chapter) in &ids {
+                let ws = Workspace::new(project_dir.clone(), *vol);
+                self.archive_for_rerun(&ws, *chapter);
+                if let Err(e) = crate::workspace::translation::reset_chapter(&ws, *chapter) {
+                    self.toast = Some(Toast::error(format!(
+                        "restart failed for Vol.{vol:02} ch {chapter}: {e}"
+                    )));
+                    return;
+                }
+            }
+            self.reset_in_memory_translation_progress_ids(&ids);
+        }
+
+        let ws = Workspace::new(project_dir.clone(), history_vol);
+        let all_chapters: Vec<u32> = plan.iter().flat_map(|p| p.chapters.clone()).collect();
+        let mut checkpoint = checkpoint.unwrap_or_else(|| {
+            crate::workspace::session::SessionCheckpoint::new(
+                project_dir.clone(),
+                project_id,
+                project_title,
+                history_vol,
+                all_chapters.clone(),
+            )
+        });
+        checkpoint.whole_project = true;
+        checkpoint.vol = history_vol;
+        checkpoint.chapters = all_chapters;
+        checkpoint.ensure_run_id();
+        if let Err(e) = crate::workspace::session::save(&checkpoint) {
+            self.push_log(
+                LogLevel::Warn,
+                format!("could not write recovery checkpoint: {e}"),
+            );
+        }
+        let history_version = if checkpoint.honya_version.trim().is_empty() {
+            crate::update::current_version().to_string()
+        } else {
+            checkpoint.honya_version.clone()
+        };
+        let history = RunHistoryEntry::started(
+            checkpoint.run_id.clone(),
+            checkpoint.started_at,
+            checkpoint.chapters.clone(),
+            history_version,
+        );
+        if let Err(e) = crate::workspace::volume::record_run_started(&ws, history) {
+            self.push_log(LogLevel::Warn, format!("could not write run history: {e}"));
+        }
+
+        let mut queue_seed = ids;
+        queue_seed.sort_unstable();
+        queue_seed.dedup();
+        let ctl = crate::agents::pipeline::RunControl::new();
+        let queue = crate::agents::pipeline::ChapterQueue::new(queue_seed);
+        let ctx = crate::agents::pipeline::PipelineCtx {
+            clients,
+            ws,
+            models,
+            cfg: self.cfg.clone(),
+            tx: self.tx.clone(),
+            ctl: ctl.clone(),
+            queue: queue.clone(),
+        };
+        self.run_ctl = Some(ctl);
+        self.run_queue = Some(queue);
+        self.active_run = Some(checkpoint);
+        self.running_vol = None;
+        self.refresh_queue_panel();
+        let vols = plan.len();
+        let total: usize = plan.iter().map(|p| p.chapters.len()).sum();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            if let Err(e) = crate::agents::run_project_pipeline(ctx, plan).await {
+                tx.send(AppEvent::Error {
+                    context: "pipeline".to_string(),
+                    msg: e.to_string(),
+                });
+            }
+        });
+        self.run_active = true;
+        self.screen = Screen::Translate;
+        self.toast = Some(Toast::info(format!(
+            "translating {total} chapter(s) across {vols} volume(s)"
+        )));
+    }
+
     fn chapters_with_translation_progress(&self, chapters: &[u32]) -> Vec<u32> {
         // Scope to the target volume: at request time there's no run yet, so this
         // resolves to the active (cursor-followed) volume, which is where the marked
@@ -3894,6 +4111,19 @@ impl App {
         out
     }
 
+    fn chapters_with_translation_progress_ids(&self, ids: &[(u32, u32)]) -> Vec<(u32, u32)> {
+        let mut out = Vec::new();
+        for (vol, chapter) in ids {
+            if let Some(ch) = self.chapter_in_vol(*vol, *chapter)
+                && (ch.committed_chunks > 0
+                    || matches!(ch.status, ChapterStatus::Failed | ChapterStatus::Paused))
+            {
+                out.push((*vol, *chapter));
+            }
+        }
+        out
+    }
+
     fn reset_in_memory_translation_progress(&mut self, chapters: &[u32]) {
         if let Some(active) = self.active.as_mut() {
             for ch in active
@@ -3903,6 +4133,26 @@ impl App {
                 .flat_map(|v| v.chapters.iter_mut())
             {
                 if chapters.contains(&ch.number) {
+                    ch.status = ChapterStatus::Pending;
+                    ch.total_chunks = 0;
+                    ch.committed_chunks = 0;
+                    ch.skipped_chunks = 0;
+                    ch.last_run = None;
+                }
+            }
+        }
+    }
+
+    fn reset_in_memory_translation_progress_ids(&mut self, ids: &[(u32, u32)]) {
+        if let Some(active) = self.active.as_mut() {
+            for (vol, chapter) in ids {
+                if let Some(ch) = active
+                    .project
+                    .volumes
+                    .iter_mut()
+                    .find(|v| v.number == *vol)
+                    .and_then(|v| v.chapters.iter_mut().find(|c| c.number == *chapter))
+                {
                     ch.status = ChapterStatus::Pending;
                     ch.total_chunks = 0;
                     ch.committed_chunks = 0;
@@ -5035,6 +5285,26 @@ fn chapter_list_preview(chapters: &[u32]) -> String {
     }
 }
 
+fn chapter_ids_list_preview(ids: &[(u32, u32)]) -> String {
+    let mut ids = ids.to_vec();
+    ids.sort_unstable();
+    ids.dedup();
+    let shown: Vec<String> = ids
+        .iter()
+        .take(5)
+        .map(|(vol, ch)| format!("Vol.{vol:02} ch {ch:03}"))
+        .collect();
+    if ids.len() > shown.len() {
+        format!(
+            "{} +{} more",
+            shown.join(", "),
+            ids.len() - shown.len()
+        )
+    } else {
+        shown.join(", ")
+    }
+}
+
 /// The working root we scan for projects / importable source files. Falls back to `.`.
 fn working_root() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
@@ -6111,7 +6381,7 @@ mod remote_tests {
                 vol: 2,
                 chapters: vec![3]
             }),
-            Action::EnqueueChapters { vol: 2, .. }
+            Action::EnqueueChapters { chapters, .. } if chapters == vec![(2, 3)]
         ));
         assert!(matches!(
             App::map_remote_command(C::Dequeue { vol: 1, ch: 4 }),

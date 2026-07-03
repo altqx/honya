@@ -296,6 +296,10 @@ pub fn render_footer(
         // overflows into the global cluster.
         let piece_cols = col_width(key) + 1 + col_width(label) + 3;
         if left_cols + piece_cols > left_budget {
+            if left_cols + 4 <= left_budget {
+                left.push(Span::styled("…", lbl_style));
+                left.push(Span::raw("   "));
+            }
             break;
         }
         left.push(Span::styled((*key).to_string(), key_style));
@@ -373,5 +377,31 @@ mod tests {
         }
         // The first tab starts at the bar's left edge.
         assert_eq!(zones[0].0.x, 0);
+    }
+
+    #[test]
+    fn footer_shows_ellipsis_when_hints_overflow() {
+        let theme = crate::model::ThemeId::default().build();
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 50,
+            height: 1,
+        };
+        let hints = &[
+            ("one", "first"),
+            ("two", "second"),
+            ("three", "third"),
+            ("four", "fourth"),
+            ("five", "fifth"),
+        ];
+        let mut term = Terminal::new(TestBackend::new(50, 1)).unwrap();
+        term.draw(|f| render_footer(f, area, hints, None, None, &theme))
+            .unwrap();
+        let line: String = (0..area.width)
+            .map(|x| term.backend().buffer()[(x, 0)].symbol().to_string())
+            .collect();
+        assert!(line.contains('…'), "cramped footer should hint at more: {line:?}");
+        assert!(line.contains("?help"), "global cluster should survive: {line:?}");
     }
 }
