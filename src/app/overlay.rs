@@ -4526,6 +4526,7 @@ impl Overlay {
             Paragraph::new(lines).style(Style::default().bg(theme.bg_panel)),
             inner,
         );
+        crate::ui::widgets::render_panel_scrollbar(f, modal, log.len(), start, theme);
     }
 
     fn render_help(&self, f: &mut Frame, area: Rect, theme: &Theme, off: u16) {
@@ -4647,7 +4648,8 @@ impl Overlay {
         }
         // Scroll instead of truncating so the lower sections stay reachable.
         let cap = inner.height as usize;
-        let max_off = lines.len().saturating_sub(cap) as u16;
+        let total = lines.len();
+        let max_off = total.saturating_sub(cap) as u16;
         let off = off.min(max_off);
         f.render_widget(
             Paragraph::new(Text::from(lines))
@@ -4656,6 +4658,7 @@ impl Overlay {
                 .style(Style::default().bg(theme.bg_panel)),
             inner,
         );
+        crate::ui::widgets::render_panel_scrollbar(f, modal, total, off as usize, theme);
     }
 
     /// The About card, animated off the app's 100ms ticker: a moon that waxes

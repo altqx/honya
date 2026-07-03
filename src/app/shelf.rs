@@ -333,9 +333,11 @@ impl ShelfScreen {
             ])));
         }
 
+        let total_items = self.import_row_index(projects) + 1 + self.unimported.len();
         let list = List::new(items).style(Style::default().bg(theme.bg));
         // Selection visuals are baked into the rows; state is kept only for scrolling.
         f.render_stateful_widget(list, list_area, &mut self.list);
+        crate::ui::widgets::render_scrollbar(f, list_area, total_items, self.list.offset(), theme);
     }
 
     pub fn hints(&self) -> &'static [(&'static str, &'static str)] {

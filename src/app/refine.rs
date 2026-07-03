@@ -15,7 +15,7 @@ use crate::model::{AppEvent, PlanStep, PlanStepStatus, Project, RefineSubagentSt
 use crate::theme::{self, Theme};
 use crate::ui::input::{self, EditOpts, Edited};
 use crate::ui::mouse::{MouseGesture, MouseInput};
-use crate::ui::text::{col_width, truncate_cols};
+use crate::ui::text::truncate_cols;
 use crate::workspace::refine_session::SessionMeta;
 
 use super::Action;
@@ -1665,6 +1665,13 @@ impl RefineScreen {
             .scroll((scroll, 0))
             .style(Style::default().bg(theme.bg_panel));
         f.render_widget(para, inner);
+        crate::ui::widgets::render_panel_scrollbar(
+            f,
+            area,
+            total_lines as usize,
+            scroll as usize,
+            theme,
+        );
     }
 
     /// Working line while a turn runs; idle usage summary otherwise.
@@ -1928,21 +1935,7 @@ fn popup_window_start(row_count: usize, selected: usize, max_rows: usize) -> usi
 }
 
 fn wrapped_line_count(lines: &[Line<'_>], width: usize) -> u16 {
-    if width == 0 {
-        return 0;
-    }
-    let rows: usize = lines
-        .iter()
-        .map(|line| {
-            let cols: usize = line
-                .spans
-                .iter()
-                .map(|span| col_width(span.content.as_ref()))
-                .sum();
-            cols.div_ceil(width).max(1)
-        })
-        .sum();
-    rows.min(u16::MAX as usize) as u16
+    crate::ui::markdown::wrapped_rows(lines, width).min(u16::MAX as usize) as u16
 }
 
 /// Transcript notice for context compaction.

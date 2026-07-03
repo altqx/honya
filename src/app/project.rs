@@ -548,6 +548,8 @@ impl ProjectScreen {
 
         let list = List::new(items).style(Style::default().bg(theme.bg_panel));
         f.render_stateful_widget(list, inner, &mut self.tree);
+        // The stateful render just updated the offset to keep the selection visible.
+        crate::ui::widgets::render_panel_scrollbar(f, area, n, self.tree.offset(), theme);
     }
 
     fn render_side(&self, f: &mut Frame, area: Rect, active: &ActiveProject, theme: &Theme) {

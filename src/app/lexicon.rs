@@ -817,6 +817,7 @@ impl LexiconScreen {
             rows[1],
             &mut self.list,
         );
+        Self::scrollbar(f, rows[1], terms.len(), self.list.offset(), theme);
     }
 
     fn render_characters_table(
@@ -906,6 +907,7 @@ impl LexiconScreen {
             rows[1],
             &mut self.list,
         );
+        Self::scrollbar(f, rows[1], chars.len(), self.list.offset(), theme);
     }
 
     fn render_style(&mut self, f: &mut Frame, area: Rect, ws: &Workspace, theme: &Theme) {
@@ -924,7 +926,8 @@ impl LexiconScreen {
             .style_cache
             .lines(key, || crate::ui::markdown::render(&body, fg, theme, width))
             .to_vec();
-        let max_scroll = (lines.len() as u16).saturating_sub(area.height);
+        let total = lines.len();
+        let max_scroll = (total as u16).saturating_sub(area.height);
         self.style_scroll = self.style_scroll.min(max_scroll);
         f.render_widget(
             Paragraph::new(lines)
@@ -932,6 +935,25 @@ impl LexiconScreen {
                 .scroll((self.style_scroll, 0))
                 .style(Style::default().bg(theme.bg_panel)),
             area,
+        );
+        Self::scrollbar(f, area, total, self.style_scroll as usize, theme);
+    }
+
+    /// Scrollbar for a table/style region: the given `area` sits inside the
+    /// bordered table block, so widen the strip one column to land the bar on
+    /// the block's right border.
+    fn scrollbar(f: &mut Frame, area: Rect, total: usize, offset: usize, theme: &Theme) {
+        crate::ui::widgets::render_scrollbar(
+            f,
+            Rect {
+                x: area.x,
+                y: area.y,
+                width: area.width.saturating_add(1),
+                height: area.height,
+            },
+            total,
+            offset,
+            theme,
         );
     }
 

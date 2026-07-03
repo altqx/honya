@@ -78,6 +78,9 @@ pub fn render(md: &str, base: Color, theme: &Theme, width: usize) -> Vec<Line<'s
 pub struct RenderCache {
     key: Option<u64>,
     lines: Vec<Line<'static>>,
+    /// Memoized display-row count of `lines` as `(wrap, width, rows)`, for
+    /// scrollbar extents; reset whenever the lines are rebuilt.
+    rows: Option<(bool, usize, usize)>,
 }
 
 impl RenderCache {
@@ -90,9 +93,54 @@ impl RenderCache {
         if self.key != Some(key) {
             self.lines = build();
             self.key = Some(key);
+            self.rows = None;
         }
         &self.lines
     }
+
+    /// The lines the last [`Self::lines`] call cached.
+    pub fn cached(&self) -> &[Line<'static>] {
+        &self.lines
+    }
+
+    /// Display rows the cached lines occupy at `width` (post-wrap when `wrap`),
+    /// memoized alongside the lines so a static pane never re-measures per tick.
+    pub fn display_rows(&mut self, wrap: bool, width: usize) -> usize {
+        if let Some((w, wd, rows)) = self.rows
+            && w == wrap
+            && wd == width
+        {
+            return rows;
+        }
+        let rows = if wrap {
+            wrapped_rows(&self.lines, width)
+        } else {
+            self.lines.len()
+        };
+        self.rows = Some((wrap, width, rows));
+        rows
+    }
+}
+
+/// Total display rows `lines` occupy at `width` once soft-wrapped (the vertical
+/// extent a `Paragraph` with `Wrap` renders). Column-count estimate: word wrap
+/// may add the odd extra row on long unbroken runs, which is fine for the
+/// scrollbar extents this feeds.
+pub fn wrapped_rows(lines: &[Line<'_>], width: usize) -> usize {
+    if width == 0 {
+        return 0;
+    }
+    lines
+        .iter()
+        .map(|line| {
+            let cols: usize = line
+                .spans
+                .iter()
+                .map(|span| crate::ui::text::col_width(span.content.as_ref()))
+                .sum();
+            cols.div_ceil(width).max(1)
+        })
+        .sum()
 }
 
 /// A cheap fingerprint of the theme colors the Markdown renderer bakes into spans, so

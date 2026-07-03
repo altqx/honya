@@ -805,6 +805,19 @@ impl TranslateScreen {
             0
         };
         self.queue_offset = offset;
+        // Scrollbar along the pending window (the running head stays pinned).
+        crate::ui::widgets::render_scrollbar(
+            f,
+            Rect {
+                x: area.x,
+                y,
+                width: area.width,
+                height: avail as u16,
+            },
+            pend.len(),
+            offset,
+            theme,
+        );
         for (i, row) in pend.iter().enumerate().skip(offset).take(avail) {
             let selected = self.queue_focused && i == self.queue_sel;
             let line_area = Rect {
@@ -1271,6 +1284,13 @@ impl TranslateScreen {
             .scroll((scroll, 0))
             .style(Style::default().bg(theme.bg_panel));
         f.render_widget(para, inner);
+        crate::ui::widgets::render_panel_scrollbar(
+            f,
+            area,
+            total_lines as usize,
+            scroll as usize,
+            theme,
+        );
     }
 
     fn pipeline_status_title(

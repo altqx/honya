@@ -955,7 +955,7 @@ impl ReaderScreen {
             &self.ja_cache
         };
         let mut cache = cache.borrow_mut();
-        let lines = cache.lines(key, || {
+        cache.lines(key, || {
             // Hide the machine-only chunk / review markers from the TH pane (they
             // would otherwise show as literal `<!-- honya:chunk N -->` lines) while
             // preserving the line count, so note/bookmark/review anchors keep their
@@ -1004,8 +1004,10 @@ impl ReaderScreen {
             }
             lines
         });
+        let total_rows = cache.display_rows(self.wrap, inner.width as usize);
+        let lines = cache.cached().to_vec();
 
-        let mut para = Paragraph::new(lines.to_vec())
+        let mut para = Paragraph::new(lines)
             .scroll((scroll, 0))
             .style(Style::default().bg(theme.bg_panel));
         if self.wrap {
@@ -1016,6 +1018,7 @@ impl ReaderScreen {
             para = para.wrap(Wrap { trim: false });
         }
         f.render_widget(para, inner);
+        crate::ui::widgets::render_panel_scrollbar(f, area, total_rows, scroll as usize, theme);
     }
 
     /// Rerun diff: archived old Thai vs live new Thai.
@@ -1105,6 +1108,11 @@ impl ReaderScreen {
             })
             .collect();
 
+        let total_rows = if self.wrap {
+            crate::ui::markdown::wrapped_rows(&lines, inner.width as usize)
+        } else {
+            lines.len()
+        };
         let mut para = Paragraph::new(lines)
             .scroll((self.scroll, 0))
             .style(Style::default().bg(theme.bg_panel));
@@ -1112,6 +1120,13 @@ impl ReaderScreen {
             para = para.wrap(Wrap { trim: false });
         }
         f.render_widget(para, inner);
+        crate::ui::widgets::render_panel_scrollbar(
+            f,
+            area,
+            total_rows,
+            self.scroll as usize,
+            theme,
+        );
     }
 
     /// Returns the clickable "[d] exit diff" cell so `render_diff` can register it.
