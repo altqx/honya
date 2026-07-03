@@ -29,6 +29,7 @@ use crate::workspace::{Workspace, characters, glossary, style, translation, volu
 
 const READ_CAP: usize = 12_000;
 const CANCEL_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+const SUBAGENT_RATE_LIMIT_MAX_SLEEP_SECS: u64 = 60;
 
 pub fn refine_tools_schema() -> serde_json::Value {
     json!([
@@ -1051,6 +1052,48 @@ fn tool_batch_activity(calls: &[ToolCall], kind: ParallelToolBatch) -> String {
     }
 }
 
+fn subagent_rate_limit_wait(retry_after: u64) -> u64 {
+    retry_after.min(SUBAGENT_RATE_LIMIT_MAX_SLEEP_SECS)
+}
+
+async fn subagent_chat_resuming_after_rate_limit(
+    client: &dyn LlmClient,
+    req: &ChatRequest,
+    tx: &EventTx,
+    task_depth: usize,
+    parent_path: &str,
+    phase: &str,
+) -> crate::llm::client::Result<ChatResponse> {
+    let mut retry = 0u32;
+    loop {
+        match client.chat(req).await {
+            Ok(resp) => return Ok(resp),
+            Err(LlmError::RateLimited {
+                retry_after,
+                message,
+            }) => {
+                retry += 1;
+                let wait = subagent_rate_limit_wait(retry_after);
+                let msg = if message.trim().is_empty() {
+                    format!("rate limited while {phase}; retrying in {wait}s")
+                } else {
+                    format!(
+                        "rate limited while {phase}; retrying in {wait}s · {}",
+                        summarize_args(&message)
+                    )
+                };
+                emit_subagent_activity(tx, parent_path, task_depth, msg.clone());
+                tx.send(AppEvent::Log {
+                    level: LogLevel::Warn,
+                    msg: format!("Refine sub-agent {msg} (retry {retry})"),
+                });
+                tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 fn subagent_budget_summary(max_rounds: usize, tool_call_count: usize) -> String {
     format!(
         "Sub-agent reached the {max_rounds}-round tool budget after {tool_call_count} tool call(s). It stopped to avoid an infinite loop. Treat any edits already written to disk as applied, then continue with a smaller follow-up task if more work remains."
@@ -1280,7 +1323,15 @@ async fn run_compacting_tool_loop(
         maybe_compact(&mut req, tx, false);
 
         emit_subagent_activity(tx, parent_path, task_depth, "thinking".to_string());
-        let resp = client.chat(&req).await?;
+        let resp = subagent_chat_resuming_after_rate_limit(
+            client,
+            &req,
+            tx,
+            task_depth,
+            parent_path,
+            "thinking",
+        )
+        .await?;
         if let Some(u) = &resp.usage {
             usage.add(u);
         }
@@ -1371,7 +1422,15 @@ async fn run_compacting_tool_loop(
             task_depth,
             "preparing final report".to_string(),
         );
-        let resp = client.chat(&req).await?;
+        let resp = subagent_chat_resuming_after_rate_limit(
+            client,
+            &req,
+            tx,
+            task_depth,
+            parent_path,
+            "preparing final report",
+        )
+        .await?;
         if let Some(u) = &resp.usage {
             usage.add(u);
         }
@@ -3225,6 +3284,39 @@ mod tests {
         }
     }
 
+    struct RateLimitedAfterToolClient {
+        calls: AtomicUsize,
+        seen_lengths: Mutex<Vec<usize>>,
+    }
+
+    impl RateLimitedAfterToolClient {
+        fn new() -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+                seen_lengths: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn seen_lengths(&self) -> Vec<usize> {
+            self.seen_lengths.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl LlmClient for RateLimitedAfterToolClient {
+        async fn chat(&self, req: &ChatRequest) -> LlmResult<crate::llm::ChatResponse> {
+            self.seen_lengths.lock().unwrap().push(req.messages.len());
+            match self.calls.fetch_add(1, Ordering::Relaxed) {
+                0 => Ok(tool_call_turn("read_chapter", r#"{"ch":1}"#)),
+                1 => Err(LlmError::RateLimited {
+                    retry_after: 0,
+                    message: "usage limit reached".to_string(),
+                }),
+                _ => Ok(stop_turn("continued after retry")),
+            }
+        }
+    }
+
     fn empty_steering() -> Arc<Mutex<VecDeque<UserTurn>>> {
         Arc::new(Mutex::new(VecDeque::new()))
     }
@@ -3440,6 +3532,47 @@ mod tests {
             }
         }
         assert!(saw_budget_log, "budget finalization should be logged");
+    }
+
+    #[tokio::test]
+    async fn subagent_tool_loop_retries_rate_limit_without_losing_context() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let etx = EventTx(tx);
+        let client = RateLimitedAfterToolClient::new();
+        let mut req = ChatRequest::new(
+            "subagent-test",
+            vec![
+                Message::system(SUBAGENT_SYSTEM),
+                Message::user("audit the volume"),
+            ],
+        );
+        req.tools = Some(refine_tools_vec());
+        let executor = HugeExecutor {
+            payload: "ok".to_string(),
+        };
+
+        let outcome = run_compacting_tool_loop(&client, req, &executor, &etx, 8, 1, "call_1")
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.tool_calls, 1);
+        assert_eq!(
+            client.seen_lengths(),
+            vec![2, 4, 4],
+            "rate-limit retry must resend the same sub-agent context, including tool results"
+        );
+        let mut saw_rate_limit_activity = false;
+        while let Ok(ev) = rx.try_recv() {
+            if let AppEvent::RefineSubagentUpdated { summary, .. } = ev
+                && summary.contains("rate limited")
+            {
+                saw_rate_limit_activity = true;
+            }
+        }
+        assert!(
+            saw_rate_limit_activity,
+            "sub-agent panel reports the retry instead of showing a hard failure"
+        );
     }
 
     #[tokio::test]
