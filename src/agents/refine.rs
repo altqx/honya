@@ -984,6 +984,24 @@ fn emit_subagent_activity(tx: &EventTx, parent_path: &str, task_depth: usize, ac
     });
 }
 
+fn emit_subagent_terminal(
+    tx: &EventTx,
+    event_id: &str,
+    task_depth: usize,
+    status: RefineSubagentStatus,
+    summary: String,
+) {
+    if event_id.is_empty() {
+        return;
+    }
+    tx.send(AppEvent::RefineSubagentUpdated {
+        id: event_id.to_string(),
+        depth: task_depth.saturating_sub(1),
+        status,
+        summary,
+    });
+}
+
 fn tool_call_failure_payload(call: &ToolCall, e: anyhow::Error) -> String {
     json!({
         "ok": false,
@@ -1476,18 +1494,23 @@ async fn run_compacting_tool_loop(
         let tool_calls: Vec<ToolCall> = choice.message.tool_calls.clone().unwrap_or_default();
 
         if tool_calls.is_empty() {
-            emit_subagent_activity(
-                tx,
-                parent_path,
-                task_depth,
-                "writing final report".to_string(),
-            );
-            finish_subagent_checkpoint(&mut checkpoint, tx);
-            return Ok(ToolLoopOutcome {
-                response: resp,
-                usage,
-                tool_calls: tool_call_count,
-            });
+            if choice
+                .message
+                .content
+                .as_deref()
+                .is_some_and(|c| !c.trim().is_empty())
+            {
+                finish_subagent_checkpoint(&mut checkpoint, tx);
+                return Ok(ToolLoopOutcome {
+                    response: resp,
+                    usage,
+                    tool_calls: tool_call_count,
+                });
+            }
+            req.messages.push(Message::user(
+                "Return a concise final report without using tools.",
+            ));
+            continue;
         }
         tool_call_count += tool_calls.len();
 
@@ -3185,12 +3208,13 @@ impl RefineTools {
         checkpoint: SubagentCheckpointState,
     ) -> ToolResult {
         let checkpoint_id = checkpoint.id().to_string();
+        let task_depth = self.depth + 1;
         match run_compacting_tool_loop(
             client.as_ref(),
             req,
             &self.child(event_id.clone()),
             &self.tx,
-            SubagentLoopOptions::new(SUBAGENT_MAX_TOOL_ROUNDS, self.depth + 1, &event_id)
+            SubagentLoopOptions::new(SUBAGENT_MAX_TOOL_ROUNDS, task_depth, &event_id)
                 .initial_tool_call_count(initial_tool_call_count)
                 .checkpoint(checkpoint),
         )
@@ -3203,14 +3227,38 @@ impl RefineTools {
                     .first()
                     .and_then(|c| c.message.content.clone())
                     .unwrap_or_default();
-                ToolResult::ok(format!(
+                let result = ToolResult::ok(format!(
                     "sub-agent finished ({} tool call(s)):\n{report}",
                     outcome.tool_calls
-                ))
+                ));
+                let summary = serde_json::to_string(&result)
+                    .map(|json| tool_result_first_line(&json))
+                    .unwrap_or_else(|_| "(no summary returned)".to_string());
+                emit_subagent_terminal(
+                    &self.tx,
+                    &event_id,
+                    task_depth,
+                    RefineSubagentStatus::Succeeded,
+                    summary,
+                );
+                result
             }
-            Err(e) => ToolResult::err(format!(
-                "sub-agent interrupted; checkpoint `{checkpoint_id}` kept for resume: {e}"
-            )),
+            Err(e) => {
+                let result = ToolResult::err(format!(
+                    "sub-agent interrupted; checkpoint `{checkpoint_id}` kept for resume: {e}"
+                ));
+                let summary = serde_json::to_string(&result)
+                    .map(|json| tool_result_first_line(&json))
+                    .unwrap_or_else(|_| "sub-agent failed".to_string());
+                emit_subagent_terminal(
+                    &self.tx,
+                    &event_id,
+                    task_depth,
+                    RefineSubagentStatus::Failed,
+                    summary,
+                );
+                result
+            }
         }
     }
 }
@@ -3845,6 +3893,198 @@ mod tests {
             }
         }
         assert!(saw_budget_log, "budget finalization should be logged");
+    }
+
+    #[tokio::test]
+    async fn subagent_loop_emits_terminal_status_on_completion() {
+        let root = temp_root("terminalstatus");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let etx = EventTx(tx);
+        let client = Arc::new(ScriptedClient {
+            responses: Mutex::new(VecDeque::from(vec![stop_turn("all done")])),
+        });
+        let tools = RefineTools::with_agent(
+            root.clone(),
+            1,
+            etx,
+            client,
+            crate::model::AgentModel::openrouter("subagent-test"),
+            RefineInteract::default(),
+        );
+
+        let out = tools
+            .execute_call(&ToolCall {
+                id: "call_1".to_string(),
+                kind: "function".to_string(),
+                function: FunctionCall {
+                    name: "task".to_string(),
+                    arguments: r#"{"description":"quick audit"}"#.to_string(),
+                },
+            })
+            .await
+            .unwrap();
+        let result: ToolResult = serde_json::from_str(&out).unwrap();
+        assert!(result.ok, "{result:?}");
+
+        let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|ev| match ev {
+                AppEvent::RefineSubagentUpdated { id, status, .. } => Some((id, status)),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            events
+                .iter()
+                .any(|(id, status)| id == "call_1" && *status == RefineSubagentStatus::Succeeded),
+            "sub-agent should report Succeeded when its loop finishes: {events:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn subagent_tool_loop_retries_empty_final_report() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let etx = EventTx(tx);
+        let client = ScriptedClient {
+            responses: Mutex::new(VecDeque::from(vec![
+                stop_turn(""),
+                stop_turn("completed the audit"),
+            ])),
+        };
+        let mut req = ChatRequest::new(
+            "subagent-test",
+            vec![
+                Message::system(SUBAGENT_SYSTEM),
+                Message::user("audit the volume"),
+            ],
+        );
+        req.tools = Some(refine_tools_vec());
+        let executor = HugeExecutor {
+            payload: "ok".to_string(),
+        };
+
+        let outcome = run_compacting_tool_loop(
+            &client,
+            req,
+            &executor,
+            &etx,
+            SubagentLoopOptions::new(8, 0, ""),
+        )
+        .await
+        .unwrap();
+
+        let report = outcome.response.choices[0]
+            .message
+            .content
+            .as_deref()
+            .unwrap_or_default();
+        assert!(report.contains("completed the audit"));
+    }
+
+    #[tokio::test]
+    async fn parallel_subagents_mark_done_without_waiting_for_siblings() {
+        let _env = REFINE_PARALLELISM_ENV_LOCK.lock().await;
+        unsafe {
+            std::env::set_var("HONYA_REFINE_PARALLELISM", "2");
+        }
+
+        struct TaskScriptedClient {
+            slow_rounds: AtomicUsize,
+        }
+
+        fn task_text(req: &ChatRequest) -> &str {
+            req.messages
+                .iter()
+                .filter(|m| m.role == Role::User)
+                .filter_map(|m| m.content.as_deref())
+                .last()
+                .unwrap_or("")
+        }
+
+        #[async_trait]
+        impl LlmClient for TaskScriptedClient {
+            async fn chat(&self, req: &ChatRequest) -> LlmResult<crate::llm::ChatResponse> {
+                let task = task_text(req);
+                if task.contains("fast audit") {
+                    return Ok(stop_turn("fast done"));
+                }
+                if task.contains("slow audit") {
+                    match self.slow_rounds.fetch_add(1, Ordering::Relaxed) {
+                        0 => Ok(tool_call_turn("read_chapter", r#"{"ch":1}"#)),
+                        _ => Ok(stop_turn("slow done")),
+                    }
+                } else {
+                    panic!("unexpected sub-agent task: {task}");
+                }
+            }
+        }
+
+        let root = temp_root("parallelsubagents");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let etx = EventTx(tx);
+        let client = Arc::new(TaskScriptedClient {
+            slow_rounds: AtomicUsize::new(0),
+        });
+        let tools = RefineTools::with_agent(
+            root.clone(),
+            1,
+            etx,
+            client,
+            crate::model::AgentModel::openrouter("subagent-test"),
+            RefineInteract::default(),
+        );
+        let calls = [
+            ToolCall {
+                id: "call_1".to_string(),
+                kind: "function".to_string(),
+                function: FunctionCall {
+                    name: "task".to_string(),
+                    arguments: r#"{"description":"fast audit"}"#.to_string(),
+                },
+            },
+            ToolCall {
+                id: "call_2".to_string(),
+                kind: "function".to_string(),
+                function: FunctionCall {
+                    name: "task".to_string(),
+                    arguments: r#"{"description":"slow audit"}"#.to_string(),
+                },
+            },
+        ];
+
+        execute_tool_calls_parallel(&tools, &calls).await;
+
+        let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|ev| match ev {
+                AppEvent::RefineSubagentUpdated {
+                    id,
+                    status,
+                    summary,
+                    ..
+                } => Some((id, status, summary)),
+                _ => None,
+            })
+            .collect();
+        let call_1_done = events.iter().position(|(id, status, _)| {
+            id == "call_1" && *status == RefineSubagentStatus::Succeeded
+        });
+        let call_2_done = events.iter().position(|(id, status, _)| {
+            id == "call_2" && *status == RefineSubagentStatus::Succeeded
+        });
+        assert!(
+            call_1_done.is_some() && call_2_done.is_some(),
+            "both sub-agents should finish: {events:?}"
+        );
+        assert!(
+            call_1_done.unwrap() < call_2_done.unwrap(),
+            "the fast sub-agent should report done before its slower sibling: {events:?}"
+        );
+
+        unsafe {
+            std::env::remove_var("HONYA_REFINE_PARALLELISM");
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[tokio::test]
