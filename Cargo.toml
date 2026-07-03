@@ -34,7 +34,7 @@ reqwest = { version = "0.13", default-features = false, features = [
 ] } # NOTE: feature is "rustls", NOT "rustls-tls"
 futures = "0.3" # FutureExt::fuse, StreamExt::next for select!
 async-trait = "0.1" # dyn-compatible async LlmClient / ToolExecutor traits
-tokio-tungstenite = { version = "0.24", default-features = false, features = [
+tokio-tungstenite = { version = "0.29", default-features = false, features = [
   "connect",
   "rustls-tls-webpki-roots",
 ] } # WebSocket client for the remote-control relay. NOTE: webpki-roots variant to
@@ -57,7 +57,7 @@ scraper = "0.27" # html5ever 0.39 XHTML->markdown walk
 ego-tree = "0.11" # MUST be direct: scraper does not re-export it; needed for NodeRef recursion
 
 # --- document import / text processing ---
-pdf-extract = "0.10" # MarkItDown's pure-Rust PDF text extractor
+pdf-extract = "0.12" # MarkItDown's pure-Rust PDF text extractor
 htmd = "0.5"         # MarkItDown-style HTML -> Markdown for non-EPUB HTML imports
 csv = "1.4"          # Text-based MarkItDown import format
 chardetng = "1"
