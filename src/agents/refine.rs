@@ -16,7 +16,10 @@ use tokio::sync::oneshot;
 use crate::app::refine::{MentionTarget, parse_scope};
 use crate::llm::client::LlmClient;
 use crate::llm::tool_loop::{ToolExecutor, ToolLoopOutcome};
-use crate::llm::{ChatRequest, LlmError, Message, Role, Tool, ToolCall, Usage};
+use crate::llm::{
+    ChatRequest, ChatResponse, Choice, LlmError, Message, ResponseMessage, Role, Tool, ToolCall,
+    Usage,
+};
 use crate::model::{
     AppEvent, Character, ContinuityNote, EventTx, GlossaryTerm, LogLevel, PlanStep, RefineRequest,
     RefineSubagentStatus, Relationship, StyleExample, TermPolicy, ToolResult,
@@ -294,6 +297,8 @@ pub fn refine_tools_schema() -> serde_json::Value {
 }
 
 const MAX_TOOL_ROUNDS: usize = 40;
+const SUBAGENT_MAX_TOOL_ROUNDS: usize = 120;
+const SUBAGENT_FINALIZE_ROUNDS: usize = 3;
 const MAX_SUBAGENT_DEPTH: usize = 3;
 const COMPACT_FRACTION: f64 = 0.8;
 const KEEP_RECENT_TURNS: usize = 3;
@@ -873,6 +878,30 @@ fn send_subagent_update(
     });
 }
 
+fn subagent_budget_summary(max_rounds: usize, tool_call_count: usize) -> String {
+    format!(
+        "Sub-agent reached the {max_rounds}-round tool budget after {tool_call_count} tool call(s). It stopped to avoid an infinite loop. Treat any edits already written to disk as applied, then continue with a smaller follow-up task if more work remains."
+    )
+}
+
+fn synthetic_subagent_budget_response(max_rounds: usize, tool_call_count: usize) -> ChatResponse {
+    ChatResponse {
+        id: None,
+        model: None,
+        service_tier: None,
+        usage: None,
+        choices: vec![Choice {
+            index: 0,
+            finish_reason: Some("tool_budget".to_string()),
+            message: ResponseMessage {
+                role: Some("assistant".to_string()),
+                content: Some(subagent_budget_summary(max_rounds, tool_call_count)),
+                tool_calls: None,
+            },
+        }],
+    }
+}
+
 /// Streams one user turn and executes tool calls until the model stops.
 async fn run_refine_turn(
     client: &dyn LlmClient,
@@ -1113,9 +1142,75 @@ async fn run_compacting_tool_loop(
         }
     }
 
-    Err(LlmError::Api {
-        status: 0,
-        message: format!("tool loop exceeded {max_rounds} rounds without finishing"),
+    tx.send(AppEvent::Log {
+        level: LogLevel::Warn,
+        msg: format!("Refine sub-agent reached {max_rounds} tool rounds; requesting final report"),
+    });
+    req.tools = None;
+    req.tool_choice = None;
+    req.messages.push(Message::user(format!(
+        "You have reached the {max_rounds}-round tool budget for this delegated task. Do not call any more tools. Return a concise final report now: what you completed, what files or chapters you changed, and what remains incomplete."
+    )));
+
+    for _ in 0..SUBAGENT_FINALIZE_ROUNDS {
+        maybe_compact(&mut req, tx, false);
+
+        let resp = client.chat(&req).await?;
+        if let Some(u) = &resp.usage {
+            usage.add(u);
+        }
+
+        let choice = resp.choices.first().ok_or(LlmError::EmptyChoices)?;
+        let tool_calls: Vec<ToolCall> = choice.message.tool_calls.clone().unwrap_or_default();
+
+        if tool_calls.is_empty() {
+            if choice
+                .message
+                .content
+                .as_deref()
+                .is_some_and(|c| !c.trim().is_empty())
+            {
+                return Ok(ToolLoopOutcome {
+                    response: resp,
+                    usage,
+                    tool_calls: tool_call_count,
+                });
+            }
+            req.messages.push(Message::user(
+                "Return a non-empty final report without using tools.",
+            ));
+            continue;
+        }
+
+        req.messages.push(Message {
+            role: Role::Assistant,
+            content: choice.message.content.clone(),
+            tool_calls: Some(tool_calls.clone()),
+            tool_call_id: None,
+            name: None,
+        });
+        for call in &tool_calls {
+            req.messages.push(Message::tool_result(
+                call.id.clone(),
+                json!({
+                    "ok": false,
+                    "message": format!(
+                        "tool '{}' was not run because the sub-agent reached its tool-round budget; provide a final report instead",
+                        call.function.name
+                    )
+                })
+                .to_string(),
+            ));
+        }
+        req.messages.push(Message::user(
+            "Stop using tools. Return the final report in plain text now.",
+        ));
+    }
+
+    Ok(ToolLoopOutcome {
+        response: synthetic_subagent_budget_response(max_rounds, tool_call_count),
+        usage,
+        tool_calls: tool_call_count,
     })
 }
 
@@ -2553,7 +2648,7 @@ impl RefineTools {
             req,
             &self.child(event_id.clone()),
             &self.tx,
-            30,
+            SUBAGENT_MAX_TOOL_ROUNDS,
             self.depth + 1,
             &event_id,
         )
@@ -2972,6 +3067,52 @@ mod tests {
             saw_compaction,
             "sub-agent loop compacts growing tool history"
         );
+    }
+
+    #[tokio::test]
+    async fn subagent_tool_loop_finalizes_when_tool_budget_is_reached() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let etx = EventTx(tx);
+        let client = ScriptedClient {
+            responses: Mutex::new(VecDeque::from(vec![
+                tool_call_turn("read_chapter", r#"{"ch":1}"#),
+                tool_call_turn("read_chapter", r#"{"ch":1,"offset":400}"#),
+                stop_turn("completed the inspected edits; remaining work should be split"),
+            ])),
+        };
+        let mut req = ChatRequest::new(
+            "subagent-test",
+            vec![
+                Message::system(SUBAGENT_SYSTEM),
+                Message::user("fix a long review-needed chapter"),
+            ],
+        );
+        req.tools = Some(refine_tools_vec());
+        let executor = HugeExecutor {
+            payload: "ok".to_string(),
+        };
+
+        let outcome = run_compacting_tool_loop(&client, req, &executor, &etx, 2, 0, "")
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.tool_calls, 2);
+        let report = outcome.response.choices[0]
+            .message
+            .content
+            .as_deref()
+            .unwrap_or_default();
+        assert!(report.contains("completed the inspected edits"));
+        let mut saw_budget_log = false;
+        while let Ok(ev) = rx.try_recv() {
+            if let AppEvent::Log { level, msg } = ev
+                && level == LogLevel::Warn
+                && msg.contains("reached 2 tool rounds")
+            {
+                saw_budget_log = true;
+            }
+        }
+        assert!(saw_budget_log, "budget finalization should be logged");
     }
 
     #[tokio::test]
