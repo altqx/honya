@@ -450,7 +450,7 @@ impl ProjectScreen {
 
         let cols = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Min(24), Constraint::Min(28)])
+            .constraints([Constraint::Fill(1), Constraint::Max(36)])
             .split(panes[1]);
 
         self.side_area = cols[1];
@@ -587,14 +587,61 @@ impl ProjectScreen {
         crate::ui::widgets::render_panel_scrollbar(f, area, n, self.tree.offset(), theme);
     }
 
+    /// Context + detail card heights: sized to their content, not the full column.
+    fn side_layout_heights(&self, active: &ActiveProject, area_h: u16) -> (u16, u16) {
+        const CONTEXT_H: u16 = 7; // 5 rows + border
+        let detail_body = if self
+            .selected_chapter(active)
+            .and_then(|n| find_chapter(active, n))
+            .is_some()
+        {
+            let mut n = 3u16; // status · chunks · source
+            if !self.selected.is_empty() {
+                n += 1;
+            }
+            n + 6 // blank · 3 usage · blank · 2 actions
+        } else {
+            4 // usage · blank · 2 prompts
+        };
+        let detail_h = detail_body + 2;
+        if CONTEXT_H + detail_h >= area_h {
+            (
+                CONTEXT_H.min(area_h),
+                area_h.saturating_sub(CONTEXT_H).max(4),
+            )
+        } else {
+            (CONTEXT_H, detail_h)
+        }
+    }
+
     fn render_side(&self, f: &mut Frame, area: Rect, active: &ActiveProject, theme: &Theme) {
+        let (context_h, detail_h) = self.side_layout_heights(active, area.height);
+        let gap = area.height.saturating_sub(context_h + detail_h);
+        let constraints = if gap > 0 {
+            vec![
+                Constraint::Length(context_h),
+                Constraint::Length(detail_h),
+                Constraint::Length(gap),
+            ]
+        } else {
+            vec![
+                Constraint::Length(context_h),
+                Constraint::Length(detail_h),
+            ]
+        };
         let rows = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(7), Constraint::Min(0)])
+            .constraints(constraints)
             .split(area);
 
         self.render_context(f, rows[0], active, theme);
         self.render_detail(f, rows[1], active, theme);
+        if gap > 0 {
+            f.render_widget(
+                Paragraph::new("").style(Style::default().bg(theme.bg)),
+                rows[2],
+            );
+        }
     }
 
     fn render_context(&self, f: &mut Frame, area: Rect, active: &ActiveProject, theme: &Theme) {
