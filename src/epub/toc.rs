@@ -5,14 +5,11 @@ use roxmltree::Node;
 
 use super::opf::element_text;
 use super::paths::{dir_of, resolve_href, split_fragment};
-use super::{EpubError, Result, TocEntry, ns};
+use super::{Result, TocEntry, ns, parse_xml_document};
 
 /// Parse an EPUB2 NCX; `ncx_path` resolves `content/@src` against the NCX's dir.
 pub fn parse_ncx(ncx_xml: &str, ncx_path: &str) -> Result<Vec<TocEntry>> {
-    let doc = roxmltree::Document::parse(ncx_xml).map_err(|e| EpubError::Xml {
-        context: ncx_path.to_string(),
-        source: e,
-    })?;
+    let doc = parse_xml_document(ncx_xml, ncx_path)?;
     let base_dir = dir_of(ncx_path);
 
     let mut out: Vec<TocEntry> = Vec::new();
@@ -71,10 +68,7 @@ fn walk_navpoint(np: &Node, base_dir: &str, depth: usize, out: &mut Vec<TocEntry
 /// Parse an EPUB3 nav document (`nav_path` resolves `a/@href`). Prefers
 /// `<nav epub:type="toc">`, else the first `<nav>` containing a list.
 pub fn parse_nav_xhtml(nav_xml: &str, nav_path: &str) -> Result<Vec<TocEntry>> {
-    let doc = roxmltree::Document::parse(nav_xml).map_err(|e| EpubError::Xml {
-        context: nav_path.to_string(),
-        source: e,
-    })?;
+    let doc = parse_xml_document(nav_xml, nav_path)?;
     let base_dir = dir_of(nav_path);
 
     let navs: Vec<Node> = doc
@@ -222,5 +216,31 @@ mod tests {
         assert_eq!(t[1].fragment.as_deref(), Some("s1"));
         assert_eq!(t[2].title, "Chapter 2");
         assert_eq!(t[2].depth, 0);
+    }
+
+    const KADOKAWA_NAV: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
+<body>
+<nav epub:type="toc" id="toc">
+<h1>Contents</h1>
+<ol>
+<li><a href="xhtml/p-002.xhtml#toc-001">Introduction　Still Raining</a></li>
+<li><a href="xhtml/p-003.xhtml#toc-002">１　雨が降る放課後、ふたりと山田</a></li>
+</ol>
+</nav>
+</body>
+</html>"#;
+
+    #[test]
+    fn nav_with_doctype_parses_kadokawa_toc() {
+        let t = parse_nav_xhtml(KADOKAWA_NAV, "item/navigation-documents.xhtml").unwrap();
+        assert_eq!(t.len(), 2);
+        assert!(t[0].title.contains("Introduction"));
+        assert!(t[0].title.contains("Still Raining"));
+        assert_eq!(t[0].content_path, "item/xhtml/p-002.xhtml");
+        assert!(t[1].title.contains("雨が降る"));
+        assert_eq!(t[1].content_path, "item/xhtml/p-003.xhtml");
+        assert_eq!(t[1].fragment.as_deref(), Some("toc-002"));
     }
 }

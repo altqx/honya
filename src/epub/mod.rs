@@ -64,6 +64,19 @@ pub enum EpubError {
 /// in this module must qualify as `std::result::Result`.
 pub type Result<T> = std::result::Result<T, EpubError>;
 
+/// Parse publisher XHTML/NCX/OPF XML. Kadokawa (and others) ship `<!DOCTYPE …>`
+/// in nav documents; roxmltree rejects those unless `allow_dtd` is set.
+pub(crate) fn parse_xml_document<'a>(xml: &'a str, context: &str) -> Result<roxmltree::Document<'a>> {
+    let opt = roxmltree::ParsingOptions {
+        allow_dtd: true,
+        ..Default::default()
+    };
+    roxmltree::Document::parse_with_options(xml, opt).map_err(|source| EpubError::Xml {
+        context: context.to_string(),
+        source,
+    })
+}
+
 /// A single `<item>` from the OPF `<manifest>`.
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // full OPF record; callers use resolved_path / media_type helpers

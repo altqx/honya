@@ -91,6 +91,54 @@ pub fn leading_image_title(html: &str) -> Option<String> {
     }
 }
 
+/// Kadokawa/MF-style chapter heads: `<p id="toc-…" class="bold mfont …">Title</p>`.
+pub fn leading_prose_title(html: &str) -> Option<String> {
+    static SELECTOR: OnceLock<scraper::Selector> = OnceLock::new();
+    let selector = SELECTOR.get_or_init(|| {
+        scraper::Selector::parse("p[id^=\"toc-\"], p.bold.mfont, p.mfont.bold")
+            .expect("static selector")
+    });
+    let doc = Html::parse_fragment(html);
+    let p = doc.select(selector).next()?;
+    let mut raw = String::new();
+    collect_title_text(*p, &mut raw);
+    let title = sanitize_external_chars(&raw)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    (!title.is_empty()).then_some(title)
+}
+
+fn collect_title_text(node: NodeRef<'_, Node>, out: &mut String) {
+    match node.value() {
+        Node::Text(text) => out.push_str(text),
+        Node::Element(el) => match el.name() {
+            "rt" | "rp" => {}
+            "ruby" => {
+                for child in node.children() {
+                    match child.value() {
+                        Node::Text(text) => out.push_str(text),
+                        Node::Element(el) if el.name() != "rt" && el.name() != "rp" => {
+                            collect_title_text(child, out);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {
+                for child in node.children() {
+                    collect_title_text(child, out);
+                }
+            }
+        },
+        _ => {
+            for child in node.children() {
+                collect_title_text(child, out);
+            }
+        }
+    }
+}
+
 /// Apply honya's quote, external-glyph, and whitespace cleanup to Markdown that
 /// came from another converter such as MarkItDown.
 pub fn clean_markdown(markdown: &str) -> String {
@@ -820,6 +868,15 @@ mod tests {
         assert_eq!(
             md("あ\u{E000}<img src=\"i.png\" alt=\"挿絵の説明\"/>"),
             "あ![ภาพประกอบ](../../images/i.png)"
+        );
+    }
+
+    #[test]
+    fn leading_prose_title_from_kadokawa_chapter_head() {
+        let html = r#"<p class="bold mfont font-110per" id="toc-002">１　雨が降る放課後、ふたりと<ruby>山<rt>やま</rt>田<rt>だ</rt></ruby></p>"#;
+        assert_eq!(
+            leading_prose_title(html).as_deref(),
+            Some("１ 雨が降る放課後、ふたりと山田")
         );
     }
 }
