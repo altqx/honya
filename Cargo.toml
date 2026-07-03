@@ -14,7 +14,7 @@ exclude = ["web/", "CLAUDE.md", "AGENTS.md", ".github/", ".remember/"]
 
 [dependencies]
 # --- TUI (single crossterm 0.29.0 in tree, verified via `cargo tree -i crossterm`) ---
-ratatui = "0.30.1" # 0.30.0; re-exports crossterm via ratatui-crossterm 0.1
+ratatui = "0.30.2" # 0.30.0; re-exports crossterm via ratatui-crossterm 0.1
 crossterm = { version = "0.29.0", features = [
   "event-stream",
 ] } # added directly ONLY for EventStream; unifies with ratatui's copy
