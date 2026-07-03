@@ -274,6 +274,7 @@ struct SubagentRun {
     depth: usize,
     title: String,
     status: RefineSubagentStatus,
+    activity: String,
     summary: String,
 }
 
@@ -932,25 +933,31 @@ impl RefineScreen {
     ) {
         if let Some(run) = self.subagents.iter_mut().find(|run| run.id == id) {
             run.depth = depth;
-            run.status = status;
             if status == RefineSubagentStatus::Running {
-                run.title = summary.to_string();
+                if run.status == RefineSubagentStatus::Running {
+                    run.activity = summary.to_string();
+                } else {
+                    run.title = summary.to_string();
+                    run.activity = "starting".to_string();
+                }
             } else {
                 run.summary = summary.to_string();
             }
+            run.status = status;
             return;
         }
 
-        let (title, run_summary) = if status == RefineSubagentStatus::Running {
-            (summary.to_string(), String::new())
+        let (title, activity, run_summary) = if status == RefineSubagentStatus::Running {
+            (summary.to_string(), "starting".to_string(), String::new())
         } else {
-            ("sub-agent".to_string(), summary.to_string())
+            ("sub-agent".to_string(), String::new(), summary.to_string())
         };
         self.subagents.push(SubagentRun {
             id: id.to_string(),
             depth,
             title,
             status,
+            activity,
             summary: run_summary,
         });
     }
@@ -1341,7 +1348,14 @@ impl RefineScreen {
                         ("×", "canceled", Style::default().fg(theme.ink_faint))
                     }
                 };
-                let detail = if run.summary.trim().is_empty() {
+                let detail = if run.status == RefineSubagentStatus::Running {
+                    let activity = run.activity.trim();
+                    if activity.is_empty() {
+                        status.to_string()
+                    } else {
+                        format!("{status} · {activity}")
+                    }
+                } else if run.summary.trim().is_empty() {
                     status.to_string()
                 } else {
                     format!("{status} · {}", run.summary.trim())
@@ -2198,6 +2212,18 @@ mod tests {
         assert_eq!(s.subagents[0].depth, 1);
         assert_eq!(s.subagents[0].title, "audit volume 2");
         assert_eq!(s.subagents[0].status, RefineSubagentStatus::Running);
+        assert_eq!(s.subagents[0].activity, "starting");
+
+        s.on_app_event(&AppEvent::RefineSubagentUpdated {
+            id: "call_1".to_string(),
+            depth: 1,
+            status: RefineSubagentStatus::Running,
+            summary: "reading chapter · {\"ch\":2}".to_string(),
+        });
+
+        assert_eq!(s.subagents[0].title, "audit volume 2");
+        assert_eq!(s.subagents[0].status, RefineSubagentStatus::Running);
+        assert!(s.subagents[0].activity.contains("reading chapter"));
 
         s.on_app_event(&AppEvent::RefineSubagentUpdated {
             id: "call_1".to_string(),

@@ -959,6 +959,18 @@ fn emit_tool_call_finished(
     }
 }
 
+fn emit_subagent_activity(tx: &EventTx, parent_path: &str, task_depth: usize, activity: String) {
+    if parent_path.is_empty() {
+        return;
+    }
+    tx.send(AppEvent::RefineSubagentUpdated {
+        id: parent_path.to_string(),
+        depth: task_depth.saturating_sub(1),
+        status: RefineSubagentStatus::Running,
+        summary: activity,
+    });
+}
+
 fn tool_call_failure_payload(call: &ToolCall, e: anyhow::Error) -> String {
     json!({
         "ok": false,
@@ -987,6 +999,56 @@ async fn execute_tool_calls_parallel(
         .buffered(limit)
         .collect()
         .await
+}
+
+fn tool_activity(call: &ToolCall) -> String {
+    let action = match call.function.name.as_str() {
+        "list_volumes" => "listing volumes",
+        "list_chapters" => "listing chapters",
+        "read_chapter" => "reading chapter",
+        "grep_chapter" => "searching chapter",
+        "read_meta" => "reading metadata",
+        "list_flagged_chunks" => "checking review-needed chunks",
+        "update_plan" => "updating plan",
+        "read_lexicon" => "reading lexicon",
+        "search_project" => "searching project",
+        "upsert_character" => "updating character roster",
+        "merge_character" => "merging characters",
+        "remove_character" => "removing character",
+        "upsert_glossary_term" => "updating glossary",
+        "remove_glossary_term" => "removing glossary term",
+        "set_recap" => "updating recap",
+        "set_chapter_summary" => "updating chapter summary",
+        "set_synopsis" => "updating synopsis",
+        "append_style_note" => "updating style notes",
+        "add_style_example" => "adding style example",
+        "add_continuity_note" => "adding continuity note",
+        "replace_chapter_text" => "rewriting chapter",
+        "edit_chapter" => "editing chapter",
+        "multi_edit_chapter" => "editing chapter",
+        "replace_across_project" => "replacing across project",
+        "retranslate_chapter" => "queueing retranslation",
+        "refine_chapter_with_feedback" => "queueing focused retranslation",
+        "task" => "waiting on nested sub-agent",
+        "ask_user" => "waiting for user",
+        other => other,
+    };
+    let detail = summarize_args(&call.function.arguments);
+    if detail.is_empty() || detail == "{}" {
+        action.to_string()
+    } else {
+        format!("{action} · {detail}")
+    }
+}
+
+fn tool_batch_activity(calls: &[ToolCall], kind: ParallelToolBatch) -> String {
+    if calls.len() == 1 {
+        return tool_activity(&calls[0]);
+    }
+    match kind {
+        ParallelToolBatch::ReadOnly => format!("running {} read-only tools", calls.len()),
+        ParallelToolBatch::Task => format!("waiting on {} nested sub-agents", calls.len()),
+    }
 }
 
 fn subagent_budget_summary(max_rounds: usize, tool_call_count: usize) -> String {
@@ -1217,6 +1279,7 @@ async fn run_compacting_tool_loop(
     for _round in 0..max_rounds {
         maybe_compact(&mut req, tx, false);
 
+        emit_subagent_activity(tx, parent_path, task_depth, "thinking".to_string());
         let resp = client.chat(&req).await?;
         if let Some(u) = &resp.usage {
             usage.add(u);
@@ -1226,6 +1289,12 @@ async fn run_compacting_tool_loop(
         let tool_calls: Vec<ToolCall> = choice.message.tool_calls.clone().unwrap_or_default();
 
         if tool_calls.is_empty() {
+            emit_subagent_activity(
+                tx,
+                parent_path,
+                task_depth,
+                "writing final report".to_string(),
+            );
             return Ok(ToolLoopOutcome {
                 response: resp,
                 usage,
@@ -1252,6 +1321,12 @@ async fn run_compacting_tool_loop(
                     end += 1;
                 }
 
+                emit_subagent_activity(
+                    tx,
+                    parent_path,
+                    task_depth,
+                    tool_batch_activity(&tool_calls[start..end], kind),
+                );
                 for call in &tool_calls[start..end] {
                     emit_tool_call_started(tx, parent_path, call, task_depth);
                 }
@@ -1267,6 +1342,7 @@ async fn run_compacting_tool_loop(
             }
 
             let call = &tool_calls[idx];
+            emit_subagent_activity(tx, parent_path, task_depth, tool_activity(call));
             emit_tool_call_started(tx, parent_path, call, task_depth);
             let result = execute_tool_call_result(executor, call).await;
             emit_tool_call_finished(tx, parent_path, call, task_depth, &result);
@@ -1289,6 +1365,12 @@ async fn run_compacting_tool_loop(
     for _ in 0..SUBAGENT_FINALIZE_ROUNDS {
         maybe_compact(&mut req, tx, false);
 
+        emit_subagent_activity(
+            tx,
+            parent_path,
+            task_depth,
+            "preparing final report".to_string(),
+        );
         let resp = client.chat(&req).await?;
         if let Some(u) = &resp.usage {
             usage.add(u);
@@ -3637,11 +3719,15 @@ mod tests {
 
         let mut saw_done = false;
         let mut subagent_statuses = Vec::new();
+        let mut subagent_summaries = Vec::new();
         while let Ok(ev) = rx.try_recv() {
             match ev {
                 AppEvent::RefineMessageDone => saw_done = true,
-                AppEvent::RefineSubagentUpdated { status, .. } => {
+                AppEvent::RefineSubagentUpdated {
+                    status, summary, ..
+                } => {
                     subagent_statuses.push(status);
+                    subagent_summaries.push(summary);
                 }
                 _ => {}
             }
@@ -3651,9 +3737,14 @@ mod tests {
             subagent_statuses,
             vec![
                 RefineSubagentStatus::Running,
+                RefineSubagentStatus::Running,
                 RefineSubagentStatus::Canceled
             ],
-            "UI sees sub-agent start and cancellation"
+            "UI sees sub-agent start, current activity, and cancellation"
+        );
+        assert!(
+            subagent_summaries.iter().any(|s| s == "thinking"),
+            "UI sees the sub-agent's current activity"
         );
         let tool_result = req
             .messages
