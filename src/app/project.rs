@@ -450,7 +450,7 @@ impl ProjectScreen {
 
         let cols = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Fill(1), Constraint::Min(45)])
+            .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
             .split(panes[1]);
 
         self.side_area = cols[1];
