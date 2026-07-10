@@ -10,36 +10,43 @@ use crate::model::TargetLanguage;
 use crate::workspace::Workspace;
 use crate::workspace::translation::read_translated;
 
-/// Matches a `<!-- honya:chunk N -->` marker (any whitespace, any integer).
-static CHUNK_MARKER: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"<!--\s*honya:chunk\s+\d+\s*-->").expect("chunk-marker regex is valid")
-});
+/// Matches machine-only honya markers embedded in translated Markdown.
+static HONYA_MARKER: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"<!--\s*honya:[^>]*-->").expect("honya-marker regex is valid"));
 
 /// Sentence terminators for continuity. Thai `ฯ`/`ๆ` are word-level, so excluded.
 static TERMINATOR: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"[.!?。！？…]+[”’」』）】\)\]]*").expect("terminator regex is valid"));
 
 /// Bounds Thai tails when missing terminators make one "sentence" very long.
-const MAX_CONTINUITY_CHARS: usize = 1200;
+const MAX_CONTINUITY_CHARS: usize = 2000;
 
-/// Return the last `n` non-empty Thai sentences of `chapter` (in order) to seed
-/// continuity. Bounded twice: at most `n` sentences AND [`MAX_CONTINUITY_CHARS`] total.
+/// Return the last `n` non-empty translated sentences ending at `chapter`, walking
+/// backward through earlier chapters as needed. Bounded twice: at most `n`
+/// sentences AND [`MAX_CONTINUITY_CHARS`] total.
 pub async fn last_translated_sentences(ws: &Workspace, chapter: u32, n: usize) -> Vec<String> {
-    if n == 0 {
-        return Vec::new();
-    }
-    let raw = read_translated(ws, chapter).await;
-    if raw.trim().is_empty() {
+    if n == 0 || chapter == 0 {
         return Vec::new();
     }
 
-    // Strip chunk markers so they never bleed into the prompt.
-    let cleaned = CHUNK_MARKER.replace_all(&raw, " ");
+    let mut tail = Vec::with_capacity(n);
+    for candidate in (1..=chapter).rev() {
+        let raw = read_translated(ws, candidate).await;
+        if raw.trim().is_empty() {
+            continue;
+        }
 
-    let sentences = split_sentences(&cleaned);
-    let len = sentences.len();
-    let start = len.saturating_sub(n);
-    let mut tail = sentences[start..].to_vec();
+        let cleaned = HONYA_MARKER.replace_all(&raw, " ");
+        let sentences = split_sentences(&cleaned);
+        let missing = n - tail.len();
+        let start = sentences.len().saturating_sub(missing);
+        let mut older = sentences[start..].to_vec();
+        older.append(&mut tail);
+        tail = older;
+        if tail.len() == n {
+            break;
+        }
+    }
 
     // Drop old sentences first; clamp one over-long survivor to its newest chars.
     while tail.len() > 1 && joined_chars(&tail) > MAX_CONTINUITY_CHARS {
@@ -90,7 +97,7 @@ fn split_sentences(text: &str) -> Vec<String> {
 
 fn push_trimmed(current: &mut String, out: &mut Vec<String>) {
     let trimmed = current.trim();
-    if !trimmed.is_empty() {
+    if !trimmed.is_empty() && trimmed != "---" {
         out.push(trimmed.to_string());
     }
     current.clear();
@@ -323,5 +330,32 @@ mod tests {
         assert!(msg.contains("`translated_name`, `translated_term`"));
         assert!(msg.contains("Make the dialogue less literal."));
         assert!(!msg.contains("ห้ามใช้ \"กู\""));
+    }
+
+    #[tokio::test]
+    async fn sparse_continuity_backfills_previous_chapters_and_ignores_dividers() {
+        let base =
+            std::env::temp_dir().join(format!("honya_continuity_backfill_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let ws = Workspace::new(base.clone(), 1);
+
+        for (chapter, text) in [
+            (1, "บรรทัดเก่าสุด"),
+            (2, "บรรทัดก่อนหน้า"),
+            (3, "---\n\nบรรทัดล่าสุด"),
+        ] {
+            let path = ws.translated(chapter);
+            std::fs::create_dir_all(path.parent().expect("translated parent")).unwrap();
+            std::fs::write(
+                path,
+                format!("<!-- honya:chunks-total 1 -->\n\n<!-- honya:chunk 0 -->\n{text}\n"),
+            )
+            .unwrap();
+        }
+
+        let tail = last_translated_sentences(&ws, 3, 3).await;
+
+        assert_eq!(tail, ["บรรทัดเก่าสุด", "บรรทัดก่อนหน้า", "บรรทัดล่าสุด"]);
+        let _ = std::fs::remove_dir_all(base);
     }
 }

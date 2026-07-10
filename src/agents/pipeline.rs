@@ -1590,17 +1590,8 @@ async fn process_chunk(
         characters_for_chunk(&ctx.ws, &chunk.text, prev_chunk_text, MAX_CHARACTERS_IN_CTX),
         ctx.target_language,
     );
-    let mut previous_translation =
+    let previous_translation =
         continuity::last_translated_sentences(&ctx.ws, chapter, ctx.cfg.continuity_sentences).await;
-    // Seed chunk 0 from the previous chapter when this one has no Thai yet.
-    if previous_translation.is_empty() && chunk.index == 0 && chapter > 1 {
-        previous_translation = continuity::last_translated_sentences(
-            &ctx.ws,
-            chapter - 1,
-            ctx.cfg.continuity_sentences,
-        )
-        .await;
-    }
 
     let max = ctx.cfg.max_attempts.max(1);
     let mut feedback: Option<String> = None;

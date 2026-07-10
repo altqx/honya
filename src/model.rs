@@ -788,7 +788,7 @@ impl Default for AppConfig {
             max_attempts: 3,
             chunk_target_tokens: 1000,
             chunk_hard_cap_tokens: 1200,
-            continuity_sentences: 5,
+            continuity_sentences: 10,
             preferred_language: TargetLanguage::default(),
             loop_stall_secs: default_loop_stall_secs(),
             max_chapter_retranslates: default_max_chapter_retranslates(),
