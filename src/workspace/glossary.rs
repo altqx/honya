@@ -209,7 +209,7 @@ pub fn render_context_blurb(terms: &[GlossaryTerm]) -> String {
     s.push_str("- CONTEXT_DEPENDENT: เลือกคำตามกฎบริบทที่ระบุ\n");
     for t in terms {
         let jp = t.jp_term.trim();
-        let th = t.thai_term.trim();
+        let th = prompt_thai_rendering(t);
         if jp.is_empty() {
             continue;
         }
@@ -296,6 +296,56 @@ fn normalize_term_controls(t: &mut GlossaryTerm) {
     {
         t.protected = Some(true);
     }
+    if is_uncontrolled_preferred(t) {
+        t.thai_term = prompt_thai_rendering(t).to_string();
+    }
+}
+
+fn prompt_thai_rendering(t: &GlossaryTerm) -> &str {
+    let thai = t.thai_term.trim();
+    if is_uncontrolled_preferred(t) {
+        strip_trailing_parenthetical_gloss(thai)
+    } else {
+        thai
+    }
+}
+
+fn is_uncontrolled_preferred(t: &GlossaryTerm) -> bool {
+    matches!(effective_policy(t), TermPolicy::Preferred)
+        && !matches!(t.protected, Some(true))
+        && !matches!(t.do_not_translate, Some(true))
+}
+
+fn strip_trailing_parenthetical_gloss(value: &str) -> &str {
+    let mut rendered = value.trim();
+    loop {
+        let (open, close) = if rendered.ends_with(')') {
+            ('(', ')')
+        } else if rendered.ends_with('）') {
+            ('（', '）')
+        } else {
+            return rendered;
+        };
+        let close_idx = rendered.len() - close.len_utf8();
+        let Some(open_idx) = rendered[..close_idx].rfind(open) else {
+            return rendered;
+        };
+        let base = rendered[..open_idx].trim_end();
+        let gloss = rendered[open_idx + open.len_utf8()..close_idx].trim();
+        if base.is_empty()
+            || gloss.is_empty()
+            || gloss.contains('\n')
+            || gloss.chars().count() > 64
+            || !base.chars().any(is_thai_char)
+        {
+            return rendered;
+        }
+        rendered = base;
+    }
+}
+
+fn is_thai_char(ch: char) -> bool {
+    matches!(ch as u32, 0x0E00..=0x0E7F)
 }
 
 fn normalized_list(values: Vec<String>) -> Vec<String> {
@@ -466,5 +516,55 @@ fn opt(s: &Option<String>) -> String {
     match s {
         Some(v) if !v.trim().is_empty() => cell(v),
         _ => "—".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn term(thai_term: &str, policy: Option<TermPolicy>, protected: Option<bool>) -> GlossaryTerm {
+        GlossaryTerm {
+            jp_term: "鬱ロック".to_string(),
+            thai_term: thai_term.to_string(),
+            romaji: Some("Utsu-rokku".to_string()),
+            category: Some("concept".to_string()),
+            gloss: None,
+            policy,
+            forbidden_thai: Vec::new(),
+            context_rule: None,
+            protected,
+            do_not_translate: None,
+            first_seen_chapter: None,
+        }
+    }
+
+    #[test]
+    fn generated_preferred_term_drops_trailing_original_gloss() {
+        let mut generated = term("อุตสึร็อก (Utsu-Rock)", None, None);
+
+        normalize_term_controls(&mut generated);
+
+        assert_eq!(generated.thai_term, "อุตสึร็อก");
+    }
+
+    #[test]
+    fn legacy_preferred_gloss_is_not_injected_as_story_rendering() {
+        let legacy = term("อุตสึร็อก (Utsu-Rock)", Some(TermPolicy::Preferred), None);
+
+        let context = render_context_blurb(&[legacy]);
+
+        assert!(context.contains("PREFERRED | 鬱ロック (Utsu-rokku) → อุตสึร็อก [concept]"));
+        assert!(!context.contains("→ อุตสึร็อก (Utsu-Rock)"));
+    }
+
+    #[test]
+    fn controlled_exact_term_keeps_parenthetical_rendering() {
+        let mut locked = term("อุตสึร็อก (Utsu-Rock)", Some(TermPolicy::HardLocked), None);
+
+        normalize_term_controls(&mut locked);
+
+        assert_eq!(locked.thai_term, "อุตสึร็อก (Utsu-Rock)");
+        assert!(render_context_blurb(&[locked]).contains("→ อุตสึร็อก (Utsu-Rock)"));
     }
 }
