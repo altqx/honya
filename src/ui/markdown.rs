@@ -587,6 +587,7 @@ fn rule_line(theme: &Theme, width: usize) -> Line<'static> {
 fn preprocess_markdown(md: &str) -> String {
     let mut lines = Vec::new();
     let mut fence: Option<(char, usize)> = None;
+    let mut html_comment = false;
 
     for raw in md.split('\n') {
         let trimmed = raw.trim_start();
@@ -599,19 +600,24 @@ fn preprocess_markdown(md: &str) -> String {
             continue;
         }
 
+        if html_comment {
+            lines.push(preprocess_non_code_line(raw, &mut html_comment));
+            continue;
+        }
+
         if let Some((fc, len)) = fence_open(trimmed) {
             fence = Some((fc, len));
             lines.push(raw.to_string());
             continue;
         }
 
-        lines.push(preprocess_non_code_line(raw));
+        lines.push(preprocess_non_code_line(raw, &mut html_comment));
     }
 
     lines.join("\n")
 }
 
-fn preprocess_non_code_line(raw: &str) -> String {
+fn preprocess_non_code_line(raw: &str, html_comment: &mut bool) -> String {
     let trimmed = raw.trim_start();
     if trimmed.is_empty() {
         return String::new();
@@ -619,7 +625,7 @@ fn preprocess_non_code_line(raw: &str) -> String {
 
     if let Some((level, text)) = heading(trimmed) {
         let hashes = "#".repeat(level as usize);
-        let text = preprocess_inline(text);
+        let text = preprocess_inline(text, html_comment);
         return if text.is_empty() {
             format!("{hashes} ")
         } else {
@@ -632,13 +638,13 @@ fn preprocess_non_code_line(raw: &str) -> String {
     }
 
     if let Some(content) = unordered_list(trimmed) {
-        return format!("* {}", preprocess_inline(content));
+        return format!("* {}", preprocess_inline(content, html_comment));
     }
 
     if let Some((number, content)) = ordered_list(trimmed) {
         return format!(
             "{ORDER_START} {number}. {ORDER_END}{}",
-            preprocess_inline(content)
+            preprocess_inline(content, html_comment)
         );
     }
 
@@ -650,16 +656,25 @@ fn preprocess_non_code_line(raw: &str) -> String {
     } else {
         protect_leading_spaces(raw)
     };
-    preprocess_inline(&raw)
+    preprocess_inline(&raw, html_comment)
 }
 
-fn preprocess_inline(text: &str) -> String {
+fn preprocess_inline(text: &str, html_comment: &mut bool) -> String {
     let mut out = String::new();
     let mut i = 0usize;
     let mut prev: Option<char> = None;
 
     while i < text.len() {
         let rest = &text[i..];
+
+        if *html_comment {
+            let Some(end) = rest.find("-->") else {
+                break;
+            };
+            *html_comment = false;
+            i += end + 3;
+            continue;
+        }
 
         if rest.starts_with("![")
             && let Some((label, _url, consumed)) = parse_link(rest, 2)
@@ -683,7 +698,7 @@ fn preprocess_inline(text: &str) -> String {
             && let Some((label, _url, consumed)) = parse_link(rest, 1)
         {
             out.push(LINK_START);
-            out.push_str(&preprocess_inline(label));
+            out.push_str(&preprocess_inline(label, html_comment));
             out.push(LINK_END);
             prev = out.chars().next_back();
             i += consumed;
@@ -699,11 +714,21 @@ fn preprocess_inline(text: &str) -> String {
             continue;
         }
 
+        if let Some(comment) = rest.strip_prefix("<!--") {
+            *html_comment = true;
+            if let Some(end) = comment.find("-->") {
+                *html_comment = false;
+                i += 4 + end + 3;
+                continue;
+            }
+            break;
+        }
+
         let ch = rest.chars().next().expect("i is on a char boundary");
         if ch == '*' {
             if let Some((delim, inner, consumed)) = valid_star_emphasis(rest) {
                 out.push_str(delim);
-                out.push_str(&preprocess_inline(inner));
+                out.push_str(&preprocess_inline(inner, html_comment));
                 out.push_str(delim);
                 prev = out.chars().next_back();
                 i += consumed;
@@ -1041,6 +1066,46 @@ mod tests {
         // The surrounding text is not bold.
         let plain = line.spans.iter().find(|s| s.content == "a ").unwrap();
         assert!(!plain.style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn inline_html_comments_are_hidden_between_bold_runs() {
+        let line = first(
+            "**Inferring character names and traits** <!-- -->**Confirming character presence and POV** <!-- -->",
+        );
+        assert_eq!(
+            line_text(&line).trim_end(),
+            "Inferring character names and traits Confirming character presence and POV"
+        );
+        for expected in [
+            "Inferring character names and traits",
+            "Confirming character presence and POV",
+        ] {
+            let span = line
+                .spans
+                .iter()
+                .find(|span| span.content == expected)
+                .expect("bold reasoning span");
+            assert!(span.style.add_modifier.contains(Modifier::BOLD));
+        }
+    }
+
+    #[test]
+    fn incomplete_html_comment_is_hidden_but_code_span_stays_literal() {
+        let partial = first("visible <!-- partial");
+        assert_eq!(line_text(&partial).trim_end(), "visible");
+
+        let code = first("`<!-- literal -->`");
+        assert_eq!(line_text(&code), "<!-- literal -->");
+
+        let multiline = render_one("before <!-- hidden\nstill hidden --> after");
+        let visible = multiline
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(visible.contains("before") && visible.contains("after"));
+        assert!(!visible.contains("hidden"));
     }
 
     #[test]

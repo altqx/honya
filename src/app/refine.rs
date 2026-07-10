@@ -2359,6 +2359,40 @@ mod tests {
     }
 
     #[test]
+    fn expanded_reasoning_renders_bold_without_comment_dividers() {
+        let mut s = RefineScreen::new();
+        s.expanded = true;
+        s.on_app_event(&AppEvent::RefineReasoning {
+            delta: "**Inferring character names and traits** <!-- -->**Confirming character presence and POV** <!-- -->".to_string(),
+        });
+
+        let theme = crate::model::ThemeId::default().build();
+        let lines = crate::ui::markdown::render(
+            &s.transcript_markdown(),
+            theme.translated_text,
+            &theme,
+            100,
+        );
+        let visible = lines
+            .iter()
+            .flat_map(|line| &line.spans)
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(!visible.contains("<!--"));
+        for expected in [
+            "Inferring character names and traits",
+            "Confirming character presence and POV",
+        ] {
+            let span = lines
+                .iter()
+                .flat_map(|line| &line.spans)
+                .find(|span| span.content == expected)
+                .expect("bold reasoning span");
+            assert!(span.style.add_modifier.contains(Modifier::BOLD));
+        }
+    }
+
+    #[test]
     fn tool_run_collapses_then_expands() {
         let mut s = RefineScreen::new();
         for (tool, summary) in [

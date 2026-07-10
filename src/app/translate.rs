@@ -977,6 +977,7 @@ impl TranslateScreen {
                     width,
                     theme.accent,
                     theme.ink_soft,
+                    theme,
                 ));
             }
             lines.push(thought_row(
@@ -1423,28 +1424,70 @@ fn reasoning_row(
     width: usize,
     label_color: Color,
     text_color: Color,
+    theme: &Theme,
 ) -> Line<'static> {
     let prefix = format!(" {label:<8}");
     let body_budget = width.saturating_sub(col_width(&prefix));
-    let body = current_reasoning_text(text, body_budget);
-    Line::from(vec![
-        Span::styled(
-            prefix,
-            Style::default()
-                .fg(label_color)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(body, Style::default().fg(text_color)),
-    ])
+    let markdown = reasoning_markdown(text);
+    let spans = crate::ui::markdown::render(&markdown, text_color, theme, body_budget)
+        .into_iter()
+        .next()
+        .map(|line| line.spans)
+        .unwrap_or_default();
+    let mut out = vec![Span::styled(
+        prefix,
+        Style::default()
+            .fg(label_color)
+            .add_modifier(Modifier::BOLD),
+    )];
+    out.extend(truncate_reasoning_spans(
+        spans,
+        body_budget,
+        Style::default().fg(text_color),
+    ));
+    Line::from(out)
 }
 
-fn current_reasoning_text(text: &str, max_cols: usize) -> String {
-    let one_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if one_line.is_empty() {
-        "…".to_string()
-    } else {
-        truncate_tail_cols(&one_line, max_cols)
+fn reasoning_markdown(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn truncate_reasoning_spans(
+    spans: Vec<Span<'static>>,
+    max_cols: usize,
+    ellipsis_style: Style,
+) -> Vec<Span<'static>> {
+    let total = spans
+        .iter()
+        .map(|span| col_width(span.content.as_ref()))
+        .sum::<usize>();
+    if total <= max_cols {
+        return spans;
     }
+    if max_cols == 0 {
+        return Vec::new();
+    }
+
+    let mut remaining = max_cols - 1;
+    let mut tail = Vec::new();
+    for span in spans.into_iter().rev() {
+        let width = col_width(span.content.as_ref());
+        if width <= remaining {
+            remaining -= width;
+            tail.push(span);
+            continue;
+        }
+        let content = truncate_tail_cols(span.content.as_ref(), remaining);
+        let content = content.strip_prefix('…').unwrap_or(&content);
+        if !content.is_empty() {
+            tail.push(Span::styled(content.to_string(), span.style));
+        }
+        break;
+    }
+    tail.reverse();
+    let mut out = vec![Span::styled("…", ellipsis_style)];
+    out.extend(tail);
+    out
 }
 
 fn human_tok(n: u32) -> String {
@@ -1641,10 +1684,52 @@ mod queue_panel_tests {
 
     #[test]
     fn current_reasoning_row_keeps_the_live_tail() {
-        assert_eq!(
-            current_reasoning_text("first thought\nlatest reasoning", 10),
-            "…reasoning"
+        let theme = crate::model::ThemeId::default().build();
+        let line = reasoning_row(
+            "current",
+            "first thought\nlatest reasoning",
+            20,
+            Color::Cyan,
+            Color::White,
+            &theme,
         );
+        let visible = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(visible.contains('…'));
+        assert!(visible.ends_with("reasoning"));
+        assert!(col_width(&visible) <= 20);
+    }
+
+    #[test]
+    fn reasoning_row_renders_bold_and_hides_comment_dividers() {
+        let theme = crate::model::ThemeId::default().build();
+        let line = reasoning_row(
+            "current",
+            "**Inferring character names and traits** <!-- -->**Confirming character presence and POV** <!-- -->",
+            120,
+            Color::Cyan,
+            Color::White,
+            &theme,
+        );
+        let visible = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert!(!visible.contains("**"));
+        assert!(!visible.contains("<!--"));
+        assert!(line.spans.iter().any(|span| {
+            span.content.contains("Inferring character names")
+                && span.style.add_modifier.contains(Modifier::BOLD)
+        }));
+        assert!(line.spans.iter().any(|span| {
+            span.content.contains("Confirming character presence")
+                && span.style.add_modifier.contains(Modifier::BOLD)
+        }));
     }
 
     #[test]
