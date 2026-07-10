@@ -481,6 +481,7 @@ enum SField {
     CloudflareToken,
     PreferredLanguageField,
     MaxAttempts,
+    ContinuitySentences,
     LoopStall,
     Retranslates,
     ServiceTierField,
@@ -488,7 +489,7 @@ enum SField {
     ReleaseChannelField,
 }
 
-const SETTINGS_ORDER: [SField; 24] = [
+const SETTINGS_ORDER: [SField; 25] = [
     SField::OrchProvider,
     SField::OrchModel,
     SField::OrchEffort,
@@ -508,6 +509,7 @@ const SETTINGS_ORDER: [SField; 24] = [
     SField::CloudflareToken,
     SField::PreferredLanguageField,
     SField::MaxAttempts,
+    SField::ContinuitySentences,
     SField::LoopStall,
     SField::Retranslates,
     SField::ServiceTierField,
@@ -587,8 +589,8 @@ impl SettingsTab {
         Some(match self {
             SettingsTab::Agents => (0, 12),
             SettingsTab::Providers => (12, 17),
-            SettingsTab::Pipeline => (17, 22),
-            SettingsTab::Appearance => (22, 24),
+            SettingsTab::Pipeline => (17, 23),
+            SettingsTab::Appearance => (23, 25),
             SettingsTab::Account => return None,
         })
     }
@@ -627,6 +629,7 @@ impl SField {
                 | SField::CloudflareAccount
                 | SField::CloudflareToken
                 | SField::MaxAttempts
+                | SField::ContinuitySentences
                 | SField::LoopStall
                 | SField::Retranslates
         )
@@ -636,7 +639,10 @@ impl SField {
     fn is_numeric(self) -> bool {
         matches!(
             self,
-            SField::MaxAttempts | SField::LoopStall | SField::Retranslates
+            SField::MaxAttempts
+                | SField::ContinuitySentences
+                | SField::LoopStall
+                | SField::Retranslates
         )
     }
 
@@ -698,6 +704,8 @@ pub struct SettingsState {
     pub preferred_language: TargetLanguage,
     /// Max Translator↔Reviewer retry attempts per chunk, as typed (digits only).
     pub max_attempts: String,
+    /// Prior translated sentences injected per chunk, as typed (digits only).
+    pub continuity_sentences: String,
     /// Loop-watchdog stall window in seconds, as typed (digits only; 0 disables).
     pub loop_stall_secs: String,
     /// Whole-chapter re-translations allowed on a detected loop, as typed (digits).
@@ -737,6 +745,7 @@ impl SettingsState {
             service_tier: cfg.service_tier,
             preferred_language: cfg.preferred_language,
             max_attempts: cfg.max_attempts.to_string(),
+            continuity_sentences: cfg.continuity_sentences.to_string(),
             loop_stall_secs: cfg.loop_stall_secs.to_string(),
             max_chapter_retranslates: cfg.max_chapter_retranslates.to_string(),
             tab: SettingsTab::Agents,
@@ -780,6 +789,7 @@ impl SettingsState {
             SField::CloudflareAccount => &mut self.cloudflare_account_id,
             SField::CloudflareToken => &mut self.cloudflare_api_token,
             SField::MaxAttempts => &mut self.max_attempts,
+            SField::ContinuitySentences => &mut self.continuity_sentences,
             SField::LoopStall => &mut self.loop_stall_secs,
             SField::Retranslates => &mut self.max_chapter_retranslates,
             _ => return None,
@@ -945,6 +955,18 @@ impl SettingsState {
             .parse::<u32>()
             .unwrap_or(0)
             .clamp(1, 20)
+    }
+
+    /// Prior translated sentences included with each chunk (0 disables it).
+    /// Empty or invalid input falls back to the default; capped at 100.
+    fn continuity_sentences_value(&self) -> usize {
+        let raw = self.continuity_sentences.trim();
+        if raw.is_empty() {
+            return AppConfig::default().continuity_sentences;
+        }
+        raw.parse::<usize>()
+            .unwrap_or_else(|_| AppConfig::default().continuity_sentences)
+            .min(100)
     }
 
     /// Loop-watchdog stall window in seconds (0 disables the time arm). Non-numeric
@@ -1555,6 +1577,7 @@ impl Overlay {
             service_tier: None,
             preferred_language: TargetLanguage::default(),
             max_attempts: String::new(),
+            continuity_sentences: String::new(),
             loop_stall_secs: String::new(),
             max_chapter_retranslates: String::new(),
             tab: SettingsTab::for_field(field.min(SETTINGS_FIELDS - 1)),
@@ -2371,6 +2394,7 @@ impl Overlay {
                     service_tier: st.service_tier,
                     preferred_language: st.preferred_language,
                     max_attempts: st.max_attempts_value(),
+                    continuity_sentences: st.continuity_sentences_value(),
                     loop_stall_secs: st.loop_stall_secs_value(),
                     max_chapter_retranslates: st.max_chapter_retranslates_value(),
                 }
@@ -4335,8 +4359,23 @@ impl Overlay {
             push(
                 &mut lines,
                 &mut focus_line,
-                row(19, "Loop watchdog (s)", st.loop_stall_secs.clone(), true),
+                row(
+                    19,
+                    "Continuity sentences",
+                    st.continuity_sentences.clone(),
+                    true,
+                ),
                 st.field == 19,
+            );
+            lines.push(Line::from(Span::styled(
+                "      ↳ Prior translated sentences per chunk (0–100; 0 disables; 2,000-char cap)",
+                Style::default().fg(theme.ink_faint),
+            )));
+            push(
+                &mut lines,
+                &mut focus_line,
+                row(20, "Loop watchdog (s)", st.loop_stall_secs.clone(), true),
+                st.field == 20,
             );
             lines.push(Line::from(Span::styled(
                 "      ↳ quiet pipeline stalls after N s; active model calls retry chunk first",
@@ -4346,12 +4385,12 @@ impl Overlay {
                 &mut lines,
                 &mut focus_line,
                 row(
-                    20,
+                    21,
                     "Loop re-translates",
                     st.max_chapter_retranslates.clone(),
                     true,
                 ),
-                st.field == 20,
+                st.field == 21,
             );
             lines.push(Line::from(Span::styled(
                 "      ↳ stalled-chapter re-translates before the run aborts (0–10)",
@@ -4361,12 +4400,12 @@ impl Overlay {
                 &mut lines,
                 &mut focus_line,
                 row(
-                    21,
+                    22,
                     "Service tier",
                     ServiceTier::label(st.service_tier).to_string(),
                     false,
                 ),
-                st.field == 21,
+                st.field == 22,
             );
             lines.push(Line::from(Span::styled(
                 format!("      ↳ {}", ServiceTier::desc(st.service_tier)),
@@ -4377,19 +4416,19 @@ impl Overlay {
             push(
                 &mut lines,
                 &mut focus_line,
-                row(22, "Auto-update", st.update_mode.label().to_string(), false),
-                st.field == 22,
+                row(23, "Auto-update", st.update_mode.label().to_string(), false),
+                st.field == 23,
             );
             push(
                 &mut lines,
                 &mut focus_line,
                 row(
-                    23,
+                    24,
                     "Update channel",
                     st.release_channel.label().to_string(),
                     false,
                 ),
-                st.field == 23,
+                st.field == 24,
             );
             lines.push(Line::from(vec![
                 Span::styled(
@@ -6412,6 +6451,16 @@ mod tests {
             let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
             term.draw(|f| ov.render_settings(f, f.area(), &theme, &cfg, st))
                 .unwrap();
+            if field == 19 {
+                let glyphs: String = term
+                    .backend()
+                    .buffer()
+                    .content()
+                    .iter()
+                    .map(|cell| cell.symbol())
+                    .collect();
+                assert!(glyphs.contains("Continuity sentences"));
+            }
         }
     }
 

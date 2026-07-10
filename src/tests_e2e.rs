@@ -508,6 +508,70 @@ fn settings_retries_field_is_digit_only_and_clamped() {
     }
 }
 
+#[test]
+fn settings_continuity_sentences_is_digit_only_and_clamped() {
+    use crate::app::Action;
+    use crate::app::overlay::SettingsState;
+
+    let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::empty());
+    let seeded = SettingsState::for_test(19);
+    assert_eq!(seeded.continuity_sentences, "10");
+
+    let mk = || {
+        Overlay::Settings(SettingsState {
+            continuity_sentences: String::new(),
+            ..SettingsState::for_test(19)
+        })
+    };
+
+    let mut ov = mk();
+    for c in "a2b5".chars() {
+        ov.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::empty()));
+    }
+    match &ov {
+        Overlay::Settings(st) => assert_eq!(st.continuity_sentences, "25"),
+        _ => panic!("settings overlay"),
+    }
+    match ov.handle_key(enter) {
+        Action::SaveSettings {
+            continuity_sentences,
+            ..
+        } => assert_eq!(continuity_sentences, 25),
+        other => panic!("expected SaveSettings, got {other:?}"),
+    }
+
+    let mut empty = mk();
+    match empty.handle_key(enter) {
+        Action::SaveSettings {
+            continuity_sentences,
+            ..
+        } => assert_eq!(continuity_sentences, 10, "empty → default"),
+        other => panic!("expected SaveSettings, got {other:?}"),
+    }
+
+    let mut disabled = mk();
+    disabled.handle_key(KeyEvent::new(KeyCode::Char('0'), KeyModifiers::empty()));
+    match disabled.handle_key(enter) {
+        Action::SaveSettings {
+            continuity_sentences,
+            ..
+        } => assert_eq!(continuity_sentences, 0, "0 disables continuity"),
+        other => panic!("expected SaveSettings, got {other:?}"),
+    }
+
+    let mut big = mk();
+    for c in "999".chars() {
+        big.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::empty()));
+    }
+    match big.handle_key(enter) {
+        Action::SaveSettings {
+            continuity_sentences,
+            ..
+        } => assert_eq!(continuity_sentences, 100, "capped at 100"),
+        other => panic!("expected SaveSettings, got {other:?}"),
+    }
+}
+
 /// Arrow keys move the caret inside a text box so edits land mid-string, not just
 /// at the end — exercised through the real overlay key router (ReaderSearch).
 #[test]

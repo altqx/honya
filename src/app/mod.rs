@@ -288,6 +288,8 @@ pub enum Action {
         preferred_language: crate::model::TargetLanguage,
         /// Max Translator↔Reviewer retry attempts per chunk (already clamped 1..=20).
         max_attempts: u32,
+        /// Prior translated sentences injected per chunk (already clamped 0..=100).
+        continuity_sentences: usize,
         /// Loop-watchdog stall window in seconds (already clamped; 0 disables it).
         loop_stall_secs: u64,
         /// Whole-chapter re-translates before a looping chapter aborts the run.
@@ -2746,6 +2748,7 @@ impl App {
                 service_tier,
                 preferred_language,
                 max_attempts,
+                continuity_sentences,
                 loop_stall_secs,
                 max_chapter_retranslates,
             } => {
@@ -2761,6 +2764,7 @@ impl App {
                     service_tier,
                     preferred_language,
                     max_attempts,
+                    continuity_sentences,
                     loop_stall_secs,
                     max_chapter_retranslates,
                 );
@@ -4431,6 +4435,7 @@ impl App {
         service_tier: Option<crate::model::ServiceTier>,
         preferred_language: crate::model::TargetLanguage,
         max_attempts: u32,
+        continuity_sentences: usize,
         loop_stall_secs: u64,
         max_chapter_retranslates: u32,
     ) {
@@ -4444,6 +4449,7 @@ impl App {
         let language_changed = self.cfg.preferred_language != preferred_language;
         self.cfg.preferred_language = preferred_language;
         self.cfg.max_attempts = max_attempts;
+        self.cfg.continuity_sentences = continuity_sentences;
         self.cfg.loop_stall_secs = loop_stall_secs;
         self.cfg.max_chapter_retranslates = max_chapter_retranslates;
         let mut keys_changed = false;
