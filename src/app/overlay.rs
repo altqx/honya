@@ -485,11 +485,12 @@ enum SField {
     LoopStall,
     Retranslates,
     ServiceTierField,
+    ParallelLookahead,
     UpdateModeField,
     ReleaseChannelField,
 }
 
-const SETTINGS_ORDER: [SField; 25] = [
+const SETTINGS_ORDER: [SField; 26] = [
     SField::OrchProvider,
     SField::OrchModel,
     SField::OrchEffort,
@@ -513,6 +514,7 @@ const SETTINGS_ORDER: [SField; 25] = [
     SField::LoopStall,
     SField::Retranslates,
     SField::ServiceTierField,
+    SField::ParallelLookahead,
     SField::UpdateModeField,
     SField::ReleaseChannelField,
 ];
@@ -589,8 +591,8 @@ impl SettingsTab {
         Some(match self {
             SettingsTab::Agents => (0, 12),
             SettingsTab::Providers => (12, 17),
-            SettingsTab::Pipeline => (17, 23),
-            SettingsTab::Appearance => (23, 25),
+            SettingsTab::Pipeline => (17, 24),
+            SettingsTab::Appearance => (24, 26),
             SettingsTab::Account => return None,
         })
     }
@@ -700,6 +702,8 @@ pub struct SettingsState {
     pub release_channel: ReleaseChannel,
     /// Request tier (cycle field; also Ctrl-Y).
     pub service_tier: Option<ServiceTier>,
+    /// Validate and reuse one speculative next-chunk Translator draft.
+    pub parallel_lookahead: bool,
     /// Default language initially selected when creating a project.
     pub preferred_language: TargetLanguage,
     /// Max Translator↔Reviewer retry attempts per chunk, as typed (digits only).
@@ -743,6 +747,7 @@ impl SettingsState {
             update_mode: cfg.update_mode,
             release_channel: cfg.release_channel,
             service_tier: cfg.service_tier,
+            parallel_lookahead: cfg.parallel_lookahead,
             preferred_language: cfg.preferred_language,
             max_attempts: cfg.max_attempts.to_string(),
             continuity_sentences: cfg.continuity_sentences.to_string(),
@@ -902,6 +907,7 @@ impl SettingsState {
             SField::PreferredLanguageField => {
                 self.preferred_language = self.preferred_language.cycled();
             }
+            SField::ParallelLookahead => self.parallel_lookahead = !self.parallel_lookahead,
             SField::UpdateModeField => self.update_mode = self.update_mode.toggled(),
             SField::ReleaseChannelField => self.release_channel = self.release_channel.toggled(),
             _ => {}
@@ -1575,6 +1581,7 @@ impl Overlay {
             update_mode: UpdateMode::default(),
             release_channel: ReleaseChannel::default(),
             service_tier: None,
+            parallel_lookahead: true,
             preferred_language: TargetLanguage::default(),
             max_attempts: String::new(),
             continuity_sentences: String::new(),
@@ -2397,6 +2404,7 @@ impl Overlay {
                     continuity_sentences: st.continuity_sentences_value(),
                     loop_stall_secs: st.loop_stall_secs_value(),
                     max_chapter_retranslates: st.max_chapter_retranslates_value(),
+                    parallel_lookahead: st.parallel_lookahead,
                 }
             }
             // Tab switches between Settings tabs; Up/Down move fields within a tab.
@@ -4411,24 +4419,39 @@ impl Overlay {
                 format!("      ↳ {}", ServiceTier::desc(st.service_tier)),
                 Style::default().fg(theme.ink_faint),
             )));
+            push(
+                &mut lines,
+                &mut focus_line,
+                row(
+                    23,
+                    "Parallel lookahead",
+                    if st.parallel_lookahead { "On" } else { "Off" }.to_string(),
+                    false,
+                ),
+                st.field == 23,
+            );
+            lines.push(Line::from(Span::styled(
+                "      ↳ Faster between chunks; invalidated drafts may increase API cost",
+                Style::default().fg(theme.ink_faint),
+            )));
         }
         if st.tab == SettingsTab::Appearance {
             push(
                 &mut lines,
                 &mut focus_line,
-                row(23, "Auto-update", st.update_mode.label().to_string(), false),
-                st.field == 23,
+                row(24, "Auto-update", st.update_mode.label().to_string(), false),
+                st.field == 24,
             );
             push(
                 &mut lines,
                 &mut focus_line,
                 row(
-                    24,
+                    25,
                     "Update channel",
                     st.release_channel.label().to_string(),
                     false,
                 ),
-                st.field == 24,
+                st.field == 25,
             );
             lines.push(Line::from(vec![
                 Span::styled(
@@ -6376,6 +6399,13 @@ mod tests {
 
         let st = SettingsState::for_test(17); // Translation language
         assert_eq!(st.tab, SettingsTab::Pipeline);
+        let mut st = st;
+        for expected in 18..=23 {
+            st.next_field();
+            assert_eq!(st.field, expected);
+        }
+        st.next_field();
+        assert_eq!(st.field, 17, "pipeline field nav wraps within the tab");
 
         let mut st = SettingsState::for_test(0);
         st.tab = SettingsTab::Account;
@@ -6460,6 +6490,17 @@ mod tests {
                     .map(|cell| cell.symbol())
                     .collect();
                 assert!(glyphs.contains("Continuity sentences"));
+            }
+            if field == 23 {
+                let glyphs: String = term
+                    .backend()
+                    .buffer()
+                    .content()
+                    .iter()
+                    .map(|cell| cell.symbol())
+                    .collect();
+                assert!(glyphs.contains("Parallel lookahead"));
+                assert!(glyphs.contains("increase API cost"));
             }
         }
     }

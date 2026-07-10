@@ -460,6 +460,26 @@ fn settings_preferred_language_defaults_to_thai_and_saves_english() {
     }
 }
 
+#[test]
+fn settings_parallel_lookahead_defaults_on_and_saves_disabled() {
+    use crate::app::Action;
+    use crate::app::overlay::SettingsState;
+
+    let mut ov = Overlay::Settings(SettingsState::for_test(23));
+    match &ov {
+        Overlay::Settings(st) => assert!(st.parallel_lookahead),
+        _ => panic!("settings overlay"),
+    }
+
+    ov.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::empty()));
+    match ov.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty())) {
+        Action::SaveSettings {
+            parallel_lookahead, ..
+        } => assert!(!parallel_lookahead),
+        other => panic!("expected SaveSettings, got {other:?}"),
+    }
+}
+
 /// The retries field accepts digits only, and Enter carries the parsed (clamped)
 /// attempt count out through `SaveSettings`.
 #[test]

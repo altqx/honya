@@ -294,6 +294,8 @@ pub enum Action {
         loop_stall_secs: u64,
         /// Whole-chapter re-translates before a looping chapter aborts the run.
         max_chapter_retranslates: u32,
+        /// Validate and reuse one speculative next-chunk Translator draft.
+        parallel_lookahead: bool,
     },
     /// Create the bundled sample project (if absent) and open it.
     CreateSample,
@@ -2751,6 +2753,7 @@ impl App {
                 continuity_sentences,
                 loop_stall_secs,
                 max_chapter_retranslates,
+                parallel_lookahead,
             } => {
                 self.save_settings(
                     *models,
@@ -2767,6 +2770,7 @@ impl App {
                     continuity_sentences,
                     loop_stall_secs,
                     max_chapter_retranslates,
+                    parallel_lookahead,
                 );
             }
             Action::CreateSample => {
@@ -4438,6 +4442,7 @@ impl App {
         continuity_sentences: usize,
         loop_stall_secs: u64,
         max_chapter_retranslates: u32,
+        parallel_lookahead: bool,
     ) {
         let models_changed = self.cfg.models != models;
         self.cfg.models = models.clone();
@@ -4452,6 +4457,7 @@ impl App {
         self.cfg.continuity_sentences = continuity_sentences;
         self.cfg.loop_stall_secs = loop_stall_secs;
         self.cfg.max_chapter_retranslates = max_chapter_retranslates;
+        self.cfg.parallel_lookahead = parallel_lookahead;
         let mut keys_changed = false;
         if let Some(k) = openrouter_key {
             let k = k.trim();

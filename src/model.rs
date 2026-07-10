@@ -669,6 +669,10 @@ pub struct AppConfig {
     pub chunk_hard_cap_tokens: usize,
     /// Sentences of prior target-language text injected for continuity.
     pub continuity_sentences: usize,
+    /// Prepare the next same-chapter Translator draft while approved-chunk metadata
+    /// is persisted, reusing it only when the rebuilt request is exactly identical.
+    #[serde(default = "default_true")]
+    pub parallel_lookahead: bool,
     /// Initial language selected when creating a new project.
     #[serde(default, alias = "target_language")]
     pub preferred_language: TargetLanguage,
@@ -789,6 +793,7 @@ impl Default for AppConfig {
             chunk_target_tokens: 1000,
             chunk_hard_cap_tokens: 1200,
             continuity_sentences: 10,
+            parallel_lookahead: true,
             preferred_language: TargetLanguage::default(),
             loop_stall_secs: default_loop_stall_secs(),
             max_chapter_retranslates: default_max_chapter_retranslates(),
@@ -1911,6 +1916,23 @@ mod provider_model_tests {
 
         let cfg: AppConfig = serde_json::from_value(value).unwrap();
         assert_eq!(cfg.preferred_language, TargetLanguage::Thai);
+    }
+
+    #[test]
+    fn app_config_defaults_missing_parallel_lookahead_to_enabled() {
+        let mut value = serde_json::to_value(AppConfig::default()).unwrap();
+        value.as_object_mut().unwrap().remove("parallel_lookahead");
+
+        let cfg: AppConfig = serde_json::from_value(value).unwrap();
+        assert!(cfg.parallel_lookahead);
+
+        let disabled = AppConfig {
+            parallel_lookahead: false,
+            ..AppConfig::default()
+        };
+        let loaded: AppConfig =
+            serde_json::from_value(serde_json::to_value(disabled).unwrap()).unwrap();
+        assert!(!loaded.parallel_lookahead);
     }
 
     #[test]

@@ -9,6 +9,20 @@ use crate::llm::structured::{
 use crate::llm::{ChatRequest, Message, Usage};
 use crate::model::{AgentModel, TargetLanguage, ThoughtProcessField, TranslatorOut};
 
+/// Every value that can change a Translator request. Lookahead drafts are reusable
+/// only when this complete value still matches after the preceding metadata turn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TranslatorInput {
+    pub model: AgentModel,
+    pub target_language: TargetLanguage,
+    pub reference_ctx: String,
+    pub previous_translation: Vec<String>,
+    pub current_pov: Option<String>,
+    pub raw_chunk: String,
+    pub feedback: Option<String>,
+    pub attempt: u32,
+}
+
 #[derive(Debug, thiserror::Error)]
 #[error("{source}")]
 pub struct TranslatorStreamError {
@@ -32,19 +46,18 @@ impl TranslatorStreamError {
     pub fn is_length_truncation(&self) -> bool {
         self.source.is_length_truncation()
     }
+
+    pub fn is_provider_pressure(&self) -> bool {
+        matches!(
+            self.source,
+            LlmError::RateLimited { .. } | LlmError::Transport(_)
+        ) || self.source.is_retryable()
+    }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub async fn translate_chunk_streaming<F>(
     client: &dyn LlmClient,
-    model: &AgentModel,
-    target_language: TargetLanguage,
-    reference_ctx: &str,
-    previous_translation: &[String],
-    current_pov: Option<&str>,
-    raw_chunk: &str,
-    feedback: Option<&str>,
-    attempt: u32,
+    input: &TranslatorInput,
     on_delta: F,
     on_reasoning_delta: impl for<'a> FnMut(&'a str) + Send,
     on_thought_delta: impl for<'a> FnMut(ThoughtProcessField, &'a str) + Send,
@@ -53,14 +66,14 @@ where
     F: for<'a> FnMut(&'a str) + Send,
 {
     let req = translator_request_for_language(
-        model,
-        target_language,
-        reference_ctx,
-        previous_translation,
-        current_pov,
-        raw_chunk,
-        feedback,
-        attempt,
+        &input.model,
+        input.target_language,
+        &input.reference_ctx,
+        &input.previous_translation,
+        input.current_pov.as_deref(),
+        &input.raw_chunk,
+        input.feedback.as_deref(),
+        input.attempt,
     );
     let mut partial_translated_text = String::new();
     let mut on_delta = on_delta;
@@ -268,5 +281,93 @@ mod tests {
         assert!(payload.contains("final English Markdown"));
         assert!(reminder.contains("fixes every item"));
         assert!(!reminder.contains("ก่อนตอบ"));
+    }
+
+    fn canonical_input() -> TranslatorInput {
+        TranslatorInput {
+            model: AgentModel::openrouter("test/model"),
+            target_language: TargetLanguage::Thai,
+            reference_ctx: "reference".into(),
+            previous_translation: vec!["continuity".into()],
+            current_pov: Some("POV".into()),
+            raw_chunk: "source".into(),
+            feedback: None,
+            attempt: 1,
+        }
+    }
+
+    #[test]
+    fn canonical_input_compares_every_translator_request_value() {
+        let base = canonical_input();
+        assert_eq!(base, canonical_input());
+
+        let variants = [
+            TranslatorInput {
+                model: AgentModel::openrouter("other/model"),
+                ..base.clone()
+            },
+            TranslatorInput {
+                target_language: TargetLanguage::English,
+                ..base.clone()
+            },
+            TranslatorInput {
+                reference_ctx: "changed reference".into(),
+                ..base.clone()
+            },
+            TranslatorInput {
+                previous_translation: vec!["changed continuity".into()],
+                ..base.clone()
+            },
+            TranslatorInput {
+                current_pov: Some("changed POV".into()),
+                ..base.clone()
+            },
+            TranslatorInput {
+                raw_chunk: "changed source".into(),
+                ..base.clone()
+            },
+            TranslatorInput {
+                feedback: Some("review feedback".into()),
+                ..base.clone()
+            },
+            TranslatorInput {
+                attempt: 2,
+                ..base.clone()
+            },
+        ];
+
+        for variant in variants {
+            assert_ne!(base, variant);
+        }
+    }
+
+    #[test]
+    fn provider_pressure_classifier_covers_rate_limits_and_transient_servers() {
+        let rate_limited = TranslatorStreamError {
+            source: LlmError::RateLimited {
+                retry_after: 1,
+                message: "busy".into(),
+            },
+            partial_translated_text: String::new(),
+        };
+        assert!(rate_limited.is_provider_pressure());
+
+        let unavailable = TranslatorStreamError {
+            source: LlmError::Api {
+                status: 503,
+                message: "unavailable".into(),
+            },
+            partial_translated_text: String::new(),
+        };
+        assert!(unavailable.is_provider_pressure());
+
+        let bad_request = TranslatorStreamError {
+            source: LlmError::Api {
+                status: 400,
+                message: "bad request".into(),
+            },
+            partial_translated_text: String::new(),
+        };
+        assert!(!bad_request.is_provider_pressure());
     }
 }

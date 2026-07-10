@@ -21,7 +21,9 @@ use crate::agents::prepass;
 use crate::agents::prompts::{build_orchestrator_metadata_msg, orchestrator_system};
 use crate::agents::reviewer::review_chunk;
 use crate::agents::tools::{WorkspaceTools, orchestrator_tools};
-use crate::agents::translator::{TranslatorStreamError, translate_chunk_streaming};
+use crate::agents::translator::{
+    TranslatorInput, TranslatorStreamError, translate_chunk_streaming,
+};
 use crate::cleanse;
 use crate::llm::client::{ClientSet, LlmClient};
 use crate::llm::tool_loop::run_tool_loop;
@@ -504,8 +506,164 @@ enum ChunkOutcome {
 
 enum TranslatorAttemptRun {
     Finished(Box<Result<(TranslatorOut, Usage, bool), TranslatorStreamError>>),
-    Repeated,
+    Repeated(Option<Box<(TranslatorOut, Usage, bool)>>),
     Stalled(LoopReason),
+}
+
+enum BufferedTranslatorEvent {
+    Stream(String),
+    Thought {
+        field: ThoughtProcessField,
+        delta: String,
+    },
+}
+
+#[derive(Clone)]
+enum TranslatorEventSink {
+    Live {
+        tx: EventTx,
+        chapter: u32,
+        chunk: usize,
+        attempt: u32,
+    },
+    Buffered(Arc<Mutex<Vec<BufferedTranslatorEvent>>>),
+}
+
+impl TranslatorEventSink {
+    fn stream(&self, delta: &str) {
+        match self {
+            Self::Live {
+                tx, chapter, chunk, ..
+            } => tx.send(AppEvent::StreamDelta {
+                chapter: *chapter,
+                chunk: *chunk,
+                role: AgentRole::Translator,
+                delta: delta.to_string(),
+            }),
+            Self::Buffered(events) => events
+                .lock()
+                .unwrap()
+                .push(BufferedTranslatorEvent::Stream(delta.to_string())),
+        }
+    }
+
+    fn thought(&self, field: ThoughtProcessField, delta: &str) {
+        match self {
+            Self::Live {
+                tx,
+                chapter,
+                chunk,
+                attempt,
+            } => tx.send(AppEvent::ThoughtProcessDelta {
+                chapter: *chapter,
+                chunk: *chunk,
+                attempt: *attempt,
+                field,
+                delta: delta.to_string(),
+            }),
+            Self::Buffered(events) => {
+                events
+                    .lock()
+                    .unwrap()
+                    .push(BufferedTranslatorEvent::Thought {
+                        field,
+                        delta: delta.to_string(),
+                    })
+            }
+        }
+    }
+}
+
+struct LookaheadCompletion {
+    run: TranslatorAttemptRun,
+    events: Vec<BufferedTranslatorEvent>,
+}
+
+struct PreparedLookahead {
+    input: TranslatorInput,
+    chapter: u32,
+    chunk: usize,
+    owner: LookaheadOwner,
+}
+
+impl Drop for PreparedLookahead {
+    fn drop(&mut self) {
+        self.owner.abort();
+    }
+}
+
+struct OwnedLookaheadTask {
+    handle: tokio::task::JoinHandle<LookaheadCompletion>,
+    model: AgentModel,
+    chapter: u32,
+    chunk: usize,
+}
+
+#[derive(Clone, Default)]
+struct LookaheadOwner(Arc<Mutex<Option<OwnedLookaheadTask>>>);
+
+impl LookaheadOwner {
+    fn install(&self, task: OwnedLookaheadTask) {
+        let replaced = self.0.lock().unwrap().replace(task);
+        debug_assert!(replaced.is_none(), "only one lookahead task may be owned");
+        if let Some(previous) = replaced {
+            previous.handle.abort();
+        }
+    }
+
+    fn take(&self) -> Option<OwnedLookaheadTask> {
+        self.0.lock().unwrap().take()
+    }
+
+    fn abort(&self) {
+        if let Some(task) = self.0.lock().unwrap().as_ref() {
+            task.handle.abort();
+        }
+    }
+}
+
+async fn await_owned_lookahead(
+    owner: &LookaheadOwner,
+) -> Option<Result<LookaheadCompletion, tokio::task::JoinError>> {
+    std::future::poll_fn(|cx| {
+        let mut slot = owner.0.lock().unwrap();
+        let Some(task) = slot.as_mut() else {
+            return std::task::Poll::Ready(None);
+        };
+        match std::future::Future::poll(std::pin::Pin::new(&mut task.handle), cx) {
+            std::task::Poll::Ready(result) => std::task::Poll::Ready(Some(result)),
+            std::task::Poll::Pending => std::task::Poll::Pending,
+        }
+    })
+    .await
+}
+
+const LOOKAHEAD_PRESSURE_FAILURE_LIMIT: u8 = 2;
+
+struct LookaheadState {
+    enabled: bool,
+    pressure_failures: u8,
+}
+
+impl LookaheadState {
+    fn new(cfg: &AppConfig) -> Self {
+        Self {
+            enabled: cfg.parallel_lookahead,
+            pressure_failures: 0,
+        }
+    }
+
+    fn note_provider_pressure(&mut self, tx: &EventTx) {
+        self.pressure_failures = self.pressure_failures.saturating_add(1);
+        if self.pressure_failures >= LOOKAHEAD_PRESSURE_FAILURE_LIMIT && self.enabled {
+            self.enabled = false;
+            tx.send(AppEvent::Log {
+                level: LogLevel::Warn,
+                msg: "parallel lookahead disabled for this run after repeated provider pressure"
+                    .to_string(),
+            });
+        }
+    }
 }
 
 enum ReviewerAttemptRun {
@@ -580,11 +738,12 @@ pub async fn run_pipeline(ctx: PipelineCtx, chapters: Vec<u32>) -> anyhow::Resul
     let wd = Watchdog::new(&ctx.cfg);
     let mut acc = Acc::default();
     let mut totals = Totals::default();
+    let mut lookahead = LookaheadState::new(&ctx.cfg);
     let vol = ctx.vol_number();
     ctx.queue
         .seed(chapters.into_iter().map(|c| (vol, c)).collect());
     maybe_run_prepass(&ctx, &mut acc).await;
-    let halt = run_volume_chapters(&ctx, None, &wd, &mut acc, &mut totals).await;
+    let halt = run_volume_chapters(&ctx, None, &wd, &mut acc, &mut totals, &mut lookahead).await;
     ctx.tx.send(AppEvent::PipelineFinished {
         chapters_done: totals.done,
         chapters_failed: totals.failed,
@@ -605,6 +764,7 @@ pub async fn run_project_pipeline(ctx: PipelineCtx, plan: Vec<VolumePlan>) -> an
     let mut acc = Acc::default();
     let mut totals = Totals::default();
     let mut stopped = false;
+    let mut lookahead = LookaheadState::new(&ctx.cfg);
 
     for vp in &plan {
         if ctx.ctl.is_stopped() {
@@ -627,7 +787,15 @@ pub async fn run_project_pipeline(ctx: PipelineCtx, plan: Vec<VolumePlan>) -> an
             ),
         });
         maybe_run_prepass(&vctx, &mut acc).await;
-        let halt = run_volume_chapters(&vctx, Some(vp.vol), &wd, &mut acc, &mut totals).await;
+        let halt = run_volume_chapters(
+            &vctx,
+            Some(vp.vol),
+            &wd,
+            &mut acc,
+            &mut totals,
+            &mut lookahead,
+        )
+        .await;
         if matches!(halt, Halt::Stopped) {
             stopped = true;
             break;
@@ -643,7 +811,8 @@ pub async fn run_project_pipeline(ctx: PipelineCtx, plan: Vec<VolumePlan>) -> an
         let vctx = ctx.with_volume(vol);
         vctx.tx.send(AppEvent::VolumeStarted { vol, label: None });
         maybe_run_prepass(&vctx, &mut acc).await;
-        let halt = run_volume_chapters(&vctx, Some(vol), &wd, &mut acc, &mut totals).await;
+        let halt =
+            run_volume_chapters(&vctx, Some(vol), &wd, &mut acc, &mut totals, &mut lookahead).await;
         if matches!(halt, Halt::Stopped) {
             stopped = true;
             break;
@@ -751,6 +920,7 @@ async fn run_volume_chapters(
     wd: &Watchdog,
     acc: &mut Acc,
     totals: &mut Totals,
+    lookahead: &mut LookaheadState,
 ) -> Halt {
     loop {
         if ctx.ctl.is_stopped() {
@@ -776,7 +946,7 @@ async fn run_volume_chapters(
             state: ChapterStatus::Chunking,
         });
 
-        let outcome = process_chapter_watched(ctx, chapter, acc, wd).await;
+        let outcome = process_chapter_watched(ctx, chapter, acc, wd, lookahead).await;
 
         // Persist this chapter's spend to VOLUME.md (cumulative lifetime accounting)
         // however it ended, then reset the per-chapter sub-total for the next one.
@@ -875,16 +1045,24 @@ async fn process_chapter_watched(
     chapter: u32,
     acc: &mut Acc,
     wd: &Watchdog,
+    lookahead: &mut LookaheadState,
 ) -> anyhow::Result<Outcome> {
     let max_retranslates = ctx.cfg.max_chapter_retranslates;
     let mut retranslates = 0u32;
     loop {
         wd.reset_chapter();
+        let owner = LookaheadOwner::default();
         let run = tokio::select! {
             biased;
-            res = process_chapter(ctx, chapter, acc, wd) => ChapterRun::Finished(res),
+            res = process_chapter(ctx, chapter, acc, wd, lookahead, &owner) => ChapterRun::Finished(res),
             reason = wd.watch(&ctx.ctl) => ChapterRun::Looped(reason),
         };
+
+        let cleanup_reason = match &run {
+            ChapterRun::Finished(_) => "the chapter attempt ended",
+            ChapterRun::Looped(_) => "the chapter watchdog reset the attempt",
+        };
+        abort_owned_lookahead(ctx, &owner, acc, lookahead, cleanup_reason).await;
 
         match run {
             ChapterRun::Finished(res) => return res,
@@ -947,6 +1125,8 @@ async fn process_chapter(
     chapter: u32,
     acc: &mut Acc,
     wd: &Watchdog,
+    lookahead: &mut LookaheadState,
+    owner: &LookaheadOwner,
 ) -> anyhow::Result<Outcome> {
     let raw_path = ctx.ws.raw(chapter);
     let raw = tokio::fs::read_to_string(&raw_path)
@@ -1032,13 +1212,34 @@ async fn process_chapter(
     // The previous chunk's source, in reading order, so a character referred to only
     // by pronoun in this chunk stays in the injected roster (see build_reference_ctx).
     let mut prev_chunk_text: Option<&str> = None;
-    for chunk in &chunks {
+    let mut prepared: Option<PreparedLookahead> = None;
+    for (position, chunk) in chunks.iter().enumerate() {
         if clean_committed.contains(&(chunk.index as u32)) {
+            if let Some(draft) = prepared.take() {
+                discard_prepared_lookahead(
+                    ctx,
+                    draft,
+                    acc,
+                    lookahead,
+                    "the target chunk was already committed",
+                )
+                .await;
+            }
             prev_chunk_text = Some(chunk.text.as_str());
             continue;
         }
 
         // Honor pause/stop between chunks ("current chunk finishes, then halts").
+        if (ctx.ctl.is_paused() || ctx.ctl.is_stopped())
+            && let Some(draft) = prepared.take()
+        {
+            let reason = if ctx.ctl.is_stopped() {
+                "the run stopped"
+            } else {
+                "the run paused"
+            };
+            discard_prepared_lookahead(ctx, draft, acc, lookahead, reason).await;
+        }
         if !gate(ctx, chapter).await {
             // Leave the interrupted chapter showing its true resting state — a
             // stop mid-chapter must not linger as Translating/Paused (or read
@@ -1062,7 +1263,10 @@ async fn process_chapter(
         // Fresh repetition state per chunk so one chunk's tail can't trip on the
         // next chunk's start.
         wd.reset_chunk();
-        match process_chunk(
+        let next_chunk = chunks
+            .get(position + 1)
+            .filter(|next| !clean_committed.contains(&(next.index as u32)));
+        match process_chunk_with_lookahead(
             ctx,
             chapter,
             chunk,
@@ -1070,12 +1274,21 @@ async fn process_chapter(
             wd,
             &mut pov_carry,
             prev_chunk_text,
+            prepared.take(),
+            next_chunk,
+            lookahead,
+            &mut prepared,
+            owner,
         )
         .await?
         {
             ChunkOutcome::Committed | ChunkOutcome::NeedsReview => {}
         }
         prev_chunk_text = Some(chunk.text.as_str());
+    }
+
+    if let Some(draft) = prepared.take() {
+        discard_prepared_lookahead(ctx, draft, acc, lookahead, "the chapter scope ended").await;
     }
 
     // Whole-chapter coherence sweep: catch cross-chunk drift the per-chunk reviewer
@@ -1558,11 +1771,404 @@ fn note_served_tier(ctx: &PipelineCtx, acc: &mut Acc, agent: &AgentModel, usage:
     ctx.tx.send(AppEvent::Log { level, msg });
 }
 
+fn translator_input(
+    ctx: &PipelineCtx,
+    reference_ctx: &str,
+    previous_translation: &[String],
+    current_pov: Option<&str>,
+    raw_chunk: &str,
+    feedback: Option<&str>,
+    attempt: u32,
+) -> TranslatorInput {
+    TranslatorInput {
+        model: ctx.models.translator.clone(),
+        target_language: ctx.target_language,
+        reference_ctx: reference_ctx.to_string(),
+        previous_translation: previous_translation.to_vec(),
+        current_pov: current_pov.map(str::to_string),
+        raw_chunk: raw_chunk.to_string(),
+        feedback: feedback.map(str::to_string),
+        attempt,
+    }
+}
+
+async fn fresh_translator_input(
+    ctx: &PipelineCtx,
+    chapter: u32,
+    chunk: &Chunk,
+    previous_source: Option<&str>,
+    current_pov: Option<&str>,
+) -> TranslatorInput {
+    let reference_ctx = build_reference_ctx_for_language(
+        &ctx.ws,
+        &chunk.text,
+        previous_source,
+        ctx.target_language,
+    );
+    let previous_translation =
+        continuity::last_translated_sentences(&ctx.ws, chapter, ctx.cfg.continuity_sentences).await;
+    translator_input(
+        ctx,
+        &reference_ctx,
+        &previous_translation,
+        current_pov,
+        &chunk.text,
+        None,
+        1,
+    )
+}
+
+async fn run_translator_attempt(
+    client: &dyn LlmClient,
+    input: &TranslatorInput,
+    wd: &Watchdog,
+    ctl: &RunControl,
+    sink: TranslatorEventSink,
+) -> TranslatorAttemptRun {
+    wd.reset_chunk();
+    let stream_sink = sink.clone();
+    let reasoning_sink = sink.clone();
+    let thought_sink = sink;
+    let translate_res = {
+        let _wait = wd.external_wait();
+        let translate = translate_chunk_streaming(
+            client,
+            input,
+            move |delta| {
+                wd.feed_stream(delta);
+                stream_sink.stream(delta);
+            },
+            move |delta| {
+                wd.ping();
+                reasoning_sink.thought(ThoughtProcessField::ModelReasoning, delta);
+            },
+            move |field, delta| {
+                wd.feed_stream(delta);
+                thought_sink.thought(field, delta);
+            },
+        );
+        tokio::pin!(translate);
+        let repeated = wd.watch_repetition(ctl);
+        tokio::pin!(repeated);
+        let stalled = wd.watch_active_call_stall(ctl);
+        tokio::pin!(stalled);
+        tokio::select! {
+            biased;
+            _ = &mut repeated => TranslatorAttemptRun::Repeated(None),
+            reason = &mut stalled => TranslatorAttemptRun::Stalled(reason),
+            res = &mut translate => TranslatorAttemptRun::Finished(Box::new(res)),
+        }
+    };
+
+    match translate_res {
+        TranslatorAttemptRun::Finished(result) => match *result {
+            Ok(completed) if wd.repetition_triggered() => {
+                TranslatorAttemptRun::Repeated(Some(Box::new(completed)))
+            }
+            other => TranslatorAttemptRun::Finished(Box::new(other)),
+        },
+        other => other,
+    }
+}
+
+fn replay_buffered_translator_events(
+    ctx: &PipelineCtx,
+    chapter: u32,
+    chunk: usize,
+    attempt: u32,
+    events: Vec<BufferedTranslatorEvent>,
+) {
+    for event in events {
+        match event {
+            BufferedTranslatorEvent::Stream(delta) => ctx.tx.send(AppEvent::StreamDelta {
+                chapter,
+                chunk,
+                role: AgentRole::Translator,
+                delta,
+            }),
+            BufferedTranslatorEvent::Thought { field, delta } => {
+                ctx.tx.send(AppEvent::ThoughtProcessDelta {
+                    chapter,
+                    chunk,
+                    attempt,
+                    field,
+                    delta,
+                })
+            }
+        }
+    }
+}
+
+fn completed_lookahead_usage(run: &TranslatorAttemptRun) -> Option<Usage> {
+    match run {
+        TranslatorAttemptRun::Finished(result) => result.as_ref().as_ref().ok().map(|r| r.1),
+        TranslatorAttemptRun::Repeated(Some(completed)) => Some(completed.1),
+        TranslatorAttemptRun::Repeated(None) | TranslatorAttemptRun::Stalled(_) => None,
+    }
+}
+
+fn lookahead_hit_provider_pressure(run: &TranslatorAttemptRun) -> bool {
+    matches!(
+        run,
+        TranslatorAttemptRun::Finished(result)
+            if result.as_ref().as_ref().is_err_and(TranslatorStreamError::is_provider_pressure)
+    )
+}
+
+fn account_discarded_lookahead(
+    ctx: &PipelineCtx,
+    acc: &mut Acc,
+    state: &mut LookaheadState,
+    model: &AgentModel,
+    completion: &LookaheadCompletion,
+) {
+    if let Some(usage) = completed_lookahead_usage(&completion.run) {
+        acc.fold(&usage);
+        note_served_tier(ctx, acc, model, &usage);
+        ctx.tx.send(AppEvent::UsageUpdate {
+            run: acc.run,
+            chapter: acc.chapter,
+        });
+    }
+    if lookahead_hit_provider_pressure(&completion.run) {
+        state.note_provider_pressure(&ctx.tx);
+    }
+}
+
+fn spawn_lookahead(
+    ctx: &PipelineCtx,
+    chapter: u32,
+    chunk: &Chunk,
+    input: TranslatorInput,
+    owner: &LookaheadOwner,
+) -> anyhow::Result<PreparedLookahead> {
+    let client = ctx.client_for(&input.model)?;
+    let task_input = input.clone();
+    let cfg = ctx.cfg.clone();
+    let ctl = ctx.ctl.clone();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let task_events = Arc::clone(&events);
+    let handle = tokio::spawn(async move {
+        let wd = Watchdog::new(&cfg);
+        let run = run_translator_attempt(
+            client.as_ref(),
+            &task_input,
+            &wd,
+            &ctl,
+            TranslatorEventSink::Buffered(Arc::clone(&task_events)),
+        )
+        .await;
+        let events = std::mem::take(&mut *task_events.lock().unwrap());
+        LookaheadCompletion { run, events }
+    });
+
+    ctx.tx.send(AppEvent::Log {
+        level: LogLevel::Info,
+        msg: format!(
+            "lookahead started · chapter {chapter} chunk {}",
+            chunk.index + 1
+        ),
+    });
+    owner.install(OwnedLookaheadTask {
+        handle,
+        model: input.model.clone(),
+        chapter,
+        chunk: chunk.index,
+    });
+    Ok(PreparedLookahead {
+        input,
+        chapter,
+        chunk: chunk.index,
+        owner: owner.clone(),
+    })
+}
+
+async fn discard_prepared_lookahead(
+    ctx: &PipelineCtx,
+    draft: PreparedLookahead,
+    acc: &mut Acc,
+    state: &mut LookaheadState,
+    reason: &str,
+) {
+    draft.owner.abort();
+    let Some(joined) = await_owned_lookahead(&draft.owner).await else {
+        return;
+    };
+    let _ = draft.owner.take();
+    match joined {
+        Ok(completion) => {
+            account_discarded_lookahead(ctx, acc, state, &draft.input.model, &completion);
+            ctx.tx.send(AppEvent::Log {
+                level: LogLevel::Info,
+                msg: format!(
+                    "lookahead discarded · chapter {} chunk {} · {reason}",
+                    draft.chapter,
+                    draft.chunk + 1
+                ),
+            });
+        }
+        Err(error) if error.is_cancelled() => ctx.tx.send(AppEvent::Log {
+            level: LogLevel::Info,
+            msg: format!(
+                "lookahead cancelled · chapter {} chunk {} · {reason}",
+                draft.chapter,
+                draft.chunk + 1
+            ),
+        }),
+        Err(error) => ctx.tx.send(AppEvent::Log {
+            level: LogLevel::Warn,
+            msg: format!(
+                "lookahead discarded · chapter {} chunk {} · task failed: {error}",
+                draft.chapter,
+                draft.chunk + 1
+            ),
+        }),
+    }
+}
+
+async fn abort_owned_lookahead(
+    ctx: &PipelineCtx,
+    owner: &LookaheadOwner,
+    acc: &mut Acc,
+    state: &mut LookaheadState,
+    reason: &str,
+) {
+    let Some(task) = owner.take() else {
+        return;
+    };
+    task.handle.abort();
+    match task.handle.await {
+        Ok(completion) => {
+            account_discarded_lookahead(ctx, acc, state, &task.model, &completion);
+            ctx.tx.send(AppEvent::Log {
+                level: LogLevel::Info,
+                msg: format!(
+                    "lookahead discarded · chapter {} chunk {} · {reason}",
+                    task.chapter,
+                    task.chunk + 1
+                ),
+            });
+        }
+        Err(error) if error.is_cancelled() => ctx.tx.send(AppEvent::Log {
+            level: LogLevel::Info,
+            msg: format!(
+                "lookahead cancelled · chapter {} chunk {} · {reason}",
+                task.chapter,
+                task.chunk + 1
+            ),
+        }),
+        Err(error) => ctx.tx.send(AppEvent::Log {
+            level: LogLevel::Warn,
+            msg: format!(
+                "lookahead discarded · chapter {} chunk {} · task failed: {error}",
+                task.chapter,
+                task.chunk + 1
+            ),
+        }),
+    }
+}
+
+async fn resolve_prepared_lookahead(
+    ctx: &PipelineCtx,
+    draft: PreparedLookahead,
+    canonical: &TranslatorInput,
+    acc: &mut Acc,
+    wd: &Watchdog,
+    state: &mut LookaheadState,
+) -> Option<TranslatorAttemptRun> {
+    if !state.enabled {
+        discard_prepared_lookahead(
+            ctx,
+            draft,
+            acc,
+            state,
+            "lookahead was disabled for this run",
+        )
+        .await;
+        return None;
+    }
+    if draft.input != *canonical {
+        discard_prepared_lookahead(ctx, draft, acc, state, "canonical Translator input changed")
+            .await;
+        return None;
+    }
+
+    let joined = loop {
+        tokio::select! {
+            result = await_owned_lookahead(&draft.owner) => break result?,
+            _ = tokio::time::sleep(Duration::from_millis(120)) => {
+                wd.ping();
+                if ctx.ctl.is_paused() || ctx.ctl.is_stopped() {
+                    draft.owner.abort();
+                    break await_owned_lookahead(&draft.owner).await?;
+                }
+            }
+        }
+    };
+    let _ = draft.owner.take();
+
+    let completion = match joined {
+        Ok(completion) => completion,
+        Err(error) if error.is_cancelled() => {
+            ctx.tx.send(AppEvent::Log {
+                level: LogLevel::Info,
+                msg: format!(
+                    "lookahead cancelled · chapter {} chunk {} · run paused or stopped",
+                    draft.chapter,
+                    draft.chunk + 1
+                ),
+            });
+            return None;
+        }
+        Err(error) => {
+            ctx.tx.send(AppEvent::Log {
+                level: LogLevel::Warn,
+                msg: format!(
+                    "lookahead discarded · chapter {} chunk {} · task failed: {error}",
+                    draft.chapter,
+                    draft.chunk + 1
+                ),
+            });
+            return None;
+        }
+    };
+
+    if !matches!(completion.run, TranslatorAttemptRun::Finished(ref result) if result.is_ok()) {
+        account_discarded_lookahead(ctx, acc, state, &draft.input.model, &completion);
+        ctx.tx.send(AppEvent::Log {
+            level: LogLevel::Warn,
+            msg: format!(
+                "lookahead discarded · chapter {} chunk {} · speculative Translator failed",
+                draft.chapter,
+                draft.chunk + 1
+            ),
+        });
+        return None;
+    }
+
+    replay_buffered_translator_events(
+        ctx,
+        draft.chapter,
+        draft.chunk,
+        canonical.attempt,
+        completion.events,
+    );
+    ctx.tx.send(AppEvent::Log {
+        level: LogLevel::Info,
+        msg: format!(
+            "lookahead reused · chapter {} chunk {} · canonical input matched",
+            draft.chapter,
+            draft.chunk + 1
+        ),
+    });
+    Some(completion.run)
+}
+
 /// Translate and review one chunk. Approved output is appended deterministically;
 /// exhausted attempts commit the best/empty NeedsReview block. Only a Translator
 /// that never yields anything can fail the chapter.
 #[allow(clippy::too_many_arguments)]
-async fn process_chunk(
+async fn process_chunk_with_lookahead(
     ctx: &PipelineCtx,
     chapter: u32,
     chunk: &Chunk,
@@ -1570,6 +2176,11 @@ async fn process_chunk(
     wd: &Watchdog,
     pov: &mut Option<String>,
     prev_chunk_text: Option<&str>,
+    mut prepared: Option<PreparedLookahead>,
+    next_chunk: Option<&Chunk>,
+    lookahead: &mut LookaheadState,
+    next_prepared: &mut Option<PreparedLookahead>,
+    owner: &LookaheadOwner,
 ) -> anyhow::Result<ChunkOutcome> {
     // Each step below counts as progress for the stall arm of the watchdog.
     wd.ping();
@@ -1617,123 +2228,48 @@ async fn process_chunk(
             attempt,
         });
 
-        wd.reset_chunk();
-        let stream_tx = ctx.tx.clone();
-        let reasoning_tx = ctx.tx.clone();
-        let thought_tx = ctx.tx.clone();
-        let translator_client = ctx.client_for(&ctx.models.translator)?;
-        let translate_res = {
-            let _wait = wd.external_wait();
-            let translate = translate_chunk_streaming(
-                translator_client.as_ref(),
-                &ctx.models.translator,
-                ctx.target_language,
-                &reference_ctx,
-                &previous_translation,
-                pov.as_deref(),
-                &chunk.text,
-                feedback.as_deref(),
-                attempt,
-                move |delta| {
-                    // Feed the watchdog: streaming is progress (resets the stall
-                    // timer) and the repetition detector sees the live tail.
-                    wd.feed_stream(delta);
-                    stream_tx.send(AppEvent::StreamDelta {
-                        chapter,
-                        chunk: chunk.index,
-                        role: AgentRole::Translator,
-                        delta: delta.to_string(),
-                    });
-                },
-                move |delta| {
-                    wd.ping();
-                    reasoning_tx.send(AppEvent::ThoughtProcessDelta {
-                        chapter,
-                        chunk: chunk.index,
-                        attempt,
-                        field: ThoughtProcessField::ModelReasoning,
-                        delta: delta.to_string(),
-                    });
-                },
-                move |field, delta| {
-                    wd.feed_stream(delta);
-                    thought_tx.send(AppEvent::ThoughtProcessDelta {
+        let canonical = translator_input(
+            ctx,
+            &reference_ctx,
+            &previous_translation,
+            pov.as_deref(),
+            &chunk.text,
+            feedback.as_deref(),
+            attempt,
+        );
+        let prepared_run = if attempt == 1 {
+            match prepared.take() {
+                Some(draft) => {
+                    resolve_prepared_lookahead(ctx, draft, &canonical, acc, wd, lookahead).await
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
+        let translate_res = match prepared_run {
+            Some(run) => run,
+            None => {
+                let translator_client = ctx.client_for(&canonical.model)?;
+                run_translator_attempt(
+                    translator_client.as_ref(),
+                    &canonical,
+                    wd,
+                    &ctx.ctl,
+                    TranslatorEventSink::Live {
+                        tx: ctx.tx.clone(),
                         chapter,
                         chunk: chunk.index,
                         attempt,
-                        field,
-                        delta: delta.to_string(),
-                    });
-                },
-            );
-            tokio::pin!(translate);
-            let repeated = wd.watch_repetition(&ctx.ctl);
-            tokio::pin!(repeated);
-            let stalled = wd.watch_active_call_stall(&ctx.ctl);
-            tokio::pin!(stalled);
-            tokio::select! {
-                biased;
-                _ = &mut repeated => TranslatorAttemptRun::Repeated,
-                reason = &mut stalled => TranslatorAttemptRun::Stalled(reason),
-                res = &mut translate => TranslatorAttemptRun::Finished(Box::new(res)),
+                    },
+                )
+                .await
             }
         };
 
         let (out, t_usage, streamed_preview): (TranslatorOut, Usage, bool) = match translate_res {
             TranslatorAttemptRun::Finished(res) => match *res {
-                Ok(o) if !wd.repetition_triggered() => o,
-                Ok(_) => {
-                    ctx.tx.send(AppEvent::Log {
-                        level: LogLevel::Warn,
-                        msg: format!(
-                            "chapter {chapter} chunk {} output repeated — retrying chunk only ({attempt}/{max})",
-                            chunk.index + 1
-                        ),
-                    });
-                    if attempt < max {
-                        emit_attempt_failed_retry(
-                            ctx,
-                            chapter,
-                            chunk,
-                            attempt,
-                            max,
-                            REPETITION_RETRY_FEEDBACK,
-                        );
-                        feedback = Some(retry_feedback_preserving_reviews(
-                            &past_reviews,
-                            REPETITION_RETRY_FEEDBACK,
-                        ));
-                        continue;
-                    }
-
-                    match candidate {
-                        Some(translated) => {
-                            let reason = format!(
-                                "translator output kept repeating on chunk {} after {max} attempts; committed the best available result for review",
-                                chunk.index + 1
-                            );
-                            return commit_chunk_needs_review(
-                                ctx,
-                                chapter,
-                                chunk,
-                                &translated,
-                                attempt,
-                                reason,
-                            )
-                            .await;
-                        }
-                        None => {
-                            let reason = format!(
-                                "translator output kept repeating on chunk {} after {max} attempts; no usable translation was produced",
-                                chunk.index + 1
-                            );
-                            return commit_chunk_needs_review(
-                                ctx, chapter, chunk, "", attempt, reason,
-                            )
-                            .await;
-                        }
-                    }
-                }
+                Ok(o) => o,
                 Err(e) => {
                     let partial = e.partial_translated_text().trim().to_string();
                     // Token-budget cutoffs need a tighter retry, not a verbatim replay.
@@ -1868,7 +2404,16 @@ async fn process_chunk(
                     }
                 }
             },
-            TranslatorAttemptRun::Repeated => {
+            TranslatorAttemptRun::Repeated(completed) => {
+                if let Some(completed) = completed {
+                    let usage = completed.1;
+                    acc.fold(&usage);
+                    note_served_tier(ctx, acc, &ctx.models.translator, &usage);
+                    ctx.tx.send(AppEvent::UsageUpdate {
+                        run: acc.run,
+                        chapter: acc.chapter,
+                    });
+                }
                 ctx.tx.send(AppEvent::Log {
                     level: LogLevel::Warn,
                     msg: format!(
@@ -2261,6 +2806,25 @@ async fn process_chunk(
                 state: ChunkState::Committed,
             });
 
+            let mut spawned_lookahead = None;
+            if lookahead.enabled
+                && let Some(next) = next_chunk
+            {
+                let input =
+                    fresh_translator_input(ctx, chapter, next, Some(&chunk.text), pov.as_deref())
+                        .await;
+                match spawn_lookahead(ctx, chapter, next, input, owner) {
+                    Ok(draft) => spawned_lookahead = Some(draft),
+                    Err(error) => ctx.tx.send(AppEvent::Log {
+                        level: LogLevel::Warn,
+                        msg: format!(
+                            "lookahead skipped · chapter {chapter} chunk {} · {error}",
+                            next.index + 1
+                        ),
+                    }),
+                }
+            }
+
             // Metadata turns can exceed the stall window without streaming; ping
             // while they run so the watchdog only trips on a wedged turn.
             let orch = {
@@ -2270,7 +2834,26 @@ async fn process_chunk(
                     tokio::select! {
                         biased;
                         r = &mut turn => break r,
-                        _ = tokio::time::sleep(Duration::from_millis(500)) => wd.ping(),
+                        _ = tokio::time::sleep(Duration::from_millis(120)) => {
+                            wd.ping();
+                            if (ctx.ctl.is_paused() || ctx.ctl.is_stopped())
+                                && let Some(draft) = spawned_lookahead.take()
+                            {
+                                let reason = if ctx.ctl.is_stopped() {
+                                    "the run stopped"
+                                } else {
+                                    "the run paused"
+                                };
+                                discard_prepared_lookahead(
+                                    ctx,
+                                    draft,
+                                    acc,
+                                    lookahead,
+                                    reason,
+                                )
+                                .await;
+                            }
+                        },
                     }
                 }
             };
@@ -2292,6 +2875,8 @@ async fn process_chunk(
                     });
                 }
             }
+
+            *next_prepared = spawned_lookahead;
 
             return Ok(ChunkOutcome::Committed);
         }
@@ -2316,6 +2901,40 @@ async fn process_chunk(
         "chunk {} exhausted attempts without resolution",
         chunk.index
     )
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+async fn process_chunk(
+    ctx: &PipelineCtx,
+    chapter: u32,
+    chunk: &Chunk,
+    acc: &mut Acc,
+    wd: &Watchdog,
+    pov: &mut Option<String>,
+    prev_chunk_text: Option<&str>,
+) -> anyhow::Result<ChunkOutcome> {
+    let mut lookahead = LookaheadState {
+        enabled: false,
+        pressure_failures: 0,
+    };
+    let mut next_prepared = None;
+    let owner = LookaheadOwner::default();
+    process_chunk_with_lookahead(
+        ctx,
+        chapter,
+        chunk,
+        acc,
+        wd,
+        pov,
+        prev_chunk_text,
+        None,
+        None,
+        &mut lookahead,
+        &mut next_prepared,
+        &owner,
+    )
+    .await
 }
 
 const REVIEW_FEEDBACK_HISTORY_LIMIT: usize = 3;
@@ -3272,6 +3891,1239 @@ mod tests {
                 service_tier: None,
             })
         }
+    }
+
+    #[derive(Clone, Copy)]
+    enum MetadataMutation {
+        None,
+        RelevantGlossary,
+        IrrelevantGlossary,
+    }
+
+    struct LookaheadTestClient {
+        ws: Workspace,
+        mutation: MetadataMutation,
+        translator_calls: AtomicU32,
+        reviewer_calls: AtomicU32,
+        orchestrator_calls: AtomicU32,
+        orchestrator_active: AtomicBool,
+        overlapped: AtomicBool,
+    }
+
+    impl LookaheadTestClient {
+        fn new(ws: Workspace, mutation: MetadataMutation) -> Self {
+            Self {
+                ws,
+                mutation,
+                translator_calls: AtomicU32::new(0),
+                reviewer_calls: AtomicU32::new(0),
+                orchestrator_calls: AtomicU32::new(0),
+                orchestrator_active: AtomicBool::new(false),
+                overlapped: AtomicBool::new(false),
+            }
+        }
+
+        fn response(content: String, usage: Usage) -> crate::llm::ChatResponse {
+            crate::llm::ChatResponse {
+                id: Some("lookahead-test".to_string()),
+                model: Some("honya/test".to_string()),
+                choices: vec![crate::llm::Choice {
+                    index: 0,
+                    message: crate::llm::ResponseMessage {
+                        role: Some("assistant".to_string()),
+                        content: Some(content),
+                        tool_calls: None,
+                    },
+                    finish_reason: Some("stop".to_string()),
+                }],
+                usage: Some(usage),
+                service_tier: None,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::llm::client::LlmClient for LookaheadTestClient {
+        async fn chat(
+            &self,
+            req: &crate::llm::ChatRequest,
+        ) -> crate::llm::client::Result<crate::llm::ChatResponse> {
+            let schema = match &req.response_format {
+                Some(crate::llm::ResponseFormat::JsonSchema { json_schema }) => {
+                    Some(json_schema.name.as_str())
+                }
+                _ => None,
+            };
+            match schema {
+                Some("translation_result") => {
+                    self.translator_calls.fetch_add(1, Ordering::Relaxed);
+                    let prompt = req
+                        .messages
+                        .iter()
+                        .filter_map(|message| message.content.as_deref())
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    if self.orchestrator_active.load(Ordering::Relaxed) {
+                        self.overlapped.store(true, Ordering::Relaxed);
+                    }
+                    if prompt.contains("魔剣") {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                        if self.orchestrator_active.load(Ordering::Relaxed) {
+                            self.overlapped.store(true, Ordering::Relaxed);
+                        }
+                    }
+                    let translated = if !prompt.contains("魔剣") {
+                        "ข้อความแปลแรก"
+                    } else if prompt.contains("ดาบมาร") {
+                        "เขาชักดาบมารออกมา"
+                    } else {
+                        "ร่างเก่าที่ห้ามแสดง"
+                    };
+                    Ok(Self::response(
+                        serde_json::json!({
+                            "thought_process": {
+                                "scene_analysis": "วิเคราะห์",
+                                "glossary_check": "ตรวจศัพท์"
+                            },
+                            "translated_text": translated,
+                            "pov": "",
+                            "new_characters": [],
+                            "new_terms": [],
+                            "continuity_notes": []
+                        })
+                        .to_string(),
+                        Usage {
+                            prompt_tokens: 4,
+                            completion_tokens: 6,
+                            total_tokens: 10,
+                            ..Usage::default()
+                        },
+                    ))
+                }
+                Some("review_result") => {
+                    self.reviewer_calls.fetch_add(1, Ordering::Relaxed);
+                    Ok(Self::response(
+                        serde_json::json!({
+                            "status": "approve",
+                            "feedback": []
+                        })
+                        .to_string(),
+                        Usage {
+                            prompt_tokens: 1,
+                            completion_tokens: 1,
+                            total_tokens: 2,
+                            ..Usage::default()
+                        },
+                    ))
+                }
+                _ => {
+                    let call = self.orchestrator_calls.fetch_add(1, Ordering::Relaxed);
+                    self.orchestrator_active.store(true, Ordering::Relaxed);
+                    if call == 0 {
+                        match self.mutation {
+                            MetadataMutation::None => {}
+                            MetadataMutation::RelevantGlossary => {
+                                glossary::upsert(&self.ws, term("魔剣", "ดาบมาร")).unwrap();
+                            }
+                            MetadataMutation::IrrelevantGlossary => {
+                                glossary::upsert(&self.ws, term("聖剣", "ดาบศักดิ์สิทธิ์")).unwrap();
+                            }
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    self.orchestrator_active.store(false, Ordering::Relaxed);
+                    Ok(Self::response(
+                        "metadata complete".to_string(),
+                        Usage {
+                            prompt_tokens: 1,
+                            completion_tokens: 2,
+                            total_tokens: 3,
+                            ..Usage::default()
+                        },
+                    ))
+                }
+            }
+        }
+    }
+
+    struct TwoChunkRun {
+        translated: String,
+        events: Vec<AppEvent>,
+        translator_calls: u32,
+        reviewer_calls: u32,
+        orchestrator_calls: u32,
+        usage: UsageStats,
+        overlapped: bool,
+    }
+
+    async fn run_two_chunks(
+        tag: &str,
+        parallel_lookahead: bool,
+        mutation: MetadataMutation,
+    ) -> TwoChunkRun {
+        let (base, ws) = temp_ws(tag);
+        let client = Arc::new(LookaheadTestClient::new(ws.clone(), mutation));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let cfg = AppConfig {
+            max_attempts: 1,
+            parallel_lookahead,
+            prepass_extract: false,
+            coherence_check: false,
+            ..AppConfig::default()
+        };
+        let ctx = PipelineCtx {
+            clients: ClientSet::single(client.clone() as Arc<dyn LlmClient>),
+            ws: ws.clone(),
+            models: ModelSet::default(),
+            cfg: cfg.clone(),
+            target_language: TargetLanguage::Thai,
+            tx: EventTx(tx),
+            ctl: RunControl::new(),
+            queue: ChapterQueue::default(),
+        };
+        let chunks = [
+            Chunk {
+                index: 0,
+                text: "彼は立ち上がった。".to_string(),
+                est_tokens: 8,
+            },
+            Chunk {
+                index: 1,
+                text: "彼は魔剣を抜いた。".to_string(),
+                est_tokens: 9,
+            },
+        ];
+        let wd = Watchdog::new(&cfg);
+        let mut acc = Acc::default();
+        let mut state = LookaheadState::new(&cfg);
+        let owner = LookaheadOwner::default();
+        let mut prepared = None;
+        let mut pov = None;
+
+        process_chunk_with_lookahead(
+            &ctx,
+            1,
+            &chunks[0],
+            &mut acc,
+            &wd,
+            &mut pov,
+            None,
+            None,
+            Some(&chunks[1]),
+            &mut state,
+            &mut prepared,
+            &owner,
+        )
+        .await
+        .unwrap();
+        process_chunk_with_lookahead(
+            &ctx,
+            1,
+            &chunks[1],
+            &mut acc,
+            &wd,
+            &mut pov,
+            Some(&chunks[0].text),
+            prepared.take(),
+            None,
+            &mut state,
+            &mut prepared,
+            &owner,
+        )
+        .await
+        .unwrap();
+        abort_owned_lookahead(&ctx, &owner, &mut acc, &mut state, "test cleanup").await;
+
+        let translated = translation::read_translated(&ws, 1).await;
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+        let result = TwoChunkRun {
+            translated,
+            events,
+            translator_calls: client.translator_calls.load(Ordering::Relaxed),
+            reviewer_calls: client.reviewer_calls.load(Ordering::Relaxed),
+            orchestrator_calls: client.orchestrator_calls.load(Ordering::Relaxed),
+            usage: acc.run,
+            overlapped: client.overlapped.load(Ordering::Relaxed),
+        };
+        let _ = std::fs::remove_dir_all(&base);
+        result
+    }
+
+    fn non_log_event_trace(events: &[AppEvent]) -> Vec<String> {
+        events
+            .iter()
+            .filter(|event| !matches!(event, AppEvent::Log { .. }))
+            .map(|event| format!("{event:?}"))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn lookahead_matches_sequential_output_and_authoritative_events() {
+        let sequential =
+            run_two_chunks("lookahead_parity_off", false, MetadataMutation::None).await;
+        let parallel = run_two_chunks("lookahead_parity_on", true, MetadataMutation::None).await;
+
+        assert_eq!(parallel.translated, sequential.translated);
+        assert_eq!(
+            non_log_event_trace(&parallel.events),
+            non_log_event_trace(&sequential.events)
+        );
+        assert_eq!(parallel.usage.tokens.total, sequential.usage.tokens.total);
+        assert_eq!(parallel.usage.tool_calls, sequential.usage.tool_calls);
+        assert_eq!(parallel.usage.cost_usd, sequential.usage.cost_usd);
+        assert_eq!(parallel.translator_calls, 2);
+        assert!(
+            parallel.overlapped,
+            "next Translator should overlap metadata"
+        );
+        assert!(parallel.events.iter().any(|event| matches!(
+            event,
+            AppEvent::Log { msg, .. } if msg.contains("lookahead reused")
+        )));
+    }
+
+    #[tokio::test]
+    async fn relevant_metadata_invalidates_and_hides_completed_draft() {
+        let run = run_two_chunks(
+            "lookahead_relevant_metadata",
+            true,
+            MetadataMutation::RelevantGlossary,
+        )
+        .await;
+
+        assert_eq!(run.translator_calls, 3, "stale draft must be replaced");
+        assert_eq!(run.reviewer_calls, 2);
+        assert_eq!(run.orchestrator_calls, 2);
+        assert_eq!(
+            run.usage.tokens.total, 40,
+            "discarded completed usage counts"
+        );
+        assert!(run.translated.contains("เขาชักดาบมารออกมา"));
+        assert!(!run.translated.contains("ร่างเก่าที่ห้ามแสดง"));
+        assert!(!run.events.iter().any(|event| match event {
+            AppEvent::StreamDelta { delta, .. } => delta.contains("ร่างเก่าที่ห้ามแสดง"),
+            AppEvent::TranslatorReturned {
+                translated_preview, ..
+            } => translated_preview.contains("ร่างเก่าที่ห้ามแสดง"),
+            _ => false,
+        }));
+        assert!(run.events.iter().any(|event| matches!(
+            event,
+            AppEvent::Log { msg, .. } if msg.contains("canonical Translator input changed")
+        )));
+    }
+
+    #[tokio::test]
+    async fn irrelevant_metadata_keeps_exact_draft_and_replays_once() {
+        let run = run_two_chunks(
+            "lookahead_irrelevant_metadata",
+            true,
+            MetadataMutation::IrrelevantGlossary,
+        )
+        .await;
+
+        assert_eq!(run.translator_calls, 2);
+        assert_eq!(run.usage.tokens.total, 30);
+        assert!(run.translated.contains("ร่างเก่าที่ห้ามแสดง"));
+        let stream_events = run
+            .events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    AppEvent::StreamDelta { chunk: 1, delta, .. }
+                        if delta.contains("ร่างเก่าที่ห้ามแสดง")
+                )
+            })
+            .count();
+        assert_eq!(
+            stream_events, 1,
+            "promoted stream must not duplicate preview"
+        );
+        assert!(run.events.iter().any(|event| matches!(
+            event,
+            AppEvent::TranslatorReturned {
+                chunk: 1,
+                translated_preview,
+                ..
+            } if translated_preview.is_empty()
+        )));
+    }
+
+    #[tokio::test]
+    async fn canonical_input_tracks_prompt_relevant_workspace_metadata_only() {
+        let (base, ws) = temp_ws("lookahead_canonical_metadata");
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = PipelineCtx {
+            clients: ClientSet::default(),
+            ws: ws.clone(),
+            models: ModelSet::default(),
+            cfg: AppConfig::default(),
+            target_language: TargetLanguage::Thai,
+            tx: EventTx(tx),
+            ctl: RunControl::new(),
+            queue: ChapterQueue::default(),
+        };
+        let chunk = Chunk {
+            index: 1,
+            text: "アリスは魔剣を抜いた。".to_string(),
+            est_tokens: 10,
+        };
+
+        let baseline = fresh_translator_input(&ctx, 1, &chunk, None, None).await;
+        glossary::upsert(&ws, term("聖剣", "ดาบศักดิ์สิทธิ์")).unwrap();
+        let irrelevant_term = fresh_translator_input(&ctx, 1, &chunk, None, None).await;
+        assert_eq!(baseline, irrelevant_term);
+
+        glossary::upsert(&ws, term("魔剣", "ดาบมาร")).unwrap();
+        let glossary_changed = fresh_translator_input(&ctx, 1, &chunk, None, None).await;
+        assert_ne!(irrelevant_term, glossary_changed);
+
+        characters::upsert(&ws, character("alice", "アリス", "อลิซ")).unwrap();
+        let character_changed = fresh_translator_input(&ctx, 1, &chunk, None, None).await;
+        assert_ne!(glossary_changed, character_changed);
+
+        crate::workspace::style::append_note(&ws, "Use clipped action prose.").unwrap();
+        let style_changed = fresh_translator_input(&ctx, 1, &chunk, None, None).await;
+        assert_ne!(character_changed, style_changed);
+
+        volume::set_synopsis(&ws, "剣の物語", "เรื่องราวของดาบ").unwrap();
+        let synopsis_changed = fresh_translator_input(&ctx, 1, &chunk, None, None).await;
+        assert_ne!(style_changed, synopsis_changed);
+
+        volume::set_recap(&ws, "metadata not injected into Translator reference").unwrap();
+        let recap_changed = fresh_translator_input(&ctx, 1, &chunk, None, None).await;
+        assert_eq!(synopsis_changed, recap_changed);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[derive(Clone, Copy)]
+    enum SpeculativeMode {
+        RateLimited,
+        Refusal,
+        Repetition,
+        Panic,
+    }
+
+    struct SpeculativeFailureClient {
+        mode: SpeculativeMode,
+        translator_calls: AtomicU32,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmClient for SpeculativeFailureClient {
+        async fn chat(
+            &self,
+            req: &crate::llm::ChatRequest,
+        ) -> crate::llm::client::Result<crate::llm::ChatResponse> {
+            let schema = match &req.response_format {
+                Some(crate::llm::ResponseFormat::JsonSchema { json_schema }) => {
+                    Some(json_schema.name.as_str())
+                }
+                _ => None,
+            };
+            match schema {
+                Some("translation_result") => {
+                    let call = self.translator_calls.fetch_add(1, Ordering::Relaxed) + 1;
+                    let speculative_failure = match self.mode {
+                        SpeculativeMode::RateLimited => call == 2 || call == 4,
+                        _ => call == 2,
+                    };
+                    if speculative_failure {
+                        match self.mode {
+                            SpeculativeMode::RateLimited => {
+                                return Err(crate::llm::client::LlmError::RateLimited {
+                                    retry_after: 0,
+                                    message: "test pressure".to_string(),
+                                });
+                            }
+                            SpeculativeMode::Panic => panic!("speculative task panic"),
+                            SpeculativeMode::Refusal | SpeculativeMode::Repetition => {}
+                        }
+                    }
+                    let translated = if speculative_failure {
+                        match self.mode {
+                            SpeculativeMode::Refusal => {
+                                "I'm sorry, but I cannot translate this due to content policy."
+                                    .to_string()
+                            }
+                            SpeculativeMode::Repetition => "ก็ได้ครับ".repeat(20),
+                            SpeculativeMode::RateLimited | SpeculativeMode::Panic => unreachable!(),
+                        }
+                    } else {
+                        "ข้อความแปลที่สะอาด".to_string()
+                    };
+                    Ok(LookaheadTestClient::response(
+                        serde_json::json!({
+                            "thought_process": {
+                                "scene_analysis": "วิเคราะห์",
+                                "glossary_check": "ตรวจศัพท์"
+                            },
+                            "translated_text": translated,
+                            "pov": "",
+                            "new_characters": [],
+                            "new_terms": [],
+                            "continuity_notes": []
+                        })
+                        .to_string(),
+                        Usage {
+                            prompt_tokens: 4,
+                            completion_tokens: 6,
+                            total_tokens: 10,
+                            ..Usage::default()
+                        },
+                    ))
+                }
+                Some("review_result") => Ok(LookaheadTestClient::response(
+                    serde_json::json!({"status": "approve", "feedback": []}).to_string(),
+                    Usage {
+                        prompt_tokens: 1,
+                        completion_tokens: 1,
+                        total_tokens: 2,
+                        ..Usage::default()
+                    },
+                )),
+                _ => {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    Ok(LookaheadTestClient::response(
+                        "metadata complete".to_string(),
+                        Usage {
+                            prompt_tokens: 1,
+                            completion_tokens: 2,
+                            total_tokens: 3,
+                            ..Usage::default()
+                        },
+                    ))
+                }
+            }
+        }
+    }
+
+    struct FailureRun {
+        events: Vec<AppEvent>,
+        translated: String,
+        translator_calls: u32,
+        usage: UsageStats,
+        lookahead_enabled: bool,
+    }
+
+    async fn run_speculative_mode(
+        tag: &str,
+        mode: SpeculativeMode,
+        chunk_count: usize,
+        max_attempts: u32,
+    ) -> FailureRun {
+        let (base, ws) = temp_ws(tag);
+        let client = Arc::new(SpeculativeFailureClient {
+            mode,
+            translator_calls: AtomicU32::new(0),
+        });
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let cfg = AppConfig {
+            max_attempts,
+            parallel_lookahead: true,
+            prepass_extract: false,
+            coherence_check: false,
+            ..AppConfig::default()
+        };
+        let ctx = PipelineCtx {
+            clients: ClientSet::single(client.clone() as Arc<dyn LlmClient>),
+            ws: ws.clone(),
+            models: ModelSet::default(),
+            cfg: cfg.clone(),
+            target_language: TargetLanguage::Thai,
+            tx: EventTx(tx),
+            ctl: RunControl::new(),
+            queue: ChapterQueue::default(),
+        };
+        let chunks: Vec<Chunk> = (0..chunk_count)
+            .map(|index| Chunk {
+                index,
+                text: format!("これは第{}の文です。", index + 1),
+                est_tokens: 8,
+            })
+            .collect();
+        let wd = Watchdog::new(&cfg);
+        let owner = LookaheadOwner::default();
+        let mut state = LookaheadState::new(&cfg);
+        let mut acc = Acc::default();
+        let mut prepared = None;
+        let mut pov = None;
+
+        for (index, chunk) in chunks.iter().enumerate() {
+            let mut next_prepared = None;
+            process_chunk_with_lookahead(
+                &ctx,
+                1,
+                chunk,
+                &mut acc,
+                &wd,
+                &mut pov,
+                index
+                    .checked_sub(1)
+                    .map(|previous| chunks[previous].text.as_str()),
+                prepared.take(),
+                chunks.get(index + 1),
+                &mut state,
+                &mut next_prepared,
+                &owner,
+            )
+            .await
+            .unwrap();
+            prepared = next_prepared;
+        }
+        if let Some(draft) = prepared.take() {
+            discard_prepared_lookahead(&ctx, draft, &mut acc, &mut state, "test cleanup").await;
+        }
+        abort_owned_lookahead(&ctx, &owner, &mut acc, &mut state, "test cleanup").await;
+
+        let translated = translation::read_translated(&ws, 1).await;
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+        let result = FailureRun {
+            events,
+            translated,
+            translator_calls: client.translator_calls.load(Ordering::Relaxed),
+            usage: acc.run,
+            lookahead_enabled: state.enabled,
+        };
+        let _ = std::fs::remove_dir_all(&base);
+        result
+    }
+
+    #[tokio::test]
+    async fn repeated_rate_limits_disable_lookahead_and_fall_back() {
+        let run =
+            run_speculative_mode("lookahead_rate_limit", SpeculativeMode::RateLimited, 3, 1).await;
+
+        assert_eq!(run.translator_calls, 5);
+        assert!(!run.lookahead_enabled);
+        assert_eq!(run.usage.tokens.total, 45);
+        assert!(run.events.iter().any(|event| matches!(
+            event,
+            AppEvent::Log { msg, .. } if msg.contains("disabled for this run")
+        )));
+    }
+
+    #[tokio::test]
+    async fn promoted_refusal_uses_the_authoritative_retry_loop() {
+        let run = run_speculative_mode("lookahead_refusal", SpeculativeMode::Refusal, 2, 2).await;
+
+        assert_eq!(run.translator_calls, 3);
+        assert!(run.lookahead_enabled);
+        assert!(!run.translated.contains("content policy"));
+        assert!(run.events.iter().any(|event| matches!(
+            event,
+            AppEvent::ChunkRetry { feedback, .. }
+                if feedback.contains("previous output was a refusal")
+        )));
+    }
+
+    #[tokio::test]
+    async fn speculative_repetition_is_discarded_before_preview_or_review() {
+        let run =
+            run_speculative_mode("lookahead_repetition", SpeculativeMode::Repetition, 2, 1).await;
+
+        assert_eq!(run.translator_calls, 3);
+        assert_eq!(run.usage.tokens.total, 40);
+        assert!(!run.events.iter().any(|event| matches!(
+            event,
+            AppEvent::StreamDelta { delta, .. } if delta.contains("ก็ได้ครับก็ได้ครับ")
+        )));
+    }
+
+    #[tokio::test]
+    async fn speculative_task_panic_falls_back_without_failing_the_chunk() {
+        let run = run_speculative_mode("lookahead_panic", SpeculativeMode::Panic, 2, 1).await;
+
+        assert_eq!(run.translator_calls, 3);
+        assert!(run.translated.contains("ข้อความแปลที่สะอาด"));
+        assert!(run.events.iter().any(|event| matches!(
+            event,
+            AppEvent::Log { msg, .. } if msg.contains("task failed")
+        )));
+    }
+
+    struct CancellationGuard(Arc<AtomicBool>);
+
+    impl Drop for CancellationGuard {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Relaxed);
+        }
+    }
+
+    struct HangingLookaheadClient {
+        translator_calls: AtomicU32,
+        speculative_started: Arc<AtomicBool>,
+        speculative_cancelled: Arc<AtomicBool>,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmClient for HangingLookaheadClient {
+        async fn chat(
+            &self,
+            req: &crate::llm::ChatRequest,
+        ) -> crate::llm::client::Result<crate::llm::ChatResponse> {
+            let schema = match &req.response_format {
+                Some(crate::llm::ResponseFormat::JsonSchema { json_schema }) => {
+                    Some(json_schema.name.as_str())
+                }
+                _ => None,
+            };
+            match schema {
+                Some("translation_result") => {
+                    let call = self.translator_calls.fetch_add(1, Ordering::Relaxed) + 1;
+                    if call == 2 {
+                        self.speculative_started.store(true, Ordering::Relaxed);
+                        let _guard = CancellationGuard(Arc::clone(&self.speculative_cancelled));
+                        std::future::pending::<()>().await;
+                        unreachable!();
+                    }
+                    Ok(LookaheadTestClient::response(
+                        serde_json::json!({
+                            "thought_process": {
+                                "scene_analysis": "วิเคราะห์",
+                                "glossary_check": "ตรวจศัพท์"
+                            },
+                            "translated_text": "ข้อความแปลแรก",
+                            "pov": "",
+                            "new_characters": [],
+                            "new_terms": [],
+                            "continuity_notes": []
+                        })
+                        .to_string(),
+                        Usage {
+                            prompt_tokens: 4,
+                            completion_tokens: 6,
+                            total_tokens: 10,
+                            ..Usage::default()
+                        },
+                    ))
+                }
+                Some("review_result") => Ok(LookaheadTestClient::response(
+                    serde_json::json!({"status": "approve", "feedback": []}).to_string(),
+                    Usage {
+                        prompt_tokens: 1,
+                        completion_tokens: 1,
+                        total_tokens: 2,
+                        ..Usage::default()
+                    },
+                )),
+                _ => {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    Ok(LookaheadTestClient::response(
+                        "metadata complete".to_string(),
+                        Usage {
+                            prompt_tokens: 1,
+                            completion_tokens: 2,
+                            total_tokens: 3,
+                            ..Usage::default()
+                        },
+                    ))
+                }
+            }
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum CancellationKind {
+        Pause,
+        Stop,
+        WatchdogReset,
+    }
+
+    async fn assert_lookahead_cancellation(kind: CancellationKind) {
+        let tag = match kind {
+            CancellationKind::Pause => "lookahead_cancel_pause",
+            CancellationKind::Stop => "lookahead_cancel_stop",
+            CancellationKind::WatchdogReset => "lookahead_cancel_watchdog",
+        };
+        let (base, ws) = temp_ws(tag);
+        let started = Arc::new(AtomicBool::new(false));
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let client = Arc::new(HangingLookaheadClient {
+            translator_calls: AtomicU32::new(0),
+            speculative_started: Arc::clone(&started),
+            speculative_cancelled: Arc::clone(&cancelled),
+        });
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let cfg = AppConfig {
+            max_attempts: 1,
+            parallel_lookahead: true,
+            prepass_extract: false,
+            coherence_check: false,
+            ..AppConfig::default()
+        };
+        let ctx = PipelineCtx {
+            clients: ClientSet::single(client as Arc<dyn LlmClient>),
+            ws,
+            models: ModelSet::default(),
+            cfg: cfg.clone(),
+            target_language: TargetLanguage::Thai,
+            tx: EventTx(tx),
+            ctl: RunControl::new(),
+            queue: ChapterQueue::default(),
+        };
+        let first = Chunk {
+            index: 0,
+            text: "最初の文。".to_string(),
+            est_tokens: 5,
+        };
+        let second = Chunk {
+            index: 1,
+            text: "次の文。".to_string(),
+            est_tokens: 5,
+        };
+        let wd = Watchdog::new(&cfg);
+        let owner = LookaheadOwner::default();
+        let mut state = LookaheadState::new(&cfg);
+        let mut acc = Acc::default();
+        let mut prepared = None;
+        process_chunk_with_lookahead(
+            &ctx,
+            1,
+            &first,
+            &mut acc,
+            &wd,
+            &mut None,
+            None,
+            None,
+            Some(&second),
+            &mut state,
+            &mut prepared,
+            &owner,
+        )
+        .await
+        .unwrap();
+
+        for _ in 0..50 {
+            if started.load(Ordering::Relaxed) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        assert!(started.load(Ordering::Relaxed));
+
+        match kind {
+            CancellationKind::Pause => {
+                ctx.ctl.toggle_pause();
+                discard_prepared_lookahead(
+                    &ctx,
+                    prepared.take().unwrap(),
+                    &mut acc,
+                    &mut state,
+                    "the run paused",
+                )
+                .await;
+            }
+            CancellationKind::Stop => {
+                ctx.ctl.stop();
+                discard_prepared_lookahead(
+                    &ctx,
+                    prepared.take().unwrap(),
+                    &mut acc,
+                    &mut state,
+                    "the run stopped",
+                )
+                .await;
+            }
+            CancellationKind::WatchdogReset => {
+                abort_owned_lookahead(
+                    &ctx,
+                    &owner,
+                    &mut acc,
+                    &mut state,
+                    "the chapter watchdog reset the attempt",
+                )
+                .await;
+                drop(prepared.take());
+            }
+        }
+
+        assert!(cancelled.load(Ordering::Relaxed), "task future was dropped");
+        assert!(owner.take().is_none(), "JoinHandle owner must be empty");
+        let mut saw_cancelled = false;
+        while let Ok(event) = rx.try_recv() {
+            if matches!(event, AppEvent::Log { msg, .. } if msg.contains("lookahead cancelled")) {
+                saw_cancelled = true;
+            }
+        }
+        assert!(saw_cancelled);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn pause_stop_and_watchdog_reset_abort_and_await_lookahead() {
+        assert_lookahead_cancellation(CancellationKind::Pause).await;
+        assert_lookahead_cancellation(CancellationKind::Stop).await;
+        assert_lookahead_cancellation(CancellationKind::WatchdogReset).await;
+    }
+
+    struct PartialLookaheadClient {
+        translator_calls: AtomicU32,
+    }
+
+    impl PartialLookaheadClient {
+        fn schema(req: &crate::llm::ChatRequest) -> Option<&str> {
+            match &req.response_format {
+                Some(crate::llm::ResponseFormat::JsonSchema { json_schema }) => {
+                    Some(json_schema.name.as_str())
+                }
+                _ => None,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LlmClient for PartialLookaheadClient {
+        async fn chat(
+            &self,
+            req: &crate::llm::ChatRequest,
+        ) -> crate::llm::client::Result<crate::llm::ChatResponse> {
+            match Self::schema(req) {
+                Some("translation_result") => {
+                    self.translator_calls.fetch_add(1, Ordering::Relaxed);
+                    Ok(LookaheadTestClient::response(
+                        serde_json::json!({
+                            "thought_process": {
+                                "scene_analysis": "วิเคราะห์",
+                                "glossary_check": "ตรวจศัพท์"
+                            },
+                            "translated_text": "ข้อความสมบูรณ์",
+                            "pov": "",
+                            "new_characters": [],
+                            "new_terms": [],
+                            "continuity_notes": []
+                        })
+                        .to_string(),
+                        Usage {
+                            prompt_tokens: 4,
+                            completion_tokens: 6,
+                            total_tokens: 10,
+                            ..Usage::default()
+                        },
+                    ))
+                }
+                Some("review_result") => Ok(LookaheadTestClient::response(
+                    serde_json::json!({"status": "approve", "feedback": []}).to_string(),
+                    Usage {
+                        prompt_tokens: 1,
+                        completion_tokens: 1,
+                        total_tokens: 2,
+                        ..Usage::default()
+                    },
+                )),
+                _ => {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    Ok(LookaheadTestClient::response(
+                        "metadata complete".to_string(),
+                        Usage {
+                            prompt_tokens: 1,
+                            completion_tokens: 2,
+                            total_tokens: 3,
+                            ..Usage::default()
+                        },
+                    ))
+                }
+            }
+        }
+
+        async fn chat_stream(
+            &self,
+            req: &crate::llm::ChatRequest,
+            on_delta: &mut (dyn for<'a> FnMut(crate::llm::StreamDelta<'a>) + Send),
+        ) -> crate::llm::client::Result<crate::llm::ChatResponse> {
+            if Self::schema(req) == Some("translation_result")
+                && self.translator_calls.load(Ordering::Relaxed) == 1
+            {
+                self.translator_calls.fetch_add(1, Ordering::Relaxed);
+                on_delta(crate::llm::StreamDelta::Content(
+                    r#"{"thought_process":{"scene_analysis":"","glossary_check":""},"translated_text":"ร่างบางส่วน"#,
+                ));
+                return Err(crate::llm::client::LlmError::Api {
+                    status: 0,
+                    message: "stream interrupted".to_string(),
+                });
+            }
+
+            let response = self.chat(req).await?;
+            if let Some(content) = response
+                .choices
+                .first()
+                .and_then(|choice| choice.message.content.as_deref())
+            {
+                on_delta(crate::llm::StreamDelta::Content(content));
+            }
+            Ok(response)
+        }
+    }
+
+    #[tokio::test]
+    async fn partial_speculative_stream_is_hidden_and_rerun_sequentially() {
+        let (base, ws) = temp_ws("lookahead_partial_stream");
+        let client = Arc::new(PartialLookaheadClient {
+            translator_calls: AtomicU32::new(0),
+        });
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let cfg = AppConfig {
+            max_attempts: 1,
+            parallel_lookahead: true,
+            prepass_extract: false,
+            coherence_check: false,
+            ..AppConfig::default()
+        };
+        let ctx = PipelineCtx {
+            clients: ClientSet::single(client.clone() as Arc<dyn LlmClient>),
+            ws: ws.clone(),
+            models: ModelSet::default(),
+            cfg: cfg.clone(),
+            target_language: TargetLanguage::Thai,
+            tx: EventTx(tx),
+            ctl: RunControl::new(),
+            queue: ChapterQueue::default(),
+        };
+        let chunks = [
+            Chunk {
+                index: 0,
+                text: "最初の文。".to_string(),
+                est_tokens: 5,
+            },
+            Chunk {
+                index: 1,
+                text: "次の文。".to_string(),
+                est_tokens: 5,
+            },
+        ];
+        let wd = Watchdog::new(&cfg);
+        let owner = LookaheadOwner::default();
+        let mut state = LookaheadState::new(&cfg);
+        let mut acc = Acc::default();
+        let mut prepared = None;
+        let mut pov = None;
+        process_chunk_with_lookahead(
+            &ctx,
+            1,
+            &chunks[0],
+            &mut acc,
+            &wd,
+            &mut pov,
+            None,
+            None,
+            Some(&chunks[1]),
+            &mut state,
+            &mut prepared,
+            &owner,
+        )
+        .await
+        .unwrap();
+        process_chunk_with_lookahead(
+            &ctx,
+            1,
+            &chunks[1],
+            &mut acc,
+            &wd,
+            &mut pov,
+            Some(&chunks[0].text),
+            prepared.take(),
+            None,
+            &mut state,
+            &mut prepared,
+            &owner,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(client.translator_calls.load(Ordering::Relaxed), 3);
+        let translated = translation::read_translated(&ws, 1).await;
+        assert!(translated.contains("ข้อความสมบูรณ์"));
+        assert!(!translated.contains("ร่างบางส่วน"));
+        while let Ok(event) = rx.try_recv() {
+            assert!(!matches!(
+                event,
+                AppEvent::StreamDelta { delta, .. } if delta.contains("ร่างบางส่วน")
+            ));
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[derive(Default)]
+    struct BenchmarkClient {
+        translator_prompts: Mutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmClient for BenchmarkClient {
+        async fn chat(
+            &self,
+            req: &crate::llm::ChatRequest,
+        ) -> crate::llm::client::Result<crate::llm::ChatResponse> {
+            let schema = match &req.response_format {
+                Some(crate::llm::ResponseFormat::JsonSchema { json_schema }) => {
+                    Some(json_schema.name.as_str())
+                }
+                _ => None,
+            };
+            match schema {
+                Some("translation_result") => {
+                    self.translator_prompts.lock().unwrap().push(
+                        req.messages
+                            .iter()
+                            .filter_map(|message| message.content.as_deref())
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    );
+                    tokio::time::sleep(Duration::from_millis(30)).await;
+                    Ok(LookaheadTestClient::response(
+                        serde_json::json!({
+                            "thought_process": {
+                                "scene_analysis": "วิเคราะห์",
+                                "glossary_check": "ตรวจศัพท์"
+                            },
+                            "translated_text": "ข้อความแปลสำหรับวัดเวลา",
+                            "pov": "",
+                            "new_characters": [],
+                            "new_terms": [],
+                            "continuity_notes": []
+                        })
+                        .to_string(),
+                        Usage {
+                            prompt_tokens: 4,
+                            completion_tokens: 6,
+                            total_tokens: 10,
+                            ..Usage::default()
+                        },
+                    ))
+                }
+                Some("review_result") => {
+                    tokio::time::sleep(Duration::from_millis(2)).await;
+                    Ok(LookaheadTestClient::response(
+                        serde_json::json!({"status": "approve", "feedback": []}).to_string(),
+                        Usage {
+                            prompt_tokens: 1,
+                            completion_tokens: 1,
+                            total_tokens: 2,
+                            ..Usage::default()
+                        },
+                    ))
+                }
+                _ => {
+                    tokio::time::sleep(Duration::from_millis(30)).await;
+                    Ok(LookaheadTestClient::response(
+                        "metadata complete".to_string(),
+                        Usage {
+                            prompt_tokens: 1,
+                            completion_tokens: 2,
+                            total_tokens: 3,
+                            ..Usage::default()
+                        },
+                    ))
+                }
+            }
+        }
+    }
+
+    struct BenchmarkRun {
+        elapsed: Duration,
+        prompts: Vec<String>,
+        translated: String,
+    }
+
+    async fn benchmark_run(tag: &str, parallel_lookahead: bool) -> BenchmarkRun {
+        let (base, ws) = temp_ws(tag);
+        let client = Arc::new(BenchmarkClient::default());
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let cfg = AppConfig {
+            max_attempts: 1,
+            parallel_lookahead,
+            prepass_extract: false,
+            coherence_check: false,
+            ..AppConfig::default()
+        };
+        let ctx = PipelineCtx {
+            clients: ClientSet::single(client.clone() as Arc<dyn LlmClient>),
+            ws: ws.clone(),
+            models: ModelSet::default(),
+            cfg: cfg.clone(),
+            target_language: TargetLanguage::Thai,
+            tx: EventTx(tx),
+            ctl: RunControl::new(),
+            queue: ChapterQueue::default(),
+        };
+        let chunks: Vec<Chunk> = (0..5)
+            .map(|index| Chunk {
+                index,
+                text: format!("ベンチマーク用の第{}文。", index + 1),
+                est_tokens: 8,
+            })
+            .collect();
+        let wd = Watchdog::new(&cfg);
+        let owner = LookaheadOwner::default();
+        let mut state = LookaheadState::new(&cfg);
+        let mut acc = Acc::default();
+        let mut prepared = None;
+        let mut pov = None;
+        let started = Instant::now();
+        for (index, chunk) in chunks.iter().enumerate() {
+            let mut next_prepared = None;
+            process_chunk_with_lookahead(
+                &ctx,
+                1,
+                chunk,
+                &mut acc,
+                &wd,
+                &mut pov,
+                index
+                    .checked_sub(1)
+                    .map(|previous| chunks[previous].text.as_str()),
+                prepared.take(),
+                chunks.get(index + 1),
+                &mut state,
+                &mut next_prepared,
+                &owner,
+            )
+            .await
+            .unwrap();
+            prepared = next_prepared;
+        }
+        let elapsed = started.elapsed();
+        abort_owned_lookahead(&ctx, &owner, &mut acc, &mut state, "benchmark cleanup").await;
+        let translated = translation::read_translated(&ws, 1).await;
+        let prompts = client.translator_prompts.lock().unwrap().clone();
+        let _ = std::fs::remove_dir_all(&base);
+        BenchmarkRun {
+            elapsed,
+            prompts,
+            translated,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn delayed_client_lookahead_median_improves_at_least_twenty_percent() {
+        let mut sequential_times = Vec::new();
+        let mut parallel_times = Vec::new();
+        for run in 0..5 {
+            let sequential = benchmark_run(&format!("benchmark_seq_{run}"), false).await;
+            let parallel = benchmark_run(&format!("benchmark_parallel_{run}"), true).await;
+            assert_eq!(parallel.prompts, sequential.prompts);
+            assert_eq!(parallel.translated, sequential.translated);
+            sequential_times.push(sequential.elapsed);
+            parallel_times.push(parallel.elapsed);
+        }
+        sequential_times.sort_unstable();
+        parallel_times.sort_unstable();
+        let sequential_median = sequential_times[sequential_times.len() / 2];
+        let parallel_median = parallel_times[parallel_times.len() / 2];
+
+        assert!(
+            parallel_median.as_nanos() * 100 <= sequential_median.as_nanos() * 80,
+            "median lookahead time {parallel_median:?} must improve at least 20% over {sequential_median:?}"
+        );
     }
 
     #[tokio::test]
@@ -4379,8 +6231,10 @@ mod tests {
         let wd = Watchdog::with_stall(Some(Duration::from_millis(100)));
         let mut acc = Acc::default();
         let mut totals = Totals::default();
+        let mut lookahead = LookaheadState::new(&ctx.cfg);
 
-        let halt = run_volume_chapters(&ctx, None, &wd, &mut acc, &mut totals).await;
+        let halt =
+            run_volume_chapters(&ctx, None, &wd, &mut acc, &mut totals, &mut lookahead).await;
 
         assert!(
             matches!(halt, Halt::Completed),
