@@ -345,7 +345,40 @@ pub fn advisory_findings_with_references_for_language(
         translated.trim(),
         characters,
     );
+    if target_language == TargetLanguage::Thai {
+        audit_female_boku_rendering(
+            &mut findings,
+            source_jp.trim(),
+            translated.trim(),
+            characters,
+        );
+    }
     findings
+}
+
+fn audit_female_boku_rendering(
+    findings: &mut Vec<String>,
+    source: &str,
+    translated: &str,
+    characters: &[Character],
+) {
+    if !has_any(source, &["僕", "ぼく", "ボク"])
+        || !has_any(translated, &["ผม", "โบคุ"])
+        || !characters.iter().any(character_is_female)
+    {
+        return;
+    }
+    findings.push(
+        "possible female `僕/ぼく/ボク` rendering uses `ผม` or `โบคุ`; verify the actual speaker/narrator against CHARACTERS.md and context, and if she is the Boku user require Thai `เรา` (do not infer gender from `僕` alone)"
+            .to_string(),
+    );
+}
+
+fn character_is_female(character: &Character) -> bool {
+    character.gender.as_deref().is_some_and(|gender| {
+        let gender = gender.trim();
+        gender.eq_ignore_ascii_case("female") || gender == "หญิง"
+    })
 }
 
 fn discouraged_casual_particle(text: &str) -> Option<(&'static str, &'static str)> {
@@ -1537,6 +1570,54 @@ mod tests {
                 .iter()
                 .any(|f| f.contains("`俺`") && f.contains("`ฉัน`")),
             "female/polite dialogue `ฉัน` should not be treated as the `俺` narrator: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn advisory_surfaces_female_boku_rendered_as_phom_or_boku() {
+        let mut character = character_with_named_voice(
+            "aoi",
+            "蒼井葵",
+            "อาโออิ อาโออิ",
+            "ตัวละครหญิง ใช้ 僕 เป็นสรรพนามตัวเอง",
+        );
+        character.gender = Some("female".to_string());
+
+        for translated in ["ผมจะกลับแล้ว", "โบคุจะกลับแล้ว"]
+        {
+            let findings = advisory_findings_with_references(
+                "葵は笑った。『僕は帰るよ』",
+                translated,
+                std::slice::from_ref(&character),
+            );
+            assert!(
+                findings.iter().any(|finding| {
+                    finding.contains("female `僕/ぼく/ボク`") && finding.contains("Thai `เรา`")
+                }),
+                "female Boku rendered as {translated} should be surfaced: {findings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn advisory_does_not_apply_female_boku_rule_to_male_character() {
+        let character = character_with_named_voice(
+            "haruto",
+            "佐藤春人",
+            "ซาโต้ ฮารุโตะ",
+            "ตัวละครชาย ใช้ 僕 เป็นสรรพนามตัวเอง",
+        );
+        let findings = advisory_findings_with_references(
+            "春人は笑った。『僕は帰るよ』",
+            "ผมจะกลับแล้ว",
+            &[character],
+        );
+
+        assert!(
+            !findings
+                .iter()
+                .any(|finding| finding.contains("female `僕/ぼく/ボク`")),
+            "male Boku should not trigger the female-specific advisory: {findings:?}"
         );
     }
 

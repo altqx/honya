@@ -667,7 +667,7 @@ fn seed_messages(root: &Path, id: &str) -> Vec<Message> {
         .unwrap_or_default()
 }
 
-const SUBAGENT_SYSTEM: &str = "You are a focused sub-agent inside honya's Refine system, completing ONE self-contained task delegated by a parent agent. You have the same project tools (read/search chapters and the lexicon; edit chapter text; update characters, glossary, style, recaps, summaries). Work autonomously — do not ask questions. Gather the context you need, make the surgical changes the task requires, verify them, then reply with a concise report of exactly what you did: chapters touched, terms/characters changed, and anything the parent agent should know. Keep Thai idiomatic and preserve scene breaks, image links, and Markdown. For large independent chunks, you may spawn multiple focused sub-agents in the same tool turn with disjoint scopes; honya runs them in parallel. Nesting is bounded by the app, so delegate only when it clearly reduces complexity.";
+const SUBAGENT_SYSTEM: &str = "You are a focused sub-agent inside honya's Refine system, completing ONE self-contained task delegated by a parent agent. You have the same project tools (read/search chapters and the lexicon; edit chapter text; update characters, glossary, style, recaps, summaries). Work autonomously — do not ask questions. Gather the context you need, make the surgical changes the task requires, verify them, then reply with a concise report of exactly what you did: chapters touched, terms/characters changed, and anything the parent agent should know. Keep Thai idiomatic and preserve scene breaks, image links, and Markdown. When a female character uses `僕/ぼく/ボク` as her self-pronoun, render it as `เรา`, never `ผม` or `โบคุ`, even if stale reference metadata suggests those forms; identify the character from context rather than inferring gender from `僕` alone. For large independent chunks, you may spawn multiple focused sub-agents in the same tool turn with disjoint scopes; honya runs them in parallel. Nesting is bounded by the app, so delegate only when it clearly reduces complexity.";
 
 const SUBAGENT_SYSTEM_ENGLISH: &str = "You are a focused sub-agent inside honya's Refine system, completing one self-contained task delegated by a parent agent. Read the real Japanese source, English translation, and reference data before editing. Make only evidence-backed surgical changes, keep the English idiomatic and publication-ready for native light-novel readers, preserve scene breaks, image links, and Markdown, verify the result, then report the chapters and metadata changed.";
 
@@ -744,6 +744,8 @@ Categorize each failing chunk before editing:
 - infrastructure: translator stream cutoff, refusal/policy notice, empty or partial output.
 
 For pronoun/register issues, resolve the actual speaker from adjacent turns and source context. `自分` in dialogue can mean the speaker or the listener; if it addresses the listener, use the listener's established address form (`คุณอากุริ`, `อามาโนะคุง`, etc.) rather than generic `เธอ/แก` when the speaker is polite. Do not infer speaker solely from politeness.
+
+When a female character uses `僕/ぼく/ボク` as her first-person pronoun, the Thai form is always `เรา`, never `ผม` or the transliteration `โบคุ`, in both narration and dialogue. This overrides stale CHARACTERS/GLOSSARY notes; identify the actual character from source context and do not infer gender from `僕` alone.
 
 For reviewer feedback, fix only actionable problems you can verify. If the feedback itself says a form is correct, acceptable, or not an issue, leave that point alone and fix the remaining issue. If a reviewer note conflicts with SOURCE_JP/CHARACTERS/GLOSSARY, trust the source/reference and say you corrected the stale note or ignored that portion.
 
@@ -3431,6 +3433,14 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     static REFINE_PARALLELISM_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    #[test]
+    fn thai_refine_prompts_map_female_boku_to_rao() {
+        let prompt = refine_system_prompt(crate::model::TargetLanguage::Thai);
+        assert!(prompt.contains("Thai form is always `เรา`"));
+        assert!(prompt.contains("never `ผม` or the transliteration `โบคุ`"));
+        assert!(SUBAGENT_SYSTEM.contains("render it as `เรา`, never `ผม` or `โบคุ`"));
+    }
 
     #[test]
     fn refine_schema_exposes_only_neutral_target_fields() {
