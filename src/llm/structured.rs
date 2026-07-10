@@ -59,6 +59,11 @@ pub async fn chat_structured<T: DeserializeOwned>(
 }
 
 /// Run a strict structured-output chat while streaming selected string fields.
+pub enum StructuredStreamDelta<'a> {
+    Field(&'static str, &'a str),
+    Reasoning(&'a str),
+}
+
 pub async fn chat_structured_stream_fields<T, F>(
     client: &dyn LlmClient,
     mut req: ChatRequest,
@@ -66,11 +71,11 @@ pub async fn chat_structured_stream_fields<T, F>(
     schema: serde_json::Value,
     retries: usize,
     field_names: &[&'static str],
-    mut on_field_delta: F,
+    mut on_delta: F,
 ) -> Result<(T, Usage, bool)>
 where
     T: DeserializeOwned,
-    F: for<'a> FnMut(&'static str, &'a str) + Send,
+    F: for<'a> FnMut(StructuredStreamDelta<'a>) + Send,
 {
     req.response_format = Some(ResponseFormat::JsonSchema {
         json_schema: JsonSchemaSpec {
@@ -90,16 +95,21 @@ where
             .copied()
             .map(JsonStringFieldStream::new)
             .collect::<Vec<_>>();
-        let mut raw_delta = |delta: crate::llm::StreamDelta| {
-            let crate::llm::StreamDelta::Content(delta) = delta else {
-                return; // structured outputs ignore reasoning fragments
-            };
-            for field_stream in &mut field_streams {
-                let field_delta = field_stream.push(delta);
-                if !field_delta.is_empty() {
-                    streamed_any = true;
-                    on_field_delta(field_stream.field_name, &field_delta);
+        let mut raw_delta = |delta: crate::llm::StreamDelta| match delta {
+            crate::llm::StreamDelta::Content(delta) => {
+                for field_stream in &mut field_streams {
+                    let field_delta = field_stream.push(delta);
+                    if !field_delta.is_empty() {
+                        streamed_any = true;
+                        on_delta(StructuredStreamDelta::Field(
+                            field_stream.field_name,
+                            &field_delta,
+                        ));
+                    }
                 }
+            }
+            crate::llm::StreamDelta::Reasoning(delta) => {
+                on_delta(StructuredStreamDelta::Reasoning(delta))
             }
         };
 
@@ -529,16 +539,19 @@ pub fn coherence_schema() -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::{
-        JsonStringFieldStream, chat_structured, chat_structured_stream_fields, coherence_schema,
-        prepass_schema, translator_schema,
+        JsonStringFieldStream, StructuredStreamDelta, chat_structured,
+        chat_structured_stream_fields, coherence_schema, prepass_schema, translator_schema,
     };
     use crate::llm::client::{LlmClient, LlmError, Result};
-    use crate::llm::{ChatRequest, ChatResponse, Choice, FunctionCall, ResponseMessage, ToolCall};
+    use crate::llm::{
+        ChatRequest, ChatResponse, Choice, FunctionCall, ResponseMessage, StreamDelta, ToolCall,
+    };
     use async_trait::async_trait;
 
     struct OneShotClient {
         message: ResponseMessage,
         finish_reason: Option<String>,
+        reasoning: Option<String>,
     }
 
     #[async_trait]
@@ -555,6 +568,25 @@ mod tests {
                     finish_reason: self.finish_reason.clone(),
                 }],
             })
+        }
+
+        async fn chat_stream(
+            &self,
+            req: &ChatRequest,
+            on_delta: &mut (dyn for<'a> FnMut(StreamDelta<'a>) + Send),
+        ) -> Result<ChatResponse> {
+            if let Some(reasoning) = self.reasoning.as_deref() {
+                on_delta(StreamDelta::Reasoning(reasoning));
+            }
+            let response = self.chat(req).await?;
+            if let Some(content) = response
+                .choices
+                .first()
+                .and_then(|choice| choice.message.content.as_deref())
+            {
+                on_delta(StreamDelta::Content(content));
+            }
+            Ok(response)
         }
     }
 
@@ -592,8 +624,10 @@ mod tests {
                 None,
             ),
             finish_reason: Some("stop".to_string()),
+            reasoning: Some("checking context".to_string()),
         };
         let mut got = Vec::new();
+        let mut reasoning = String::new();
 
         let (_value, _usage, streamed) = chat_structured_stream_fields::<serde_json::Value, _>(
             &client,
@@ -602,12 +636,16 @@ mod tests {
             serde_json::json!({}),
             0,
             &["scene_analysis", "glossary_check", "translated_text"],
-            |field, delta| got.push((field, delta.to_string())),
+            |delta| match delta {
+                StructuredStreamDelta::Field(field, delta) => got.push((field, delta.to_string())),
+                StructuredStreamDelta::Reasoning(delta) => reasoning.push_str(delta),
+            },
         )
         .await
         .expect("structured JSON should parse");
 
         assert!(streamed);
+        assert_eq!(reasoning, "checking context");
         assert_eq!(
             got,
             vec![
@@ -623,6 +661,7 @@ mod tests {
         let client = OneShotClient {
             message: message(None, None),
             finish_reason: Some("length".to_string()),
+            reasoning: None,
         };
         match run(&client).await.unwrap_err() {
             LlmError::EmptyContent {
@@ -649,6 +688,7 @@ mod tests {
         let client = OneShotClient {
             message: message(None, Some(vec![tool_call])),
             finish_reason: Some("tool_calls".to_string()),
+            reasoning: None,
         };
         let (value, _usage) = run(&client).await.expect("tool-call args should parse");
         assert!(value.ok);

@@ -19,7 +19,7 @@ use crate::model::{
 };
 use crate::theme::{self, Theme, agent_badge, agent_spinner_frame, spinner_frame, status_glyph};
 use crate::ui::mouse::{MouseGesture, MouseInput};
-use crate::ui::text::{col_width, pad_to_cols, truncate_cols};
+use crate::ui::text::{col_width, pad_to_cols, truncate_cols, truncate_tail_cols};
 use crate::ui::widgets::render_line_gauge;
 
 use super::{Action, Screen};
@@ -63,6 +63,7 @@ pub struct TranslateScreen {
     /// Accumulated translated preview text.
     preview: String,
     pending_preview_separator: bool,
+    thought_reasoning: String,
     thought_scene: String,
     thought_glossary: String,
     thought_chunk: Option<usize>,
@@ -103,6 +104,7 @@ impl TranslateScreen {
             chunk: (0, 0),
             preview: String::new(),
             pending_preview_separator: false,
+            thought_reasoning: String::new(),
             thought_scene: String::new(),
             thought_glossary: String::new(),
             thought_chunk: None,
@@ -428,6 +430,7 @@ impl TranslateScreen {
     }
 
     fn clear_thought_process(&mut self) {
+        self.thought_reasoning.clear();
         self.thought_scene.clear();
         self.thought_glossary.clear();
         self.thought_chunk = None;
@@ -442,6 +445,7 @@ impl TranslateScreen {
     fn append_thought_process(&mut self, field: ThoughtProcessField, delta: &str) {
         let safe = crate::ui::text::thai_display_safe(delta);
         let target = match field {
+            ThoughtProcessField::ModelReasoning => &mut self.thought_reasoning,
             ThoughtProcessField::SceneAnalysis => &mut self.thought_scene,
             ThoughtProcessField::GlossaryCheck => &mut self.thought_glossary,
         };
@@ -450,7 +454,9 @@ impl TranslateScreen {
     }
 
     fn thought_process_is_empty(&self) -> bool {
-        self.thought_scene.trim().is_empty() && self.thought_glossary.trim().is_empty()
+        self.thought_reasoning.trim().is_empty()
+            && self.thought_scene.trim().is_empty()
+            && self.thought_glossary.trim().is_empty()
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Action {
@@ -917,7 +923,7 @@ impl TranslateScreen {
         if self.show_thought_panel(area) {
             let rows = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([Constraint::Length(5), Constraint::Min(4)])
+                .constraints([Constraint::Length(6), Constraint::Min(4)])
                 .split(area);
             self.render_thought_panel(f, rows[0], theme);
             self.render_preview(f, rows[1], theme);
@@ -929,7 +935,7 @@ impl TranslateScreen {
     fn show_thought_panel(&self, area: Rect) -> bool {
         matches!(self.phase, RunPhase::Running | RunPhase::Paused)
             && area.width >= 34
-            && area.height >= 11
+            && area.height >= 12
     }
 
     fn render_thought_panel(&self, f: &mut Frame, area: Rect, theme: &Theme) {
@@ -943,7 +949,7 @@ impl TranslateScreen {
             .border_set(theme::hairline_set())
             .border_style(Style::default().fg(border))
             .title(Span::styled(
-                " 思考 · thought_process ",
+                " 翻訳者 · live reasoning ",
                 Style::default().fg(theme.ink_soft),
             ))
             .style(Style::default().bg(theme.bg_panel));
@@ -960,10 +966,19 @@ impl TranslateScreen {
         }
         if self.thought_process_is_empty() {
             lines.push(Line::from(Span::styled(
-                " waiting for translator analysis",
+                " waiting for translator reasoning",
                 Style::default().fg(theme.ink_faint),
             )));
         } else {
+            if !self.thought_reasoning.trim().is_empty() {
+                lines.push(reasoning_row(
+                    "current",
+                    &self.thought_reasoning,
+                    width,
+                    theme.accent,
+                    theme.ink_soft,
+                ));
+            }
             lines.push(thought_row(
                 "scene",
                 &self.thought_scene,
@@ -1402,6 +1417,36 @@ fn thought_row(
     ])
 }
 
+fn reasoning_row(
+    label: &str,
+    text: &str,
+    width: usize,
+    label_color: Color,
+    text_color: Color,
+) -> Line<'static> {
+    let prefix = format!(" {label:<8}");
+    let body_budget = width.saturating_sub(col_width(&prefix));
+    let body = current_reasoning_text(text, body_budget);
+    Line::from(vec![
+        Span::styled(
+            prefix,
+            Style::default()
+                .fg(label_color)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(body, Style::default().fg(text_color)),
+    ])
+}
+
+fn current_reasoning_text(text: &str, max_cols: usize) -> String {
+    let one_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one_line.is_empty() {
+        "…".to_string()
+    } else {
+        truncate_tail_cols(&one_line, max_cols)
+    }
+}
+
 fn human_tok(n: u32) -> String {
     if n >= 1_000_000 {
         format!("{:.1}M", n as f64 / 1_000_000.0)
@@ -1550,6 +1595,13 @@ mod queue_panel_tests {
             chapter: 1,
             chunk: 0,
             attempt: 1,
+            field: ThoughtProcessField::ModelReasoning,
+            delta: "checking context ".into(),
+        });
+        screen.on_app_event(&AppEvent::ThoughtProcessDelta {
+            chapter: 1,
+            chunk: 0,
+            attempt: 1,
             field: ThoughtProcessField::SceneAnalysis,
             delta: "tone".into(),
         });
@@ -1561,6 +1613,7 @@ mod queue_panel_tests {
             delta: "term".into(),
         });
 
+        assert_eq!(screen.thought_reasoning, "checking context ");
         assert_eq!(screen.thought_scene, "tone");
         assert_eq!(screen.thought_glossary, "term");
         assert_eq!(screen.thought_chunk, Some(1));
@@ -1577,12 +1630,21 @@ mod queue_panel_tests {
             translated_preview: String::new(),
             tokens: crate::model::TokenUsage::default(),
         });
+        assert_eq!(screen.thought_reasoning, "checking context ");
         assert_eq!(screen.thought_scene, "final tone");
         assert_eq!(screen.thought_glossary, "final term");
 
         let mut term = Terminal::new(TestBackend::new(90, 24)).unwrap();
         term.draw(|f| screen.render(f, f.area(), 0, &theme, None))
             .unwrap();
+    }
+
+    #[test]
+    fn current_reasoning_row_keeps_the_live_tail() {
+        assert_eq!(
+            current_reasoning_text("first thought\nlatest reasoning", 10),
+            "…reasoning"
+        );
     }
 
     #[test]

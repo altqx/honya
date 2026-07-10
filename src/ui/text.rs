@@ -38,6 +38,28 @@ pub fn truncate_cols(s: &str, max_cols: usize) -> String {
     out
 }
 
+/// Keep the newest end of `s` within `max_cols`, prefixed by an ellipsis when cut.
+pub fn truncate_tail_cols(s: &str, max_cols: usize) -> String {
+    if col_width(s) <= max_cols {
+        return s.to_string();
+    }
+    if max_cols == 0 {
+        return String::new();
+    }
+    let budget = max_cols - 1;
+    let mut used = 0usize;
+    let mut start = s.len();
+    for (idx, g) in s.grapheme_indices(true).rev() {
+        let width = col_width(g);
+        if used + width > budget {
+            break;
+        }
+        start = idx;
+        used += width;
+    }
+    format!("…{}", &s[start..])
+}
+
 /// Right-pad (or truncate) `s` so it renders exactly `cols` columns wide.
 pub fn pad_to_cols(s: &str, cols: usize) -> String {
     let w = col_width(s);
@@ -124,5 +146,13 @@ mod tests {
     fn non_thai_is_untouched() {
         let s = "日本語 ABC 123";
         assert_eq!(thai_display_safe(s), s);
+    }
+
+    #[test]
+    fn tail_truncation_keeps_latest_graphemes_and_display_width() {
+        assert_eq!(truncate_tail_cols("abcdef", 4), "…def");
+        assert_eq!(truncate_tail_cols("日本語", 5), "…本語");
+        assert_eq!(col_width(&truncate_tail_cols("日本語", 4)), 3);
+        assert_eq!(truncate_tail_cols("abc", 0), "");
     }
 }

@@ -3,7 +3,9 @@
 use crate::agents::continuity::build_translator_user_msg_for_language;
 use crate::agents::prompts::translator_system;
 use crate::llm::client::{LlmClient, LlmError};
-use crate::llm::structured::{chat_structured_stream_fields, translator_schema};
+use crate::llm::structured::{
+    StructuredStreamDelta, chat_structured_stream_fields, translator_schema,
+};
 use crate::llm::{ChatRequest, Message, Usage};
 use crate::model::{AgentModel, TargetLanguage, ThoughtProcessField, TranslatorOut};
 
@@ -44,6 +46,7 @@ pub async fn translate_chunk_streaming<F>(
     feedback: Option<&str>,
     attempt: u32,
     on_delta: F,
+    on_reasoning_delta: impl for<'a> FnMut(&'a str) + Send,
     on_thought_delta: impl for<'a> FnMut(ThoughtProcessField, &'a str) + Send,
 ) -> std::result::Result<(TranslatorOut, Usage, bool), TranslatorStreamError>
 where
@@ -61,17 +64,21 @@ where
     );
     let mut partial_translated_text = String::new();
     let mut on_delta = on_delta;
+    let mut on_reasoning_delta = on_reasoning_delta;
     let mut on_thought_delta = on_thought_delta;
     let mut streamed_translated_text = false;
-    let mut relay_delta = |field: &'static str, delta: &str| match field {
-        "scene_analysis" => on_thought_delta(ThoughtProcessField::SceneAnalysis, delta),
-        "glossary_check" => on_thought_delta(ThoughtProcessField::GlossaryCheck, delta),
-        "translated_text" => {
-            streamed_translated_text = true;
-            partial_translated_text.push_str(delta);
-            on_delta(delta);
-        }
-        _ => {}
+    let mut relay_delta = |stream_delta: StructuredStreamDelta<'_>| match stream_delta {
+        StructuredStreamDelta::Reasoning(delta) => on_reasoning_delta(delta),
+        StructuredStreamDelta::Field(field, delta) => match field {
+            "scene_analysis" => on_thought_delta(ThoughtProcessField::SceneAnalysis, delta),
+            "glossary_check" => on_thought_delta(ThoughtProcessField::GlossaryCheck, delta),
+            "translated_text" => {
+                streamed_translated_text = true;
+                partial_translated_text.push_str(delta);
+                on_delta(delta);
+            }
+            _ => {}
+        },
     };
 
     // The pipeline owns Translator retries so it can react to partial streamed

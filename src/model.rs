@@ -842,6 +842,7 @@ pub struct ThoughtProcess {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThoughtProcessField {
+    ModelReasoning,
     SceneAnalysis,
     GlossaryCheck,
 }

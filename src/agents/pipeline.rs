@@ -29,7 +29,7 @@ use crate::llm::{ChatRequest, Message, Tool, Usage};
 use crate::model::{
     AgentModel, AgentRole, AppConfig, AppEvent, ChapterStatus, ChunkState, ContinuityNote, EventTx,
     GlossaryTerm, LogLevel, ModelSet, ReviewVerdict, ReviewerOut, ServiceTier, TargetLanguage,
-    TokenUsage, TranslatorOut, UsageStats,
+    ThoughtProcessField, TokenUsage, TranslatorOut, UsageStats,
 };
 use crate::workspace::{Workspace, characters, data_block, glossary, translation, volume};
 
@@ -1628,6 +1628,7 @@ async fn process_chunk(
 
         wd.reset_chunk();
         let stream_tx = ctx.tx.clone();
+        let reasoning_tx = ctx.tx.clone();
         let thought_tx = ctx.tx.clone();
         let translator_client = ctx.client_for(&ctx.models.translator)?;
         let translate_res = {
@@ -1650,6 +1651,16 @@ async fn process_chunk(
                         chapter,
                         chunk: chunk.index,
                         role: AgentRole::Translator,
+                        delta: delta.to_string(),
+                    });
+                },
+                move |delta| {
+                    wd.ping();
+                    reasoning_tx.send(AppEvent::ThoughtProcessDelta {
+                        chapter,
+                        chunk: chunk.index,
+                        attempt,
+                        field: ThoughtProcessField::ModelReasoning,
                         delta: delta.to_string(),
                     });
                 },

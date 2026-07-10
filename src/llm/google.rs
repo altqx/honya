@@ -187,7 +187,7 @@ fn build_body(req: &ChatRequest, configured_tier: Option<ServiceTier>, stream: b
     if let Some(format) = &req.response_format {
         body["response_format"] = response_format_to_google(format);
     }
-    if let Some(config) = generation_config(req) {
+    if let Some(config) = generation_config(req, stream) {
         body["generation_config"] = config;
     }
     if let Some(tier) = req.service_tier.or(configured_tier) {
@@ -297,8 +297,12 @@ fn response_format_to_google(format: &ResponseFormat) -> Value {
     }
 }
 
-fn generation_config(req: &ChatRequest) -> Option<Value> {
+fn generation_config(req: &ChatRequest, include_thought_summaries: bool) -> Option<Value> {
     let mut config = serde_json::Map::new();
+
+    if include_thought_summaries {
+        config.insert("thinking_summaries".to_string(), json!("auto"));
+    }
 
     if let Some(temperature) = req.temperature {
         config.insert("temperature".to_string(), json!(temperature));
@@ -555,30 +559,50 @@ fn handle_sse_line(
             return Err(LlmError::Api { status: 0, message });
         }
         Some("step.start") => {
+            let step = event.get("step");
             if let Some(index) = event.get("index").and_then(Value::as_u64)
-                && let Some(kind) = event
-                    .get("step")
-                    .and_then(|s| s.get("type"))
+                && let Some(kind) = step
+                    .and_then(|value| value.get("type"))
                     .and_then(Value::as_str)
             {
                 stream.step_types.insert(index as u32, kind.to_string());
+                match kind {
+                    "model_output" => {
+                        emit_text_blocks(step.and_then(|value| value.get("content")), |text| {
+                            stream.content.push_str(text);
+                            on_delta(StreamDelta::Content(text));
+                        })
+                    }
+                    "thought" => {
+                        emit_text_blocks(step.and_then(|value| value.get("summary")), |text| {
+                            on_delta(StreamDelta::Reasoning(text))
+                        })
+                    }
+                    _ => {}
+                }
             }
         }
         Some("step.delta") => {
-            let step_is_model_output = event
+            let step_kind = event
                 .get("index")
                 .and_then(Value::as_u64)
                 .and_then(|index| stream.step_types.get(&(index as u32)))
-                .is_none_or(|kind| kind == "model_output");
-            if step_is_model_output
-                && let Some(text) = event
-                    .get("delta")
-                    .filter(|d| d.get("type").and_then(Value::as_str) == Some("text"))
-                    .and_then(|d| d.get("text"))
-                    .and_then(Value::as_str)
-            {
-                stream.content.push_str(text);
-                on_delta(StreamDelta::Content(text));
+                .map(String::as_str);
+            if let Some(delta) = event.get("delta") {
+                match delta.get("type").and_then(Value::as_str) {
+                    Some("text") if step_kind.is_none_or(|kind| kind == "model_output") => {
+                        if let Some(text) = delta_text(delta) {
+                            stream.content.push_str(text);
+                            on_delta(StreamDelta::Content(text));
+                        }
+                    }
+                    Some("thought_summary" | "thought") => {
+                        if let Some(text) = delta_text(delta) {
+                            on_delta(StreamDelta::Reasoning(text));
+                        }
+                    }
+                    _ => {}
+                }
             }
         }
         _ => {}
@@ -596,6 +620,33 @@ fn handle_sse_line(
     }
 
     Ok(())
+}
+
+fn emit_text_blocks(blocks: Option<&Value>, mut emit: impl FnMut(&str)) {
+    let Some(blocks) = blocks.and_then(Value::as_array) else {
+        return;
+    };
+    for block in blocks {
+        if block.get("type").and_then(Value::as_str) == Some("text")
+            && let Some(text) = block.get("text").and_then(Value::as_str)
+            && !text.is_empty()
+        {
+            emit(text);
+        }
+    }
+}
+
+fn delta_text(delta: &Value) -> Option<&str> {
+    delta
+        .get("text")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            delta
+                .get("content")
+                .and_then(|content| content.get("text"))
+                .and_then(Value::as_str)
+        })
+        .filter(|text| !text.is_empty())
 }
 
 fn google_error_message(raw: String) -> String {
@@ -656,6 +707,16 @@ mod tests {
         assert_eq!(body["response_format"]["mime_type"], "application/json");
         assert_eq!(body["generation_config"]["thinking_level"], "high");
         assert_eq!(body["service_tier"], "flex");
+    }
+
+    #[test]
+    fn body_requests_thought_summaries_without_explicit_effort() {
+        let body = build_body(
+            &ChatRequest::new("gemini-3.5-flash", vec![Message::user("go")]),
+            None,
+            true,
+        );
+        assert_eq!(body["generation_config"]["thinking_summaries"], "auto");
     }
 
     #[test]
@@ -726,13 +787,13 @@ mod tests {
         };
 
         handle_sse_line(
-            br#"data: {"event_type":"step.start","index":0,"step":{"type":"model_output"}}"#,
+            br#"data: {"event_type":"step.start","index":0,"step":{"type":"model_output","content":[{"type":"text","text":"he"}]}}"#,
             &mut on_delta,
             &mut stream,
         )
         .unwrap();
         handle_sse_line(
-            br#"data: {"event_type":"step.delta","index":0,"delta":{"type":"text","text":"hel"}}"#,
+            br#"data: {"event_type":"step.delta","index":0,"delta":{"type":"text","text":"l"}}"#,
             &mut on_delta,
             &mut stream,
         )
@@ -747,6 +808,39 @@ mod tests {
         assert_eq!(content, "hel");
         let chat = stream.into_response().unwrap();
         assert_eq!(chat.choices[0].message.content.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn sse_thought_summary_streams_as_reasoning() {
+        let mut stream = GoogleStreamResponse::default();
+        let mut reasoning = String::new();
+        let mut on_delta = |delta: StreamDelta| {
+            if let StreamDelta::Reasoning(text) = delta {
+                reasoning.push_str(text);
+            }
+        };
+
+        handle_sse_line(
+            br#"data: {"event_type":"step.start","index":0,"step":{"type":"thought","summary":[{"type":"text","text":"checking "}]}}"#,
+            &mut on_delta,
+            &mut stream,
+        )
+        .unwrap();
+        handle_sse_line(
+            br#"data: {"event_type":"step.delta","index":0,"delta":{"type":"thought_summary","content":{"type":"text","text":"terms"}}}"#,
+            &mut on_delta,
+            &mut stream,
+        )
+        .unwrap();
+        handle_sse_line(
+            br#"data: {"event_type":"step.delta","index":0,"delta":{"type":"thought_signature","signature":"encrypted"}}"#,
+            &mut on_delta,
+            &mut stream,
+        )
+        .unwrap();
+
+        assert_eq!(reasoning, "checking terms");
+        assert!(stream.content.is_empty());
     }
 
     #[test]
