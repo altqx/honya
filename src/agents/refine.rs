@@ -1800,6 +1800,16 @@ fn parse_plan_steps(args_json: &str) -> Option<Vec<PlanStep>> {
         .map(|a| normalize_plan_steps(a.steps))
 }
 
+fn emit_plan_update(tx: &EventTx, owner: Option<&str>, steps: Vec<PlanStep>) {
+    match owner {
+        Some(id) => tx.send(AppEvent::RefineSubagentPlanUpdated {
+            id: id.to_string(),
+            steps,
+        }),
+        None => tx.send(AppEvent::RefinePlanUpdated { steps }),
+    }
+}
+
 fn clear_completed_plan(tx: &EventTx, steps: Option<&[PlanStep]>) {
     let Some(steps) = steps else {
         return;
@@ -2222,6 +2232,17 @@ pub async fn dispatch_refine_tool(
     name: &str,
     args_json: &str,
 ) -> ToolResult {
+    dispatch_refine_tool_for_owner(root, default_vol, tx, None, name, args_json).await
+}
+
+async fn dispatch_refine_tool_for_owner(
+    root: &Path,
+    default_vol: u32,
+    tx: &EventTx,
+    plan_owner: Option<&str>,
+    name: &str,
+    args_json: &str,
+) -> ToolResult {
     macro_rules! parse {
         ($t:ty) => {
             match serde_json::from_str::<$t>(args_json) {
@@ -2396,12 +2417,10 @@ pub async fn dispatch_refine_tool(
             let a = parse!(UpdatePlanArgs);
             let steps = normalize_plan_steps(a.steps);
             if steps.is_empty() {
-                tx.send(AppEvent::RefinePlanUpdated { steps });
+                emit_plan_update(tx, plan_owner, steps);
                 return ToolResult::ok("plan cleared");
             }
-            tx.send(AppEvent::RefinePlanUpdated {
-                steps: steps.clone(),
-            });
+            emit_plan_update(tx, plan_owner, steps.clone());
             let rendered = steps
                 .iter()
                 .map(|s| {
@@ -3293,9 +3312,23 @@ impl ToolExecutor for RefineTools {
                 "edit rejected by the user",
             ))?);
         }
-        let result =
-            dispatch_refine_tool(&self.root, self.default_vol, &self.tx, name, arguments_json)
-                .await;
+        let result = match (!self.path.is_empty()).then_some(self.path.as_str()) {
+            Some(owner) => {
+                dispatch_refine_tool_for_owner(
+                    &self.root,
+                    self.default_vol,
+                    &self.tx,
+                    Some(owner),
+                    name,
+                    arguments_json,
+                )
+                .await
+            }
+            None => {
+                dispatch_refine_tool(&self.root, self.default_vol, &self.tx, name, arguments_json)
+                    .await
+            }
+        };
         Ok(serde_json::to_string(&result)?)
     }
 
@@ -4929,6 +4962,39 @@ mod tests {
             }
         }
         assert!(saw_empty, "empty plan event clears the UI checklist");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn subagent_update_plan_does_not_replace_main_plan() {
+        let root = temp_root("subagentplan");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let tools = RefineTools::new(root.clone(), 1, EventTx(tx)).child("call_1".to_string());
+
+        let result = tools
+            .execute(
+                "update_plan",
+                r#"{"steps":[{"step":"read chapter","status":"in_progress"}]}"#,
+            )
+            .await
+            .unwrap();
+        assert!(result.contains("plan updated"));
+
+        let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(
+            events
+                .iter()
+                .all(|event| !matches!(event, AppEvent::RefinePlanUpdated { .. })),
+            "a sub-agent plan must not be emitted as the main plan: {events:?}"
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AppEvent::RefineSubagentPlanUpdated { id, steps }
+                if id == "call_1"
+                    && steps.len() == 1
+                    && steps[0].step == "read chapter"
+        )));
 
         let _ = std::fs::remove_dir_all(&root);
     }

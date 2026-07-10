@@ -276,6 +276,7 @@ struct SubagentRun {
     status: RefineSubagentStatus,
     activity: String,
     summary: String,
+    plan: Vec<PlanStep>,
 }
 
 pub struct RefineScreen {
@@ -961,6 +962,10 @@ impl RefineScreen {
                 self.plan = steps.clone();
                 self.follow = true;
             }
+            AppEvent::RefineSubagentPlanUpdated { id, steps } => {
+                self.update_subagent_plan(id, steps);
+                self.follow = true;
+            }
             AppEvent::RefineApprovalRequest { id, summary, diff } => {
                 self.pending = Some(RefinePending::Approval {
                     id: *id,
@@ -1056,6 +1061,23 @@ impl RefineScreen {
             status,
             activity,
             summary: run_summary,
+            plan: Vec::new(),
+        });
+    }
+
+    fn update_subagent_plan(&mut self, id: &str, steps: &[PlanStep]) {
+        if let Some(run) = self.subagents.iter_mut().find(|run| run.id == id) {
+            run.plan = steps.to_vec();
+            return;
+        }
+        self.subagents.push(SubagentRun {
+            id: id.to_string(),
+            depth: id.matches('/').count(),
+            title: "sub-agent".to_string(),
+            status: RefineSubagentStatus::Running,
+            activity: "planning".to_string(),
+            summary: String::new(),
+            plan: steps.to_vec(),
         });
     }
 
@@ -1447,11 +1469,34 @@ impl RefineScreen {
                 };
                 let detail = if run.status == RefineSubagentStatus::Running {
                     let activity = run.activity.trim();
-                    if activity.is_empty() {
-                        status.to_string()
-                    } else {
-                        format!("{status} · {activity}")
+                    let mut parts = vec![status.to_string()];
+                    if !activity.is_empty() {
+                        parts.push(activity.to_string());
                     }
+                    if !run.plan.is_empty() {
+                        let done = run
+                            .plan
+                            .iter()
+                            .filter(|step| step.status == PlanStepStatus::Completed)
+                            .count();
+                        let current = run
+                            .plan
+                            .iter()
+                            .find(|step| step.status == PlanStepStatus::InProgress)
+                            .or_else(|| {
+                                run.plan
+                                    .iter()
+                                    .find(|step| step.status == PlanStepStatus::Pending)
+                            })
+                            .map(|step| step.step.trim())
+                            .filter(|step| !step.is_empty());
+                        let progress = match current {
+                            Some(step) => format!("plan {done}/{} · {step}", run.plan.len()),
+                            None => format!("plan {done}/{}", run.plan.len()),
+                        };
+                        parts.push(progress);
+                    }
+                    parts.join(" · ")
                 } else if run.summary.trim().is_empty() {
                     status.to_string()
                 } else {
@@ -2399,6 +2444,50 @@ mod tests {
 
         s.clear();
         assert!(s.subagents.is_empty());
+    }
+
+    #[test]
+    fn subagents_keep_separate_plans_without_replacing_main_plan() {
+        let mut s = RefineScreen::new();
+        s.plan = vec![PlanStep {
+            step: "main task".to_string(),
+            status: PlanStepStatus::InProgress,
+        }];
+
+        for id in ["call_1", "call_2"] {
+            s.on_app_event(&AppEvent::RefineSubagentUpdated {
+                id: id.to_string(),
+                depth: 0,
+                status: RefineSubagentStatus::Running,
+                summary: format!("run {id}"),
+            });
+        }
+        s.on_app_event(&AppEvent::RefineSubagentPlanUpdated {
+            id: "call_1".to_string(),
+            steps: vec![PlanStep {
+                step: "first child task".to_string(),
+                status: PlanStepStatus::InProgress,
+            }],
+        });
+        s.on_app_event(&AppEvent::RefineSubagentPlanUpdated {
+            id: "call_2".to_string(),
+            steps: vec![PlanStep {
+                step: "second child task".to_string(),
+                status: PlanStepStatus::Pending,
+            }],
+        });
+
+        assert_eq!(s.plan[0].step, "main task");
+        assert_eq!(s.subagents[0].plan[0].step, "first child task");
+        assert_eq!(s.subagents[1].plan[0].step, "second child task");
+
+        s.on_app_event(&AppEvent::RefineSubagentPlanUpdated {
+            id: "call_1".to_string(),
+            steps: Vec::new(),
+        });
+        assert_eq!(s.plan[0].step, "main task");
+        assert!(s.subagents[0].plan.is_empty());
+        assert_eq!(s.subagents[1].plan[0].step, "second child task");
     }
 
     #[test]

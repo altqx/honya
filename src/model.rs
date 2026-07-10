@@ -1599,6 +1599,10 @@ pub enum AppEvent {
     RefinePlanUpdated {
         steps: Vec<PlanStep>,
     },
+    RefineSubagentPlanUpdated {
+        id: String,
+        steps: Vec<PlanStep>,
+    },
     /// Edit approval prompt for a paused mutating tool.
     RefineApprovalRequest {
         id: u64,
