@@ -134,9 +134,9 @@ impl ProjectScreen {
     }
 
     fn volume_header_index(&self, active: &ActiveProject, vol: u32) -> Option<usize> {
-        self.rows(active).iter().position(|r| {
-            matches!(r, Row::Volume(v) if v.number == vol)
-        })
+        self.rows(active)
+            .iter()
+            .position(|r| matches!(r, Row::Volume(v) if v.number == vol))
     }
 
     fn collapse_all_volumes(&mut self, active: &ActiveProject) {
@@ -223,9 +223,7 @@ impl ProjectScreen {
                     self.selected.clear();
                     Action::EnqueueChapters { chapters: marked }
                 } else if let Some(id) = self.selected_chapter_id(active) {
-                    Action::EnqueueChapters {
-                        chapters: vec![id],
-                    }
+                    Action::EnqueueChapters { chapters: vec![id] }
                 } else {
                     Action::None
                 }
@@ -243,15 +241,17 @@ impl ProjectScreen {
                 let data = crate::workspace::volume::load(&active.workspace);
                 Action::show_overlay(Overlay::synopsis_edit(
                     data.synopsis_raw,
-                    data.synopsis_th,
+                    data.translated_synopsis,
                     active.vol,
                     active.project.title.clone(),
+                    active.project.target_language,
                 ))
             }
             KeyCode::Char('e') => Action::show_overlay(Overlay::project_title_edit(
                 active.project.id.clone(),
                 active.project.title.clone(),
-                active.project.title_th.clone(),
+                active.project.translated_title.clone(),
+                active.project.target_language,
             )),
             KeyCode::Char('V') => Action::AddVolume,
             KeyCode::Char('i') => {
@@ -471,10 +471,13 @@ impl ProjectScreen {
 
         // Title line: 棚 + project title (left), active volume + count (right).
         let prefix = " 棚  ";
-        let title_src = if active.project.title_th.trim().is_empty() {
+        let title_src = if active.project.translated_title.trim().is_empty() {
             active.project.title.clone()
         } else {
-            format!("{} · {}", active.project.title, active.project.title_th)
+            format!(
+                "{} · {}",
+                active.project.title, active.project.translated_title
+            )
         };
         let title = truncate_cols(
             &thai_display_safe(&title_src),
@@ -608,12 +611,8 @@ impl ProjectScreen {
         let content_h = detail_body + 2;
         let detail_floor = if has_chapter { 22 } else { 14 };
         let remainder = area_h.saturating_sub(CONTEXT_H);
-        let detail_target = (remainder * 2 / 5)
-            .max(content_h)
-            .max(detail_floor);
-        let detail_cap = ((area_h * 55) / 100)
-            .max(content_h)
-            .min(remainder);
+        let detail_target = (remainder * 2 / 5).max(content_h).max(detail_floor);
+        let detail_cap = ((area_h * 55) / 100).max(content_h).min(remainder);
         let detail_h = detail_target.min(detail_cap);
         if CONTEXT_H + detail_h >= area_h {
             (
@@ -635,10 +634,7 @@ impl ProjectScreen {
                 Constraint::Length(gap),
             ]
         } else {
-            vec![
-                Constraint::Length(context_h),
-                Constraint::Length(detail_h),
-            ]
+            vec![Constraint::Length(context_h), Constraint::Length(detail_h)]
         };
         let rows = Layout::default()
             .direction(Direction::Vertical)
@@ -792,7 +788,13 @@ impl ProjectScreen {
                     c.total_chunks
                 )
             };
-            lines.push(side_field_line("chunks", &chunk_progress, inner_w, faint, soft));
+            lines.push(side_field_line(
+                "chunks",
+                &chunk_progress,
+                inner_w,
+                faint,
+                soft,
+            ));
             lines.push(side_field_line(
                 "source",
                 &format!("{} 句", c.source_segments),
@@ -806,7 +808,12 @@ impl ProjectScreen {
             if let Some(vol) = find_volume(active, c.number) {
                 lines.push(usage_line("volume", &vol.usage_total(), inner_w, theme));
             }
-            lines.push(usage_line("project", &active.project.usage_total(), inner_w, theme));
+            lines.push(usage_line(
+                "project",
+                &active.project.usage_total(),
+                inner_w,
+                theme,
+            ));
             if !self.selected.is_empty() {
                 let nvols = self
                     .selected
@@ -815,11 +822,7 @@ impl ProjectScreen {
                     .collect::<HashSet<_>>()
                     .len();
                 let label = if nvols > 1 {
-                    format!(
-                        "{} chapter(s) · {} vols",
-                        self.selected.len(),
-                        nvols
-                    )
+                    format!("{} chapter(s) · {} vols", self.selected.len(), nvols)
                 } else {
                     format!("{} chapter(s)", self.selected.len())
                 };
@@ -843,7 +846,12 @@ impl ProjectScreen {
                 Style::default().fg(theme.accent),
             ));
         } else {
-            lines.push(usage_line("project", &active.project.usage_total(), inner_w, theme));
+            lines.push(usage_line(
+                "project",
+                &active.project.usage_total(),
+                inner_w,
+                theme,
+            ));
             lines.push(Line::raw(""));
             lines.push(side_indented_line(
                 "Select a chapter to see its detail.",
@@ -1131,11 +1139,7 @@ fn usage_line(label: &str, u: &UsageStats, width: usize, theme: &Theme) -> Line<
     let value = if col_width(&full) <= budget {
         full
     } else {
-        let mid = format!(
-            "{} tok · {} tools",
-            human_num(u.tokens.total),
-            u.tool_calls,
-        );
+        let mid = format!("{} tok · {} tools", human_num(u.tokens.total), u.tool_calls,);
         if col_width(&mid) <= budget {
             truncate_cols(&mid, budget)
         } else {
@@ -1247,7 +1251,8 @@ mod tests {
                 id: "novel".to_string(),
                 dir: dir.clone(),
                 title: "Novel".to_string(),
-                title_th: String::new(),
+                translated_title: String::new(),
+                target_language: crate::model::TargetLanguage::Thai,
                 created: None,
                 touched: None,
                 volumes: vec![Volume {
@@ -1503,7 +1508,10 @@ mod tests {
                 break;
             }
         }
-        assert!(saw_bar, "overflowing chapter tree should render a scrollbar");
+        assert!(
+            saw_bar,
+            "overflowing chapter tree should render a scrollbar"
+        );
     }
 
     #[test]
@@ -1555,7 +1563,11 @@ mod tests {
             Action::None
         ));
         assert!(screen.collapsed.is_empty());
-        assert_eq!(screen.rows(&active).len(), 6, "both volumes show chapters again");
+        assert_eq!(
+            screen.rows(&active).len(),
+            6,
+            "both volumes show chapters again"
+        );
     }
 
     #[test]
@@ -1570,11 +1582,7 @@ mod tests {
             cost_usd: 70.3614,
         };
         let line = usage_line("project", &u, 30, &theme);
-        let rendered: String = line
-            .spans
-            .iter()
-            .map(|s| s.content.as_ref())
-            .collect();
+        let rendered: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(
             col_width(&rendered) <= 30,
             "usage line should fit the panel: {rendered} ({})",
@@ -1593,11 +1601,7 @@ mod tests {
             theme.status_working,
             &theme,
         );
-        let rendered: String = line
-            .spans
-            .iter()
-            .map(|s| s.content.as_ref())
-            .collect();
+        let rendered: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(
             col_width(&rendered) <= 30,
             "context row should fit the panel: {rendered} ({})",

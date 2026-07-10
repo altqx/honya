@@ -1,8 +1,8 @@
 //! src/app/reader.rs — the Reader / Diff view (4 読).
 //!
-//! Synced side-by-side JA source vs TH translation for proofreading. A single
+//! Synced side-by-side Japanese source and target translation for proofreading. A single
 //! shared scroll position drives both panes; `z` decouples; `[`/`]` move between
-//! chapters; `o` cycles split / JA-only / TH-only; `w` toggles wrap.
+//! chapters; `o` cycles split / JA-only / translation-only; `w` toggles wrap.
 
 use std::cell::RefCell;
 use std::hash::{Hash, Hasher};
@@ -27,7 +27,7 @@ use super::overlay::Overlay;
 /// Layout modes for `o`.
 const MODE_SPLIT: u8 = 0;
 const MODE_JA: u8 = 1;
-const MODE_TH: u8 = 2;
+const MODE_TRANSLATION: u8 = 2;
 
 /// Default soft / hard chunk budgets, mirroring `AppConfig`. Used to re-derive JA
 /// chunk boundaries for `s` (show source) until the App seeds the live values.
@@ -38,7 +38,7 @@ const DEFAULT_CHUNK_HARD_CAP: usize = 1200;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Side {
     Ja,
-    Th,
+    Translation,
 }
 
 /// One global-search match: a pane and the (0-based) source line it sits on.
@@ -110,48 +110,48 @@ impl StatusBar {
 struct ReaderSearch {
     /// Query as typed (matched against the JA pane).
     query: String,
-    /// Display-safe form of the query (matched against the decomposed TH pane).
-    th_query: String,
+    /// Display-safe form of the query (matched against the decomposed translation pane).
+    translated_query: String,
     hits: Vec<SearchHit>,
     sel: usize,
 }
 
 pub struct ReaderScreen {
     scroll: u16,
-    /// Second (Thai) scroll offset, used only when sync is off.
-    th_scroll: u16,
+    /// Translation-pane scroll offset, used only when sync is off.
+    translation_scroll: u16,
     sync: bool,
     wrap: bool,
     layout_mode: u8,
     ja: String,
-    th: String,
+    translated_text: String,
     annotations: Vec<ReaderAnnotation>,
     show_annotations: bool,
     chapter: u32,
     /// Rerun comparison for the current chapter, present only when an earlier
     /// version is archived (i.e. the chapter has been retranslated at least once).
     compare: Option<RerunCompare>,
-    /// Diff mode active: side-by-side old vs new Thai. Only enterable when
+    /// Diff mode active: side-by-side old vs new translation. Only enterable when
     /// `compare` is `Some`; `d` toggles it.
     diff_mode: bool,
     /// Glossary/character JP forms present in this chapter, tinted in the JA pane.
     hl_ja: Vec<String>,
-    /// Glossary/character Thai forms present in this chapter (display-safe), TH pane.
-    hl_th: Vec<String>,
+    /// Glossary/character target forms present in this chapter, display-safe.
+    translated_highlights: Vec<String>,
     /// Whether glossary-term highlighting is on (toggle with `G`).
     highlight: bool,
     /// Active search across both panes, or `None`.
     search: Option<ReaderSearch>,
-    /// `[REVIEW NEEDED]` banner line anchors (0-based) in the TH pane, for `r`.
+    /// `[REVIEW NEEDED]` banner line anchors (0-based) in the translation pane, for `r`.
     review_lines: Vec<u16>,
     /// Bookmark line anchors (1-based) for the current chapter, for the status badge.
     bookmark_lines: Vec<u32>,
-    /// Soft / hard chunk budgets used to align a TH chunk to its JA source (`s`).
+    /// Soft / hard chunk budgets used to align a translation chunk to its JA source (`s`).
     chunk_cfg: (usize, usize),
     /// Pane rectangles, refreshed every frame, so the wheel scrolls whichever pane
     /// the pointer is over when the two are decoupled. Empty when a pane is hidden.
     ja_area: Rect,
-    th_area: Rect,
+    translation_area: Rect,
     /// Clickable cells of the status bar (sync/wrap/mode/… toggles), refreshed
     /// every frame like the pane rects.
     status_zones: Vec<(Rect, StatusHit)>,
@@ -159,41 +159,41 @@ pub struct ReaderScreen {
     /// edits). Folds into the per-pane cache key so the expensive Markdown parse is
     /// skipped on the 100 ms ticker / pipeline events while reading a static chapter.
     content_rev: u64,
-    /// Memoized rendered lines for the JA / TH panes, rebuilt only when their cache
+    /// Memoized rendered lines for the JA / translation panes, rebuilt only when their cache
     /// key (content_rev, width, theme, highlight/search state …) changes — never on a
     /// bare scroll or animation tick.
     ja_cache: RefCell<crate::ui::markdown::RenderCache>,
-    th_cache: RefCell<crate::ui::markdown::RenderCache>,
+    translation_cache: RefCell<crate::ui::markdown::RenderCache>,
 }
 
 impl ReaderScreen {
     pub fn new() -> Self {
         Self {
             scroll: 0,
-            th_scroll: 0,
+            translation_scroll: 0,
             sync: true,
             wrap: true,
             layout_mode: MODE_SPLIT,
             ja: String::new(),
-            th: String::new(),
+            translated_text: String::new(),
             annotations: Vec::new(),
             show_annotations: true,
             chapter: 0,
             compare: None,
             diff_mode: false,
             hl_ja: Vec::new(),
-            hl_th: Vec::new(),
+            translated_highlights: Vec::new(),
             highlight: true,
             search: None,
             review_lines: Vec::new(),
             bookmark_lines: Vec::new(),
             chunk_cfg: (DEFAULT_CHUNK_TARGET, DEFAULT_CHUNK_HARD_CAP),
             ja_area: Rect::default(),
-            th_area: Rect::default(),
+            translation_area: Rect::default(),
             status_zones: Vec::new(),
             content_rev: 0,
             ja_cache: RefCell::new(crate::ui::markdown::RenderCache::default()),
-            th_cache: RefCell::new(crate::ui::markdown::RenderCache::default()),
+            translation_cache: RefCell::new(crate::ui::markdown::RenderCache::default()),
         }
     }
 
@@ -204,7 +204,7 @@ impl ReaderScreen {
         self.chunk_cfg = (target.max(1), hard_cap.max(target.max(1)));
     }
 
-    /// Enter the rerun diff view (old vs new Thai).
+    /// Enter the rerun diff view (old vs new translation).
     pub fn enter_diff(&mut self) {
         self.diff_mode = true;
     }
@@ -216,19 +216,19 @@ impl ReaderScreen {
         }
     }
 
-    /// Load raw/ (JA) + translated/ (TH) for a chapter.
+    /// Load raw/ (JA) + translated/ (translation) for a chapter.
     pub fn load(&mut self, ws: &Workspace, chapter: u32) {
         self.chapter = chapter;
         self.scroll = 0;
-        self.th_scroll = 0;
+        self.translation_scroll = 0;
         self.diff_mode = false;
         self.ja = std::fs::read_to_string(ws.raw(chapter))
             .unwrap_or_else(|_| "(raw not found)".to_string());
-        let th = std::fs::read_to_string(ws.translated(chapter))
+        let translated = std::fs::read_to_string(ws.translated(chapter))
             .unwrap_or_else(|_| "(not translated yet)".to_string());
         // Decompose Thai SARA AM so it never lands as a width-2 single cell that
         // desyncs the terminal and smears ำ across the screen on the next redraw.
-        self.th = crate::ui::text::thai_display_safe(&th);
+        self.translated_text = crate::ui::text::thai_display_safe(&translated);
         self.search = None;
         self.content_rev = self.content_rev.wrapping_add(1);
         self.reload_annotations(ws);
@@ -238,34 +238,34 @@ impl ReaderScreen {
         self.load_compare(ws);
     }
 
-    /// Load the project glossary + characters and keep only the JP / Thai forms that
+    /// Load the project glossary + characters and keep only the source/target forms that
     /// actually appear in this chapter, so highlighting is bounded per chapter (the
     /// same present-only filter `build_reference_ctx` uses for injected context).
     fn reload_highlight_terms(&mut self, ws: &Workspace) {
         self.hl_ja.clear();
-        self.hl_th.clear();
+        self.translated_highlights.clear();
         if self.chapter == 0 {
             return;
         }
         let glossary = crate::workspace::glossary::load(ws);
         let characters = crate::workspace::characters::load(ws);
 
-        // TH forms: decompose like the pane content, keep only those present.
-        let mut th_seen = std::collections::HashSet::new();
-        let mut hl_th = Vec::new();
-        let th_forms = glossary
+        // translation forms: decompose like the pane content, keep only those present.
+        let mut translated_seen = std::collections::HashSet::new();
+        let mut translated_highlights = Vec::new();
+        let translated_forms = glossary
             .iter()
-            .map(|t| t.thai_term.as_str())
-            .chain(characters.iter().map(|c| c.thai_name.as_str()));
-        for raw in th_forms {
+            .map(|t| t.translated_term.as_str())
+            .chain(characters.iter().map(|c| c.translated_name.as_str()));
+        for raw in translated_forms {
             let safe = crate::ui::text::thai_display_safe(raw.trim());
             // Match case-insensitively to stay consistent with the renderer's
             // `highlight` (matters only for ASCII terms like "HP"/"SSR").
             if !safe.is_empty()
-                && crate::ui::markdown::contains_ci(&self.th, &safe)
-                && th_seen.insert(safe.clone())
+                && crate::ui::markdown::contains_ci(&self.translated_text, &safe)
+                && translated_seen.insert(safe.clone())
             {
-                hl_th.push(safe);
+                translated_highlights.push(safe);
             }
         }
 
@@ -286,7 +286,7 @@ impl ReaderScreen {
             }
         }
 
-        self.hl_th = hl_th;
+        self.translated_highlights = translated_highlights;
         self.hl_ja = hl_ja;
     }
 
@@ -307,7 +307,7 @@ impl ReaderScreen {
     /// in document order, so `r` can cycle through them and the status bar can count.
     fn recompute_review_lines(&mut self) {
         self.review_lines = self
-            .th
+            .translated_text
             .lines()
             .enumerate()
             .filter(|(_, l)| l.contains("[REVIEW NEEDED]"))
@@ -333,12 +333,12 @@ impl ReaderScreen {
             return;
         };
 
-        let old_th = crate::workspace::translation::prose_only(
+        let old_translation = crate::workspace::translation::prose_only(
             &crate::ui::text::thai_display_safe(&old_raw),
         );
-        // `self.th` is already display-safe; strip the chunk markers for a clean diff.
-        let new_th = crate::workspace::translation::prose_only(&self.th);
-        let line = crate::ui::diff::diff_lines(&old_th, &new_th);
+        // `self.translated_text` is already display-safe; strip the chunk markers for a clean diff.
+        let new_translation = crate::workspace::translation::prose_only(&self.translated_text);
+        let line = crate::ui::diff::diff_lines(&old_translation, &new_translation);
 
         let old_cost = (!prev.usage_unknown).then_some(prev.usage.cost_usd);
         let new_cost = live.and_then(|r| (!r.usage_unknown).then_some(r.usage.cost_usd));
@@ -347,8 +347,8 @@ impl ReaderScreen {
             // No recorded live run (e.g. a rerun crashed before finishing): read the
             // review-needed count straight off the live file.
             None => (
-                crate::workspace::translation::review_needed_chunk_indices_in(&self.th).len()
-                    as u32,
+                crate::workspace::translation::review_needed_chunk_indices_in(&self.translated_text)
+                    .len() as u32,
                 false,
             ),
         };
@@ -362,8 +362,8 @@ impl ReaderScreen {
             new_label: live
                 .map(|r| short_dt(r.finished_at))
                 .unwrap_or_else(|| "live".to_string()),
-            old_th,
-            new_th,
+            old_translation,
+            new_translation,
             line,
             old_cost,
             new_cost,
@@ -383,7 +383,7 @@ impl ReaderScreen {
         } else {
             crate::workspace::volume::reader_annotations(ws, self.chapter)
         };
-        // Notes are interleaved into the TH pane, so a note edit changes its render.
+        // Notes are interleaved into the translation pane, so a note edit changes its render.
         self.content_rev = self.content_rev.wrapping_add(1);
     }
 
@@ -422,7 +422,7 @@ impl ReaderScreen {
             KeyCode::Char('z') => {
                 self.sync = !self.sync;
                 if self.sync {
-                    self.th_scroll = self.scroll;
+                    self.translation_scroll = self.scroll;
                 }
                 Action::None
             }
@@ -457,7 +457,7 @@ impl ReaderScreen {
                 if self.chapter == 0 {
                     Action::None
                 } else {
-                    let text = crate::workspace::translation::prose_only(&self.th);
+                    let text = crate::workspace::translation::prose_only(&self.translated_text);
                     if text.trim().is_empty() {
                         Action::None
                     } else {
@@ -525,7 +525,7 @@ impl ReaderScreen {
 
     /// Mouse: the wheel scrolls. When the panes are synced (or in diff mode) both
     /// move together; when decoupled, only the pane under the pointer scrolls — so
-    /// you can read JA and TH at independent positions with the wheel. A click on
+    /// you can read JA and translation at independent positions with the wheel. A click on
     /// a status-bar cell fires its key binding (sync/wrap/mode/…).
     pub fn handle_mouse(&mut self, m: MouseInput) -> Action {
         match m.gesture {
@@ -553,7 +553,7 @@ impl ReaderScreen {
             StatusHit::Sync => {
                 self.sync = !self.sync;
                 if self.sync {
-                    self.th_scroll = self.scroll;
+                    self.translation_scroll = self.scroll;
                 }
             }
             StatusHit::Wrap => self.wrap = !self.wrap,
@@ -576,8 +576,8 @@ impl ReaderScreen {
             self.scroll_by(delta);
             return;
         }
-        if col_in(self.th_area, col) {
-            self.th_scroll = step(self.th_scroll, delta);
+        if col_in(self.translation_area, col) {
+            self.translation_scroll = step(self.translation_scroll, delta);
         } else if col_in(self.ja_area, col) {
             self.scroll = step(self.scroll, delta);
         } else {
@@ -588,9 +588,9 @@ impl ReaderScreen {
     fn scroll_by(&mut self, delta: i32) {
         self.scroll = step(self.scroll, delta);
         if self.sync {
-            self.th_scroll = self.scroll;
+            self.translation_scroll = self.scroll;
         } else {
-            self.th_scroll = step(self.th_scroll, delta);
+            self.translation_scroll = step(self.translation_scroll, delta);
         }
     }
 
@@ -612,7 +612,7 @@ impl ReaderScreen {
         match self.layout_mode {
             MODE_JA => {
                 self.ja_area = body;
-                self.th_area = Rect::default();
+                self.translation_area = Rect::default();
                 self.render_pane(
                     f,
                     body,
@@ -625,17 +625,17 @@ impl ReaderScreen {
                     None,
                 );
             }
-            MODE_TH => {
+            MODE_TRANSLATION => {
                 self.ja_area = Rect::default();
-                self.th_area = body;
+                self.translation_area = body;
                 self.render_pane(
                     f,
                     body,
                     theme,
-                    "Thai (translated)",
-                    &self.th,
-                    theme.th_text,
-                    self.effective_th_scroll(),
+                    "Translation",
+                    &self.translated_text,
+                    theme.translated_text,
+                    self.effective_translation_scroll(),
                     true,
                     Some(&self.annotations),
                 );
@@ -646,7 +646,7 @@ impl ReaderScreen {
                     .constraints([Constraint::Percentage(48), Constraint::Percentage(52)])
                     .split(body);
                 self.ja_area = cols[0];
-                self.th_area = cols[1];
+                self.translation_area = cols[1];
                 self.render_pane(
                     f,
                     cols[0],
@@ -662,10 +662,10 @@ impl ReaderScreen {
                     f,
                     cols[1],
                     theme,
-                    "Thai (translated)",
-                    &self.th,
-                    theme.th_text,
-                    self.effective_th_scroll(),
+                    "Translation",
+                    &self.translated_text,
+                    theme.translated_text,
+                    self.effective_translation_scroll(),
                     true,
                     Some(&self.annotations),
                 );
@@ -675,17 +675,17 @@ impl ReaderScreen {
         self.render_status(f, rows[1], theme);
     }
 
-    fn effective_th_scroll(&self) -> u16 {
+    fn effective_translation_scroll(&self) -> u16 {
         if self.sync {
             self.scroll
         } else {
-            self.th_scroll
+            self.translation_scroll
         }
     }
 
     fn current_annotation_line(&self) -> u32 {
-        let line_count = self.th.lines().count().max(1) as u32;
-        (u32::from(self.effective_th_scroll()) + 1).clamp(1, line_count)
+        let line_count = self.translated_text.lines().count().max(1) as u32;
+        (u32::from(self.effective_translation_scroll()) + 1).clamp(1, line_count)
     }
 
     /// The chapter currently loaded (0 = none), for the App's jump-overlay builder.
@@ -693,12 +693,12 @@ impl ReaderScreen {
         self.chapter
     }
 
-    /// A short preview of the current TH line, used as a bookmark label.
+    /// A short preview of the current translation line, used as a bookmark label.
     pub fn current_line_preview(&self) -> String {
         // Clamp to the last line so a scroll-past-EOF cursor still yields real text.
-        let idx =
-            (self.effective_th_scroll() as usize).min(self.th.lines().count().saturating_sub(1));
-        let raw = self.th.lines().nth(idx).unwrap_or("");
+        let idx = (self.effective_translation_scroll() as usize)
+            .min(self.translated_text.lines().count().saturating_sub(1));
+        let raw = self.translated_text.lines().nth(idx).unwrap_or("");
         let cleaned = crate::workspace::translation::prose_only(raw);
         let text = if cleaned.trim().is_empty() {
             raw.trim()
@@ -709,14 +709,14 @@ impl ReaderScreen {
     }
 
     /// Section outline (heading line / level / text) of the loaded chapter, parsed
-    /// from the TH pane (falling back to JA when the chapter is untranslated). The
+    /// from the translation pane (falling back to JA when the chapter is untranslated). The
     /// line is the 1-based source line, the same basis the scroll offset tracks.
     pub fn outline(&self) -> Vec<(u32, u8, String)> {
-        let from_th = parse_headings(&self.th);
-        if from_th.is_empty() {
+        let from_translation = parse_headings(&self.translated_text);
+        if from_translation.is_empty() {
             parse_headings(&self.ja)
         } else {
-            from_th
+            from_translation
         }
     }
 
@@ -728,7 +728,7 @@ impl ReaderScreen {
             self.search = None;
             return 0;
         }
-        let th_query = crate::ui::text::thai_display_safe(&query);
+        let translated_query = crate::ui::text::thai_display_safe(&query);
         let mut hits = Vec::new();
         for (i, line) in self.ja.lines().enumerate() {
             if crate::ui::markdown::contains_ci(line, &query) {
@@ -738,16 +738,16 @@ impl ReaderScreen {
                 });
             }
         }
-        for (i, line) in self.th.lines().enumerate() {
-            if crate::ui::markdown::contains_ci(line, &th_query) {
+        for (i, line) in self.translated_text.lines().enumerate() {
+            if crate::ui::markdown::contains_ci(line, &translated_query) {
                 hits.push(SearchHit {
-                    side: Side::Th,
+                    side: Side::Translation,
                     line: i.min(u16::MAX as usize) as u16,
                 });
             }
         }
-        // Document order, JA then TH on the same line, so `>` walks top-to-bottom.
-        hits.sort_by_key(|h| (h.line, h.side == Side::Th));
+        // Document order, JA then translation on the same line, so `>` walks top-to-bottom.
+        hits.sort_by_key(|h| (h.line, h.side == Side::Translation));
         let count = hits.len();
         if count == 0 {
             self.search = None;
@@ -755,7 +755,7 @@ impl ReaderScreen {
         }
         self.search = Some(ReaderSearch {
             query,
-            th_query,
+            translated_query,
             hits,
             sel: 0,
         });
@@ -792,22 +792,22 @@ impl ReaderScreen {
         let target = hit.line;
         if self.sync {
             self.scroll = target;
-            self.th_scroll = target;
+            self.translation_scroll = target;
         } else {
             match hit.side {
                 Side::Ja => self.scroll = target,
-                Side::Th => self.th_scroll = target,
+                Side::Translation => self.translation_scroll = target,
             }
         }
     }
 
-    /// Scroll to the next `[REVIEW NEEDED]` banner in the TH pane, wrapping. No-op
+    /// Scroll to the next `[REVIEW NEEDED]` banner in the translation pane, wrapping. No-op
     /// when the chapter carries no review markers.
     fn jump_next_review(&mut self) {
         if self.review_lines.is_empty() {
             return;
         }
-        let cur = self.effective_th_scroll();
+        let cur = self.effective_translation_scroll();
         let target = self
             .review_lines
             .iter()
@@ -816,19 +816,19 @@ impl ReaderScreen {
             .unwrap_or(self.review_lines[0]);
         if self.sync {
             self.scroll = target;
-            self.th_scroll = target;
+            self.translation_scroll = target;
         } else {
-            self.th_scroll = target;
+            self.translation_scroll = target;
         }
     }
 
-    /// Align the JA pane to the source chunk that produced the TH paragraph under
-    /// the cursor: find the TH chunk via its marker, re-chunk the JA raw the same
+    /// Align the JA pane to the source chunk that produced the translation paragraph under
+    /// the cursor: find the translation chunk via its marker, re-chunk the JA raw the same
     /// way the pipeline did, and scroll the JA pane to that chunk's first line.
     /// Decouples sync and forces split layout so the source is actually visible.
     fn show_source(&mut self) {
-        let cur = self.effective_th_scroll() as usize;
-        let Some(chunk_idx) = th_chunk_at_line(&self.th, cur) else {
+        let cur = self.effective_translation_scroll() as usize;
+        let Some(chunk_idx) = translation_chunk_at_line(&self.translated_text, cur) else {
             return;
         };
         let chunks =
@@ -846,9 +846,12 @@ impl ReaderScreen {
         }
     }
 
-    /// Chunk under the cursor, from Thai chunk markers.
+    /// Chunk under the cursor, from translation chunk markers.
     fn current_chunk(&self) -> Option<u32> {
-        th_chunk_at_line(&self.th, self.effective_th_scroll() as usize)
+        translation_chunk_at_line(
+            &self.translated_text,
+            self.effective_translation_scroll() as usize,
+        )
     }
 
     /// Source chunk text, re-chunked with the pipeline settings.
@@ -858,7 +861,7 @@ impl ReaderScreen {
         chunks.get(chunk as usize).map(|c| c.text.clone())
     }
 
-    /// Show source, Thai, and active review note for the cursor chunk.
+    /// Show source, translation, and active review note for the cursor chunk.
     fn inspect_overlay(&self) -> Action {
         if self.chapter == 0 {
             return Action::None;
@@ -867,20 +870,22 @@ impl ReaderScreen {
             return Action::None;
         };
         let source_jp = self.source_for_chunk(chunk).unwrap_or_default();
-        let thai =
-            crate::workspace::translation::chunk_prose_in(&self.th, chunk).unwrap_or_default();
-        let review = crate::workspace::translation::chunk_review_reason_in(&self.th, chunk);
+        let translated =
+            crate::workspace::translation::chunk_prose_in(&self.translated_text, chunk)
+                .unwrap_or_default();
+        let review =
+            crate::workspace::translation::chunk_review_reason_in(&self.translated_text, chunk);
         Action::show_overlay(Overlay::reader_inspect(
             self.chapter,
             chunk,
             source_jp,
-            thai,
+            translated,
             review,
         ))
     }
 
-    /// Request an editor seeded App-side from composed on-disk Thai.
-    /// Avoids editing `self.th`, which is display-decomposed for the terminal.
+    /// Request an editor seeded App-side from composed on-disk translated text.
+    /// Avoids editing `self.translated_text`, which is display-decomposed for the terminal.
     fn edit_overlay(&self) -> Action {
         if self.chapter == 0 {
             return Action::None;
@@ -899,12 +904,14 @@ impl ReaderScreen {
     pub fn scroll_to_line(&mut self, line: u32) {
         let target = line.saturating_sub(1).min(u16::MAX as u32) as u16;
         self.scroll = target;
-        self.th_scroll = target;
+        self.translation_scroll = target;
     }
 
     /// Scroll to a QA-flagged chunk when its marker exists.
     pub fn scroll_to_chunk(&mut self, chunk: u32) {
-        if let Some(line) = crate::workspace::translation::chunk_marker_line_in(&self.th, chunk) {
+        if let Some(line) =
+            crate::workspace::translation::chunk_marker_line_in(&self.translated_text, chunk)
+        {
             self.scroll_to_line(line);
         }
     }
@@ -919,7 +926,7 @@ impl ReaderScreen {
         content: &str,
         fg: ratatui::style::Color,
         scroll: u16,
-        is_thai: bool,
+        is_translation: bool,
         annotations: Option<&[ReaderAnnotation]>,
     ) {
         let block = Block::default()
@@ -940,7 +947,7 @@ impl ReaderScreen {
         // the scroll offset — so memoize it and let the `Paragraph` re-scroll cheaply.
         let mut h = std::collections::hash_map::DefaultHasher::new();
         self.content_rev.hash(&mut h);
-        is_thai.hash(&mut h);
+        is_translation.hash(&mut h);
         inner.width.hash(&mut h);
         self.highlight.hash(&mut h);
         self.show_annotations.hash(&mut h);
@@ -949,19 +956,19 @@ impl ReaderScreen {
         self.search.as_ref().map(|s| &s.query).hash(&mut h);
         let key = h.finish();
 
-        let cache = if is_thai {
-            &self.th_cache
+        let cache = if is_translation {
+            &self.translation_cache
         } else {
             &self.ja_cache
         };
         let mut cache = cache.borrow_mut();
         cache.lines(key, || {
-            // Hide the machine-only chunk / review markers from the TH pane (they
+            // Hide the machine-only chunk / review markers from the translation pane (they
             // would otherwise show as literal `<!-- honya:chunk N -->` lines) while
             // preserving the line count, so note/bookmark/review anchors keep their
             // file-line basis.
             let cleaned;
-            let base: &str = if is_thai {
+            let base: &str = if is_translation {
                 cleaned = hide_markers(content);
                 cleaned.as_str()
             } else {
@@ -971,7 +978,7 @@ impl ReaderScreen {
             // Render the chapter Markdown as styled prose (bold/italic, headings,
             // image chips, …) rather than leaking raw `**`/`![]()` syntax.
             let annotated;
-            let render_content = if is_thai && self.show_annotations {
+            let render_content = if is_translation && self.show_annotations {
                 if let Some(annotations) = annotations.filter(|notes| !notes.is_empty()) {
                     annotated = annotate_markdown(base, annotations);
                     annotated.as_str()
@@ -987,12 +994,16 @@ impl ReaderScreen {
             // Glossary terms first (subtle tint), then search matches on top
             // (standout), so an active query always wins the cell where they overlap.
             if self.highlight {
-                let needles = if is_thai { &self.hl_th } else { &self.hl_ja };
+                let needles = if is_translation {
+                    &self.translated_highlights
+                } else {
+                    &self.hl_ja
+                };
                 crate::ui::markdown::highlight(&mut lines, needles, glossary_style(theme));
             }
             if let Some(search) = self.search.as_ref() {
-                let needle = if is_thai {
-                    &search.th_query
+                let needle = if is_translation {
+                    &search.translated_query
                 } else {
                     &search.query
                 };
@@ -1013,15 +1024,15 @@ impl ReaderScreen {
         if self.wrap {
             // Always trim:false — Thai has no inter-word spaces so trim:true would
             // produce long unbroken runs (risks.txt); JA leading spaces in dialogue
-            // blocks are likewise intentional. `is_thai` is kept for callers' intent.
-            let _ = is_thai;
+            // blocks are likewise intentional. `is_translation` is kept for callers' intent.
+            let _ = is_translation;
             para = para.wrap(Wrap { trim: false });
         }
         f.render_widget(para, inner);
         crate::ui::widgets::render_panel_scrollbar(f, area, total_rows, scroll as usize, theme);
     }
 
-    /// Rerun diff: archived old Thai vs live new Thai.
+    /// Rerun diff: archived old translation vs live new translation.
     fn render_diff(&mut self, f: &mut Frame, area: Rect, theme: &Theme) {
         let Some(cmp) = self.compare.as_ref() else {
             return;
@@ -1039,7 +1050,7 @@ impl ReaderScreen {
             cols[0],
             theme,
             &format!("old · {}", cmp.old_label),
-            &cmp.old_th,
+            &cmp.old_translation,
             &cmp.line.old_changed,
             false,
         );
@@ -1048,7 +1059,7 @@ impl ReaderScreen {
             cols[1],
             theme,
             &format!("new · {}", cmp.new_label),
-            &cmp.new_th,
+            &cmp.new_translation,
             &cmp.line.new_changed,
             true,
         );
@@ -1087,7 +1098,7 @@ impl ReaderScreen {
         } else {
             theme.status_failed
         });
-        let normal_style = Style::default().fg(theme.th_text);
+        let normal_style = Style::default().fg(theme.translated_text);
         let gutter_changed = if is_new { "+ " } else { "- " };
         let gutter_style = Style::default().fg(theme.ink_faint);
 
@@ -1195,7 +1206,7 @@ impl ReaderScreen {
         let glyph = |state: bool| if state { "●" } else { "○" };
         let mode = match self.layout_mode {
             MODE_JA => "JA",
-            MODE_TH => "TH",
+            MODE_TRANSLATION => "TR",
             _ => "split",
         };
 
@@ -1377,11 +1388,12 @@ fn inline_note_text(note: &str) -> String {
 }
 
 /// Blank the machine-only marker lines (`<!-- honya:chunk N -->` and the
-/// review-needed comment) for display, WITHOUT changing the line count — so the TH
+/// review-needed comment) for display, WITHOUT changing the line count — so the translation
 /// pane reads cleanly while note/bookmark/review anchors keep their translated-file
 /// line basis. The visible `[REVIEW NEEDED]` banner is deliberately kept.
-fn hide_markers(th: &str) -> String {
-    th.split('\n')
+fn hide_markers(translated: &str) -> String {
+    translated
+        .split('\n')
         .map(|line| {
             if crate::workspace::translation::parse_chunk_marker(line).is_some()
                 || crate::workspace::translation::parse_total_marker(line).is_some()
@@ -1449,11 +1461,11 @@ fn parse_heading(line: &str) -> Option<(u8, String)> {
     }
 }
 
-/// The 0-based TH chunk index covering source `line`: the largest chunk marker at or
+/// The 0-based translation chunk index covering source `line`: the largest chunk marker at or
 /// above it. `None` before the first marker (e.g. an untranslated chapter).
-fn th_chunk_at_line(th: &str, line: usize) -> Option<u32> {
+fn translation_chunk_at_line(translated: &str, line: usize) -> Option<u32> {
     let mut current = None;
-    for (i, l) in th.lines().enumerate() {
+    for (i, l) in translated.lines().enumerate() {
         if i > line {
             break;
         }
@@ -1504,14 +1516,14 @@ impl QaTrend {
     }
 }
 
-/// Side-by-side rerun comparison: archived previous Thai vs the live new Thai, plus
+/// Side-by-side rerun comparison: archived previous translation vs the live new one, plus
 /// the cost / QA / glossary deltas between the two runs that produced them.
 struct RerunCompare {
     old_label: String,
     new_label: String,
-    /// Prose-only (markers stripped), display-safe Thai for each side.
-    old_th: String,
-    new_th: String,
+    /// Prose-only (markers stripped), display-safe text for each side.
+    old_translation: String,
+    new_translation: String,
     line: crate::ui::diff::LineDiff,
     /// Per-run cost (USD); `None` when that run's spend was never recorded.
     old_cost: Option<f64>,
@@ -1680,26 +1692,26 @@ mod tests {
         assert_eq!(qa_trend(false, 0, true, 0), QaTrend::Worse); // newly failed
     }
 
-    fn screen_with(ja: &str, th: &str) -> ReaderScreen {
+    fn screen_with(ja: &str, translated: &str) -> ReaderScreen {
         let mut r = ReaderScreen::new();
         r.chapter = 1;
         r.ja = ja.to_string();
-        r.th = crate::ui::text::thai_display_safe(th);
+        r.translated_text = crate::ui::text::thai_display_safe(translated);
         r.recompute_review_lines();
         r
     }
 
     #[test]
     fn search_finds_hits_across_both_panes_and_cycles() {
-        // "skill" appears once in JA (line 2) and once in TH (line 0).
+        // "skill" appears once in JA (line 2) and once in translation (line 0).
         let ja = "intro line\nsecond line\nthe skill awakens\n";
-        let th = "the skill blooms\nบรรทัดสอง\nบรรทัดสาม\n";
-        let mut r = screen_with(ja, th);
+        let translated = "the skill blooms\nบรรทัดสอง\nบรรทัดสาม\n";
+        let mut r = screen_with(ja, translated);
 
         let count = r.run_search("skill");
-        assert_eq!(count, 2, "one JA hit + one TH hit");
-        // Hits are document-ordered; the first is on line 0 (TH), so we land there.
-        assert_eq!(r.effective_th_scroll(), 0);
+        assert_eq!(count, 2, "one JA hit + one translation hit");
+        // Hits are document-ordered; the first is on line 0 (translation), so we land there.
+        assert_eq!(r.effective_translation_scroll(), 0);
 
         // `>` advances to the JA hit on line 2; `<` wraps back.
         r.search_step(true);
@@ -1717,29 +1729,32 @@ mod tests {
 
     #[test]
     fn jump_next_review_walks_banners_and_wraps() {
-        let th = "<!-- honya:chunk 0 -->\nclean prose\n\n<!-- honya:chunk 1 -->\n> ⚠️ **[REVIEW NEEDED]** chunk 2\nflagged\n\nmore\n> a second [REVIEW NEEDED] here\n";
-        let mut r = screen_with("raw", th);
+        let translated = "<!-- honya:chunk 0 -->\nclean prose\n\n<!-- honya:chunk 1 -->\n> ⚠️ **[REVIEW NEEDED]** chunk 2\nflagged\n\nmore\n> a second [REVIEW NEEDED] here\n";
+        let mut r = screen_with("raw", translated);
         assert_eq!(r.review_lines.len(), 2, "two banner lines detected");
 
-        r.th_scroll = 0;
+        r.translation_scroll = 0;
         r.sync = false;
         r.jump_next_review();
-        let first = r.th_scroll;
+        let first = r.translation_scroll;
         assert_eq!(first, r.review_lines[0]);
         r.jump_next_review();
-        assert_eq!(r.th_scroll, r.review_lines[1]);
+        assert_eq!(r.translation_scroll, r.review_lines[1]);
         r.jump_next_review();
-        assert_eq!(r.th_scroll, r.review_lines[0], "wraps to the first banner");
+        assert_eq!(
+            r.translation_scroll, r.review_lines[0],
+            "wraps to the first banner"
+        );
     }
 
     #[test]
     fn show_source_aligns_ja_to_the_th_chunk() {
         // Two CJK paragraphs split into two chunks at this budget (probed).
         let ja = "あいうえおかきくけこさしすせそ\n\nたちつてとなにぬねのはひふへほ\n";
-        let th = "<!-- honya:chunk 0 -->\nคำแปลหนึ่ง\n\n<!-- honya:chunk 1 -->\nคำแปลสอง\n";
-        let mut r = screen_with(ja, th);
+        let translated = "<!-- honya:chunk 0 -->\nคำแปลหนึ่ง\n\n<!-- honya:chunk 1 -->\nคำแปลสอง\n";
+        let mut r = screen_with(ja, translated);
         r.set_chunk_cfg(8, 80);
-        // Start synced with the cursor inside chunk 1 (line 4 of the TH file).
+        // Start synced with the cursor inside chunk 1 (line 4 of the translation file).
         r.sync = true;
         r.scroll = 4;
 
@@ -1752,18 +1767,18 @@ mod tests {
 
     #[test]
     fn current_line_preview_clamps_past_eof() {
-        let mut r = screen_with("raw", "first th line\nsecond th line\n");
+        let mut r = screen_with("raw", "first translated line\nsecond translated line\n");
         r.sync = false;
-        r.th_scroll = 999; // scrolled far past EOF
-        assert_eq!(r.current_line_preview(), "second th line");
+        r.translation_scroll = 999; // scrolled far past EOF
+        assert_eq!(r.current_line_preview(), "second translated line");
     }
 
     #[test]
     fn hide_markers_blanks_machine_lines_keeping_line_count() {
-        let th = "<!-- honya:chunk 0 -->\nสวัสดี\n\n<!-- honya:review-needed -->\n> ⚠️ [REVIEW NEEDED] chunk 1\nบรรทัด\n";
-        let hidden = hide_markers(th);
+        let translated = "<!-- honya:chunk 0 -->\nสวัสดี\n\n<!-- honya:review-needed -->\n> ⚠️ [REVIEW NEEDED] chunk 1\nบรรทัด\n";
+        let hidden = hide_markers(translated);
         // Line count is preserved exactly (anchors keep their basis)…
-        assert_eq!(th.split('\n').count(), hidden.split('\n').count());
+        assert_eq!(translated.split('\n').count(), hidden.split('\n').count());
         // …machine markers are gone…
         assert!(!hidden.contains("honya:chunk"));
         assert!(!hidden.contains("honya:review-needed"));
@@ -1779,7 +1794,7 @@ mod tests {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
-        let mut r = screen_with("raw ja", "th text");
+        let mut r = screen_with("raw ja", "translated text");
         let theme = crate::model::ThemeId::default().build();
         let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
         term.draw(|f| r.render(f, f.area(), &theme)).unwrap();
@@ -1817,15 +1832,15 @@ mod tests {
     }
 
     #[test]
-    fn outline_parses_headings_from_th_else_ja() {
-        let th = "# บทที่หนึ่ง\nเนื้อหา\n## ฉากเปิด\nมากกว่า\n";
-        let r = screen_with("raw", th);
+    fn outline_parses_headings_from_translation_else_ja() {
+        let translated = "# บทที่หนึ่ง\nเนื้อหา\n## ฉากเปิด\nมากกว่า\n";
+        let r = screen_with("raw", translated);
         let outline = r.outline();
         assert_eq!(outline.len(), 2);
         assert_eq!(outline[0], (1, 1, "บทที่หนึ่ง".to_string()));
         assert_eq!(outline[1], (3, 2, "ฉากเปิด".to_string()));
 
-        // Untranslated TH (no headings) falls back to the JA pane.
+        // Untranslated translation (no headings) falls back to the JA pane.
         let r2 = screen_with("# 第一章\nbody\n", "ยังไม่มีคำแปล\n");
         let outline2 = r2.outline();
         assert_eq!(outline2.len(), 1);

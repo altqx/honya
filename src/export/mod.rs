@@ -15,7 +15,9 @@ use std::sync::Arc;
 use crate::model::{AppEvent, EventTx};
 use crate::workspace::Workspace;
 
-pub use book::{ExportBook, gather};
+#[cfg(test)]
+pub use book::gather;
+pub use book::{ExportBook, gather_for_language};
 
 /// A deliverable output format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -139,7 +141,7 @@ mod tests {
             project_id: "test".to_string(),
             volume_number: 1,
             volume_label: None,
-            synopsis_th: "เรื่องย่อ".to_string(),
+            translated_synopsis: "เรื่องย่อ".to_string(),
             language: "th".to_string(),
             chapters: vec![
                 ExportChapter {

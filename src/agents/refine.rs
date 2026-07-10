@@ -46,26 +46,26 @@ pub fn refine_tools_schema() -> serde_json::Value {
         }},
         {"type":"function","function":{
             "name":"read_chapter",
-            "description":"Read a chapter's Japanese source and/or its current Thai translation (prose only). The Thai is returned with `N│ ` line-number prefixes and a total line count; long chapters are windowed (use offset/limit to page). NEVER copy the `N│ ` prefix into an edit. Read before editing so you work from the real text.",
+            "description":"Read a chapter's Japanese source and/or current target-language translation (prose only). The translation is returned with `N│ ` line-number prefixes and a total line count; long chapters are windowed (use offset/limit to page). NEVER copy the `N│ ` prefix into an edit.",
             "parameters":{"type":"object","additionalProperties":false,"required":["ch"],
                 "properties":{
                     "vol":{"type":"integer","description":"Volume number; defaults to the active volume."},
                     "ch":{"type":"integer"},
                     "include_jp":{"type":"boolean","description":"Include the Japanese source (default true)."},
-                    "include_th":{"type":"boolean","description":"Include the Thai translation (default true)."},
-                    "offset":{"type":"integer","description":"1-based first Thai line to return (default 1)."},
-                    "limit":{"type":"integer","description":"Max Thai lines to return (default 400)."}
+                    "include_translation":{"type":"boolean","description":"Include the target-language translation (default true)."},
+                    "offset":{"type":"integer","description":"1-based first translated line to return (default 1)."},
+                    "limit":{"type":"integer","description":"Max translated lines to return (default 400)."}
                 }}
         }},
         {"type":"function","function":{
             "name":"grep_chapter",
-            "description":"Find a substring inside one chapter and return matching lines with their line numbers, so you can locate the exact text to pass to edit_chapter. Searches the Thai translation by default.",
+            "description":"Find a substring inside one chapter and return matching lines with line numbers. Searches the target-language translation by default.",
             "parameters":{"type":"object","additionalProperties":false,"required":["ch","query"],
                 "properties":{
                     "vol":{"type":"integer"},
                     "ch":{"type":"integer"},
                     "query":{"type":"string"},
-                    "side":{"type":"string","enum":["th","jp","both"],"description":"Which text to search (default th)."},
+                    "side":{"type":"string","enum":["translation","jp","both"],"description":"Which text to search (default translation)."},
                     "ignore_case":{"type":"boolean","description":"Case-insensitive match (default true)."}
                 }}
         }},
@@ -112,7 +112,7 @@ pub fn refine_tools_schema() -> serde_json::Value {
         }},
         {"type":"function","function":{
             "name":"search_project",
-            "description":"Search the translated Thai of every chapter (or one volume) for a substring; returns matching chapters with snippets.",
+            "description":"Search the target-language translation of every chapter (or one volume) for a substring; returns matching chapters with snippets.",
             "parameters":{"type":"object","additionalProperties":false,"required":["query"],
                 "properties":{
                     "query":{"type":"string"},
@@ -122,12 +122,12 @@ pub fn refine_tools_schema() -> serde_json::Value {
         {"type":"function","function":{
             "name":"upsert_character",
             "description":"Create or update a character in CHARACTERS.md (cross-volume; pass vol for the volume whose lexicon to edit).",
-            "parameters":{"type":"object","additionalProperties":false,"required":["jp_name","thai_name"],
+            "parameters":{"type":"object","additionalProperties":false,"required":["jp_name","translated_name"],
                 "properties":{
                     "vol":{"type":"integer"},
                     "id":{"type":"string"},
                     "jp_name":{"type":"string"},
-                    "thai_name":{"type":"string"},
+                    "translated_name":{"type":"string"},
                     "romaji":{"type":"string"},
                     "gender":{"type":"string","enum":["male","female","nonbinary","unknown"]},
                     "honorific":{"type":"string"},
@@ -135,8 +135,8 @@ pub fn refine_tools_schema() -> serde_json::Value {
                     "relationships":{"type":"array","items":{"type":"object","additionalProperties":false,
                         "required":["target_id","relation"],
                         "properties":{"target_id":{"type":"string"},"relation":{"type":"string"}}}},
-                    "aliases":{"type":"array","items":{"type":"string"},"description":"Variant JP spellings of the SAME name that render to the same Thai."},
-                    "also_called":{"type":"array","description":"Distinct names others use for this character (nickname/title), each with its OWN Thai rendering.","items":{"type":"object","additionalProperties":false,"required":["jp","thai"],"properties":{"jp":{"type":"string"},"thai":{"type":"string"},"by":{"type":"string"}}}},
+                    "aliases":{"type":"array","items":{"type":"string"},"description":"Variant JP spellings of the SAME name that share one target rendering."},
+                    "also_called":{"type":"array","description":"Distinct names others use for this character, each with its own target rendering.","items":{"type":"object","additionalProperties":false,"required":["jp","translated_name"],"properties":{"jp":{"type":"string"},"translated_name":{"type":"string"},"by":{"type":"string"}}}},
                     "notes":{"type":"string"},
                     "first_seen_chapter":{"type":"integer"}
                 }}
@@ -156,16 +156,16 @@ pub fn refine_tools_schema() -> serde_json::Value {
         {"type":"function","function":{
             "name":"upsert_glossary_term",
             "description":"Create or update a glossary term in GLOSSARY.md. The refine agent is human-directed, so this overwrites existing terms (echo what changed).",
-            "parameters":{"type":"object","additionalProperties":false,"required":["jp_term","thai_term"],
+            "parameters":{"type":"object","additionalProperties":false,"required":["jp_term","translated_term"],
                 "properties":{
                     "vol":{"type":"integer"},
                     "jp_term":{"type":"string"},
-                    "thai_term":{"type":"string"},
+                    "translated_term":{"type":"string"},
                     "romaji":{"type":"string"},
                     "category":{"type":"string","enum":["skill","place","org","item","title","concept","sfx","other"]},
                     "gloss":{"type":"string"},
                     "policy":{"type":"string","enum":["hard_locked","preferred","forbidden","context_dependent"]},
-                    "forbidden_thai":{"type":"array","items":{"type":"string"}},
+                    "forbidden_translations":{"type":"array","items":{"type":"string"}},
                     "context_rule":{"type":"string"},
                     "do_not_translate":{"type":"boolean"},
                     "first_seen_chapter":{"type":"integer"}
@@ -191,9 +191,9 @@ pub fn refine_tools_schema() -> serde_json::Value {
         }},
         {"type":"function","function":{
             "name":"set_synopsis",
-            "description":"Set the volume synopsis. Provide the Thai synopsis (and optionally the raw source synopsis).",
-            "parameters":{"type":"object","additionalProperties":false,"required":["thai"],
-                "properties":{"vol":{"type":"integer"},"raw":{"type":"string"},"thai":{"type":"string"}}}
+            "description":"Set the volume synopsis, optionally retaining the raw source.",
+            "parameters":{"type":"object","additionalProperties":false,"required":["translated_synopsis"],
+                "properties":{"vol":{"type":"integer"},"raw":{"type":"string"},"translated_synopsis":{"type":"string"}}}
         }},
         {"type":"function","function":{
             "name":"append_style_note",
@@ -203,9 +203,9 @@ pub fn refine_tools_schema() -> serde_json::Value {
         }},
         {"type":"function","function":{
             "name":"add_style_example",
-            "description":"Add a JP→TH exemplar pair to the volume's style anchors (guides future translation).",
-            "parameters":{"type":"object","additionalProperties":false,"required":["jp","th"],
-                "properties":{"vol":{"type":"integer"},"jp":{"type":"string"},"th":{"type":"string"},"note":{"type":"string"}}}
+            "description":"Add a Japanese→target-language exemplar pair.",
+            "parameters":{"type":"object","additionalProperties":false,"required":["jp","translated_text"],
+                "properties":{"vol":{"type":"integer"},"jp":{"type":"string"},"translated_text":{"type":"string"},"note":{"type":"string"}}}
         }},
         {"type":"function","function":{
             "name":"add_continuity_note",
@@ -221,13 +221,13 @@ pub fn refine_tools_schema() -> serde_json::Value {
         }},
         {"type":"function","function":{
             "name":"replace_chapter_text",
-            "description":"Replace a chapter's ENTIRE Thai translation with new_text. The prior version is archived first (reversible via /undo and the Reader diff). Use for a full rewrite; for a small edit prefer edit_chapter.",
+            "description":"Replace a chapter's ENTIRE target-language translation with new_text. The prior version is archived first. Use for a full rewrite; for a small edit prefer edit_chapter.",
             "parameters":{"type":"object","additionalProperties":false,"required":["ch","new_text"],
                 "properties":{"vol":{"type":"integer"},"ch":{"type":"integer"},"new_text":{"type":"string"}}}
         }},
         {"type":"function","function":{
             "name":"edit_chapter",
-            "description":"Surgically replace an exact snippet of a chapter's Thai. `old` must match the file EXACTLY (verbatim from read_chapter, without the `N│ ` line-number prefix) and be UNIQUE — if it appears more than once the edit fails; pass a longer surrounding snippet or set replace_all=true. The prior version is archived first (reversible via /undo and the Reader diff). This is the preferred tool for any targeted wording fix.",
+            "description":"Surgically replace an exact snippet of a chapter's target-language translation. `old` must match exactly without the `N│ ` prefix and be unique unless replace_all=true. The prior version is archived first.",
             "parameters":{"type":"object","additionalProperties":false,"required":["ch","old","new"],
                 "properties":{
                     "vol":{"type":"integer"},"ch":{"type":"integer"},
@@ -238,7 +238,7 @@ pub fn refine_tools_schema() -> serde_json::Value {
         }},
         {"type":"function","function":{
             "name":"multi_edit_chapter",
-            "description":"Apply several exact edits to ONE chapter's Thai in a single atomic call (edits run in order; each `old` must match — unique unless replace_all). If any edit fails, nothing is written. The prior version is archived once. Prefer this over many edit_chapter calls on the same chapter.",
+            "description":"Apply several exact edits to one chapter's target-language translation atomically. Each `old` must match; if any edit fails, nothing is written.",
             "parameters":{"type":"object","additionalProperties":false,"required":["ch","edits"],
                 "properties":{
                     "vol":{"type":"integer"},"ch":{"type":"integer"},
@@ -252,7 +252,7 @@ pub fn refine_tools_schema() -> serde_json::Value {
         }},
         {"type":"function","function":{
             "name":"replace_across_project",
-            "description":"Project-wide consistency fix: replace an exact Thai string in EVERY chapter (or one volume) — e.g. standardizing a name or term rendering. Set dry_run=true first to preview which chapters and how many matches WITHOUT changing anything, then run for real. Each modified chapter is archived (per-chapter Reader diff). Afterwards update the matching glossary/character entry so future translation stays consistent.",
+            "description":"Project-wide consistency fix: replace an exact target-language string in every chapter (or one volume). Preview with dry_run=true, then update matching glossary/character metadata after applying.",
             "parameters":{"type":"object","additionalProperties":false,"required":["find","replace"],
                 "properties":{
                     "vol":{"type":"integer","description":"Restrict to one volume; omit for the whole project."},
@@ -548,6 +548,7 @@ pub struct RefineCtx {
     pub root: PathBuf,
     pub default_vol: u32,
     pub model: crate::model::AgentModel,
+    pub target_language: crate::model::TargetLanguage,
     pub tx: EventTx,
     /// Stops the in-flight turn between rounds.
     pub cancel: Arc<AtomicBool>,
@@ -668,7 +669,26 @@ fn seed_messages(root: &Path, id: &str) -> Vec<Message> {
 
 const SUBAGENT_SYSTEM: &str = "You are a focused sub-agent inside honya's Refine system, completing ONE self-contained task delegated by a parent agent. You have the same project tools (read/search chapters and the lexicon; edit chapter text; update characters, glossary, style, recaps, summaries). Work autonomously — do not ask questions. Gather the context you need, make the surgical changes the task requires, verify them, then reply with a concise report of exactly what you did: chapters touched, terms/characters changed, and anything the parent agent should know. Keep Thai idiomatic and preserve scene breaks, image links, and Markdown. For large independent chunks, you may spawn multiple focused sub-agents in the same tool turn with disjoint scopes; honya runs them in parallel. Nesting is bounded by the app, so delegate only when it clearly reduces complexity.";
 
-fn refine_system_prompt() -> String {
+const SUBAGENT_SYSTEM_ENGLISH: &str = "You are a focused sub-agent inside honya's Refine system, completing one self-contained task delegated by a parent agent. Read the real Japanese source, English translation, and reference data before editing. Make only evidence-backed surgical changes, keep the English idiomatic and publication-ready for native light-novel readers, preserve scene breaks, image links, and Markdown, verify the result, then report the chapters and metadata changed.";
+
+fn subagent_system_prompt(target: crate::model::TargetLanguage) -> &'static str {
+    match target {
+        crate::model::TargetLanguage::Thai => SUBAGENT_SYSTEM,
+        crate::model::TargetLanguage::English => SUBAGENT_SYSTEM_ENGLISH,
+    }
+}
+
+fn refine_system_prompt(target: crate::model::TargetLanguage) -> String {
+    if target == crate::model::TargetLanguage::English {
+        return r#"You are honya's Refine agent for a Japanese-to-English light-novel translation project. Work directly on the on-disk project through the provided tools and keep going until the user's request is resolved.
+
+Lead with results, stay concise, and match the user's language. Read the Japanese source, current English translation, CHARACTERS, GLOSSARY, STYLE, and relevant context before judging or editing. For multi-step work, maintain a plan; delegate only large independent scopes. Prefer surgical exact edits, verify every changed passage afterward, preserve Markdown/images/scene breaks, and archive-safe tool workflows.
+
+English quality means publication-ready prose for native English-language light-novel readers: faithful meaning and POV, natural dialogue, distinct voices, confident narrative rhythm, idiomatic syntax, restrained honorific/localization choices consistent with project style, and no translationese, intrusive glosses, gratuitous Westernization, invented profanity, censorship, or raw Japanese residue. Treat reviewer notes as evidence to verify, not automatic truth. Resolve speakers and Japanese modifier chains from the source. Keep short name surfaces short and follow exact alternate-address mappings.
+
+All `translated_*` fields contain English target-language text in this mode. When changing a recurring name or term, update both chapters and reference metadata. Handle mature material neutrally and faithfully. Ask the user only when two materially different valid outcomes cannot be resolved from source, context, or a safe default."#
+            .to_string();
+    }
     r#"You are honya's Refine agent — an autonomous, expert engineering assistant for a Japanese→Thai light-novel translation project, working through a chat tab inside the honya TUI. You read, fix, and refine anything in the project: any volume or chapter's Thai translation, the character roster, the glossary, the style guide, the volume recap/synopsis, and chapter summaries. Your tools read and write the project on disk; treat the on-disk files as the single source of truth.
 
 # Tone and style
@@ -738,17 +758,18 @@ fn refine_tools_vec() -> Vec<Tool> {
 
 /// Owns the live chat thread so multi-turn history persists.
 pub async fn run_refine_agent(ctx: RefineCtx, mut rx: UnboundedReceiver<RefineControl>) {
-    let tools = RefineTools::with_agent(
+    let tools = RefineTools::with_agent_for_language(
         ctx.root.clone(),
         ctx.default_vol,
         ctx.tx.clone(),
         ctx.client.clone(),
         ctx.model.clone(),
         ctx.interact.clone(),
+        ctx.target_language,
     );
     let mut req = ChatRequest::new(
         ctx.model.model.clone(),
-        vec![Message::system(refine_system_prompt())],
+        vec![Message::system(refine_system_prompt(ctx.target_language))],
     );
     req.tools = Some(refine_tools_vec());
     // Keep configured effort; otherwise ask reasoning models to stream thinking.
@@ -1879,8 +1900,8 @@ struct ReadChapterArgs {
     ch: u32,
     #[serde(default = "default_true")]
     include_jp: bool,
-    #[serde(default = "default_true")]
-    include_th: bool,
+    #[serde(default = "default_true", alias = "include_th")]
+    include_translation: bool,
     #[serde(default)]
     offset: Option<usize>,
     #[serde(default)]
@@ -1930,7 +1951,8 @@ struct UpsertCharacterArgs {
     #[serde(default)]
     id: Option<String>,
     jp_name: String,
-    thai_name: String,
+    #[serde(alias = "thai_name")]
+    translated_name: String,
     #[serde(default)]
     romaji: Option<String>,
     #[serde(default)]
@@ -1968,7 +1990,8 @@ struct UpsertGlossaryArgs {
     #[serde(default)]
     vol: Option<u32>,
     jp_term: String,
-    thai_term: String,
+    #[serde(alias = "thai_term")]
+    translated_term: String,
     #[serde(default)]
     romaji: Option<String>,
     #[serde(default)]
@@ -1977,8 +2000,8 @@ struct UpsertGlossaryArgs {
     gloss: Option<String>,
     #[serde(default)]
     policy: Option<TermPolicy>,
-    #[serde(default)]
-    forbidden_thai: Vec<String>,
+    #[serde(default, alias = "forbidden_thai")]
+    forbidden_translations: Vec<String>,
     #[serde(default)]
     context_rule: Option<String>,
     #[serde(default)]
@@ -2011,7 +2034,8 @@ struct SetSynopsisArgs {
     vol: Option<u32>,
     #[serde(default)]
     raw: Option<String>,
-    thai: String,
+    #[serde(alias = "thai")]
+    translated_synopsis: String,
 }
 #[derive(Deserialize)]
 struct StyleNoteArgs {
@@ -2024,7 +2048,8 @@ struct StyleExampleArgs {
     #[serde(default)]
     vol: Option<u32>,
     jp: String,
-    th: String,
+    #[serde(alias = "th")]
+    translated_text: String,
     #[serde(default)]
     note: Option<String>,
 }
@@ -2315,14 +2340,18 @@ async fn dispatch_refine_tool_for_owner(
                 let jp = std::fs::read_to_string(w.raw(a.ch)).unwrap_or_default();
                 data.insert("japanese".into(), json!(cap(&jp)));
             }
-            if a.include_th {
-                let th = translation::prose_only(&translation::read_translated(&w, a.ch).await);
-                let (numbered, total, to) = numbered_window(&th, offset, limit);
-                data.insert("thai".into(), json!(numbered));
-                data.insert("thai_total_lines".into(), json!(total));
-                data.insert("thai_from_line".into(), json!(offset.min(total.max(1))));
-                data.insert("thai_to_line".into(), json!(to));
-                data.insert("thai_truncated".into(), json!(to < total));
+            if a.include_translation {
+                let translated =
+                    translation::prose_only(&translation::read_translated(&w, a.ch).await);
+                let (numbered, total, to) = numbered_window(&translated, offset, limit);
+                data.insert("translation".into(), json!(numbered));
+                data.insert("translation_total_lines".into(), json!(total));
+                data.insert(
+                    "translation_from_line".into(),
+                    json!(offset.min(total.max(1))),
+                );
+                data.insert("translation_to_line".into(), json!(to));
+                data.insert("translation_truncated".into(), json!(to < total));
             }
             ToolResult::data(
                 format!(
@@ -2340,7 +2369,12 @@ async fn dispatch_refine_tool_for_owner(
             if a.query.is_empty() {
                 return ToolResult::err("empty query");
             }
-            let side = a.side.as_deref().unwrap_or("th");
+            let side = match a.side.as_deref().unwrap_or("translation") {
+                "translation" | "translated" | "th" => "translation",
+                "jp" => "jp",
+                "both" => "both",
+                other => return ToolResult::err(format!("invalid side: {other}")),
+            };
             let needle = if a.ignore_case {
                 a.query.to_lowercase()
             } else {
@@ -2362,9 +2396,10 @@ async fn dispatch_refine_tool_for_owner(
                     .collect()
             };
             let mut data = serde_json::Map::new();
-            if matches!(side, "th" | "both") {
-                let th = translation::prose_only(&translation::read_translated(&w, a.ch).await);
-                data.insert("thai".into(), json!(grep(&th)));
+            if matches!(side, "translation" | "both") {
+                let translated =
+                    translation::prose_only(&translation::read_translated(&w, a.ch).await);
+                data.insert("translation".into(), json!(grep(&translated)));
             }
             if matches!(side, "jp" | "both") {
                 let jp = std::fs::read_to_string(w.raw(a.ch)).unwrap_or_default();
@@ -2396,7 +2431,7 @@ async fn dispatch_refine_tool_for_owner(
             }
             if matches!(kind, "all" | "synopsis") {
                 data.insert("synopsis_raw".into(), json!(vd.synopsis_raw));
-                data.insert("synopsis_th".into(), json!(vd.synopsis_th));
+                data.insert("translated_synopsis".into(), json!(vd.translated_synopsis));
             }
             if matches!(kind, "all" | "summaries") {
                 data.insert("chapter_summaries".into(), json!(vd.chapters));
@@ -2468,20 +2503,20 @@ async fn dispatch_refine_tool_for_owner(
                 }
                 let w = Workspace::new(root.to_path_buf(), v.number);
                 for c in &v.chapters {
-                    let th =
+                    let translated =
                         translation::prose_only(&translation::read_translated(&w, c.number).await);
                     // Find AND slice on the SAME (lowercased) string: a byte index
                     // from the lowercased text is not a valid boundary in the original
                     // when lowercasing changes a char's byte length (would panic).
-                    let th_low = th.to_lowercase();
-                    if let Some(pos) = th_low.find(&needle) {
-                        let start = th_low[..pos]
+                    let translated_lower = translated.to_lowercase();
+                    if let Some(pos) = translated_lower.find(&needle) {
+                        let start = translated_lower[..pos]
                             .char_indices()
                             .rev()
                             .nth(40)
                             .map(|(i, _)| i)
                             .unwrap_or(0);
-                        let snippet: String = th_low[start..].chars().take(100).collect();
+                        let snippet: String = translated_lower[start..].chars().take(100).collect();
                         hits.push(json!({"vol": v.number, "ch": c.number, "snippet": snippet}));
                         if hits.len() >= 30 {
                             break 'outer;
@@ -2499,7 +2534,7 @@ async fn dispatch_refine_tool_for_owner(
             let character = Character {
                 id: id.clone(),
                 jp_name: a.jp_name.clone(),
-                thai_name: a.thai_name.clone(),
+                translated_name: a.translated_name.clone(),
                 romaji: a.romaji,
                 gender: a.gender,
                 honorific: a.honorific,
@@ -2512,21 +2547,25 @@ async fn dispatch_refine_tool_for_owner(
             };
             match characters::upsert(&w, character) {
                 Ok(outcome) => {
-                    emit_edit(tx, "character", &format!("{} → {}", a.jp_name, a.thai_name));
+                    emit_edit(
+                        tx,
+                        "character",
+                        &format!("{} → {}", a.jp_name, a.translated_name),
+                    );
                     let msg = match outcome {
                         characters::CharacterUpsertOutcome::Merged { into_id } => {
-                            format!("merged {} into {into_id}", a.thai_name)
+                            format!("merged {} into {into_id}", a.translated_name)
                         }
                         characters::CharacterUpsertOutcome::InsertedWithCandidates {
                             id,
                             candidates,
                         } => format!(
                             "saved {} ({id}); possible duplicates: {}",
-                            a.thai_name,
+                            a.translated_name,
                             candidates.join(", ")
                         ),
                         characters::CharacterUpsertOutcome::Inserted => {
-                            format!("saved character {} ({id})", a.thai_name)
+                            format!("saved character {} ({id})", a.translated_name)
                         }
                     };
                     ToolResult::ok(msg)
@@ -2569,12 +2608,12 @@ async fn dispatch_refine_tool_for_owner(
             let w = ws(a.vol);
             let term = GlossaryTerm {
                 jp_term: a.jp_term.clone(),
-                thai_term: a.thai_term.clone(),
+                translated_term: a.translated_term.clone(),
                 romaji: a.romaji,
                 category: a.category,
                 gloss: a.gloss,
                 policy: a.policy,
-                forbidden_thai: a.forbidden_thai,
+                forbidden_translations: a.forbidden_translations,
                 context_rule: a.context_rule,
                 protected: None,
                 do_not_translate: a.do_not_translate,
@@ -2582,8 +2621,12 @@ async fn dispatch_refine_tool_for_owner(
             };
             match glossary::upsert(&w, term) {
                 Ok(()) => {
-                    emit_edit(tx, "glossary", &format!("{} → {}", a.jp_term, a.thai_term));
-                    ToolResult::ok(format!("saved term {} → {}", a.jp_term, a.thai_term))
+                    emit_edit(
+                        tx,
+                        "glossary",
+                        &format!("{} → {}", a.jp_term, a.translated_term),
+                    );
+                    ToolResult::ok(format!("saved term {} → {}", a.jp_term, a.translated_term))
                 }
                 Err(e) => ToolResult::err(format!("failed to write term: {e}")),
             }
@@ -2629,7 +2672,7 @@ async fn dispatch_refine_tool_for_owner(
             let a = parse!(SetSynopsisArgs);
             let w = ws(a.vol);
             let raw = a.raw.unwrap_or_else(|| volume::load(&w).synopsis_raw);
-            match volume::set_synopsis(&w, &raw, &a.thai) {
+            match volume::set_synopsis(&w, &raw, &a.translated_synopsis) {
                 Ok(()) => {
                     emit_edit(tx, "synopsis", "updated volume synopsis");
                     ToolResult::ok("synopsis updated".to_string())
@@ -2655,7 +2698,7 @@ async fn dispatch_refine_tool_for_owner(
             let w = ws(a.vol);
             let ex = StyleExample {
                 jp: a.jp,
-                th: a.th,
+                translated_text: a.translated_text,
                 note: a.note,
             };
             match volume::add_style_examples(&w, vec![ex]) {
@@ -2976,6 +3019,7 @@ pub struct RefineTools {
     depth: usize,
     path: String,
     interact: RefineInteract,
+    target_language: crate::model::TargetLanguage,
 }
 
 impl RefineTools {
@@ -2991,9 +3035,11 @@ impl RefineTools {
             depth: 0,
             path: String::new(),
             interact: RefineInteract::default(),
+            target_language: crate::model::TargetLanguage::Thai,
         }
     }
 
+    #[cfg(test)]
     pub fn with_agent(
         root: PathBuf,
         default_vol: u32,
@@ -3001,6 +3047,26 @@ impl RefineTools {
         client: std::sync::Arc<dyn LlmClient>,
         model: crate::model::AgentModel,
         interact: RefineInteract,
+    ) -> Self {
+        Self::with_agent_for_language(
+            root,
+            default_vol,
+            tx,
+            client,
+            model,
+            interact,
+            crate::model::TargetLanguage::Thai,
+        )
+    }
+
+    pub fn with_agent_for_language(
+        root: PathBuf,
+        default_vol: u32,
+        tx: EventTx,
+        client: std::sync::Arc<dyn LlmClient>,
+        model: crate::model::AgentModel,
+        interact: RefineInteract,
+        target_language: crate::model::TargetLanguage,
     ) -> Self {
         Self {
             root,
@@ -3012,6 +3078,7 @@ impl RefineTools {
             depth: 0,
             path: String::new(),
             interact,
+            target_language,
         }
     }
 
@@ -3026,6 +3093,7 @@ impl RefineTools {
             depth: self.depth + 1,
             path,
             interact: self.interact.clone(),
+            target_language: self.target_language,
         }
     }
 
@@ -3172,7 +3240,10 @@ impl RefineTools {
         };
         let mut req = ChatRequest::new(
             self.model.model.clone(),
-            vec![Message::system(SUBAGENT_SYSTEM), Message::user(user)],
+            vec![
+                Message::system(subagent_system_prompt(self.target_language)),
+                Message::user(user),
+            ],
         );
         req.tools = Some(refine_tools_vec());
         req.reasoning = self.model.reasoning_param();
@@ -3360,6 +3431,34 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     static REFINE_PARALLELISM_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    #[test]
+    fn refine_schema_exposes_only_neutral_target_fields() {
+        let schema = refine_tools_schema().to_string();
+        for field in [
+            "include_translation",
+            "translated_name",
+            "translated_term",
+            "forbidden_translations",
+            "translated_synopsis",
+            "translated_text",
+        ] {
+            assert!(schema.contains(field), "missing neutral field {field}");
+        }
+        for legacy in [
+            "include_th",
+            "thai_name",
+            "thai_term",
+            "forbidden_thai",
+            "\"thai\"",
+            "\"th\"",
+        ] {
+            assert!(
+                !schema.contains(legacy),
+                "legacy field leaked into Refine schema: {legacy}"
+            );
+        }
+    }
 
     #[test]
     fn model_max_context_by_family() {
@@ -3725,7 +3824,10 @@ mod tests {
         let etx = EventTx(tx);
         let client = ScriptedClient {
             responses: Mutex::new(VecDeque::from(vec![
-                tool_call_turn("upsert_character", r#"{"jp_name":"勇","thai_name":"ยู"}"#),
+                tool_call_turn(
+                    "upsert_character",
+                    r#"{"jp_name":"勇","translated_name":"ยู"}"#,
+                ),
                 stop_turn("เพิ่มตัวละครเรียบร้อย"),
             ])),
         };
@@ -3757,7 +3859,9 @@ mod tests {
 
         let ws = Workspace::new(root.clone(), 1);
         assert!(
-            characters::load(&ws).iter().any(|c| c.thai_name == "ยู"),
+            characters::load(&ws)
+                .iter()
+                .any(|c| c.translated_name == "ยู"),
             "the tool mutated the workspace"
         );
         assert!(req.messages.len() >= 4);
@@ -4383,7 +4487,10 @@ mod tests {
         let etx = EventTx(tx);
         let client = ScriptedClient {
             responses: Mutex::new(VecDeque::from(vec![
-                tool_call_turn("upsert_character", r#"{"jp_name":"勇","thai_name":"ยู"}"#),
+                tool_call_turn(
+                    "upsert_character",
+                    r#"{"jp_name":"勇","translated_name":"ยู"}"#,
+                ),
                 stop_turn(""),
             ])),
         };
@@ -4712,6 +4819,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn refine_accepts_legacy_target_field_arguments() {
+        let root = temp_root("legacy_target_args");
+        let ws = Workspace::new(root.clone(), 1);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let tx = EventTx(tx);
+
+        let character = dispatch_refine_tool(
+            &root,
+            1,
+            &tx,
+            "upsert_character",
+            r#"{"jp_name":"勇","thai_name":"ยู","also_called":[{"jp":"兄ちゃん","thai":"พี่"}]}"#,
+        )
+        .await;
+        assert!(character.ok, "{}", character.message);
+        let saved_character = characters::load(&ws).pop().unwrap();
+        assert_eq!(saved_character.translated_name, "ยู");
+        assert_eq!(saved_character.also_called[0].translated_name, "พี่");
+
+        let term = dispatch_refine_tool(
+            &root,
+            1,
+            &tx,
+            "upsert_glossary_term",
+            r#"{"jp_term":"魔法","thai_term":"เวทมนตร์","forbidden_thai":["มายากล"]}"#,
+        )
+        .await;
+        assert!(term.ok, "{}", term.message);
+        let saved_term = glossary::load(&ws).pop().unwrap();
+        assert_eq!(saved_term.translated_term, "เวทมนตร์");
+        assert_eq!(saved_term.forbidden_translations, ["มายากล"]);
+
+        let synopsis = dispatch_refine_tool(
+            &root,
+            1,
+            &tx,
+            "set_synopsis",
+            r#"{"raw":"粗筋","thai":"เรื่องย่อ"}"#,
+        )
+        .await;
+        assert!(synopsis.ok, "{}", synopsis.message);
+
+        let example = dispatch_refine_tool(
+            &root,
+            1,
+            &tx,
+            "add_style_example",
+            r#"{"jp":"彼は笑った。","th":"เขาหัวเราะ"}"#,
+        )
+        .await;
+        assert!(example.ok, "{}", example.message);
+        let volume = volume::load(&ws);
+        assert_eq!(volume.translated_synopsis, "เรื่องย่อ");
+        assert_eq!(volume.style_examples[0].translated_text, "เขาหัวเราะ");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
     async fn upsert_character_then_read_lexicon_round_trips() {
         let root = temp_root("char");
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -4722,7 +4888,7 @@ mod tests {
             1,
             &tx,
             "upsert_character",
-            r#"{"jp_name":"勇","thai_name":"ยู"}"#,
+            r#"{"jp_name":"勇","translated_name":"ยู"}"#,
         )
         .await;
         assert!(r.ok, "{}", r.message);
@@ -4734,7 +4900,7 @@ mod tests {
         let arr = chars.get("characters").unwrap().as_array().unwrap();
         assert!(
             arr.iter()
-                .any(|c| c.get("thai_name").and_then(|v| v.as_str()) == Some("ยู"))
+                .any(|c| c.get("translated_name").and_then(|v| v.as_str()) == Some("ยู"))
         );
 
         let _ = std::fs::remove_dir_all(&root);

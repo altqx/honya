@@ -42,12 +42,12 @@ fn write_glossary(ws: &Workspace) -> std::io::Result<()> {
     let terms = [
         GlossaryTerm {
             jp_term: "星詠み".into(),
-            thai_term: "ผู้ขับขานดารา".into(),
+            translated_term: "ผู้ขับขานดารา".into(),
             romaji: Some("hoshiyomi".into()),
             category: Some("ตำแหน่ง/พลัง".into()),
             gloss: Some("ผู้ถอดอ่านชะตากรรมจากการโคจรของดวงดาว".into()),
             policy: Some(TermPolicy::HardLocked),
-            forbidden_thai: Vec::new(),
+            forbidden_translations: Vec::new(),
             context_rule: None,
             protected: Some(true),
             do_not_translate: None,
@@ -55,12 +55,12 @@ fn write_glossary(ws: &Workspace) -> std::io::Result<()> {
         },
         GlossaryTerm {
             jp_term: "魔導書".into(),
-            thai_term: "ตำราเวทมนตร์".into(),
+            translated_term: "ตำราเวทมนตร์".into(),
             romaji: Some("madōsho".into()),
             category: Some("ไอเทม".into()),
             gloss: Some("หนังสือบรรจุเวทมนตร์โบราณ".into()),
             policy: Some(TermPolicy::Preferred),
-            forbidden_thai: Vec::new(),
+            forbidden_translations: Vec::new(),
             context_rule: None,
             protected: None,
             do_not_translate: None,
@@ -68,12 +68,12 @@ fn write_glossary(ws: &Workspace) -> std::io::Result<()> {
         },
         GlossaryTerm {
             jp_term: "魔法".into(),
-            thai_term: "เวทมนตร์".into(),
+            translated_term: "เวทมนตร์".into(),
             romaji: Some("mahō".into()),
             category: Some("ทั่วไป".into()),
             gloss: Some("ใช้ “เวทมนตร์” เสมอ ห้ามแปลเป็น “มายากล”".into()),
             policy: Some(TermPolicy::Forbidden),
-            forbidden_thai: vec!["มายากล".into()],
+            forbidden_translations: vec!["มายากล".into()],
             context_rule: None,
             protected: None,
             do_not_translate: None,
@@ -94,7 +94,7 @@ fn write_characters(ws: &Workspace) -> std::io::Result<()> {
         Character {
             id: "rei".into(),
             jp_name: "レイ".into(),
-            thai_name: "เรย์".into(),
+            translated_name: "เรย์".into(),
             romaji: Some("Rei".into()),
             gender: Some("ชาย".into()),
             honorific: None,
@@ -111,7 +111,7 @@ fn write_characters(ws: &Workspace) -> std::io::Result<()> {
         Character {
             id: "sena".into(),
             jp_name: "セナ".into(),
-            thai_name: "เซนะ".into(),
+            translated_name: "เซนะ".into(),
             romaji: Some("Sena".into()),
             gender: Some("หญิง".into()),
             honorific: None,
@@ -161,8 +161,11 @@ fn write_chapters(ws: &Workspace) -> std::io::Result<()> {
 }
 
 /// Write a finished translated chapter in the pipeline's chunk format.
-fn write_translated(ws: &Workspace, chapter: u32, thai: &str) -> std::io::Result<()> {
-    let body = format!("<!-- honya:chunk 0 -->\n{}\n", thai.trim_end_matches('\n'));
+fn write_translated(ws: &Workspace, chapter: u32, translated: &str) -> std::io::Result<()> {
+    let body = format!(
+        "<!-- honya:chunk 0 -->\n{}\n",
+        translated.trim_end_matches('\n')
+    );
     let path = ws.translated(chapter);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -276,7 +279,10 @@ mod tests {
         assert_eq!(glossary::load(&ws).len(), 3, "three glossary terms");
         assert_eq!(characters::load(&ws).len(), 2, "two characters");
         let data = volume::load(&ws);
-        assert!(!data.synopsis_th.trim().is_empty(), "Thai synopsis present");
+        assert!(
+            !data.translated_synopsis.trim().is_empty(),
+            "translated synopsis present"
+        );
         assert!(
             !data.synopsis_raw.trim().is_empty(),
             "source synopsis present"
@@ -300,12 +306,12 @@ mod tests {
             &ws,
             GlossaryTerm {
                 jp_term: "扉".into(),
-                thai_term: "ประตู".into(),
+                translated_term: "ประตู".into(),
                 romaji: None,
                 category: None,
                 gloss: None,
                 policy: None,
-                forbidden_thai: Vec::new(),
+                forbidden_translations: Vec::new(),
                 context_rule: None,
                 protected: None,
                 do_not_translate: None,

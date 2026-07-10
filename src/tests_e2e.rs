@@ -10,7 +10,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::app::overlay::Overlay;
 use crate::app::{ActiveProject, App, Screen, Toast};
-use crate::model::{AppConfig, EventTx, LogLevel, ModelSet};
+use crate::model::{AppConfig, EventTx, LogLevel, ModelSet, TargetLanguage};
 
 fn fresh_app() -> App {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -54,7 +54,8 @@ fn reader_note_overlay_saves_line_annotation() {
             id: "novel".to_string(),
             dir: dir.clone(),
             title: "Novel".to_string(),
-            title_th: String::new(),
+            translated_title: String::new(),
+            target_language: TargetLanguage::Thai,
             created: None,
             touched: None,
             volumes: vec![Volume {
@@ -174,7 +175,8 @@ fn project_l_key_is_not_shadowed_by_activity_log() {
         id: "novel".to_string(),
         dir: dir.clone(),
         title: "Novel".to_string(),
-        title_th: String::new(),
+        translated_title: String::new(),
+        target_language: TargetLanguage::Thai,
         created: None,
         touched: None,
         volumes: vec![Volume {
@@ -437,6 +439,27 @@ fn settings_ctrl_g_toggles_release_channel_and_saves_it() {
     }
 }
 
+#[test]
+fn settings_preferred_language_defaults_to_thai_and_saves_english() {
+    use crate::app::Action;
+    use crate::app::overlay::SettingsState;
+    use crate::model::TargetLanguage;
+
+    let mut ov = Overlay::Settings(SettingsState::for_test(17));
+    match &ov {
+        Overlay::Settings(st) => assert_eq!(st.preferred_language, TargetLanguage::Thai),
+        _ => panic!("settings overlay"),
+    }
+
+    ov.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::empty()));
+    match ov.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty())) {
+        Action::SaveSettings {
+            preferred_language, ..
+        } => assert_eq!(preferred_language, TargetLanguage::English),
+        other => panic!("expected SaveSettings, got {other:?}"),
+    }
+}
+
 /// The retries field accepts digits only, and Enter carries the parsed (clamped)
 /// attempt count out through `SaveSettings`.
 #[test]
@@ -447,10 +470,10 @@ fn settings_retries_field_is_digit_only_and_clamped() {
     let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::empty());
 
     let mk = || {
-        // Focus the "Retry attempts" numeric field (index 17) with an empty buffer.
+        // Focus the "Retry attempts" numeric field (index 18) with an empty buffer.
         Overlay::Settings(SettingsState {
             max_attempts: String::new(),
-            ..SettingsState::for_test(17)
+            ..SettingsState::for_test(18)
         })
     };
 
@@ -563,7 +586,8 @@ fn onboarding_shows_welcome_on_first_run_only() {
         id: "x".into(),
         dir: PathBuf::from("/tmp/honya-x"),
         title: "X".into(),
-        title_th: String::new(),
+        translated_title: String::new(),
+        target_language: TargetLanguage::Thai,
         created: None,
         touched: None,
         volumes: vec![],
@@ -655,7 +679,8 @@ fn shelf_delete_confirm_removes_project() {
         id: "re-zero".into(),
         dir: dir.clone(),
         title: "Re:Zero".into(),
-        title_th: String::new(),
+        translated_title: String::new(),
+        target_language: TargetLanguage::Thai,
         created: None,
         touched: None,
         volumes: vec![],
@@ -926,7 +951,8 @@ fn all_done_checkpoint_is_cleared_without_prompting() {
         id: "novel".to_string(),
         dir: project_dir.clone(),
         title: "Novel".to_string(),
-        title_th: String::new(),
+        translated_title: String::new(),
+        target_language: TargetLanguage::Thai,
         created: None,
         touched: None,
         volumes: vec![Volume {
@@ -953,6 +979,97 @@ fn all_done_checkpoint_is_cleared_without_prompting() {
         history[0].status,
         RunHistoryStatus::Completed,
         "an already-finished recovery closes the run-history row"
+    );
+
+    unsafe {
+        std::env::remove_var("HONYA_SESSION_FILE");
+    }
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// Recovery re-scans PROJECT.md instead of borrowing the current preference:
+/// stored project languages survive upgrades, while projects from the Thai-only
+/// format (no language field) continue as Thai.
+#[test]
+fn resume_uses_the_projects_language_not_the_current_preference() {
+    use crate::workspace::session::{self, SessionCheckpoint};
+
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let tmp = std::env::temp_dir().join(format!("honya_recover_language_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    unsafe {
+        std::env::set_var("HONYA_SESSION_FILE", tmp.join("session.json"));
+    }
+
+    let english_dir = tmp.join("english-project");
+    crate::workspace::scaffold::create_project_for_language(
+        &english_dir,
+        "English Project",
+        &ModelSet::default(),
+        1,
+        TargetLanguage::English,
+    )
+    .unwrap();
+    session::save(&SessionCheckpoint::new(
+        english_dir,
+        "english-project".to_string(),
+        "English Project".to_string(),
+        1,
+        vec![1],
+    ))
+    .unwrap();
+
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = App::new(
+        EventTx(tx),
+        AppConfig {
+            preferred_language: TargetLanguage::Thai,
+            ..AppConfig::default()
+        },
+    );
+    app.init_recovery_prompt();
+    app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+    assert_eq!(
+        app.active.as_ref().unwrap().project.target_language,
+        TargetLanguage::English
+    );
+
+    let legacy_dir = tmp.join("legacy-project");
+    crate::workspace::scaffold::create_project(
+        &legacy_dir,
+        "Legacy Project",
+        &ModelSet::default(),
+        1,
+    )
+    .unwrap();
+    let project_md = legacy_dir.join("PROJECT.md");
+    let body = crate::workspace::data_block::read_body(&project_md);
+    let mut data: serde_json::Value = crate::workspace::data_block::read_data_block(&project_md);
+    data.as_object_mut().unwrap().remove("target_language");
+    crate::workspace::data_block::write_with_data(&project_md, &body, &data).unwrap();
+    session::save(&SessionCheckpoint::new(
+        legacy_dir,
+        "legacy-project".to_string(),
+        "Legacy Project".to_string(),
+        1,
+        vec![1],
+    ))
+    .unwrap();
+
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = App::new(
+        EventTx(tx),
+        AppConfig {
+            preferred_language: TargetLanguage::English,
+            ..AppConfig::default()
+        },
+    );
+    app.init_recovery_prompt();
+    app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+    assert_eq!(
+        app.active.as_ref().unwrap().project.target_language,
+        TargetLanguage::Thai
     );
 
     unsafe {
@@ -1064,7 +1181,8 @@ async fn qa_overlay_gathers_and_navigates() {
         id: "novel".to_string(),
         dir: dir.clone(),
         title: "Novel".to_string(),
-        title_th: String::new(),
+        translated_title: String::new(),
+        target_language: TargetLanguage::Thai,
         created: None,
         touched: None,
         volumes: vec![Volume {
@@ -1179,7 +1297,8 @@ fn qa_collect_continuity_and_key_edges() {
             id: "novel".to_string(),
             dir: dir.clone(),
             title: "Novel".to_string(),
-            title_th: String::new(),
+            translated_title: String::new(),
+            target_language: TargetLanguage::Thai,
             created: None,
             touched: None,
             volumes: vec![Volume {
@@ -1412,6 +1531,7 @@ async fn end_to_end_import_and_mock_translate() {
         ws,
         models: ModelSet::default(),
         cfg: AppConfig::default(),
+        target_language: TargetLanguage::Thai,
         tx: EventTx(tx),
         ctl: RunControl::new(),
         queue: ChapterQueue::new(vec![]),
@@ -1617,6 +1737,7 @@ async fn partial_translator_stream_is_salvaged_as_needs_review() {
         ws,
         models: ModelSet::default(),
         cfg: AppConfig::default(),
+        target_language: TargetLanguage::Thai,
         tx: EventTx(tx),
         ctl: RunControl::new(),
         queue: ChapterQueue::new(vec![]),
@@ -1678,7 +1799,8 @@ fn pipeline_events_route_to_the_running_volume() {
         id: "novel".to_string(),
         dir: dir.clone(),
         title: "Novel".to_string(),
-        title_th: String::new(),
+        translated_title: String::new(),
+        target_language: TargetLanguage::Thai,
         created: None,
         touched: None,
         volumes: vec![
@@ -1798,7 +1920,8 @@ fn whole_volume_translate_requeues_legacy_partial_chapter() {
             id: "novel".to_string(),
             dir: dir.clone(),
             title: "Novel".to_string(),
-            title_th: String::new(),
+            translated_title: String::new(),
+            target_language: TargetLanguage::Thai,
             created: None,
             touched: None,
             volumes: vec![Volume {
@@ -2045,7 +2168,8 @@ fn refine_app_with_project(tag: &str) -> App {
             id: "novel".to_string(),
             dir: dir.clone(),
             title: "Novel".to_string(),
-            title_th: String::new(),
+            translated_title: String::new(),
+            target_language: TargetLanguage::Thai,
             created: None,
             touched: None,
             volumes: vec![Volume {
@@ -2118,7 +2242,8 @@ fn refine_undo_restores_prior_chapter_text() {
             id: "novel".to_string(),
             dir: dir.clone(),
             title: "Novel".to_string(),
-            title_th: String::new(),
+            translated_title: String::new(),
+            target_language: TargetLanguage::Thai,
             created: None,
             touched: None,
             volumes: vec![Volume {

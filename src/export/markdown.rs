@@ -18,9 +18,9 @@ pub fn write(book: &ExportBook, out_path: &Path) -> io::Result<()> {
     if let Some(label) = book.volume_label.as_ref().filter(|l| !l.trim().is_empty()) {
         doc.push_str(&format!("**{}**\n\n", label.trim()));
     }
-    let synopsis = book.synopsis_th.trim();
+    let synopsis = book.translated_synopsis.trim();
     if !synopsis.is_empty() {
-        doc.push_str("## เรื่องย่อ\n\n");
+        doc.push_str(&format!("## {}\n\n", book.synopsis_heading()));
         doc.push_str(synopsis);
         doc.push_str("\n\n");
     }
@@ -60,7 +60,7 @@ mod tests {
             project_id: "novel".to_string(),
             volume_number: 1,
             volume_label: Some("黎明".to_string()),
-            synopsis_th: "เรื่องย่อทดสอบ".to_string(),
+            translated_synopsis: "เรื่องย่อทดสอบ".to_string(),
             language: "th".to_string(),
             chapters: vec![
                 ExportChapter {

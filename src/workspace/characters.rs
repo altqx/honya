@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::{Character, Relationship};
+use crate::model::{Character, Relationship, TargetLanguage};
 use crate::workspace::Workspace;
 use crate::workspace::data_block;
 
@@ -90,21 +90,21 @@ pub fn upsert(ws: &Workspace, mut c: Character) -> std::io::Result<CharacterUpse
     finish(ws, chars, outcome)
 }
 
-/// Like [`upsert`], but preserves established Thai names on auto-merge.
+/// Like [`upsert`], but preserves established translated names on auto-merge.
 /// Agent writes use this; human/coherence edits still use plain [`upsert`].
-pub fn upsert_keep_thai(
+pub fn upsert_keep_translation(
     ws: &Workspace,
     mut c: Character,
 ) -> std::io::Result<CharacterUpsertOutcome> {
-    if !c.thai_name.trim().is_empty() {
+    if !c.translated_name.trim().is_empty() {
         if c.id.trim().is_empty() {
             c.id = derive_id(&c);
         }
         let chars = load(ws);
         if let Some(i) = find_match(&chars, &c)
-            && !chars[i].thai_name.trim().is_empty()
+            && !chars[i].translated_name.trim().is_empty()
         {
-            c.thai_name = String::new();
+            c.translated_name = String::new();
         }
     }
     upsert(ws, c)
@@ -199,7 +199,7 @@ pub fn remove(ws: &Workspace, id: &str) -> std::io::Result<()> {
     data_block::write_with_data(&ws.characters_md(), &body, &block)
 }
 
-/// Query by case/whitespace-insensitive substring `query` (id/jp_name/thai_name/
+/// Query by case/whitespace-insensitive substring `query` (id/jp_name/translated_name/
 /// romaji/aliases) and/or `id`; both absent (or blank — LLM callers routinely send
 /// `""` for params they don't use) returns all. An `id` with no exact hit degrades
 /// to a name needle, since models often put the surface name in `id`.
@@ -235,7 +235,7 @@ pub fn render_table(chars: &[Character]) -> String {
         return s;
     }
 
-    s.push_str("| ID | 日本語 | ไทย | Romaji | เพศ | คำลงท้าย | สรรพนาม/น้ำเสียง | ความสัมพันธ์ | บทแรก | หมายเหตุ |\n");
+    s.push_str("| ID | 日本語 | เป้าหมาย / Target | Romaji | เพศ | คำลงท้าย | สรรพนาม/น้ำเสียง | ความสัมพันธ์ | บทแรก | หมายเหตุ |\n");
     s.push_str("|----|--------|-----|--------|-----|----------|------------------|---------------|-------|----------|\n");
     for c in chars {
         let rels = if c.relationships.is_empty() {
@@ -252,30 +252,30 @@ pub fn render_table(chars: &[Character]) -> String {
         } else {
             cell(&format!("{} ({})", c.jp_name, c.aliases.join(", ")))
         };
-        let thai = if c.also_called.is_empty() {
-            cell(&c.thai_name)
+        let translated = if c.also_called.is_empty() {
+            cell(&c.translated_name)
         } else {
             let calls = c
                 .also_called
                 .iter()
                 .filter(|a| !a.jp.trim().is_empty())
                 .map(|a| {
-                    let th = if a.thai.trim().is_empty() {
-                        c.thai_name.trim()
+                    let translated = if a.translated_name.trim().is_empty() {
+                        c.translated_name.trim()
                     } else {
-                        a.thai.trim()
+                        a.translated_name.trim()
                     };
-                    format!("{}→{}", a.jp.trim(), th)
+                    format!("{}→{}", a.jp.trim(), translated)
                 })
                 .collect::<Vec<_>>()
                 .join(", ");
-            cell(&format!("{} [{}]", c.thai_name, calls))
+            cell(&format!("{} [{}]", c.translated_name, calls))
         };
         s.push_str(&format!(
             "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
             cell(&c.id),
             jp,
-            thai,
+            translated,
             opt(&c.romaji),
             opt(&c.gender),
             opt(&c.honorific),
@@ -293,7 +293,18 @@ pub fn render_table(chars: &[Character]) -> String {
 /// Render the character blurb for the Translator/Reviewer prompt: one `日本語 → ไทย`
 /// bullet plus honorific/speech-style (pronoun/register the spec needs for
 /// continuity); empty roster → "".
+#[cfg(test)]
 pub fn render_context_blurb(chars: &[Character]) -> String {
+    render_context_blurb_for_language(chars, TargetLanguage::Thai)
+}
+
+pub fn render_context_blurb_for_language(
+    chars: &[Character],
+    target_language: TargetLanguage,
+) -> String {
+    if target_language == TargetLanguage::English {
+        return render_context_blurb_english(chars);
+    }
     if chars.is_empty() {
         return String::new();
     }
@@ -317,18 +328,18 @@ pub fn render_context_blurb(chars: &[Character]) -> String {
             s.push_str(&format!(" (=คนเดียวกัน: {})", aliases.join(", ")));
         }
         s.push_str(" → ");
-        s.push_str(if c.thai_name.trim().is_empty() {
+        s.push_str(if c.translated_name.trim().is_empty() {
             "—"
         } else {
-            c.thai_name.trim()
+            c.translated_name.trim()
         });
         if let Some(g) = c.gender.as_deref().filter(|x| !x.trim().is_empty()) {
-            let th = match g.trim() {
+            let translated = match g.trim() {
                 "male" => "ชาย",
                 "female" => "หญิง",
                 other => other,
             };
-            s.push_str(&format!(" [เพศ: {th}]"));
+            s.push_str(&format!(" [เพศ: {translated}]"));
         }
         if let Some(h) = c.honorific.as_deref().filter(|x| !x.trim().is_empty()) {
             s.push_str(&format!(" [คำลงท้าย: {}]", h.trim()));
@@ -341,19 +352,82 @@ pub fn render_context_blurb(chars: &[Character]) -> String {
             .iter()
             .filter(|a| !a.jp.trim().is_empty())
             .map(|a| {
-                let th = if a.thai.trim().is_empty() {
-                    c.thai_name.trim()
+                let translated = if a.translated_name.trim().is_empty() {
+                    c.translated_name.trim()
                 } else {
-                    a.thai.trim()
+                    a.translated_name.trim()
                 };
                 match a.by.as_deref().map(str::trim).filter(|b| !b.is_empty()) {
-                    Some(by) => format!("{}→{} (โดย {by})", a.jp.trim(), th),
-                    None => format!("{}→{}", a.jp.trim(), th),
+                    Some(by) => format!("{}→{} (โดย {by})", a.jp.trim(), translated),
+                    None => format!("{}→{}", a.jp.trim(), translated),
                 }
             })
             .collect();
         if !calls.is_empty() {
             s.push_str(&format!(" [เรียกอีกชื่อ: {}]", calls.join(", ")));
+        }
+        s.push('\n');
+    }
+    s
+}
+
+fn render_context_blurb_english(chars: &[Character]) -> String {
+    if chars.is_empty() {
+        return String::new();
+    }
+    let mut s = String::from(
+        "Characters. The rendering after → is the canonical English spelling/identity anchor stored in `translated_name`; never invent a variant. Do not expand a short SOURCE_JP surface into the full name. Use each exact alternate address mapping when present:\n",
+    );
+    for c in chars {
+        let jp = c.jp_name.trim();
+        if jp.is_empty() {
+            continue;
+        }
+        s.push_str("- ");
+        s.push_str(jp);
+        let aliases: Vec<&str> = c
+            .aliases
+            .iter()
+            .map(|a| a.trim())
+            .filter(|a| source_side_alias(a))
+            .collect();
+        if !aliases.is_empty() {
+            s.push_str(&format!(" (= same person: {})", aliases.join(", ")));
+        }
+        s.push_str(" → ");
+        let canonical = c.translated_name.trim();
+        s.push_str(if canonical.is_empty() {
+            "—"
+        } else {
+            canonical
+        });
+        if let Some(gender) = c.gender.as_deref().filter(|x| !x.trim().is_empty()) {
+            s.push_str(&format!(" [gender: {}]", gender.trim()));
+        }
+        if let Some(honorific) = c.honorific.as_deref().filter(|x| !x.trim().is_empty()) {
+            s.push_str(&format!(" [address/honorific: {}]", honorific.trim()));
+        }
+        if let Some(voice) = c.speech_style.as_deref().filter(|x| !x.trim().is_empty()) {
+            s.push_str(&format!(" [voice: {}]", voice.trim()));
+        }
+        let calls: Vec<String> = c
+            .also_called
+            .iter()
+            .filter(|a| !a.jp.trim().is_empty())
+            .map(|a| {
+                let target = if a.translated_name.trim().is_empty() {
+                    canonical
+                } else {
+                    a.translated_name.trim()
+                };
+                match a.by.as_deref().map(str::trim).filter(|by| !by.is_empty()) {
+                    Some(by) => format!("{}→{} (used by {by})", a.jp.trim(), target),
+                    None => format!("{}→{}", a.jp.trim(), target),
+                }
+            })
+            .collect();
+        if !calls.is_empty() {
+            s.push_str(&format!(" [alternate addresses: {}]", calls.join(", ")));
         }
         s.push('\n');
     }
@@ -374,8 +448,8 @@ fn merge_into(target: &mut Character, incoming: Character) {
     if !incoming.jp_name.trim().is_empty() {
         target.jp_name = incoming.jp_name;
     }
-    if !incoming.thai_name.trim().is_empty() {
-        target.thai_name = incoming.thai_name;
+    if !incoming.translated_name.trim().is_empty() {
+        target.translated_name = incoming.translated_name;
     }
     merge_opt(&mut target.romaji, incoming.romaji);
     merge_opt(&mut target.gender, incoming.gender);
@@ -405,8 +479,8 @@ fn union_also_called(
         }
         let key = norm_name(&inc.jp);
         if let Some(existing) = target.iter_mut().find(|e| norm_name(&e.jp) == key) {
-            if !inc.thai.trim().is_empty() {
-                existing.thai = inc.thai;
+            if !inc.translated_name.trim().is_empty() {
+                existing.translated_name = inc.translated_name;
             }
             if inc.by.as_deref().is_some_and(|b| !b.trim().is_empty()) {
                 existing.by = inc.by;
@@ -446,14 +520,14 @@ fn derive_id(c: &Character) -> String {
     if !from_jp.is_empty() {
         return from_jp;
     }
-    let from_thai = crate::workspace::slugify(&c.thai_name);
-    if !from_thai.is_empty() {
-        return from_thai;
+    let from_translation = crate::workspace::slugify(&c.translated_name);
+    if !from_translation.is_empty() {
+        return from_translation;
     }
     // Last resort: deterministic hash so two distinct unnamed entries don't collide.
     format!(
         "char-{:08x}",
-        fnv1a(&format!("{}|{}", c.jp_name, c.thai_name))
+        fnv1a(&format!("{}|{}", c.jp_name, c.translated_name))
     )
 }
 
@@ -476,14 +550,14 @@ fn character_matches(c: &Character, needle: &str) -> bool {
     let mut hay = vec![
         norm_name(&c.id).to_lowercase(),
         norm_name(&c.jp_name).to_lowercase(),
-        norm_name(&c.thai_name).to_lowercase(),
+        norm_name(&c.translated_name).to_lowercase(),
         norm_name(c.romaji.as_deref().unwrap_or("")).to_lowercase(),
     ];
     hay.extend(c.aliases.iter().map(|a| norm_name(a).to_lowercase()));
     hay.extend(c.also_called.iter().flat_map(|a| {
         [
             norm_name(&a.jp).to_lowercase(),
-            norm_name(&a.thai).to_lowercase(),
+            norm_name(&a.translated_name).to_lowercase(),
         ]
     }));
     if hay.iter().any(|h| contains_either(h, &norm_needle)) {
@@ -554,7 +628,7 @@ fn absorb(target: &mut Character, incoming: Character) {
     rest.aliases = Vec::new();
     if inc_shorter {
         // A shorter variant's Thai must not overwrite the canonical entry's Thai.
-        rest.thai_name = String::new();
+        rest.translated_name = String::new();
     }
     merge_into(target, rest);
     // Canonical name must never also sit in aliases.
@@ -565,8 +639,8 @@ fn absorb(target: &mut Character, incoming: Character) {
 /// Fill only the empty/None fields of `target` from `src` (survivor-wins), keeping
 /// the earliest `first_seen_chapter`. Used by [`merge`] where `target` is canonical.
 fn fill_from(target: &mut Character, src: &Character) {
-    if target.thai_name.trim().is_empty() && !src.thai_name.trim().is_empty() {
-        target.thai_name = src.thai_name.clone();
+    if target.translated_name.trim().is_empty() && !src.translated_name.trim().is_empty() {
+        target.translated_name = src.translated_name.clone();
     }
     fill_opt(&mut target.romaji, &src.romaji);
     fill_opt(&mut target.gender, &src.gender);
@@ -672,7 +746,7 @@ fn reading_candidates(chars: &[Character], inc: &Character) -> Vec<usize> {
         .as_deref()
         .map(norm_romaji)
         .filter(|s| !s.is_empty());
-    let inc_t = norm_name(&inc.thai_name);
+    let inc_t = norm_name(&inc.translated_name);
     let (Some(inc_r), false) = (inc_r, inc_t.is_empty()) else {
         return Vec::new();
     };
@@ -681,7 +755,7 @@ fn reading_candidates(chars: &[Character], inc: &Character) -> Vec<usize> {
         .enumerate()
         .filter(|(_, e)| {
             e.romaji.as_deref().map(norm_romaji).as_deref() == Some(inc_r.as_str())
-                && norm_name(&e.thai_name) == inc_t
+                && norm_name(&e.translated_name) == inc_t
                 && norm_name(&e.jp_name) != norm_name(&inc.jp_name)
         })
         .map(|(i, _)| i)
@@ -773,11 +847,11 @@ mod tests {
         (base, ws)
     }
 
-    fn ch(id: &str, jp: &str, thai: &str, romaji: Option<&str>) -> Character {
+    fn ch(id: &str, jp: &str, translated: &str, romaji: Option<&str>) -> Character {
         Character {
             id: id.into(),
             jp_name: jp.into(),
-            thai_name: thai.into(),
+            translated_name: translated.into(),
             romaji: romaji.map(|s| s.to_string()),
             gender: None,
             honorific: None,
@@ -794,15 +868,15 @@ mod tests {
         chars.iter().find(|c| c.id == id)
     }
 
-    /// Address forms union, search, and render with per-form Thai.
+    /// Address forms union, search, and render with per-form translations.
     #[test]
-    fn also_called_per_form_thai() {
+    fn also_called_preserves_each_translated_name() {
         use crate::model::AltName;
         let (base, ws) = temp_ws("also_called");
         let mut yuu = ch("yuu", "結城勇", "ยูกิ ยู", Some("Yuuki Yuu"));
         yuu.also_called = vec![AltName {
             jp: "ユウ".into(),
-            thai: "ยู".into(),
+            translated_name: "ยู".into(),
             by: Some("เพื่อนสนิท".into()),
         }];
         upsert(&ws, yuu).unwrap();
@@ -810,7 +884,7 @@ mod tests {
         let mut again = ch("yuu", "結城勇", "ยูกิ ยู", None);
         again.also_called = vec![AltName {
             jp: "お兄ちゃん".into(),
-            thai: "พี่".into(),
+            translated_name: "พี่".into(),
             by: None,
         }];
         upsert(&ws, again).unwrap();
@@ -828,6 +902,32 @@ mod tests {
             blurb.contains("お兄ちゃん→พี่"),
             "sister's name shown:\n{blurb}"
         );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn legacy_character_block_loads_then_rewrites_neutral_keys() {
+        let (base, ws) = temp_ws("legacy_block");
+        std::fs::write(
+            ws.characters_md(),
+            r#"# Characters
+
+<!-- honya:data
+{"characters":[{"id":"rin","jp_name":"鈴","thai_name":"ริน","also_called":[{"jp":"鈴ちゃん","thai":"รินจัง"}]}]}
+honya:data -->
+"#,
+        )
+        .unwrap();
+
+        let loaded = load(&ws);
+        assert_eq!(loaded[0].translated_name, "ริน");
+        assert_eq!(loaded[0].also_called[0].translated_name, "รินจัง");
+        upsert(&ws, loaded[0].clone()).unwrap();
+
+        let rewritten = std::fs::read_to_string(ws.characters_md()).unwrap();
+        assert!(rewritten.contains("\"translated_name\""));
+        assert!(!rewritten.contains("\"thai_name\""));
+        assert!(!rewritten.contains("\"thai\""));
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -892,17 +992,20 @@ mod tests {
 
     /// Agent upserts preserve established Thai names but set first sightings.
     #[test]
-    fn keep_thai_preserves_established_name() {
-        let (base, ws) = temp_ws("keep_thai");
-        upsert_keep_thai(&ws, ch("yuu", "勇", "ยู", Some("Yuu"))).unwrap();
-        upsert_keep_thai(&ws, ch("yuu", "勇", "ยูว์", Some("Yuu"))).unwrap();
+    fn keep_translation_preserves_established_name() {
+        let (base, ws) = temp_ws("keep_translation");
+        upsert_keep_translation(&ws, ch("yuu", "勇", "ยู", Some("Yuu"))).unwrap();
+        upsert_keep_translation(&ws, ch("yuu", "勇", "ยูว์", Some("Yuu"))).unwrap();
 
         let chars = load(&ws);
         assert_eq!(chars.len(), 1);
-        assert_eq!(chars[0].thai_name, "ยู", "established Thai name must stick");
+        assert_eq!(
+            chars[0].translated_name, "ยู",
+            "established Thai name must stick"
+        );
 
-        upsert_keep_thai(&ws, ch("miya", "未夜", "มิยะ", Some("Miya"))).unwrap();
-        assert_eq!(find(&load(&ws), "miya").unwrap().thai_name, "มิยะ");
+        upsert_keep_translation(&ws, ch("miya", "未夜", "มิยะ", Some("Miya"))).unwrap();
+        assert_eq!(find(&load(&ws), "miya").unwrap().translated_name, "มิยะ");
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -934,7 +1037,7 @@ mod tests {
         let yuu = &chars[0];
         assert_eq!(yuu.jp_name, "有月勇", "fuller name stays canonical");
         assert_eq!(
-            yuu.thai_name, "อาริทสึกิ ยู",
+            yuu.translated_name, "อาริทสึกิ ยู",
             "shorter variant's Thai must not win"
         );
         assert!(yuu.aliases.iter().any(|a| a == "勇"));
@@ -1055,7 +1158,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// get() matches alias forms, not just jp_name/thai_name.
+    /// get() matches alias forms, not just jp_name/translated_name.
     #[test]
     fn get_finds_by_alias() {
         let (base, ws) = temp_ws("get_alias");
@@ -1169,7 +1272,7 @@ mod tests {
     /// Old CHARACTERS.md without an `aliases` field loads, and empty aliases never serialize.
     #[test]
     fn serde_back_compat_for_aliases() {
-        let json = r#"{"characters":[{"id":"a","jp_name":"A","thai_name":"เอ"}]}"#;
+        let json = r#"{"characters":[{"id":"a","jp_name":"A","translated_name":"เอ"}]}"#;
         let block: CharactersBlock = serde_json::from_str(json).unwrap();
         assert_eq!(block.characters.len(), 1);
         assert!(block.characters[0].aliases.is_empty());

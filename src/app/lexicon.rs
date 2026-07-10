@@ -40,12 +40,12 @@ impl EditForm {
     fn new_glossary(seed: Option<&GlossaryTerm>) -> Self {
         let g = seed.cloned().unwrap_or(GlossaryTerm {
             jp_term: String::new(),
-            thai_term: String::new(),
+            translated_term: String::new(),
             romaji: None,
             category: None,
             gloss: None,
             policy: Some(TermPolicy::Preferred),
-            forbidden_thai: Vec::new(),
+            forbidden_translations: Vec::new(),
             context_rule: None,
             protected: None,
             do_not_translate: None,
@@ -54,11 +54,11 @@ impl EditForm {
         let policy = policy_field(crate::workspace::glossary::effective_policy(&g));
         let fields = vec![
             ("JP term", g.jp_term),
-            ("Thai term", g.thai_term),
+            ("Target term", g.translated_term),
             ("Category", g.category.unwrap_or_default()),
             ("Policy", policy),
             ("Do not trans", bool_field(g.do_not_translate)),
-            ("Forbidden", g.forbidden_thai.join(", ")),
+            ("Forbidden", g.forbidden_translations.join(", ")),
             ("Context rule", g.context_rule.unwrap_or_default()),
             ("Gloss", g.gloss.unwrap_or_default()),
         ];
@@ -80,8 +80,10 @@ impl EditForm {
                 c.as_ref().map(|x| x.jp_name.clone()).unwrap_or_default(),
             ),
             (
-                "Thai name",
-                c.as_ref().map(|x| x.thai_name.clone()).unwrap_or_default(),
+                "Target name",
+                c.as_ref()
+                    .map(|x| x.translated_name.clone())
+                    .unwrap_or_default(),
             ),
             (
                 "Aliases",
@@ -135,12 +137,12 @@ impl EditForm {
         let policy = parse_policy(&get(3)).unwrap_or(TermPolicy::Preferred);
         GlossaryTerm {
             jp_term: get(0),
-            thai_term: get(1),
+            translated_term: get(1),
             romaji: None,
             category: opt(get(2)),
             gloss: opt(get(7)),
             policy: Some(policy),
-            forbidden_thai: split_list(&get(5)),
+            forbidden_translations: split_list(&get(5)),
             context_rule: opt(get(6)),
             protected: matches!(
                 policy,
@@ -158,7 +160,7 @@ impl EditForm {
         Character {
             id: self.id.clone().unwrap_or_else(|| slug_id(&jp)),
             jp_name: jp,
-            thai_name: get(1),
+            translated_name: get(1),
             romaji: None,
             gender: opt(get(4)),
             honorific: None,
@@ -236,7 +238,7 @@ impl LexiconScreen {
             all.into_iter()
                 .filter(|t| {
                     t.jp_term.to_lowercase().contains(&q)
-                        || t.thai_term.to_lowercase().contains(&q)
+                        || t.translated_term.to_lowercase().contains(&q)
                         || t.category
                             .as_deref()
                             .unwrap_or("")
@@ -244,7 +246,7 @@ impl LexiconScreen {
                             .contains(&q)
                         || policy_field(crate::workspace::glossary::effective_policy(t))
                             .contains(&q)
-                        || t.forbidden_thai
+                        || t.forbidden_translations
                             .iter()
                             .any(|v| v.to_lowercase().contains(&q))
                         || t.context_rule
@@ -566,14 +568,14 @@ impl LexiconScreen {
         let labelled: Option<(String, Action)> = match self.sub {
             SUB_CHARACTERS => self.characters(ws).get(idx).map(|c| {
                 (
-                    format!("{} → {}", c.jp_name, c.thai_name),
+                    format!("{} → {}", c.jp_name, c.translated_name),
                     Action::DeleteCharacter { id: c.id.clone() },
                 )
             }),
             SUB_STYLE => None,
             _ => self.glossary(ws).get(idx).map(|t| {
                 (
-                    format!("{} → {}", t.jp_term, t.thai_term),
+                    format!("{} → {}", t.jp_term, t.translated_term),
                     Action::DeleteGlossary {
                         jp_term: t.jp_term.clone(),
                     },
@@ -742,7 +744,7 @@ impl LexiconScreen {
             format!(
                 "   {} {} {} {} {}  Notes",
                 pad_to_cols("JP term", 12),
-                pad_to_cols("Thai term", 16),
+                pad_to_cols("Target term", 16),
                 pad_to_cols("Cat", 8),
                 pad_to_cols("Policy", 10),
                 "DNT"
@@ -783,8 +785,8 @@ impl LexiconScreen {
                 ),
                 Span::styled(" ", Style::default().bg(bg)),
                 Span::styled(
-                    pad_to_cols(&thai_display_safe(&t.thai_term), 16),
-                    Style::default().fg(theme.th_text).bg(bg),
+                    pad_to_cols(&thai_display_safe(&t.translated_term), 16),
+                    Style::default().fg(theme.translated_text).bg(bg),
                 ),
                 Span::styled(" ", Style::default().bg(bg)),
                 Span::styled(
@@ -837,7 +839,7 @@ impl LexiconScreen {
         let mut head = format!(
             "   {} {}",
             pad_to_cols("JP name", cols.jp),
-            pad_to_cols("Thai name", cols.thai)
+            pad_to_cols("Target name", cols.translated)
         );
         if cols.gender > 0 {
             head.push(' ');
@@ -873,8 +875,8 @@ impl LexiconScreen {
                 ),
                 Span::styled(" ", Style::default().bg(bg)),
                 Span::styled(
-                    pad_to_cols(&thai_display_safe(&c.thai_name), cols.thai),
-                    Style::default().fg(theme.th_text).bg(bg),
+                    pad_to_cols(&thai_display_safe(&c.translated_name), cols.translated),
+                    Style::default().fg(theme.translated_text).bg(bg),
                 ),
             ];
             if cols.gender > 0 {
@@ -1043,7 +1045,7 @@ impl Default for LexiconScreen {
 #[derive(Debug, Clone, Copy)]
 struct CharacterColumns {
     jp: usize,
-    thai: usize,
+    translated: usize,
     gender: usize,
     extra: usize,
 }
@@ -1058,7 +1060,7 @@ fn character_columns(width: u16) -> CharacterColumns {
         10.min(total.saturating_sub(5).max(4))
     };
     let mut gender = if total >= 68 { 8 } else { 0 };
-    // Width of the leading bar + JP name + Gender — everything before Thai name.
+    // Width of the leading bar + JP name + Gender — everything before the translation.
     let base = |jp: usize, gender: usize| 3 + jp + 1 + if gender > 0 { 1 + gender } else { 0 };
     while total < base(jp, gender) + 9 {
         if gender > 0 {
@@ -1069,19 +1071,19 @@ fn character_columns(width: u16) -> CharacterColumns {
             break;
         }
     }
-    // Wide pane: "Names / Notes" soaks up the leftover width and Thai stays a
-    // readable fixed width. Narrow pane (no room for notes): Thai absorbs the
+    // Wide pane: "Names / Notes" soaks up the leftover width and the translation stays a
+    // readable fixed width. Narrow pane (no room for notes): translation absorbs the
     // slack so the table still fills the pane with no dead space.
     let thai_fixed = if total >= 48 { 20 } else { 12 };
     let leftover = total.saturating_sub(base(jp, gender) + thai_fixed + 2);
-    let (thai, extra) = if leftover >= 18 {
+    let (translated, extra) = if leftover >= 18 {
         (thai_fixed, leftover)
     } else {
         (total.saturating_sub(base(jp, gender)).max(1), 0)
     };
     CharacterColumns {
         jp,
-        thai,
+        translated,
         gender,
         extra,
     }
@@ -1091,7 +1093,7 @@ fn character_matches_filter(c: &Character, q: &str) -> bool {
     let fields = [
         c.id.as_str(),
         c.jp_name.as_str(),
-        c.thai_name.as_str(),
+        c.translated_name.as_str(),
         c.romaji.as_deref().unwrap_or(""),
         c.gender.as_deref().unwrap_or(""),
         c.honorific.as_deref().unwrap_or(""),
@@ -1102,7 +1104,7 @@ fn character_matches_filter(c: &Character, q: &str) -> bool {
         || c.aliases.iter().any(|v| v.to_lowercase().contains(q))
         || c.also_called.iter().any(|a| {
             a.jp.to_lowercase().contains(q)
-                || a.thai.to_lowercase().contains(q)
+                || a.translated_name.to_lowercase().contains(q)
                 || a.by.as_deref().unwrap_or("").to_lowercase().contains(q)
         })
 }
@@ -1121,10 +1123,10 @@ fn format_also_called(c: &Character) -> String {
 }
 
 fn format_alt_name(a: &AltName) -> String {
-    let mut out = if a.thai.trim().is_empty() {
+    let mut out = if a.translated_name.trim().is_empty() {
         a.jp.trim().to_string()
     } else {
-        format!("{}→{}", a.jp.trim(), a.thai.trim())
+        format!("{}→{}", a.jp.trim(), a.translated_name.trim())
     };
     if let Some(by) = a.by.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
         out.push_str(" @ ");
@@ -1145,18 +1147,18 @@ fn parse_alt_name(piece: &str) -> Option<AltName> {
         .rsplit_once('@')
         .map(|(body, by)| (body.trim(), opt(by.trim().to_string())))
         .unwrap_or((piece.trim(), None));
-    let (jp, thai) = body
+    let (jp, translated) = body
         .split_once('→')
         .or_else(|| body.split_once("=>"))
         .or_else(|| body.split_once('='))
-        .map(|(jp, thai)| (jp.trim(), thai.trim()))
+        .map(|(jp, translated)| (jp.trim(), translated.trim()))
         .unwrap_or((body, ""));
     if jp.is_empty() {
         return None;
     }
     Some(AltName {
         jp: jp.to_string(),
-        thai: thai.to_string(),
+        translated_name: translated.to_string(),
         by,
     })
 }
@@ -1282,7 +1284,7 @@ mod tests {
         Character {
             id: "char-3199b4b0".into(),
             jp_name: "清水圭".into(),
-            thai_name: "ชิมิซุ เค".into(),
+            translated_name: "ชิมิซุ เค".into(),
             romaji: Some("Shimizu Kei".into()),
             gender: Some("female".into()),
             honorific: Some("คุณ".into()),
@@ -1291,7 +1293,7 @@ mod tests {
             aliases: vec!["圭".into(), "シミズ".into()],
             also_called: vec![AltName {
                 jp: "ケ様".into(),
-                thai: "ท่านเค".into(),
+                translated_name: "ท่านเค".into(),
                 by: Some("清水愛".into()),
             }],
             notes: Some("นางเอก".into()),
@@ -1304,7 +1306,7 @@ mod tests {
         let used = |c: &CharacterColumns| {
             3 + c.jp
                 + 1
-                + c.thai
+                + c.translated
                 + if c.gender > 0 { 1 + c.gender } else { 0 }
                 + if c.extra > 0 { 2 + c.extra } else { 0 }
         };
@@ -1313,11 +1315,11 @@ mod tests {
             let c = character_columns(w);
             assert_eq!(used(&c), w as usize, "columns should fill width {w}");
             assert!(
-                c.extra > c.thai,
+                c.extra > c.translated,
                 "Names/Notes should be the flexible column"
             );
         }
-        // Every width fills the pane without overflowing (Thai absorbs slack
+        // Every width fills the pane without overflowing (translation absorbs slack
         // when there is no room for a notes column).
         for w in [10u16, 30, 47, 67, 80] {
             let c = character_columns(w);
@@ -1351,11 +1353,11 @@ mod tests {
 
         assert_eq!(edited.id, c.id);
         assert_eq!(edited.jp_name, "清水圭");
-        assert_eq!(edited.thai_name, "ชิมิซุ เค");
+        assert_eq!(edited.translated_name, "ชิมิซุ เค");
         assert_eq!(edited.aliases, vec!["圭".to_string(), "シミズ".to_string()]);
         assert_eq!(edited.also_called.len(), 1);
         assert_eq!(edited.also_called[0].jp, "ケ様");
-        assert_eq!(edited.also_called[0].thai, "ท่านเค");
+        assert_eq!(edited.also_called[0].translated_name, "ท่านเค");
         assert_eq!(edited.also_called[0].by.as_deref(), Some("清水愛"));
         assert_eq!(edited.gender.as_deref(), Some("female"));
         assert_eq!(edited.notes.as_deref(), Some("นางเอก"));

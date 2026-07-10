@@ -13,7 +13,9 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
 use crate::export::ExportFormat;
-use crate::model::{AppConfig, LogLevel, ReleaseChannel, ServiceTier, ThemeId, UpdateMode};
+use crate::model::{
+    AppConfig, LogLevel, ReleaseChannel, ServiceTier, TargetLanguage, ThemeId, UpdateMode,
+};
 use crate::theme::{self, ALL_THEMES, Theme};
 use crate::ui::input::{self, EditOpts, Edited};
 use crate::ui::layout::{centered_modal, centered_pct};
@@ -31,7 +33,7 @@ pub enum SynPhase {
     Editing,
     /// Awaiting a Translator round-trip (reroll or first translation).
     Translating,
-    /// A Thai translation is in hand; can accept / reroll / edit.
+    /// A translation is in hand; can accept / reroll / edit.
     Done,
     /// The last translation attempt errored (message in `error`).
     Failed,
@@ -45,13 +47,13 @@ pub struct SynopsisState {
     pub raw: String,
     /// Caret byte-offset into `raw`.
     pub cursor: usize,
-    /// Latest Thai translation — directly hand-editable when `edit_th` is set.
-    pub th: String,
-    /// Caret byte-offset into `th` (used while `edit_th`).
-    pub th_cursor: usize,
-    /// Focus on the Thai field: type to edit it by hand instead of only
+    /// Latest target-language translation, directly hand-editable when focused.
+    pub translated_text: String,
+    /// Caret byte-offset into `translated_text`.
+    pub translated_cursor: usize,
+    /// Focus on the translated field: type to edit it by hand instead of only
     /// translating via the agent. Only used by the single-line title editors.
-    pub edit_th: bool,
+    pub edit_translation: bool,
     pub phase: SynPhase,
     /// Error text shown while `phase == Failed`.
     pub error: String,
@@ -62,18 +64,18 @@ pub struct SynopsisState {
 }
 
 impl SynopsisState {
-    pub fn new(raw: String, th: String) -> Self {
-        let phase = if th.trim().is_empty() {
+    pub fn new(raw: String, translated_text: String) -> Self {
+        let phase = if translated_text.trim().is_empty() {
             SynPhase::Editing
         } else {
             SynPhase::Done
         };
         Self {
             cursor: raw.len(),
-            th_cursor: th.len(),
+            translated_cursor: translated_text.len(),
             raw,
-            th,
-            edit_th: false,
+            translated_text,
+            edit_translation: false,
             phase,
             error: String::new(),
             attempt: 0,
@@ -81,19 +83,18 @@ impl SynopsisState {
         }
     }
 
-    pub fn new_single_line(raw: String, th: String) -> Self {
+    pub fn new_single_line(raw: String, translated_text: String) -> Self {
         Self {
             multiline: false,
-            ..Self::new(raw, th)
+            ..Self::new(raw, translated_text)
         }
     }
 
-    /// Single-line editor focused on hand-editing the Thai field (project title):
-    /// the user types the Thai name directly, with Tab to translate via the agent.
-    pub fn new_title(raw: String, th: String) -> Self {
+    /// Single-line editor focused on hand-editing the translated project title.
+    pub fn new_title(raw: String, translated_text: String) -> Self {
         Self {
-            edit_th: true,
-            ..Self::new_single_line(raw, th)
+            edit_translation: true,
+            ..Self::new_single_line(raw, translated_text)
         }
     }
 }
@@ -103,7 +104,7 @@ enum SynKey {
     None,
     /// Start translating the current `raw` (phase already set to Translating).
     Translate,
-    /// Accept the current (raw, th) pair.
+    /// Accept the current source/translation pair.
     Accept,
     /// Proceed without a synopsis.
     Skip,
@@ -121,15 +122,21 @@ fn handle_synopsis_keys(st: &mut SynopsisState, key: KeyEvent) -> SynKey {
         }
         return SynKey::None;
     }
-    // Hand-editing the Thai field directly: type to edit, Tab to (re)translate from
+    // Hand-editing the translated field directly: type to edit, Tab to (re)translate from
     // the source. Single-line (title): Enter accepts, Esc cancels. Multiline
     // (synopsis): Enter adds a newline, Esc returns to the settled view to save.
-    if st.edit_th {
+    if st.edit_translation {
         let opts = EditOpts {
             numeric_only: false,
             multiline: st.multiline,
         };
-        if input::handle(&mut st.th, &mut st.th_cursor, key, opts) != Edited::Ignored {
+        if input::handle(
+            &mut st.translated_text,
+            &mut st.translated_cursor,
+            key,
+            opts,
+        ) != Edited::Ignored
+        {
             return SynKey::None;
         }
         return match key.code {
@@ -143,12 +150,12 @@ fn handle_synopsis_keys(st: &mut SynopsisState, key: KeyEvent) -> SynKey {
                 }
             }
             KeyCode::Enter if st.multiline => {
-                input::insert_char(&mut st.th, &mut st.th_cursor, '\n');
+                input::insert_char(&mut st.translated_text, &mut st.translated_cursor, '\n');
                 SynKey::None
             }
             KeyCode::Enter => SynKey::Accept,
             KeyCode::Esc if st.multiline => {
-                st.edit_th = false;
+                st.edit_translation = false;
                 SynKey::None
             }
             KeyCode::Esc => SynKey::Back,
@@ -204,10 +211,10 @@ fn handle_synopsis_keys(st: &mut SynopsisState, key: KeyEvent) -> SynKey {
                 st.phase = SynPhase::Translating;
                 SynKey::Translate
             }
-            // Edit the Thai translation by hand.
+            // Edit the translation by hand.
             KeyCode::Char('e') | KeyCode::Char('E') => {
-                st.edit_th = true;
-                st.th_cursor = st.th.len();
+                st.edit_translation = true;
+                st.translated_cursor = st.translated_text.len();
                 SynKey::None
             }
             // Edit the original source again.
@@ -232,6 +239,7 @@ fn handle_synopsis_keys(st: &mut SynopsisState, key: KeyEvent) -> SynKey {
 pub struct SynopsisEditState {
     pub vol: u32,
     pub title: String,
+    pub target_language: TargetLanguage,
     pub syn: SynopsisState,
 }
 
@@ -239,6 +247,7 @@ pub struct SynopsisEditState {
 #[derive(Debug, Clone)]
 pub struct TitleEditState {
     pub id: String,
+    pub target_language: TargetLanguage,
     pub syn: SynopsisState,
 }
 
@@ -249,6 +258,7 @@ pub struct ProjectRef {
     /// Stable slug = directory name.
     pub slug: String,
     pub title: String,
+    pub target_language: TargetLanguage,
     /// (volume number, chapter count), ascending.
     pub volumes: Vec<(u32, usize)>,
 }
@@ -258,6 +268,7 @@ impl ProjectRef {
         Self {
             slug: p.id.clone(),
             title: p.title.clone(),
+            target_language: p.target_language,
             volumes: p
                 .volumes
                 .iter()
@@ -267,13 +278,13 @@ impl ProjectRef {
     }
 }
 
-/// The import wizard: pick source file → name → Thai title → volume → synopsis →
+/// The import wizard: pick source file → name → translated title → volume → synopsis →
 /// importing. When `lock_name` is set (the "add volume to this project" flow),
-/// the name and Thai-title steps are skipped and the title is fixed to the open
+/// the name and translated-title steps are skipped and the title is fixed to the open
 /// project's.
 #[derive(Debug, Clone)]
 pub struct ImportState {
-    /// 0 = pick, 1 = name, 2 = Thai title, 3 = volume, 4 = synopsis, 5 = importing.
+    /// 0 = pick, 1 = name, 2 = translated title, 3 = volume, 4 = synopsis, 5 = importing.
     pub step: u8,
     /// Importable source files (path, byte size) found in the working root.
     pub files: Vec<(PathBuf, u64)>,
@@ -289,11 +300,13 @@ pub struct ImportState {
     /// True for the "add volume" flow: the name is the open project's and locked,
     /// so the wizard skips the name step (pick → volume → synopsis).
     pub lock_name: bool,
+    /// Language for a new project, seeded from the app preference.
+    pub target_language: TargetLanguage,
     /// Existing projects, for merge detection and existing-volume feedback.
     pub projects: Vec<ProjectRef>,
     /// Transient validation note (name step); cleared on the next edit.
     pub note: Option<&'static str>,
-    /// Thai-title translate/reroll loop (wizard step 2); `raw` mirrors `name`.
+    /// Translated-title reroll loop (wizard step 2); `raw` mirrors `name`.
     pub title_syn: SynopsisState,
     /// Synopsis input + translate/reroll loop (wizard step 4).
     pub syn: SynopsisState,
@@ -305,7 +318,11 @@ pub struct ImportState {
 }
 
 impl ImportState {
-    fn new(files: Vec<(PathBuf, u64)>, projects: Vec<ProjectRef>) -> Self {
+    fn new(
+        files: Vec<(PathBuf, u64)>,
+        projects: Vec<ProjectRef>,
+        preferred_language: TargetLanguage,
+    ) -> Self {
         // Seed the name field from the first source file's stem for a friendly default.
         let name = files
             .first()
@@ -323,6 +340,7 @@ impl ImportState {
             vol: 1,
             vol_touched: false,
             lock_name: false,
+            target_language: preferred_language,
             projects,
             note: None,
             title_syn: SynopsisState::new_title(String::new(), String::new()),
@@ -340,10 +358,11 @@ impl ImportState {
         projects: Vec<ProjectRef>,
         title: String,
         vol: u32,
+        target_language: TargetLanguage,
     ) -> Self {
         Self {
             append_to: Some(vol.max(1)),
-            ..Self::new_into(files, projects, title, vol)
+            ..Self::new_into(files, projects, title, vol, target_language)
         }
     }
 
@@ -355,6 +374,7 @@ impl ImportState {
         projects: Vec<ProjectRef>,
         title: String,
         vol: u32,
+        target_language: TargetLanguage,
     ) -> Self {
         Self {
             step: 0,
@@ -367,6 +387,7 @@ impl ImportState {
             // The caller already computed the project's next volume.
             vol_touched: true,
             lock_name: true,
+            target_language,
             projects,
             note: None,
             title_syn: SynopsisState::new_title(String::new(), String::new()),
@@ -388,6 +409,12 @@ impl ImportState {
             return None;
         }
         self.projects.iter().find(|p| p.slug == slug)
+    }
+
+    pub fn effective_target_language(&self) -> TargetLanguage {
+        self.target_project()
+            .map(|project| project.target_language)
+            .unwrap_or(self.target_language)
     }
 
     /// When the name targets an existing project and the user hasn't picked a
@@ -452,6 +479,7 @@ enum SField {
     GoogleKey,
     CloudflareAccount,
     CloudflareToken,
+    PreferredLanguageField,
     MaxAttempts,
     LoopStall,
     Retranslates,
@@ -460,7 +488,7 @@ enum SField {
     ReleaseChannelField,
 }
 
-const SETTINGS_ORDER: [SField; 23] = [
+const SETTINGS_ORDER: [SField; 24] = [
     SField::OrchProvider,
     SField::OrchModel,
     SField::OrchEffort,
@@ -478,6 +506,7 @@ const SETTINGS_ORDER: [SField; 23] = [
     SField::GoogleKey,
     SField::CloudflareAccount,
     SField::CloudflareToken,
+    SField::PreferredLanguageField,
     SField::MaxAttempts,
     SField::LoopStall,
     SField::Retranslates,
@@ -558,8 +587,8 @@ impl SettingsTab {
         Some(match self {
             SettingsTab::Agents => (0, 12),
             SettingsTab::Providers => (12, 17),
-            SettingsTab::Pipeline => (17, 21),
-            SettingsTab::Appearance => (21, 23),
+            SettingsTab::Pipeline => (17, 22),
+            SettingsTab::Appearance => (22, 24),
             SettingsTab::Account => return None,
         })
     }
@@ -665,6 +694,8 @@ pub struct SettingsState {
     pub release_channel: ReleaseChannel,
     /// Request tier (cycle field; also Ctrl-Y).
     pub service_tier: Option<ServiceTier>,
+    /// Default language initially selected when creating a project.
+    pub preferred_language: TargetLanguage,
     /// Max Translator↔Reviewer retry attempts per chunk, as typed (digits only).
     pub max_attempts: String,
     /// Loop-watchdog stall window in seconds, as typed (digits only; 0 disables).
@@ -704,6 +735,7 @@ impl SettingsState {
             update_mode: cfg.update_mode,
             release_channel: cfg.release_channel,
             service_tier: cfg.service_tier,
+            preferred_language: cfg.preferred_language,
             max_attempts: cfg.max_attempts.to_string(),
             loop_stall_secs: cfg.loop_stall_secs.to_string(),
             max_chapter_retranslates: cfg.max_chapter_retranslates.to_string(),
@@ -856,6 +888,9 @@ impl SettingsState {
                     [None, Some(ServiceTier::Flex), Some(ServiceTier::Priority)];
                 let i = T.iter().position(|t| *t == self.service_tier).unwrap_or(0);
                 self.service_tier = T[step(i, T.len(), forward)];
+            }
+            SField::PreferredLanguageField => {
+                self.preferred_language = self.preferred_language.cycled();
             }
             SField::UpdateModeField => self.update_mode = self.update_mode.toggled(),
             SField::ReleaseChannelField => self.release_channel = self.release_channel.toggled(),
@@ -1093,13 +1128,13 @@ pub struct ReaderNoteState {
     pub cursor: usize,
 }
 
-/// Chunk proofreading popover: source, Thai, and active reviewer note.
+/// Chunk proofreading popover: source, translation, and active reviewer note.
 #[derive(Debug, Clone)]
 pub struct ReaderInspectState {
     pub chapter: u32,
     pub chunk: u32,
     pub source_jp: String,
-    pub thai: String,
+    pub translated_text: String,
     pub review: Option<String>,
     pub scroll: u16,
 }
@@ -1115,7 +1150,7 @@ pub struct ReaderEditState {
 }
 
 /// Reader global-search input: a single text field. On commit the App hands the
-/// query to the Reader, which finds matches across both the JA and TH panes.
+/// query to the Reader, which finds matches across both source and translation panes.
 #[derive(Debug, Clone)]
 pub struct ReaderSearchState {
     pub query: String,
@@ -1251,11 +1286,11 @@ pub enum Overlay {
     Qa(QaState),
     /// Reader proofreading note editor, anchored to a translated line.
     ReaderNote(ReaderNoteState),
-    /// Read-only source‖Thai‖reviewer-note popover for the current chunk.
+    /// Read-only source‖translation‖reviewer-note popover for the current chunk.
     ReaderInspect(ReaderInspectState),
-    /// In-place editor for the current chunk's Thai prose.
+    /// In-place editor for the current chunk's translated prose.
     ReaderEdit(ReaderEditState),
-    /// Reader global search across both panes (JA + TH).
+    /// Reader global search across both panes.
     ReaderSearch(ReaderSearchState),
     /// Reader jump/outline picker (chapters · sections · bookmarks).
     ReaderJump(ReaderJumpState),
@@ -1264,9 +1299,13 @@ pub enum Overlay {
 }
 
 impl Overlay {
-    pub fn import(files: Vec<(PathBuf, u64)>, projects: &[crate::model::Project]) -> Self {
+    pub fn import(
+        files: Vec<(PathBuf, u64)>,
+        projects: &[crate::model::Project],
+        preferred_language: TargetLanguage,
+    ) -> Self {
         let refs = projects.iter().map(ProjectRef::of).collect();
-        Overlay::Import(ImportState::new(files, refs))
+        Overlay::Import(ImportState::new(files, refs, preferred_language))
     }
 
     /// "Add volume" wizard, pre-targeted at an open project: the name is locked to
@@ -1276,9 +1315,16 @@ impl Overlay {
         projects: &[crate::model::Project],
         title: String,
         vol: u32,
+        target_language: TargetLanguage,
     ) -> Self {
         let refs = projects.iter().map(ProjectRef::of).collect();
-        Overlay::Import(ImportState::new_into(files, refs, title, vol))
+        Overlay::Import(ImportState::new_into(
+            files,
+            refs,
+            title,
+            vol,
+            target_language,
+        ))
     }
 
     /// "Add chapters" wizard, pre-targeted at an open project's volume `vol`: the
@@ -1289,9 +1335,16 @@ impl Overlay {
         projects: &[crate::model::Project],
         title: String,
         vol: u32,
+        target_language: TargetLanguage,
     ) -> Self {
         let refs = projects.iter().map(ProjectRef::of).collect();
-        Overlay::Import(ImportState::new_append(files, refs, title, vol))
+        Overlay::Import(ImportState::new_append(
+            files,
+            refs,
+            title,
+            vol,
+            target_language,
+        ))
     }
 
     pub fn image_source(files: Vec<(PathBuf, u64)>, vol: u32) -> Self {
@@ -1333,20 +1386,33 @@ impl Overlay {
         Overlay::Palette(PaletteState::new())
     }
 
-    /// Standalone synopsis editor seeded from a volume's stored raw/Thai; `vol`
+    /// Standalone synopsis editor seeded from stored source/translation text; `vol`
     /// and `title` name the target in the modal title.
-    pub fn synopsis_edit(raw: String, th: String, vol: u32, title: String) -> Self {
+    pub fn synopsis_edit(
+        raw: String,
+        translated_text: String,
+        vol: u32,
+        title: String,
+        target_language: TargetLanguage,
+    ) -> Self {
         Overlay::Synopsis(SynopsisEditState {
             vol,
             title,
-            syn: SynopsisState::new(raw, th),
+            target_language,
+            syn: SynopsisState::new(raw, translated_text),
         })
     }
 
-    pub fn project_title_edit(id: String, title: String, title_th: String) -> Self {
+    pub fn project_title_edit(
+        id: String,
+        title: String,
+        translated_title: String,
+        target_language: TargetLanguage,
+    ) -> Self {
         Overlay::ProjectTitle(TitleEditState {
             id,
-            syn: SynopsisState::new_title(title, title_th),
+            target_language,
+            syn: SynopsisState::new_title(title, translated_title),
         })
     }
 
@@ -1370,14 +1436,14 @@ impl Overlay {
         chapter: u32,
         chunk: u32,
         source_jp: String,
-        thai: String,
+        translated_text: String,
         review: Option<String>,
     ) -> Self {
         Overlay::ReaderInspect(ReaderInspectState {
             chapter,
             chunk,
             source_jp,
-            thai,
+            translated_text,
             review,
             scroll: 0,
         })
@@ -1487,6 +1553,7 @@ impl Overlay {
             update_mode: UpdateMode::default(),
             release_channel: ReleaseChannel::default(),
             service_tier: None,
+            preferred_language: TargetLanguage::default(),
             max_attempts: String::new(),
             loop_stall_secs: String::new(),
             max_chapter_retranslates: String::new(),
@@ -1552,14 +1619,14 @@ impl Overlay {
         }
         match result {
             Ok(text) => {
-                st.th = text;
-                st.th_cursor = st.th.len();
+                st.translated_text = text;
+                st.translated_cursor = st.translated_text.len();
                 st.error.clear();
                 st.phase = SynPhase::Done;
                 // Single-line title flow: drop the user back into editing the
                 // result so they can tweak the agent's translation by hand.
                 if !st.multiline {
-                    st.edit_th = true;
+                    st.edit_translation = true;
                 }
             }
             Err(msg) => {
@@ -1575,11 +1642,14 @@ impl Overlay {
         match self {
             Overlay::Import(st) => {
                 st.step == 1
-                    || (st.step == 2 && st.title_syn.edit_th)
-                    || (st.step == 4 && (st.syn.phase == SynPhase::Editing || st.syn.edit_th))
+                    || (st.step == 2 && st.title_syn.edit_translation)
+                    || (st.step == 4
+                        && (st.syn.phase == SynPhase::Editing || st.syn.edit_translation))
             }
-            Overlay::Synopsis(st) => st.syn.phase == SynPhase::Editing || st.syn.edit_th,
-            Overlay::ProjectTitle(st) => st.syn.edit_th || st.syn.phase == SynPhase::Editing,
+            Overlay::Synopsis(st) => st.syn.phase == SynPhase::Editing || st.syn.edit_translation,
+            Overlay::ProjectTitle(st) => {
+                st.syn.edit_translation || st.syn.phase == SynPhase::Editing
+            }
             Overlay::ReaderNote(_) => true,
             Overlay::ReaderEdit(_) => true,
             Overlay::ReaderSearch(_) => true, // query field
@@ -1962,6 +2032,14 @@ impl Overlay {
                     st.sel = st.files.len().saturating_sub(1);
                     Action::None
                 }
+                KeyCode::Left | KeyCode::Char('h') if !st.lock_name => {
+                    st.target_language = st.target_language.cycled();
+                    Action::None
+                }
+                KeyCode::Right | KeyCode::Char('l') if !st.lock_name => {
+                    st.target_language = st.target_language.cycled();
+                    Action::None
+                }
                 KeyCode::Enter => {
                     if st.files.is_empty() {
                         Action::CloseOverlay
@@ -1975,10 +2053,11 @@ impl Overlay {
                         Action::ImportFile {
                             source,
                             title,
-                            title_th: String::new(),
+                            translated_title: String::new(),
                             vol,
                             synopsis_raw: String::new(),
-                            synopsis_th: String::new(),
+                            translated_synopsis: String::new(),
+                            target_language: st.effective_target_language(),
                             append: true,
                         }
                     } else {
@@ -2036,13 +2115,14 @@ impl Overlay {
                 }
             }
             2 => {
-                // Type the Thai title by hand; Tab translates via the agent;
-                // Enter (with or without a Thai title) continues; Esc → name step.
+                // Type the translated title by hand; Tab translates via the agent;
+                // Enter (with or without one) continues; Esc returns to the name step.
                 match handle_synopsis_keys(&mut st.title_syn, key) {
                     SynKey::None => Action::None,
                     SynKey::Translate => Action::TranslateProjectTitle {
                         raw: st.title_syn.raw.clone(),
                         attempt: st.title_syn.attempt,
+                        target_language: st.effective_target_language(),
                     },
                     SynKey::Accept | SynKey::Skip => {
                         st.step = 3;
@@ -2095,6 +2175,7 @@ impl Overlay {
                     SynKey::Translate => Action::TranslateSynopsis {
                         raw: st.syn.raw.clone(),
                         attempt: st.syn.attempt,
+                        target_language: st.effective_target_language(),
                     },
                     SynKey::Back => {
                         st.step = 3;
@@ -2103,36 +2184,38 @@ impl Overlay {
                     SynKey::Accept => {
                         let source = st.selected_file().cloned().unwrap_or_default();
                         let title = st.name.trim().to_string();
-                        let title_th = st.title_syn.th.trim().to_string();
+                        let translated_title = st.title_syn.translated_text.trim().to_string();
                         let vol = st.vol.max(1);
                         let synopsis_raw = st.syn.raw.trim().to_string();
-                        let synopsis_th = st.syn.th.trim().to_string();
+                        let translated_synopsis = st.syn.translated_text.trim().to_string();
                         st.step = 5;
                         st.progress = Some((0, 0, "starting".to_string()));
                         Action::ImportFile {
                             source,
                             title,
-                            title_th,
+                            translated_title,
                             vol,
                             synopsis_raw,
-                            synopsis_th,
+                            translated_synopsis,
+                            target_language: st.effective_target_language(),
                             append: false,
                         }
                     }
                     SynKey::Skip => {
                         let source = st.selected_file().cloned().unwrap_or_default();
                         let title = st.name.trim().to_string();
-                        let title_th = st.title_syn.th.trim().to_string();
+                        let translated_title = st.title_syn.translated_text.trim().to_string();
                         let vol = st.vol.max(1);
                         st.step = 5;
                         st.progress = Some((0, 0, "starting".to_string()));
                         Action::ImportFile {
                             source,
                             title,
-                            title_th,
+                            translated_title,
                             vol,
                             synopsis_raw: String::new(),
-                            synopsis_th: String::new(),
+                            translated_synopsis: String::new(),
+                            target_language: st.effective_target_language(),
                             append: false,
                         }
                     }
@@ -2286,6 +2369,7 @@ impl Overlay {
                     update_mode: st.update_mode,
                     release_channel: st.release_channel,
                     service_tier: st.service_tier,
+                    preferred_language: st.preferred_language,
                     max_attempts: st.max_attempts_value(),
                     loop_stall_secs: st.loop_stall_secs_value(),
                     max_chapter_retranslates: st.max_chapter_retranslates_value(),
@@ -2670,10 +2754,11 @@ impl Overlay {
             SynKey::Translate => Action::TranslateSynopsis {
                 raw: st.syn.raw.clone(),
                 attempt: st.syn.attempt,
+                target_language: st.target_language,
             },
             SynKey::Accept => Action::SaveSynopsis {
                 raw: st.syn.raw.clone(),
-                th: st.syn.th.clone(),
+                translated_synopsis: st.syn.translated_text.clone(),
             },
             SynKey::Skip | SynKey::Back => Action::CloseOverlay,
         }
@@ -2688,11 +2773,12 @@ impl Overlay {
             SynKey::Translate => Action::TranslateProjectTitle {
                 raw: st.syn.raw.clone(),
                 attempt: st.syn.attempt,
+                target_language: st.target_language,
             },
             SynKey::Accept => Action::SaveProjectTitle {
                 id: st.id.clone(),
                 raw: st.syn.raw.clone(),
-                th: st.syn.th.clone(),
+                translated_title: st.syn.translated_text.clone(),
             },
             SynKey::Skip | SynKey::Back => Action::CloseOverlay,
         }
@@ -2704,6 +2790,7 @@ impl Overlay {
             Overlay::Import(st) => match st.step {
                 0 => &[
                     ("↑↓", "pick"),
+                    ("←→", "language"),
                     ("↵", "next"),
                     ("r", "rescan"),
                     ("Esc", "cancel"),
@@ -2735,9 +2822,11 @@ impl Overlay {
             Overlay::About => &[("Esc/↵", "close")],
             Overlay::Qa(_) => &[("jk", "move"), ("↵", "jump to chapter"), ("Esc", "close")],
             Overlay::ReaderNote(_) => &[("type", "note"), ("↵", "save"), ("Esc", "cancel")],
-            Overlay::ReaderInspect(_) => {
-                &[("jk", "scroll"), ("e", "edit Thai"), ("Esc/q", "close")]
-            }
+            Overlay::ReaderInspect(_) => &[
+                ("jk", "scroll"),
+                ("e", "edit translation"),
+                ("Esc/q", "close"),
+            ],
             Overlay::ReaderEdit(_) => &[
                 ("type", "edit"),
                 ("↵", "newline"),
@@ -2839,7 +2928,7 @@ impl Overlay {
         let mut lines: Vec<Line> = vec![
             Line::raw(""),
             Line::from(Span::styled(
-                "  AI-assisted Japanese → Thai light-novel translation.",
+                "  AI-assisted Japanese → Thai / English light-novel translation.",
                 soft,
             )),
             Line::raw(""),
@@ -2849,7 +2938,7 @@ impl Overlay {
             ("1", "書架 Shelf", "import files · pick a project"),
             ("2", "棚 Project", "chapters · queue · run translation"),
             ("3", "訳 Translate", "watch the live 3-agent pipeline"),
-            ("4", "読 Reader", "read JA ↔ TH side by side"),
+            ("4", "読 Reader", "read source ↔ translation side by side"),
             ("5", "辞 Lexicon", "glossary · characters · style"),
         ];
         for (num, name, desc) in screens {
@@ -3085,7 +3174,7 @@ impl Overlay {
             &st.syn,
             "save",
             &EditorLabels {
-                label: "  Title · source  (translate to Thai with the Translator agent)",
+                label: "  Title · source  (translate with the Translator agent)",
                 placeholder: "Type the source title…",
                 input_rows: 3,
             },
@@ -3212,11 +3301,11 @@ impl Overlay {
             )));
         }
         lines.push(Line::raw(""));
-        lines.push(head("ไทย · translation", theme.accent));
-        for l in st.thai.lines() {
+        lines.push(head("Translation", theme.accent));
+        for l in st.translated_text.lines() {
             lines.push(Line::from(Span::styled(
                 l.to_string(),
-                Style::default().fg(theme.th_text),
+                Style::default().fg(theme.translated_text),
             )));
         }
         if let Some(r) = &st.review {
@@ -3245,7 +3334,11 @@ impl Overlay {
     fn render_reader_edit(&self, f: &mut Frame, area: Rect, theme: &Theme, st: &ReaderEditState) {
         let modal = centered_pct(82, 75, area);
         f.render_widget(Clear, modal);
-        let title = format!("Edit Thai · ch {:03} · chunk {}", st.chapter, st.chunk + 1);
+        let title = format!(
+            "Edit translation · ch {:03} · chunk {}",
+            st.chapter,
+            st.chunk + 1
+        );
         let block = self.modal_block(&title, theme);
         let inner = block.inner(modal);
         f.render_widget(block, modal);
@@ -3263,7 +3356,7 @@ impl Overlay {
             .map(|l| {
                 Line::from(Span::styled(
                     l.to_string(),
-                    Style::default().fg(theme.th_text),
+                    Style::default().fg(theme.translated_text),
                 ))
             })
             .collect();
@@ -3293,7 +3386,7 @@ impl Overlay {
     ) {
         let modal = centered_modal(64, 7, area);
         f.render_widget(Clear, modal);
-        let block = self.modal_block("Search · ค้นหา (JA + TH)", theme);
+        let block = self.modal_block("Search (source + translation)", theme);
         let inner = block.inner(modal);
         f.render_widget(block, modal);
 
@@ -3323,7 +3416,7 @@ impl Overlay {
         let input = if st.query.is_empty() {
             Line::from(vec![
                 Span::styled(
-                    "聖剣 · ตัวละคร · a phrase to locate…",
+                    "聖剣 · a character · a phrase to locate…",
                     Style::default().fg(theme.ink_faint),
                 ),
                 Span::styled("▏", Style::default().fg(theme.stream_cursor)),
@@ -3467,6 +3560,7 @@ impl Overlay {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(1), // header
+                Constraint::Length(1), // language selector
                 Constraint::Length(1), // gap
                 Constraint::Min(0),    // windowed file list
             ])
@@ -3487,12 +3581,47 @@ impl Overlay {
             rows[0],
         );
 
+        let language_locked = st.lock_name;
+        let language = if language_locked {
+            st.effective_target_language()
+        } else {
+            st.target_language
+        };
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(
+                    "  Translation language  ",
+                    Style::default().fg(theme.ink_faint),
+                ),
+                Span::styled(
+                    if language_locked { "  " } else { "◂ " },
+                    Style::default().fg(theme.accent_soft),
+                ),
+                Span::styled(
+                    language.label(),
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    if language_locked {
+                        "  (fixed for this project)"
+                    } else {
+                        " ▸  (from Settings preference)"
+                    },
+                    Style::default().fg(theme.ink_faint),
+                ),
+            ]))
+            .style(Style::default().bg(theme.bg_panel)),
+            rows[1],
+        );
+
         // Window the rows so the selection stays visible with long file lists.
-        let cap = rows[2].height.max(1);
+        let cap = rows[3].height.max(1);
         let start = windowed_start(st.sel, cap);
         let end = (start + cap as usize).min(st.files.len());
         let size_w = 9usize;
-        let name_w = (rows[2].width as usize).saturating_sub(6 + size_w);
+        let name_w = (rows[3].width as usize).saturating_sub(6 + size_w);
 
         let mut lines = Vec::with_capacity(end - start);
         for (i, (p, size)) in st.files.iter().enumerate().take(end).skip(start) {
@@ -3519,7 +3648,7 @@ impl Overlay {
         }
         f.render_widget(
             Paragraph::new(lines).style(Style::default().bg(theme.bg_panel)),
-            rows[2],
+            rows[3],
         );
     }
 
@@ -3603,6 +3732,10 @@ impl Overlay {
                 format!("    already has {}", volume_chips(&target.volumes)),
                 Style::default().fg(theme.ink_faint),
             )));
+            feedback.push(Line::from(Span::styled(
+                format!("    project language: {}", target.target_language.label()),
+                Style::default().fg(theme.ink_faint),
+            )));
         } else {
             feedback.push(Line::from(Span::styled(
                 "  ✓ creates a new project",
@@ -3622,7 +3755,13 @@ impl Overlay {
         let faint = Style::default().fg(theme.ink_faint);
         let mut lines = vec![
             Line::from(vec![
-                Span::styled("  Thai title", Style::default().fg(theme.ink_soft)),
+                Span::styled(
+                    format!(
+                        "  Translated title ({})",
+                        st.effective_target_language().label()
+                    ),
+                    Style::default().fg(theme.ink_soft),
+                ),
                 Span::styled("   ◦ optional", faint),
             ]),
             Line::from(Span::styled(
@@ -3639,13 +3778,14 @@ impl Overlay {
             ]),
             Line::raw(""),
             {
-                let mut spans = vec![Span::styled("  Thai      ", faint)];
-                if syn.edit_th {
-                    if syn.th.is_empty() {
-                        spans.push(Span::styled(thai_display_safe("พิมพ์ชื่อไทย…"), faint));
+                let mut spans = vec![Span::styled("  Translation", faint)];
+                if syn.edit_translation {
+                    if syn.translated_text.is_empty() {
+                        spans.push(Span::styled("Type translated title…", faint));
                         spans.push(Span::styled("▏", Style::default().fg(theme.stream_cursor)));
                     } else {
-                        let (before, after) = input::caret_halves(&syn.th, syn.th_cursor, 48);
+                        let (before, after) =
+                            input::caret_halves(&syn.translated_text, syn.translated_cursor, 48);
                         spans.push(Span::styled(
                             thai_display_safe(&before),
                             Style::default()
@@ -3660,14 +3800,14 @@ impl Overlay {
                                 .add_modifier(Modifier::BOLD),
                         ));
                     }
-                } else if syn.th.trim().is_empty() {
+                } else if syn.translated_text.trim().is_empty() {
                     spans.push(Span::styled(
-                        thai_display_safe("(no Thai title yet.)"),
+                        thai_display_safe("(no translated title yet.)"),
                         faint,
                     ));
                 } else {
                     spans.push(Span::styled(
-                        thai_display_safe(syn.th.trim()),
+                        thai_display_safe(syn.translated_text.trim()),
                         Style::default()
                             .fg(theme.accent)
                             .add_modifier(Modifier::BOLD),
@@ -3684,7 +3824,9 @@ impl Overlay {
             ))),
             SynPhase::Failed => {
                 lines.push(Line::from(Span::styled(
-                    thai_display_safe("  ✗ failed — type a Thai title, Tab to retry · Esc cancel"),
+                    thai_display_safe(
+                        "  ✗ failed — type a translated title, Tab to retry · Esc cancel",
+                    ),
                     Style::default().fg(theme.status_failed),
                 )));
                 lines.push(Line::from(Span::styled(
@@ -3692,10 +3834,10 @@ impl Overlay {
                     Style::default().fg(theme.status_failed),
                 )));
             }
-            // Edit_th is on for both Editing and Done in the title flow.
+            // Translation editing is active for both Editing and Done in the title flow.
             _ => {
-                let msg = if syn.th.trim().is_empty() {
-                    "  ↵ skip · type a Thai title · Tab to translate it for you"
+                let msg = if syn.translated_text.trim().is_empty() {
+                    "  ↵ skip · type a translated title · Tab to translate it for you"
                 } else {
                     "  ↵ next · type to edit · Tab to retranslate"
                 };
@@ -4168,8 +4310,23 @@ impl Overlay {
             push(
                 &mut lines,
                 &mut focus_line,
-                row(17, "Retry attempts", st.max_attempts.clone(), true),
+                row(
+                    17,
+                    "Preferred language",
+                    st.preferred_language.label().to_string(),
+                    false,
+                ),
                 st.field == 17,
+            );
+            lines.push(Line::from(Span::styled(
+                "      ↳ Default for new projects; existing projects keep their language",
+                Style::default().fg(theme.ink_faint),
+            )));
+            push(
+                &mut lines,
+                &mut focus_line,
+                row(18, "Retry attempts", st.max_attempts.clone(), true),
+                st.field == 18,
             );
             lines.push(Line::from(Span::styled(
                 "      ↳ Translator↔Reviewer loop per chunk (1–20)",
@@ -4178,8 +4335,8 @@ impl Overlay {
             push(
                 &mut lines,
                 &mut focus_line,
-                row(18, "Loop watchdog (s)", st.loop_stall_secs.clone(), true),
-                st.field == 18,
+                row(19, "Loop watchdog (s)", st.loop_stall_secs.clone(), true),
+                st.field == 19,
             );
             lines.push(Line::from(Span::styled(
                 "      ↳ quiet pipeline stalls after N s; active model calls retry chunk first",
@@ -4189,12 +4346,12 @@ impl Overlay {
                 &mut lines,
                 &mut focus_line,
                 row(
-                    19,
+                    20,
                     "Loop re-translates",
                     st.max_chapter_retranslates.clone(),
                     true,
                 ),
-                st.field == 19,
+                st.field == 20,
             );
             lines.push(Line::from(Span::styled(
                 "      ↳ stalled-chapter re-translates before the run aborts (0–10)",
@@ -4204,12 +4361,12 @@ impl Overlay {
                 &mut lines,
                 &mut focus_line,
                 row(
-                    20,
+                    21,
                     "Service tier",
                     ServiceTier::label(st.service_tier).to_string(),
                     false,
                 ),
-                st.field == 20,
+                st.field == 21,
             );
             lines.push(Line::from(Span::styled(
                 format!("      ↳ {}", ServiceTier::desc(st.service_tier)),
@@ -4220,19 +4377,19 @@ impl Overlay {
             push(
                 &mut lines,
                 &mut focus_line,
-                row(21, "Auto-update", st.update_mode.label().to_string(), false),
-                st.field == 21,
+                row(22, "Auto-update", st.update_mode.label().to_string(), false),
+                st.field == 22,
             );
             push(
                 &mut lines,
                 &mut focus_line,
                 row(
-                    22,
+                    23,
                     "Update channel",
                     st.release_channel.label().to_string(),
                     false,
                 ),
-                st.field == 22,
+                st.field == 23,
             );
             lines.push(Line::from(vec![
                 Span::styled(
@@ -4573,7 +4730,7 @@ impl Overlay {
                     ("i", "add chapters to volume (append import)"),
                     ("M", "update volume images from source EPUB"),
                     ("x", "export volume EPUB"),
-                    ("e", "edit project Thai name"),
+                    ("e", "edit translated project name"),
                     ("y", "volume synopsis (translate/reroll)"),
                     ("d", "delete marked/current chapter(s)"),
                     ("Q", "QA review (flagged issues)"),
@@ -4598,15 +4755,15 @@ impl Overlay {
                     ("jk / ↑↓", "scroll (synced)"),
                     ("[ ]", "prev · next chapter"),
                     ("z / w / o", "sync · wrap · layout"),
-                    ("/  > <", "search JA+TH · next · prev match"),
+                    ("/  > <", "search both panes · next · prev match"),
                     ("g", "jump (chapters · sections · marks)"),
                     ("G", "toggle glossary highlight"),
                     ("r", "next [REVIEW NEEDED] in chapter"),
-                    ("s", "show source for this TH chunk"),
-                    ("i / e", "inspect chunk (JP‖TH‖review) · edit Thai"),
+                    ("s", "show source for this translation chunk"),
+                    ("i / e", "inspect chunk (JP‖translation‖review) · edit"),
                     ("m", "toggle bookmark at this line"),
                     ("n / N", "add note · show/hide notes"),
-                    ("d / y", "rerun diff · copy visible Thai"),
+                    ("d / y", "rerun diff · copy visible translation"),
                     ("Q", "QA review (flagged issues)"),
                 ],
             ),
@@ -4757,7 +4914,7 @@ impl Overlay {
             )),
             Line::raw(""),
             Line::from(Span::styled(
-                "AI-assisted Japanese → Thai light-novel translation TUI",
+                "AI-assisted Japanese → Thai / English light-novel translation TUI",
                 Style::default().fg(theme.ink_soft),
             )),
             Line::from(Span::styled(
@@ -5108,13 +5265,13 @@ fn modal_button_at(dlg: &Dialog, inner: Rect, col: u16) -> Option<ModalButton> {
 /// resolve_click must mirror render_import's layout.
 const IMPORT_HEADER_ROWS: u16 = 3;
 /// Rows the pick step draws above its file list (header · gap).
-const IMPORT_PICK_LIST_OFFSET: u16 = 2;
+const IMPORT_PICK_LIST_OFFSET: u16 = 3;
 
 /// The wizard's step rail: done steps get a check, the current step is
 /// highlighted, future steps are dimmed. The add-volume flow hides "Name".
 fn step_rail(st: &ImportState, theme: &Theme) -> Line<'static> {
     // (step id, label, optional). Required steps are numbered; optional steps
-    // (Thai title, synopsis) get a `◦` marker so the skippable ones read apart.
+    // Optional translated title and synopsis steps get a `◦` marker.
     let steps: &[(u8, &str, bool)] = if st.lock_name {
         &[
             (0, "File", false),
@@ -5125,7 +5282,7 @@ fn step_rail(st: &ImportState, theme: &Theme) -> Line<'static> {
         &[
             (0, "File", false),
             (1, "Name", false),
-            (2, "Thai title", true),
+            (2, "Translated title", true),
             (3, "Volume", false),
             (4, "Synopsis", true),
         ]
@@ -5181,6 +5338,11 @@ fn import_context_line(st: &ImportState, theme: &Theme) -> Line<'static> {
         truncate_cols(&thai_display_safe(file), 30),
         if st.step == 0 { pending } else { confirmed },
     ));
+    spans.push(sep.clone());
+    spans.push(Span::styled(
+        st.effective_target_language().label().to_string(),
+        Style::default().fg(theme.accent_soft),
+    ));
     if st.lock_name || st.step > 1 {
         spans.push(sep.clone());
         spans.push(Span::styled(
@@ -5211,9 +5373,9 @@ fn volume_chips(volumes: &[(u32, usize)]) -> String {
 /// step and the standalone overlay); `wizard` switches the accept label, since
 /// accepting in the wizard starts the import while standalone accept saves.
 fn synopsis_hints(st: &SynopsisState, wizard: bool) -> &'static [(&'static str, &'static str)] {
-    if st.edit_th {
+    if st.edit_translation {
         return &[
-            ("type", "thai"),
+            ("type", "translation"),
             ("Tab", "retranslate"),
             ("^S", "save"),
             ("Esc", "done"),
@@ -5235,36 +5397,36 @@ fn synopsis_hints(st: &SynopsisState, wizard: bool) -> &'static [(&'static str, 
         SynPhase::Translating => &[("Esc", "cancel"), ("…", "translating")],
         SynPhase::Done if wizard => &[
             ("↵", "start import"),
-            ("e", "edit th"),
+            ("e", "edit translation"),
             ("r", "reroll"),
             ("s", "skip"),
         ],
         SynPhase::Done => &[
             ("↵", "save"),
-            ("e", "edit th"),
+            ("e", "edit translation"),
             ("r", "reroll"),
             ("o", "src"),
         ],
-        SynPhase::Failed => &[("e", "edit th"), ("r", "retry"), ("o", "src")],
+        SynPhase::Failed => &[("e", "edit translation"), ("r", "retry"), ("o", "src")],
     }
 }
 
-/// Footer hints for the wizard's Thai-title step: the user types the Thai title
+/// Footer hints for the translated-title step: the user types the title
 /// directly, with Tab to translate via the agent.
 fn import_title_hints(st: &SynopsisState) -> &'static [(&'static str, &'static str)] {
     if st.phase == SynPhase::Translating {
         return &[("Esc", "cancel"), ("…", "translating")];
     }
-    if st.th.trim().is_empty() {
+    if st.translated_text.trim().is_empty() {
         return &[
             ("↵", "skip"),
-            ("type", "thai"),
+            ("type", "translation"),
             ("Tab", "translate"),
             ("Esc", "back"),
         ];
     }
     &[
-        ("type", "thai"),
+        ("type", "translation"),
         ("Tab", "translate"),
         ("↵", "next"),
         ("Esc", "back"),
@@ -5276,7 +5438,7 @@ fn title_hints(st: &SynopsisState) -> &'static [(&'static str, &'static str)] {
         return &[("Esc", "cancel"), ("…", "translating")];
     }
     &[
-        ("type", "thai"),
+        ("type", "translation"),
         ("Tab", "translate"),
         ("↵", "save"),
         ("Esc", "cancel"),
@@ -5372,9 +5534,9 @@ fn render_editor_body(
         rows[0],
     );
 
-    // While hand-editing the Thai field, the source box is a read-only reference.
-    let editing = st.phase == SynPhase::Editing && !st.edit_th;
-    let border_color = if st.edit_th || !editing {
+    // While hand-editing the translation, the source box is a read-only reference.
+    let editing = st.phase == SynPhase::Editing && !st.edit_translation;
+    let border_color = if st.edit_translation || !editing {
         theme.rule
     } else {
         theme.accent_soft
@@ -5442,41 +5604,41 @@ fn render_editor_body(
 
     f.render_widget(
         Paragraph::new(Span::styled(
-            "  Thai translation",
+            "  Translation",
             Style::default().fg(theme.ink_soft),
         ))
         .style(Style::default().bg(theme.bg_panel)),
         rows[3],
     );
 
-    // The Thai output gets the same boxed treatment as the source, so the pair
+    // The translated output gets the same boxed treatment as the source, so the pair
     // reads as siblings; its border accents while it is the field being edited.
-    let th_block = Block::default()
+    let translation_block = Block::default()
         .borders(Borders::ALL)
         .border_set(theme::hairline_set())
-        .border_style(Style::default().fg(if st.edit_th {
+        .border_style(Style::default().fg(if st.edit_translation {
             theme.accent_soft
         } else {
             theme.rule
         }))
         .style(Style::default().bg(theme.bg_inset));
 
-    if st.edit_th {
-        let lines = if st.th.is_empty() {
+    if st.edit_translation {
+        let lines = if st.translated_text.is_empty() {
             vec![Line::from(vec![
                 Span::styled(
-                    "Type the Thai, or press Tab to translate",
+                    "Type the translation, or press Tab to translate",
                     Style::default().fg(theme.ink_faint),
                 ),
                 Span::styled("▏", Style::default().fg(theme.stream_cursor)),
             ])]
         } else {
-            caret_text_lines(&st.th, st.th_cursor, theme)
+            caret_text_lines(&st.translated_text, st.translated_cursor, theme)
         };
         f.render_widget(
             Paragraph::new(Text::from(lines))
                 .wrap(Wrap { trim: false })
-                .block(th_block),
+                .block(translation_block),
             indent(rows[4], 2),
         );
         return;
@@ -5484,16 +5646,16 @@ fn render_editor_body(
 
     let (body, color) = match st.phase {
         SynPhase::Failed => (st.error.clone(), theme.status_failed),
-        _ if st.th.trim().is_empty() => (
+        _ if st.translated_text.trim().is_empty() => (
             "No translation yet — press Tab to translate".to_string(),
             theme.ink_faint,
         ),
-        _ => (st.th.clone(), theme.ink),
+        _ => (st.translated_text.clone(), theme.ink),
     };
     f.render_widget(
         Paragraph::new(crate::ui::text::thai_display_safe(&body))
             .wrap(Wrap { trim: false })
-            .block(th_block)
+            .block(translation_block)
             .style(Style::default().fg(color).bg(theme.bg_inset)),
         indent(rows[4], 2),
     );
@@ -5509,7 +5671,7 @@ fn editor_status(
 ) -> Span<'static> {
     let faint = Style::default().fg(theme.ink_faint);
     let text = editor_status_text(st, accept_label, max_cols as usize);
-    if st.edit_th {
+    if st.edit_translation {
         return Span::styled(text, faint);
     }
     match st.phase {
@@ -5521,11 +5683,11 @@ fn editor_status(
 }
 
 fn editor_status_text(st: &SynopsisState, accept_label: &str, max_cols: usize) -> String {
-    if st.edit_th {
+    if st.edit_translation {
         let msg = if st.multiline {
-            "  Editing Thai · Tab retranslate · Enter newline · Esc done".to_string()
+            "  Editing translation · Tab retranslate · Enter newline · Esc done".to_string()
         } else {
-            format!("  Editing Thai · Tab retranslate · Enter {accept_label} · Esc done")
+            format!("  Editing translation · Tab retranslate · Enter {accept_label} · Esc done")
         };
         return fit_status_text(std::iter::once(msg), max_cols);
     }
@@ -5716,10 +5878,68 @@ mod tests {
     }
 
     fn wizard(projects: Vec<ProjectRef>) -> Overlay {
+        wizard_with_language(projects, TargetLanguage::Thai)
+    }
+
+    fn wizard_with_language(
+        projects: Vec<ProjectRef>,
+        preferred_language: TargetLanguage,
+    ) -> Overlay {
         Overlay::Import(ImportState::new(
             vec![(PathBuf::from("cursed_blade_v03.epub"), 2_345_678)],
             projects,
+            preferred_language,
         ))
+    }
+
+    #[test]
+    fn preferred_language_only_seeds_the_new_project_wizard() {
+        let mut seeded = wizard_with_language(vec![], TargetLanguage::English);
+        let Overlay::Import(st) = &seeded else {
+            panic!("overlay changed variant")
+        };
+        assert_eq!(st.target_language, TargetLanguage::English);
+        assert_eq!(st.effective_target_language(), TargetLanguage::English);
+        if let Overlay::Import(st) = &mut seeded {
+            st.step = 4;
+        }
+        match seeded.handle_key(key(KeyCode::Tab)) {
+            Action::ImportFile {
+                target_language, ..
+            } => assert_eq!(target_language, TargetLanguage::English),
+            other => panic!("expected ImportFile, got {other:?}"),
+        }
+
+        let mut ov = wizard_with_language(vec![], TargetLanguage::English);
+        ov.handle_key(key(KeyCode::Right));
+        let Overlay::Import(st) = &ov else {
+            panic!("overlay changed variant")
+        };
+        assert_eq!(st.target_language, TargetLanguage::Thai);
+    }
+
+    #[test]
+    fn existing_project_language_overrides_the_wizard_preference() {
+        let existing = ProjectRef {
+            slug: slugify("Cursed Blade"),
+            title: "Cursed Blade".to_string(),
+            target_language: TargetLanguage::Thai,
+            volumes: vec![(1, 12)],
+        };
+        let mut st = ImportState::new(
+            vec![(PathBuf::from("cursed_blade_v03.epub"), 2_345_678)],
+            vec![existing],
+            TargetLanguage::English,
+        );
+        st.step = 4;
+        let mut ov = Overlay::Import(st);
+
+        match ov.handle_key(key(KeyCode::Tab)) {
+            Action::ImportFile {
+                target_language, ..
+            } => assert_eq!(target_language, TargetLanguage::Thai),
+            other => panic!("expected ImportFile, got {other:?}"),
+        }
     }
 
     /// Append mode skips every wizard step: picking a file (Enter on step 0)
@@ -5731,6 +5951,7 @@ mod tests {
             vec![],
             "Party Got Sick III".into(),
             3,
+            TargetLanguage::Thai,
         ));
         match ov.handle_key(key(KeyCode::Enter)) {
             Action::ImportFile {
@@ -5748,24 +5969,36 @@ mod tests {
     }
 
     #[test]
-    fn project_title_editor_can_hand_edit_then_save() {
-        let mut ov = Overlay::project_title_edit("novel".into(), "夜の影".into(), String::new());
+    fn project_title_editor_can_hand_edit_translation_and_save() {
+        let mut ov = Overlay::project_title_edit(
+            "novel".into(),
+            "夜の影".into(),
+            String::new(),
+            TargetLanguage::Thai,
+        );
 
-        // The editor starts focused on the Thai field — type the name by hand.
+        // The editor starts focused on the translated field — type the name by hand.
         for c in "เงา".chars() {
             ov.handle_key(key(KeyCode::Char(c)));
         }
         if let Overlay::ProjectTitle(st) = &ov {
-            assert!(st.syn.edit_th, "starts editing the Thai field");
-            assert_eq!(st.syn.th, "เงา");
+            assert!(
+                st.syn.edit_translation,
+                "starts editing the translated field"
+            );
+            assert_eq!(st.syn.translated_text, "เงา");
         } else {
             panic!("overlay changed variant");
         }
         match ov.handle_key(key(KeyCode::Enter)) {
-            Action::SaveProjectTitle { id, raw, th } => {
+            Action::SaveProjectTitle {
+                id,
+                raw,
+                translated_title,
+            } => {
                 assert_eq!(id, "novel");
                 assert_eq!(raw, "夜の影");
-                assert_eq!(th, "เงา", "hand-typed Thai is saved as-is");
+                assert_eq!(translated_title, "เงา", "hand-typed Thai is saved as-is");
             }
             other => panic!("expected SaveProjectTitle, got {other:?}"),
         }
@@ -5774,14 +6007,23 @@ mod tests {
     #[test]
     fn synopsis_editor_can_continue_without_translating() {
         // Typed a source synopsis but don't want to translate: Ctrl+S continues.
-        let mut ov = Overlay::synopsis_edit(String::new(), String::new(), 1, "Novel".into());
+        let mut ov = Overlay::synopsis_edit(
+            String::new(),
+            String::new(),
+            1,
+            "Novel".into(),
+            TargetLanguage::Thai,
+        );
         for c in "あらすじ".chars() {
             ov.handle_key(key(KeyCode::Char(c)));
         }
         match ov.handle_key(ctrl(KeyCode::Char('s'))) {
-            Action::SaveSynopsis { raw, th } => {
+            Action::SaveSynopsis {
+                raw,
+                translated_synopsis,
+            } => {
                 assert_eq!(raw, "あらすじ");
-                assert_eq!(th, "", "no translation was forced");
+                assert_eq!(translated_synopsis, "", "no translation was forced");
             }
             other => panic!("expected SaveSynopsis, got {other:?}"),
         }
@@ -5789,22 +6031,34 @@ mod tests {
 
     #[test]
     fn synopsis_editor_can_hand_edit_translation() {
-        let mut ov = Overlay::synopsis_edit("源".into(), "เก่า".into(), 1, "Novel".into());
-        // 'e' focuses the Thai field for hand-editing (was: edit the source).
+        let mut ov = Overlay::synopsis_edit(
+            "源".into(),
+            "เก่า".into(),
+            1,
+            "Novel".into(),
+            TargetLanguage::Thai,
+        );
+        // 'e' focuses the translated field for hand-editing.
         ov.handle_key(key(KeyCode::Char('e')));
         if let Overlay::Synopsis(st) = &ov {
-            assert!(st.syn.edit_th, "'e' edits the translation by hand");
+            assert!(st.syn.edit_translation, "'e' edits the translation by hand");
         } else {
             panic!("overlay changed variant");
         }
         for c in "ใหม่".chars() {
             ov.handle_key(key(KeyCode::Char(c)));
         }
-        ov.handle_key(key(KeyCode::Esc)); // settle the Thai field (multiline)
+        ov.handle_key(key(KeyCode::Esc)); // settle the translated field (multiline)
         match ov.handle_key(key(KeyCode::Enter)) {
-            Action::SaveSynopsis { raw, th } => {
+            Action::SaveSynopsis {
+                raw,
+                translated_synopsis,
+            } => {
                 assert_eq!(raw, "源");
-                assert_eq!(th, "เก่าใหม่", "hand-edited translation is saved");
+                assert_eq!(
+                    translated_synopsis, "เก่าใหม่",
+                    "hand-edited translation is saved"
+                );
             }
             other => panic!("expected SaveSynopsis, got {other:?}"),
         }
@@ -5812,13 +6066,23 @@ mod tests {
 
     #[test]
     fn project_title_editor_translates_then_saves() {
-        let mut ov = Overlay::project_title_edit("novel".into(), "夜の影".into(), String::new());
+        let mut ov = Overlay::project_title_edit(
+            "novel".into(),
+            "夜の影".into(),
+            String::new(),
+            TargetLanguage::Thai,
+        );
 
         // Tab hands the source off to the translator agent.
         match ov.handle_key(key(KeyCode::Tab)) {
-            Action::TranslateProjectTitle { ref raw, attempt } => {
+            Action::TranslateProjectTitle {
+                ref raw,
+                attempt,
+                target_language,
+            } => {
                 assert_eq!(raw, "夜の影");
                 assert_eq!(attempt, 0);
+                assert_eq!(target_language, TargetLanguage::Thai);
             }
             other => panic!("expected TranslateProjectTitle, got {other:?}"),
         }
@@ -5829,12 +6093,16 @@ mod tests {
         }
 
         ov.set_synopsis_result(Ok("เงาแห่งราตรี".into()));
-        // The result lands back in the editable Thai field; Enter saves it.
+        // The result lands back in the editable translated field; Enter saves it.
         match ov.handle_key(key(KeyCode::Enter)) {
-            Action::SaveProjectTitle { id, raw, th } => {
+            Action::SaveProjectTitle {
+                id,
+                raw,
+                translated_title,
+            } => {
                 assert_eq!(id, "novel");
                 assert_eq!(raw, "夜の影");
-                assert_eq!(th, "เงาแห่งราตรี");
+                assert_eq!(translated_title, "เงาแห่งราตรี");
             }
             other => panic!("expected SaveProjectTitle, got {other:?}"),
         }
@@ -5842,7 +6110,12 @@ mod tests {
 
     #[test]
     fn project_title_editor_seeds_done_from_stored_translation() {
-        let ov = Overlay::project_title_edit("novel".into(), "夜の影".into(), "เงาแห่งราตรี".into());
+        let ov = Overlay::project_title_edit(
+            "novel".into(),
+            "夜の影".into(),
+            "เงาแห่งราตรี".into(),
+            TargetLanguage::Thai,
+        );
         let Overlay::ProjectTitle(st) = &ov else {
             panic!("wrong variant");
         };
@@ -5882,6 +6155,7 @@ mod tests {
             slug: slugify("Cursed Blade"),
             title: "Cursed Blade".to_string(),
             volumes: vec![(1, 12), (2, 9)],
+            target_language: TargetLanguage::Thai,
         };
         let mut ov = wizard(vec![existing]);
         if let Overlay::Import(st) = &mut ov {
@@ -5889,8 +6163,8 @@ mod tests {
             st.name = "Cursed Blade".to_string();
             st.name_cursor = st.name.len();
         }
-        ov.handle_key(key(KeyCode::Enter)); // → Thai-title step
-        ov.handle_key(key(KeyCode::Enter)); // empty Thai title → volume step
+        ov.handle_key(key(KeyCode::Enter)); // → translated-title step
+        ov.handle_key(key(KeyCode::Enter)); // empty translated title → volume step
         let Overlay::Import(st) = &ov else {
             panic!("overlay changed variant")
         };
@@ -5906,6 +6180,7 @@ mod tests {
             slug: slugify("Cursed Blade"),
             title: "Cursed Blade".to_string(),
             volumes: vec![(1, 12)],
+            target_language: TargetLanguage::Thai,
         };
         let mut ov = wizard(vec![existing]);
         if let Overlay::Import(st) = &mut ov {
@@ -5913,35 +6188,40 @@ mod tests {
             st.name = "Cursed Blade".to_string();
             st.name_cursor = st.name.len();
         }
-        ov.handle_key(key(KeyCode::Enter)); // → Thai-title step
-        ov.handle_key(key(KeyCode::Enter)); // empty Thai title → volume step, suggested 2
+        ov.handle_key(key(KeyCode::Enter)); // → translated-title step
+        ov.handle_key(key(KeyCode::Enter)); // empty translated title → volume step, suggested 2
         ov.handle_key(key(KeyCode::Up)); // user picks 3
-        ov.handle_key(key(KeyCode::Esc)); // back to Thai title
+        ov.handle_key(key(KeyCode::Esc)); // back to translated title
         ov.handle_key(key(KeyCode::Esc)); // back to name
         ov.handle_key(key(KeyCode::Enter)); // forward again
-        ov.handle_key(key(KeyCode::Enter)); // empty Thai title → volume step
+        ov.handle_key(key(KeyCode::Enter)); // empty translated title → volume step
         let Overlay::Import(st) = &ov else {
             panic!("overlay changed variant")
         };
         assert_eq!(st.vol, 3, "manual pick must not be re-suggested away");
     }
 
-    /// The Thai-title step translates the typed project name via the title agent
-    /// and threads the accepted Thai title into the import action; skipping it
+    /// The translated-title step uses the title agent and threads the accepted
+    /// result into the import action; skipping it
     /// leaves the title empty.
     #[test]
-    fn wizard_title_step_threads_thai_title_into_import() {
+    fn wizard_title_step_threads_translated_title_into_import() {
         let mut ov = wizard(vec![]);
         if let Overlay::Import(st) = &mut ov {
             st.step = 1;
             st.name = "夜の影".to_string();
             st.name_cursor = st.name.len();
         }
-        ov.handle_key(key(KeyCode::Enter)); // name → Thai title
+        ov.handle_key(key(KeyCode::Enter)); // name → translated title
         match ov.handle_key(key(KeyCode::Tab)) {
-            Action::TranslateProjectTitle { raw, attempt } => {
+            Action::TranslateProjectTitle {
+                raw,
+                attempt,
+                target_language,
+            } => {
                 assert_eq!(raw, "夜の影");
                 assert_eq!(attempt, 0);
+                assert_eq!(target_language, TargetLanguage::Thai);
             }
             other => panic!("expected TranslateProjectTitle, got {other:?}"),
         }
@@ -5951,10 +6231,12 @@ mod tests {
         match ov.handle_key(key(KeyCode::Tab)) {
             // Empty synopsis + Tab skips it and starts the import.
             Action::ImportFile {
-                title, title_th, ..
+                title,
+                translated_title,
+                ..
             } => {
                 assert_eq!(title, "夜の影");
-                assert_eq!(title_th, "เงาแห่งราตรี");
+                assert_eq!(translated_title, "เงาแห่งราตรี");
             }
             other => panic!("expected ImportFile, got {other:?}"),
         }
@@ -5976,7 +6258,10 @@ mod tests {
         ov.handle_key(key(KeyCode::Esc)); // back to name (same name)
         ov.handle_key(key(KeyCode::Enter)); // re-enter title step
         if let Overlay::Import(st) = &ov {
-            assert_eq!(st.title_syn.th, "เงาแห่งราตรี", "same name keeps the roll");
+            assert_eq!(
+                st.title_syn.translated_text, "เงาแห่งราตรี",
+                "same name keeps the roll"
+            );
             assert_eq!(st.title_syn.phase, SynPhase::Done);
         }
         ov.handle_key(key(KeyCode::Esc));
@@ -5986,7 +6271,7 @@ mod tests {
             panic!("overlay changed variant")
         };
         assert!(
-            st.title_syn.th.is_empty(),
+            st.title_syn.translated_text.is_empty(),
             "a changed name must reset the stale translation"
         );
     }
@@ -6000,10 +6285,12 @@ mod tests {
             slug: slugify("Cursed Blade"),
             title: "ดาบคำสาป".to_string(),
             volumes: vec![(1, 3)],
+            target_language: TargetLanguage::Thai,
         };
         let mut st = ImportState::new(
             vec![(PathBuf::from("ดาบคำสาป_v01.epub"), 2_345_678)],
             vec![existing],
+            TargetLanguage::Thai,
         );
         st.name = "ดาบคำสาป".to_string();
         st.name_cursor = st.name.len();
@@ -6048,7 +6335,7 @@ mod tests {
         st.next_field();
         assert_eq!(st.field, 12, "field nav wraps within the tab");
 
-        let st = SettingsState::for_test(17); // Retry attempts
+        let st = SettingsState::for_test(17); // Translation language
         assert_eq!(st.tab, SettingsTab::Pipeline);
 
         let mut st = SettingsState::for_test(0);

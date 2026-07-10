@@ -29,11 +29,11 @@ pub fn orchestrator_tools() -> serde_json::Value {
                 "parameters": {
                     "type": "object",
                     "additionalProperties": false,
-                    "required": ["jp_name", "thai_name"],
+                    "required": ["jp_name", "translated_name"],
                     "properties": {
                         "id": {"type": "string", "description": "Stable slug; if omitted it is derived from jp_name."},
                         "jp_name": {"type": "string", "description": "Japanese name as written in the source."},
-                        "thai_name": {"type": "string", "description": "Canonical Thai rendering of the name."},
+                        "translated_name": {"type": "string", "description": "Canonical target-language rendering."},
                         "romaji": {"type": "string"},
                         "gender": {"type": "string", "enum": ["male", "female", "nonbinary", "unknown"]},
                         "honorific": {"type": "string", "description": "Honorific or suffix convention, e.g. さん / -kun."},
@@ -50,17 +50,17 @@ pub fn orchestrator_tools() -> serde_json::Value {
                                 }
                             }
                         },
-                        "aliases": {"type": "array", "items": {"type": "string"}, "description": "Alternate JP surface forms of THIS SAME character (e.g. bare given name, alternate kanji) that should render as the SAME Thai name. Used to fold name variants into one entry instead of creating duplicates."},
+                        "aliases": {"type": "array", "items": {"type": "string"}, "description": "Alternate JP surface forms of this same character that share one target rendering."},
                         "also_called": {
                             "type": "array",
-                            "description": "DISTINCT names other characters use to address this person (nickname, title, term of endearment) that get their OWN Thai rendering — e.g. ユウ→ยู, お兄ちゃん→พี่. Different from `aliases` (same name, same Thai). Record one here whenever someone addresses this character by a different name so that form stays consistent.",
+                            "description": "Distinct names used to address this person, each with its own target rendering; unlike aliases, these are different visible names/titles.",
                             "items": {
                                 "type": "object",
                                 "additionalProperties": false,
-                                "required": ["jp", "thai"],
+                                "required": ["jp", "translated_name"],
                                 "properties": {
                                     "jp": {"type": "string", "description": "The JP name/form as spoken."},
-                                    "thai": {"type": "string", "description": "Fixed Thai rendering for THIS form."},
+                                    "translated_name": {"type": "string", "description": "Fixed target-language rendering for this form."},
                                     "by": {"type": "string", "description": "Who calls them this (character name or role), optional."}
                                 }
                             }
@@ -95,15 +95,15 @@ pub fn orchestrator_tools() -> serde_json::Value {
                 "parameters": {
                     "type": "object",
                     "additionalProperties": false,
-                    "required": ["jp_term", "thai_term"],
+                    "required": ["jp_term", "translated_term"],
                     "properties": {
                         "jp_term": {"type": "string"},
-                        "thai_term": {"type": "string"},
+                        "translated_term": {"type": "string"},
                         "romaji": {"type": "string"},
                         "category": {"type": "string", "enum": ["skill", "place", "org", "item", "title", "concept", "sfx", "other"]},
                         "gloss": {"type": "string", "description": "Short clarifying note about meaning or usage."},
                         "policy": {"type": "string", "enum": ["hard_locked", "preferred", "forbidden", "context_dependent"], "description": "Terminology policy. Use preferred for normal discoveries; hard_locked/forbidden/context_dependent are human controls and block automatic overwrites."},
-                        "forbidden_thai": {"type": "array", "items": {"type": "string"}, "description": "Thai renderings that must not be used for this Japanese term."},
+                        "forbidden_translations": {"type": "array", "items": {"type": "string"}, "description": "Target-language renderings that must not be used."},
                         "context_rule": {"type": "string", "description": "Rule for context_dependent terms (when to use each rendering)."},
                         "protected": {"type": "boolean", "description": "Back-compat human protection flag; protected existing terms cannot be automatically overwritten."},
                         "do_not_translate": {"type": "boolean", "description": "True to keep the term verbatim / romanized."},
@@ -133,15 +133,15 @@ pub fn orchestrator_tools() -> serde_json::Value {
             "type": "function",
             "function": {
                 "name": "append_translation",
-                "description": "Append approved Thai text to translated/ch_NNN.md. The app appends deterministically; this tool is a secondary, idempotent path keyed by chunk_index.",
+                "description": "Append approved target-language text to translated/ch_NNN.md. The app normally appends deterministically; this is an idempotent secondary path.",
                 "parameters": {
                     "type": "object",
                     "additionalProperties": false,
-                    "required": ["chapter", "chunk_index", "thai_text"],
+                    "required": ["chapter", "chunk_index", "translated_text"],
                     "properties": {
                         "chapter": {"type": "integer"},
                         "chunk_index": {"type": "integer"},
-                        "thai_text": {"type": "string"}
+                        "translated_text": {"type": "string"}
                     }
                 }
             }
@@ -168,7 +168,7 @@ pub fn orchestrator_tools() -> serde_json::Value {
             "type": "function",
             "function": {
                 "name": "get_glossary",
-                "description": "Read glossary terms from GLOSSARY.md, optionally filtered by query/category/policy/protected_only, to check existing terminology controls before inventing new terms. The query matches JP/Thai/romaji forms and kana readings, in either direction (聖剣エクスカリバー finds 聖剣); omit it to list everything.",
+                "description": "Read glossary terms, optionally filtered by query/category/policy/protected_only, before inventing terms. Query matches Japanese, target, romaji, and kana forms.",
                 "parameters": {
                     "type": "object",
                     "additionalProperties": false,
@@ -209,7 +209,8 @@ struct UpsertCharacterArgs {
     #[serde(default)]
     id: Option<String>,
     jp_name: String,
-    thai_name: String,
+    #[serde(alias = "thai_name")]
+    translated_name: String,
     #[serde(default)]
     romaji: Option<String>,
     #[serde(default)]
@@ -239,7 +240,8 @@ struct MergeCharacterArgs {
 #[derive(Debug, Deserialize)]
 struct UpsertGlossaryArgs {
     jp_term: String,
-    thai_term: String,
+    #[serde(alias = "thai_term")]
+    translated_term: String,
     #[serde(default)]
     romaji: Option<String>,
     #[serde(default)]
@@ -248,8 +250,8 @@ struct UpsertGlossaryArgs {
     gloss: Option<String>,
     #[serde(default)]
     policy: Option<TermPolicy>,
-    #[serde(default)]
-    forbidden_thai: Vec<String>,
+    #[serde(default, alias = "forbidden_thai")]
+    forbidden_translations: Vec<String>,
     #[serde(default)]
     context_rule: Option<String>,
     #[serde(default)]
@@ -273,7 +275,8 @@ struct UpdateRecapArgs {
 struct AppendTranslationArgs {
     chapter: u32,
     chunk_index: u32,
-    thai_text: String,
+    #[serde(alias = "thai_text")]
+    translated_text: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -351,7 +354,7 @@ pub async fn dispatch_tool(
             let character = Character {
                 id: id.clone(),
                 jp_name: a.jp_name.clone(),
-                thai_name: a.thai_name.clone(),
+                translated_name: a.translated_name.clone(),
                 romaji: a.romaji,
                 gender: a.gender,
                 honorific: a.honorific,
@@ -362,18 +365,18 @@ pub async fn dispatch_tool(
                 notes: a.notes,
                 first_seen_chapter: a.first_seen_chapter.or(Some(chapter)),
             };
-            match characters::upsert_keep_thai(ws, character) {
+            match characters::upsert_keep_translation(ws, character) {
                 Ok(outcome) => {
                     tx.send(AppEvent::CharacterUpserted {
                         id: id.clone(),
                         jp_name: a.jp_name.clone(),
-                        thai_name: a.thai_name.clone(),
+                        translated_name: a.translated_name.clone(),
                     });
                     let summary = match &outcome {
                         characters::CharacterUpsertOutcome::Merged { into_id } => {
                             format!("character {} merged into {}", a.jp_name, into_id)
                         }
-                        _ => format!("character {} ({} → {})", id, a.jp_name, a.thai_name),
+                        _ => format!("character {} ({} → {})", id, a.jp_name, a.translated_name),
                     };
                     tx.send(AppEvent::ToolInvoked {
                         chapter,
@@ -387,7 +390,7 @@ pub async fn dispatch_tool(
                         } => ToolResult::data(
                             format!(
                                 "Saved character {} ({}), but it may duplicate existing entr{}: {}. If any is the same person, call merge_character(from_id, into_id) to consolidate (keep the fuller name as into_id).",
-                                a.thai_name,
+                                a.translated_name,
                                 id,
                                 if candidates.len() == 1 { "y" } else { "ies" },
                                 candidates.join(", "),
@@ -395,11 +398,12 @@ pub async fn dispatch_tool(
                             json!({ "id": id, "merge_candidates": candidates }),
                         ),
                         characters::CharacterUpsertOutcome::Merged { into_id } => ToolResult::ok(
-                            format!("Merged character {} into {}", a.thai_name, into_id),
+                            format!("Merged character {} into {}", a.translated_name, into_id),
                         ),
-                        characters::CharacterUpsertOutcome::Inserted => {
-                            ToolResult::ok(format!("Upserted character {} ({})", a.thai_name, id))
-                        }
+                        characters::CharacterUpsertOutcome::Inserted => ToolResult::ok(format!(
+                            "Upserted character {} ({})",
+                            a.translated_name, id
+                        )),
                     }
                 }
                 Err(e) => ToolResult::err(format!("failed to write character: {e}")),
@@ -440,12 +444,12 @@ pub async fn dispatch_tool(
             };
             let term = GlossaryTerm {
                 jp_term: a.jp_term.clone(),
-                thai_term: a.thai_term.clone(),
+                translated_term: a.translated_term.clone(),
                 romaji: a.romaji,
                 category: a.category,
                 gloss: a.gloss,
                 policy: a.policy,
-                forbidden_thai: a.forbidden_thai,
+                forbidden_translations: a.forbidden_translations,
                 context_rule: a.context_rule,
                 protected: a.protected,
                 do_not_translate: a.do_not_translate,
@@ -456,14 +460,17 @@ pub async fn dispatch_tool(
                 | Ok(glossary::GlossaryUpsertOutcome::Updated) => {
                     tx.send(AppEvent::GlossaryUpserted {
                         jp_term: a.jp_term.clone(),
-                        thai_term: a.thai_term.clone(),
+                        translated_term: a.translated_term.clone(),
                     });
                     tx.send(AppEvent::ToolInvoked {
                         chapter,
                         tool: name.to_string(),
-                        summary: format!("term {} → {}", a.jp_term, a.thai_term),
+                        summary: format!("term {} → {}", a.jp_term, a.translated_term),
                     });
-                    ToolResult::ok(format!("Upserted term {} → {}", a.jp_term, a.thai_term))
+                    ToolResult::ok(format!(
+                        "Upserted term {} → {}",
+                        a.jp_term, a.translated_term
+                    ))
                 }
                 Ok(glossary::GlossaryUpsertOutcome::Protected { existing, conflict }) => {
                     let policy = glossary::effective_policy(&existing);
@@ -538,7 +545,8 @@ pub async fn dispatch_tool(
                 Ok(a) => a,
                 Err(e) => return ToolResult::err(format!("invalid append_translation args: {e}")),
             };
-            match translation::append_chunk(ws, a.chapter, a.chunk_index, &a.thai_text).await {
+            match translation::append_chunk(ws, a.chapter, a.chunk_index, &a.translated_text).await
+            {
                 Ok(bytes) => {
                     tx.send(AppEvent::ToolInvoked {
                         chapter,
@@ -720,10 +728,75 @@ mod tests {
         (base, ws)
     }
 
-    fn term(jp: &str, th: &str, protected: Option<bool>) -> GlossaryTerm {
+    #[test]
+    fn orchestrator_schema_exposes_only_neutral_target_fields() {
+        let schema = orchestrator_tools().to_string();
+        for field in [
+            "translated_name",
+            "translated_term",
+            "forbidden_translations",
+            "translated_text",
+        ] {
+            assert!(schema.contains(field), "missing neutral field {field}");
+        }
+        for legacy in ["thai_name", "thai_term", "forbidden_thai", "thai_text"] {
+            assert!(
+                !schema.contains(legacy),
+                "legacy field leaked into tool schema: {legacy}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn orchestrator_accepts_legacy_tool_arguments() {
+        let (base, ws) = temp_ws("legacy_args");
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let tx = EventTx(tx);
+
+        let character = dispatch_tool(
+            &ws,
+            &tx,
+            1,
+            "upsert_character",
+            r#"{"id":"rin","jp_name":"鈴","thai_name":"ริน","also_called":[{"jp":"鈴ちゃん","thai":"รินจัง"}]}"#,
+        )
+        .await;
+        assert!(character.ok, "{}", character.message);
+        let saved_character = characters::load(&ws).pop().unwrap();
+        assert_eq!(saved_character.translated_name, "ริน");
+        assert_eq!(saved_character.also_called[0].translated_name, "รินจัง");
+
+        let term = dispatch_tool(
+            &ws,
+            &tx,
+            1,
+            "upsert_glossary_term",
+            r#"{"jp_term":"魔法","thai_term":"เวทมนตร์","forbidden_thai":["มายากล"]}"#,
+        )
+        .await;
+        assert!(term.ok, "{}", term.message);
+        let saved_term = glossary::load(&ws).pop().unwrap();
+        assert_eq!(saved_term.translated_term, "เวทมนตร์");
+        assert_eq!(saved_term.forbidden_translations, ["มายากล"]);
+
+        let appended = dispatch_tool(
+            &ws,
+            &tx,
+            1,
+            "append_translation",
+            r#"{"chapter":1,"chunk_index":0,"thai_text":"คำแปล"}"#,
+        )
+        .await;
+        assert!(appended.ok, "{}", appended.message);
+        assert!(translation::read_translated(&ws, 1).await.contains("คำแปล"));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    fn term(jp: &str, translated: &str, protected: Option<bool>) -> GlossaryTerm {
         GlossaryTerm {
             jp_term: jp.to_string(),
-            thai_term: th.to_string(),
+            translated_term: translated.to_string(),
             romaji: None,
             category: Some("item".to_string()),
             gloss: None,
@@ -734,7 +807,7 @@ mod tests {
                     TermPolicy::Preferred
                 }
             }),
-            forbidden_thai: Vec::new(),
+            forbidden_translations: Vec::new(),
             context_rule: None,
             protected,
             do_not_translate: Some(false),
@@ -753,7 +826,7 @@ mod tests {
             &EventTx(tx),
             3,
             "upsert_glossary_term",
-            r#"{"jp_term":"聖剣","thai_term":"ดาบเทพ","do_not_translate":true}"#,
+            r#"{"jp_term":"聖剣","translated_term":"ดาบเทพ","do_not_translate":true}"#,
         )
         .await;
 
@@ -773,7 +846,7 @@ mod tests {
 
         let terms = glossary::load(&ws);
         let saved = terms.iter().find(|t| t.jp_term == "聖剣").unwrap();
-        assert_eq!(saved.thai_term, "ดาบศักดิ์สิทธิ์");
+        assert_eq!(saved.translated_term, "ดาบศักดิ์สิทธิ์");
         assert_eq!(saved.do_not_translate, Some(false));
         assert_eq!(saved.protected, Some(true));
         assert_eq!(glossary::effective_policy(saved), TermPolicy::HardLocked);
@@ -830,11 +903,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    fn character(id: &str, jp: &str, thai: &str, romaji: Option<&str>) -> Character {
+    fn character(id: &str, jp: &str, translated: &str, romaji: Option<&str>) -> Character {
         Character {
             id: id.into(),
             jp_name: jp.into(),
-            thai_name: thai.into(),
+            translated_name: translated.into(),
             romaji: romaji.map(|s| s.to_string()),
             gender: None,
             honorific: None,
@@ -856,7 +929,7 @@ mod tests {
             &EventTx(tx),
             3,
             "upsert_character",
-            r#"{"id":"yuu","jp_name":"有月勇","thai_name":"อาริทสึกิ ยู","aliases":["勇"]}"#,
+            r#"{"id":"yuu","jp_name":"有月勇","translated_name":"อาริทสึกิ ยู","aliases":["勇"]}"#,
         )
         .await;
         assert!(result.ok, "{}", result.message);
@@ -878,7 +951,7 @@ mod tests {
             &EventTx(tx),
             3,
             "upsert_character",
-            r#"{"id":"miya2","jp_name":"未夜","thai_name":"มิยะ","romaji":"Miya"}"#,
+            r#"{"id":"miya2","jp_name":"未夜","translated_name":"มิยะ","romaji":"Miya"}"#,
         )
         .await;
         assert!(result.ok);

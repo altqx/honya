@@ -123,12 +123,12 @@ Use `update_plan`. First list/count the flagged chunks, then categorize them bef
 - source fidelity: mistranslation, wrong subject, missing line, skipped title/credit.
 - residue/format/ruby: Japanese punctuation, `（ ）`, furigana/original glosses, Markdown/HTML drift.
 - glossary/terminology: hard_locked/preferred/forbidden terms and handles.
-- Thai quality/SFX: awkward literal phrasing, tone drift, unnatural onomatopoeia.
+- target-language quality/SFX: awkward literal phrasing, tone drift, unnatural onomatopoeia.
 - infrastructure: translator stream cutoff, refusal/policy notice, empty or partial output.
 
-For each chunk you edit, read the matching SOURCE_JP, Thai chunk, CHARACTERS, GLOSSARY, and STYLE. Treat the reviewer reason as a clue, not as automatic truth. Fix only actionable issues that SOURCE_JP/REFERENCE confirms. If a reviewer note says a point is correct/acceptable/not an issue, leave that point alone and fix the actual remaining issue.
+For each chunk you edit, read the matching SOURCE_JP, translated chunk, CHARACTERS, GLOSSARY, and STYLE. Treat the reviewer reason as a clue, not as automatic truth. Fix only actionable issues that SOURCE_JP/REFERENCE confirms. If a reviewer note says a point is correct/acceptable/not an issue, leave that point alone and fix the actual remaining issue.
 
-Special dialogue rule: `自分` inside dialogue may mean the speaker or the listener. Resolve from adjacent turns; if it means the listener, use that listener's established address form such as `คุณอากุริ` or `อามาโนะคุง`, not generic `เธอ/แก` when the speaker is polite.
+Special dialogue rule: `自分` inside dialogue may mean the speaker or the listener. Resolve it from adjacent turns; when it means the listener, use that listener's established target-language address form from CHARACTERS rather than a generic form.
 
 Use surgical `multi_edit_chapter`/`edit_chapter`, verify changed regions, and report counts by category plus files changed.
 
@@ -1664,7 +1664,7 @@ impl RefineScreen {
             ]
         } else {
             let md = self.transcript_markdown();
-            let fg = theme.th_text;
+            let fg = theme.translated_text;
             let mut h = std::collections::hash_map::DefaultHasher::new();
             md.len().hash(&mut h);
             md.as_bytes()

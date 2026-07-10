@@ -1,11 +1,11 @@
 //! Run the Reviewer agent (English, json_schema `review_result`) for one chunk:
-//! diff Japanese source against Thai output for a verdict plus itemized feedback.
+//! diff Japanese source against target-language output for a verdict and feedback.
 
-use crate::agents::prompts::{REVIEWER_SYSTEM, build_reviewer_user};
+use crate::agents::prompts::{build_reviewer_user_for_language, reviewer_system};
 use crate::llm::client::{LlmClient, Result};
 use crate::llm::structured::{chat_structured, reviewer_schema};
 use crate::llm::{ChatRequest, Message, Usage};
-use crate::model::{AgentModel, ReviewerOut};
+use crate::model::{AgentModel, ReviewerOut, TargetLanguage};
 
 /// Review one translated chunk against its source. `reference_ctx` matches the
 /// Translator context so glossary/pronoun/style checks are enforceable.
@@ -13,24 +13,29 @@ use crate::model::{AgentModel, ReviewerOut};
 pub async fn review_chunk(
     client: &dyn LlmClient,
     model: &AgentModel,
+    target_language: TargetLanguage,
     source_jp: &str,
-    thai: &str,
+    translated: &str,
     reference_ctx: &str,
     audit_findings: &[String],
     advisory_findings: &[String],
-    prev_thai: &[String],
+    previous_translation: &[String],
     attempt: u32,
 ) -> Result<(ReviewerOut, Usage)> {
-    let user = build_reviewer_user(
+    let user = build_reviewer_user_for_language(
+        target_language,
         source_jp,
-        thai,
+        translated,
         reference_ctx,
         audit_findings,
         advisory_findings,
-        prev_thai,
+        previous_translation,
     );
 
-    let mut messages = vec![Message::system(REVIEWER_SYSTEM), Message::user(user)];
+    let mut messages = vec![
+        Message::system(reviewer_system(target_language)),
+        Message::user(user),
+    ];
     if attempt > 1 {
         messages.push(Message::user(
             "Your previous reply was not an actionable review_result: it either missed required \

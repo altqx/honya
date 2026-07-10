@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::{GlossaryTerm, TermPolicy};
+use crate::model::{GlossaryTerm, TargetLanguage, TermPolicy};
 use crate::workspace::Workspace;
 use crate::workspace::data_block;
 
@@ -104,7 +104,7 @@ pub fn remove(ws: &Workspace, jp_term: &str) -> std::io::Result<()> {
     data_block::write_with_data(&ws.glossary_md(), &body, &block)
 }
 
-/// Query terms by case-insensitive substring `query` (jp_term/thai_term/romaji/
+/// Query terms by case-insensitive substring `query` (jp_term/translated_term/romaji/
 /// gloss/policy) and optional exact `category` / `policy` / protected-only flag,
 /// capped at `limit` (0 means no cap).
 pub fn get(
@@ -159,7 +159,7 @@ pub fn render_table(terms: &[GlossaryTerm]) -> String {
     }
 
     s.push_str(
-        "| 日本語 | ไทย | Romaji | หมวด | นโยบาย | ห้ามแปล | ห้ามใช้ | บทแรก | บริบท/คำอธิบาย |\n",
+        "| 日本語 | เป้าหมาย / Target | Romaji | หมวด | นโยบาย | ห้ามแปล | ห้ามใช้ | บทแรก | บริบท/คำอธิบาย |\n",
     );
     s.push_str(
         "|--------|-----|--------|------|--------|---------|---------|-------|----------------|\n",
@@ -179,7 +179,7 @@ pub fn render_table(terms: &[GlossaryTerm]) -> String {
         s.push_str(&format!(
             "| {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
             cell(&t.jp_term),
-            cell(&t.thai_term),
+            cell(&t.translated_term),
             opt(&t.romaji),
             opt(&t.category),
             cell(policy_label(effective_policy(t))),
@@ -197,7 +197,18 @@ pub fn render_table(terms: &[GlossaryTerm]) -> String {
 /// Render the terminology-control blurb for the Translator prompt: one bullet per
 /// term with explicit policy semantics (hard lock / preferred / forbidden /
 /// context-dependent); empty list → "".
+#[cfg(test)]
 pub fn render_context_blurb(terms: &[GlossaryTerm]) -> String {
+    render_context_blurb_for_language(terms, TargetLanguage::Thai)
+}
+
+pub fn render_context_blurb_for_language(
+    terms: &[GlossaryTerm],
+    target_language: TargetLanguage,
+) -> String {
+    if target_language == TargetLanguage::English {
+        return render_context_blurb_english(terms);
+    }
     if terms.is_empty() {
         return String::new();
     }
@@ -209,7 +220,7 @@ pub fn render_context_blurb(terms: &[GlossaryTerm]) -> String {
     s.push_str("- CONTEXT_DEPENDENT: เลือกคำตามกฎบริบทที่ระบุ\n");
     for t in terms {
         let jp = t.jp_term.trim();
-        let th = prompt_thai_rendering(t);
+        let translated = prompt_translated_rendering(t);
         if jp.is_empty() {
             continue;
         }
@@ -233,7 +244,11 @@ pub fn render_context_blurb(terms: &[GlossaryTerm]) -> String {
             }
             _ => {
                 s.push_str(" → ");
-                s.push_str(if th.is_empty() { "—" } else { th });
+                s.push_str(if translated.is_empty() {
+                    "—"
+                } else {
+                    translated
+                });
             }
         }
         if let Some(cat) = t.category.as_deref().filter(|c| !c.trim().is_empty()) {
@@ -253,12 +268,69 @@ pub fn render_context_blurb(terms: &[GlossaryTerm]) -> String {
     s
 }
 
+fn render_context_blurb_english(terms: &[GlossaryTerm]) -> String {
+    if terms.is_empty() {
+        return String::new();
+    }
+    let mut s = String::from(
+        "Controlled terminology. Legacy `translated_term`/`forbidden_translations` fields contain English target renderings in this run:\n\
+         - HARD_LOCKED: use the saved form exactly.\n\
+         - PREFERRED: use the saved form by default; adjust only when English grammar genuinely requires it.\n\
+         - FORBIDDEN: never use the listed rendering for this Japanese term.\n\
+         - CONTEXT_DEPENDENT: follow the saved context rule.\n",
+    );
+    for t in terms {
+        let jp = t.jp_term.trim();
+        if jp.is_empty() {
+            continue;
+        }
+        let policy = effective_policy(t);
+        s.push_str("- ");
+        s.push_str(policy_prompt_label(policy));
+        s.push_str(" | ");
+        s.push_str(jp);
+        if let Some(romaji) = t.romaji.as_deref().filter(|r| !r.trim().is_empty()) {
+            s.push_str(&format!(" ({})", romaji.trim()));
+        }
+        match policy {
+            TermPolicy::Forbidden => {
+                let forbidden = forbidden_renderings(t);
+                if forbidden.is_empty() {
+                    s.push_str(" | avoid the rendering described in the note");
+                } else {
+                    s.push_str(" | forbidden: ");
+                    s.push_str(&forbidden.join(", "));
+                }
+            }
+            _ => {
+                s.push_str(" → ");
+                let target = t.translated_term.trim();
+                s.push_str(if target.is_empty() { "—" } else { target });
+            }
+        }
+        if let Some(cat) = t.category.as_deref().filter(|c| !c.trim().is_empty()) {
+            s.push_str(&format!(" [{}]", cat.trim()));
+        }
+        if matches!(t.do_not_translate, Some(true)) {
+            s.push_str(" [retain exactly]");
+        }
+        if let Some(rule) = t.context_rule.as_deref().filter(|r| !r.trim().is_empty()) {
+            s.push_str(&format!(" [context rule: {}]", rule.trim()));
+        }
+        if let Some(gloss) = t.gloss.as_deref().filter(|g| !g.trim().is_empty()) {
+            s.push_str(&format!(" [note: {}]", gloss.trim()));
+        }
+        s.push('\n');
+    }
+    s
+}
+
 fn merge_into(target: &mut GlossaryTerm, incoming: GlossaryTerm) {
     if !incoming.jp_term.trim().is_empty() {
         target.jp_term = incoming.jp_term;
     }
-    if !incoming.thai_term.trim().is_empty() {
-        target.thai_term = incoming.thai_term;
+    if !incoming.translated_term.trim().is_empty() {
+        target.translated_term = incoming.translated_term;
     }
     merge_opt(&mut target.romaji, incoming.romaji);
     merge_opt(&mut target.category, incoming.category);
@@ -266,8 +338,8 @@ fn merge_into(target: &mut GlossaryTerm, incoming: GlossaryTerm) {
     if incoming.policy.is_some() {
         target.policy = incoming.policy;
     }
-    if !incoming.forbidden_thai.is_empty() {
-        target.forbidden_thai = normalized_list(incoming.forbidden_thai);
+    if !incoming.forbidden_translations.is_empty() {
+        target.forbidden_translations = normalized_list(incoming.forbidden_translations);
     }
     merge_opt(&mut target.context_rule, incoming.context_rule);
     if incoming.protected.is_some() {
@@ -286,7 +358,7 @@ fn merge_into(target: &mut GlossaryTerm, incoming: GlossaryTerm) {
 }
 
 fn normalize_term_controls(t: &mut GlossaryTerm) {
-    t.forbidden_thai = normalized_list(std::mem::take(&mut t.forbidden_thai));
+    t.forbidden_translations = normalized_list(std::mem::take(&mut t.forbidden_translations));
     if let Some(policy) = t.policy
         && matches!(
             policy,
@@ -297,16 +369,16 @@ fn normalize_term_controls(t: &mut GlossaryTerm) {
         t.protected = Some(true);
     }
     if is_uncontrolled_preferred(t) {
-        t.thai_term = prompt_thai_rendering(t).to_string();
+        t.translated_term = prompt_translated_rendering(t).to_string();
     }
 }
 
-fn prompt_thai_rendering(t: &GlossaryTerm) -> &str {
-    let thai = t.thai_term.trim();
+fn prompt_translated_rendering(t: &GlossaryTerm) -> &str {
+    let translated = t.translated_term.trim();
     if is_uncontrolled_preferred(t) {
-        strip_trailing_parenthetical_gloss(thai)
+        strip_trailing_parenthetical_gloss(translated)
     } else {
-        thai
+        translated
     }
 }
 
@@ -382,14 +454,15 @@ pub fn blocks_automatic_update(t: &GlossaryTerm) -> bool {
         )
 }
 
-/// Forbidden Thai renderings for this term. For a `forbidden` policy, `thai_term`
+/// Forbidden Thai renderings for this term. For a `forbidden` policy, `translated_term`
 /// itself is also interpreted as a forbidden rendering.
 pub fn forbidden_renderings(t: &GlossaryTerm) -> Vec<String> {
     let mut out = Vec::new();
-    if matches!(effective_policy(t), TermPolicy::Forbidden) && !t.thai_term.trim().is_empty() {
-        out.push(t.thai_term.trim().to_string());
+    if matches!(effective_policy(t), TermPolicy::Forbidden) && !t.translated_term.trim().is_empty()
+    {
+        out.push(t.translated_term.trim().to_string());
     }
-    for value in &t.forbidden_thai {
+    for value in &t.forbidden_translations {
         let v = value.trim();
         if !v.is_empty() && !out.iter().any(|existing| existing == v) {
             out.push(v.to_string());
@@ -417,7 +490,7 @@ fn policy_prompt_label(policy: TermPolicy) -> &'static str {
 }
 
 fn controlled_conflict(existing: &GlossaryTerm, incoming: &GlossaryTerm) -> bool {
-    let incoming_thai = incoming.thai_term.trim();
+    let incoming_translation = incoming.translated_term.trim();
     if let Some(incoming_policy) = incoming.policy
         && incoming_policy != effective_policy(existing)
     {
@@ -426,7 +499,9 @@ fn controlled_conflict(existing: &GlossaryTerm, incoming: &GlossaryTerm) -> bool
 
     match effective_policy(existing) {
         TermPolicy::HardLocked => {
-            if !incoming_thai.is_empty() && incoming_thai != existing.thai_term.trim() {
+            if !incoming_translation.is_empty()
+                && incoming_translation != existing.translated_term.trim()
+            {
                 return true;
             }
             if let Some(incoming_dnt) = incoming.do_not_translate
@@ -437,20 +512,20 @@ fn controlled_conflict(existing: &GlossaryTerm, incoming: &GlossaryTerm) -> bool
             false
         }
         TermPolicy::Forbidden => {
-            !incoming_thai.is_empty()
+            !incoming_translation.is_empty()
                 && forbidden_renderings(existing)
                     .iter()
-                    .any(|forbidden| forbidden == incoming_thai)
+                    .any(|forbidden| forbidden == incoming_translation)
         }
         TermPolicy::ContextDependent => {
-            !incoming_thai.is_empty()
-                && !existing.thai_term.trim().is_empty()
-                && incoming_thai != existing.thai_term.trim()
+            !incoming_translation.is_empty()
+                && !existing.translated_term.trim().is_empty()
+                && incoming_translation != existing.translated_term.trim()
         }
         TermPolicy::Preferred => {
             matches!(existing.protected, Some(true))
-                && !incoming_thai.is_empty()
-                && incoming_thai != existing.thai_term.trim()
+                && !incoming_translation.is_empty()
+                && incoming_translation != existing.translated_term.trim()
         }
     }
 }
@@ -474,7 +549,7 @@ fn term_matches(t: &GlossaryTerm, needle: &str) -> bool {
     // "contains" short prose fragments.
     let names = [
         t.jp_term.to_lowercase(),
-        t.thai_term.to_lowercase(),
+        t.translated_term.to_lowercase(),
         t.romaji.as_deref().unwrap_or("").to_lowercase(),
     ];
     if names
@@ -489,7 +564,7 @@ fn term_matches(t: &GlossaryTerm, needle: &str) -> bool {
         t.context_rule.as_deref().unwrap_or("").to_lowercase(),
         policy_label(effective_policy(t)).to_lowercase(),
     ];
-    prose.extend(t.forbidden_thai.iter().map(|v| v.to_lowercase()));
+    prose.extend(t.forbidden_translations.iter().map(|v| v.to_lowercase()));
     if prose.iter().any(|h| h.contains(needle)) {
         return true;
     }
@@ -523,15 +598,34 @@ fn opt(s: &Option<String>) -> String {
 mod tests {
     use super::*;
 
-    fn term(thai_term: &str, policy: Option<TermPolicy>, protected: Option<bool>) -> GlossaryTerm {
+    fn temp_ws(tag: &str) -> (std::path::PathBuf, Workspace) {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let base = std::env::temp_dir().join(format!(
+            "honya_glossary_{tag}_{}_{}",
+            std::process::id(),
+            stamp
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+        let ws = Workspace::new(base.clone(), 1);
+        (base, ws)
+    }
+
+    fn term(
+        translated_term: &str,
+        policy: Option<TermPolicy>,
+        protected: Option<bool>,
+    ) -> GlossaryTerm {
         GlossaryTerm {
             jp_term: "鬱ロック".to_string(),
-            thai_term: thai_term.to_string(),
+            translated_term: translated_term.to_string(),
             romaji: Some("Utsu-rokku".to_string()),
             category: Some("concept".to_string()),
             gloss: None,
             policy,
-            forbidden_thai: Vec::new(),
+            forbidden_translations: Vec::new(),
             context_rule: None,
             protected,
             do_not_translate: None,
@@ -545,7 +639,34 @@ mod tests {
 
         normalize_term_controls(&mut generated);
 
-        assert_eq!(generated.thai_term, "อุตสึร็อก");
+        assert_eq!(generated.translated_term, "อุตสึร็อก");
+    }
+
+    #[test]
+    fn legacy_glossary_block_loads_then_rewrites_neutral_keys() {
+        let (base, ws) = temp_ws("legacy_block");
+        std::fs::write(
+            ws.glossary_md(),
+            r#"# Glossary
+
+<!-- honya:data
+{"terms":[{"jp_term":"魔法","thai_term":"เวทมนตร์","forbidden_thai":["มายากล"]}]}
+honya:data -->
+"#,
+        )
+        .unwrap();
+
+        let loaded = load(&ws);
+        assert_eq!(loaded[0].translated_term, "เวทมนตร์");
+        assert_eq!(loaded[0].forbidden_translations, ["มายากล"]);
+        upsert(&ws, loaded[0].clone()).unwrap();
+
+        let rewritten = std::fs::read_to_string(ws.glossary_md()).unwrap();
+        assert!(rewritten.contains("\"translated_term\""));
+        assert!(rewritten.contains("\"forbidden_translations\""));
+        assert!(!rewritten.contains("\"thai_term\""));
+        assert!(!rewritten.contains("\"forbidden_thai\""));
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -564,7 +685,7 @@ mod tests {
 
         normalize_term_controls(&mut locked);
 
-        assert_eq!(locked.thai_term, "อุตสึร็อก (Utsu-Rock)");
+        assert_eq!(locked.translated_term, "อุตสึร็อก (Utsu-Rock)");
         assert!(render_context_blurb(&[locked]).contains("→ อุตสึร็อก (Utsu-Rock)"));
     }
 }

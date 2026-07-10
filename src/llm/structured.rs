@@ -396,10 +396,10 @@ pub fn translator_schema() -> serde_json::Value {
                 "items": {
                     "type": "object",
                     "additionalProperties": false,
-                    "required": ["jp_name", "thai_name", "gender", "notes"],
+                    "required": ["jp_name", "translated_name", "gender", "notes"],
                     "properties": {
                         "jp_name": { "type": "string" },
-                        "thai_name": { "type": "string" },
+                        "translated_name": { "type": "string" },
                         "gender": { "type": "string" },
                         "notes": { "type": "string" }
                     }
@@ -410,10 +410,10 @@ pub fn translator_schema() -> serde_json::Value {
                 "items": {
                     "type": "object",
                     "additionalProperties": false,
-                    "required": ["jp_term", "thai_term", "category", "gloss"],
+                    "required": ["jp_term", "translated_term", "category", "gloss"],
                     "properties": {
                         "jp_term": { "type": "string" },
-                        "thai_term": { "type": "string" },
+                        "translated_term": { "type": "string" },
                         "category": { "type": "string" },
                         "gloss": { "type": "string" }
                     }
@@ -455,10 +455,10 @@ pub fn prepass_schema() -> serde_json::Value {
                 "items": {
                     "type": "object",
                     "additionalProperties": false,
-                    "required": ["jp_name", "thai_name", "romaji", "gender", "aliases", "honorific", "speech_style", "notes"],
+                    "required": ["jp_name", "translated_name", "romaji", "gender", "aliases", "honorific", "speech_style", "notes"],
                     "properties": {
                         "jp_name": { "type": "string" },
-                        "thai_name": { "type": "string" },
+                        "translated_name": { "type": "string" },
                         "romaji": { "type": "string" },
                         "gender": { "type": "string" },
                         "aliases": { "type": "array", "items": { "type": "string" } },
@@ -473,10 +473,10 @@ pub fn prepass_schema() -> serde_json::Value {
                 "items": {
                     "type": "object",
                     "additionalProperties": false,
-                    "required": ["jp_term", "thai_term", "romaji", "category", "gloss"],
+                    "required": ["jp_term", "translated_term", "romaji", "category", "gloss"],
                     "properties": {
                         "jp_term": { "type": "string" },
-                        "thai_term": { "type": "string" },
+                        "translated_term": { "type": "string" },
                         "romaji": { "type": "string" },
                         "category": { "type": "string" },
                         "gloss": { "type": "string" }
@@ -488,10 +488,10 @@ pub fn prepass_schema() -> serde_json::Value {
                 "items": {
                     "type": "object",
                     "additionalProperties": false,
-                    "required": ["jp", "th", "note"],
+                    "required": ["jp", "translated_text", "note"],
                     "properties": {
                         "jp": { "type": "string" },
-                        "th": { "type": "string" },
+                        "translated_text": { "type": "string" },
                         "note": { "type": "string" }
                     }
                 }
@@ -518,7 +518,7 @@ pub fn coherence_schema() -> serde_json::Value {
                         "note": { "type": "string" },
                         "resolve_kind": { "type": "string", "enum": ["term", "character", ""] },
                         "resolve_jp": { "type": "string" },
-                        "resolve_canonical_th": { "type": "string" }
+                        "resolve_canonical_translation": { "type": "string" }
                     }
                 }
             }
@@ -528,7 +528,10 @@ pub fn coherence_schema() -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{JsonStringFieldStream, chat_structured, chat_structured_stream_fields};
+    use super::{
+        JsonStringFieldStream, chat_structured, chat_structured_stream_fields, coherence_schema,
+        prepass_schema, translator_schema,
+    };
     use crate::llm::client::{LlmClient, LlmError, Result};
     use crate::llm::{ChatRequest, ChatResponse, Choice, FunctionCall, ResponseMessage, ToolCall};
     use async_trait::async_trait;
@@ -673,5 +676,36 @@ mod tests {
         let mut stream = JsonStringFieldStream::new("translated_text");
         assert_eq!(stream.push(r#"{"translated_text":"a \u"#), "a ");
         assert_eq!(stream.push("d83d\\udc4d\"}"), "👍");
+    }
+
+    #[test]
+    fn model_schemas_expose_only_target_neutral_field_names() {
+        let schemas = serde_json::json!({
+            "translator": translator_schema(),
+            "prepass": prepass_schema(),
+            "coherence": coherence_schema(),
+        })
+        .to_string();
+
+        for field in [
+            "translated_name",
+            "translated_term",
+            "translated_text",
+            "resolve_canonical_translation",
+        ] {
+            assert!(schemas.contains(field), "missing neutral field {field}");
+        }
+        for legacy in [
+            "thai_name",
+            "thai_term",
+            "forbidden_thai",
+            "resolve_canonical_th",
+            "\"th\"",
+        ] {
+            assert!(
+                !schemas.contains(legacy),
+                "legacy field leaked into model schema: {legacy}"
+            );
+        }
     }
 }

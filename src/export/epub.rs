@@ -112,9 +112,9 @@ fn front_xhtml(book: &ExportBook) -> String {
     if let Some(label) = book.volume_label.as_ref().filter(|l| !l.trim().is_empty()) {
         body.push_str(&format!("<p><strong>{}</strong></p>\n", esc(label.trim())));
     }
-    let synopsis = book.synopsis_th.trim();
+    let synopsis = book.translated_synopsis.trim();
     if !synopsis.is_empty() {
-        body.push_str("<h2>เรื่องย่อ</h2>\n");
+        body.push_str(&format!("<h2>{}</h2>\n", esc(book.synopsis_heading())));
         for para in synopsis.split("\n\n") {
             let p = para.trim();
             if !p.is_empty() {

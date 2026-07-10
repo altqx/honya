@@ -50,13 +50,15 @@ pub fn scan_one_project(dir: &Path) -> Option<Project> {
     let volumes = scan_volumes(dir);
     let (created, touched) = dir_times(dir);
     let title = read_project_title(dir).unwrap_or_else(|| id.clone());
-    let title_th = super::scaffold::read_title_th(dir);
+    let translated_title = super::scaffold::read_translated_title(dir);
+    let target_language = super::scaffold::read_target_language(dir);
 
     Some(Project {
         id,
         dir: dir.to_path_buf(),
         title,
-        title_th,
+        translated_title,
+        target_language,
         created,
         touched,
         volumes,
@@ -348,7 +350,52 @@ fn file_modified(path: &Path) -> Option<DateTime<Utc>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::{ModelSet, TargetLanguage};
     use crate::workspace::translation::REVIEW_NEEDED_MARKER;
+
+    #[test]
+    fn scan_reads_the_language_stored_by_each_project() {
+        let base = std::env::temp_dir().join(format!("honya_scan_language_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let project_dir = base.join("english-project");
+        crate::workspace::scaffold::create_project_for_language(
+            &project_dir,
+            "夜の影",
+            &ModelSet::default(),
+            1,
+            TargetLanguage::English,
+        )
+        .unwrap();
+
+        let project = scan_one_project(&project_dir).unwrap();
+        assert_eq!(project.target_language, TargetLanguage::English);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn scan_defaults_projects_without_a_language_to_thai() {
+        let base =
+            std::env::temp_dir().join(format!("honya_scan_legacy_language_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let project_dir = base.join("legacy-project");
+        let project_md = project_dir.join("PROJECT.md");
+        data_block::write_with_data(
+            &project_md,
+            "# Legacy Project",
+            &serde_json::json!({
+                "title": "Legacy Project",
+                "created": "2025-01-01",
+                "models": ModelSet::default()
+            }),
+        )
+        .unwrap();
+
+        let project = scan_one_project(&project_dir).unwrap();
+        assert_eq!(project.target_language, TargetLanguage::Thai);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     /// Resting status from disk distinguishes a clean translation from one that
     /// carries the review-needed marker, so a `NeedsReview` chapter stays flagged

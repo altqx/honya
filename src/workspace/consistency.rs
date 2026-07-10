@@ -37,12 +37,12 @@ pub fn roster_consistency(chars: &[Character], terms: &[GlossaryTerm]) -> Vec<Co
         }
     }
     for (reading, group) in &by_reading {
-        let forms = distinct(group.iter().map(|c| c.thai_name.clone()));
+        let forms = distinct(group.iter().map(|c| c.translated_name.clone()));
         if forms.len() > 1 {
             let names: Vec<&str> = group.iter().map(|c| c.jp_name.trim()).collect();
             issues.push(ConsistencyIssue {
                 detail: format!(
-                    "characters sharing reading \"{reading}\" ({}) render as different Thai names: {} — merge them or disambiguate",
+                    "characters sharing reading \"{reading}\" ({}) use different target names: {} — merge them or disambiguate",
                     names.join(", "),
                     forms.join(" / "),
                 ),
@@ -57,12 +57,12 @@ pub fn roster_consistency(chars: &[Character], terms: &[GlossaryTerm]) -> Vec<Co
         }
     }
     for (reading, group) in &terms_by_reading {
-        let forms = distinct(group.iter().map(|t| t.thai_term.clone()));
+        let forms = distinct(group.iter().map(|t| t.translated_term.clone()));
         if forms.len() > 1 {
             let jps: Vec<&str> = group.iter().map(|t| t.jp_term.trim()).collect();
             issues.push(ConsistencyIssue {
                 detail: format!(
-                    "glossary terms sharing reading \"{reading}\" ({}) map to different Thai: {} — pin one rendering",
+                    "glossary terms sharing reading \"{reading}\" ({}) map to different target renderings: {} — pin one rendering",
                     jps.join(", "),
                     forms.join(" / "),
                 ),
@@ -74,19 +74,19 @@ pub fn roster_consistency(chars: &[Character], terms: &[GlossaryTerm]) -> Vec<Co
         terms.iter().map(|t| (norm(&t.jp_term), t)).collect();
     for c in chars {
         let key = norm(&c.jp_name);
-        if key.is_empty() || c.thai_name.trim().is_empty() {
+        if key.is_empty() || c.translated_name.trim().is_empty() {
             continue;
         }
         if let Some(t) = term_by_jp.get(&key)
-            && !t.thai_term.trim().is_empty()
-            && t.thai_term.trim() != c.thai_name.trim()
+            && !t.translated_term.trim().is_empty()
+            && t.translated_term.trim() != c.translated_name.trim()
         {
             issues.push(ConsistencyIssue {
                 detail: format!(
-                    "\"{}\" is a character (→ {}) and a glossary term (→ {}) with different Thai — align them",
+                    "\"{}\" is a character (→ {}) and a glossary term (→ {}) with different target renderings — align them",
                     c.jp_name.trim(),
-                    c.thai_name.trim(),
-                    t.thai_term.trim(),
+                    c.translated_name.trim(),
+                    t.translated_term.trim(),
                 ),
             });
         }
@@ -99,11 +99,11 @@ pub fn roster_consistency(chars: &[Character], terms: &[GlossaryTerm]) -> Vec<Co
 mod tests {
     use super::*;
 
-    fn ch(jp: &str, th: &str, romaji: &str) -> Character {
+    fn ch(jp: &str, translated: &str, romaji: &str) -> Character {
         Character {
             id: jp.to_string(),
             jp_name: jp.to_string(),
-            thai_name: th.to_string(),
+            translated_name: translated.to_string(),
             romaji: Some(romaji.to_string()),
             gender: None,
             honorific: None,
@@ -116,15 +116,15 @@ mod tests {
         }
     }
 
-    fn term(jp: &str, th: &str, romaji: &str) -> GlossaryTerm {
+    fn term(jp: &str, translated: &str, romaji: &str) -> GlossaryTerm {
         GlossaryTerm {
             jp_term: jp.to_string(),
-            thai_term: th.to_string(),
+            translated_term: translated.to_string(),
             romaji: Some(romaji.to_string()),
             category: None,
             gloss: None,
             policy: None,
-            forbidden_thai: Vec::new(),
+            forbidden_translations: Vec::new(),
             context_rule: None,
             protected: None,
             do_not_translate: None,
@@ -133,7 +133,7 @@ mod tests {
     }
 
     #[test]
-    fn flags_characters_with_same_reading_different_thai() {
+    fn flags_characters_with_same_reading_different_translations() {
         let chars = vec![ch("朱夏", "ชูกะ", "Shuka"), ch("シュカ", "ชูคา", "shuka")];
         let issues = roster_consistency(&chars, &[]);
         assert_eq!(issues.len(), 1);
@@ -157,7 +157,7 @@ mod tests {
         assert!(
             issues
                 .iter()
-                .any(|i| i.detail.contains("map to different Thai"))
+                .any(|i| i.detail.contains("different target renderings"))
         );
     }
 

@@ -5,7 +5,7 @@
 use once_cell::sync::Lazy;
 use regex::Regex;
 
-use crate::model::{Character, GlossaryTerm, TermPolicy};
+use crate::model::{Character, GlossaryTerm, TargetLanguage, TermPolicy};
 use crate::workspace::glossary;
 
 static HTML_TAG: Lazy<Regex> = Lazy::new(|| {
@@ -15,7 +15,7 @@ static HTML_TAG: Lazy<Regex> = Lazy::new(|| {
         (?: a|abbr|b|big|blockquote|br|center|code|del|div|em|font
           | h[1-6]|hr|i|img|image|ins|kbd|li|mark|ol|p|pre|q|rp|rt|ruby
           | s|samp|small|span|strike|strong|sub|sup|svg
-          | table|tbody|td|tfoot|th|thead|tr|tt|u|ul|var|wbr )
+          | table|tbody|td|tfoot|translated|thead|tr|tt|u|ul|var|wbr )
         \b
         (?:\s+[^<>\n]{0,160})?
         \s*/?>",
@@ -27,7 +27,7 @@ static MARKDOWN_IMAGE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"!\[[^\]\n]*\]\([^\)\n]+\)").expect("image regex is valid"));
 
 static TRANSLATION_LABEL: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)^\s*(?:translation|translated text|thai translation|คำแปล|คำแปลภาษาไทย|แปลไทย)\s*[:：\-]")
+    Regex::new(r"(?i)^\s*(?:translation|translated text|translated translation|คำแปล|คำแปลภาษาไทย|แปลไทย)\s*[:：\-]")
         .expect("translation-label regex is valid")
 });
 
@@ -42,14 +42,31 @@ static BLANK_RUN: Lazy<Regex> =
 
 /// Return concise, actionable findings with deterministic terminology checks for
 /// scoped glossary terms that appear in this source chunk.
+#[cfg(test)]
 pub fn audit_translation_with_terms(
     source_jp: &str,
-    thai: &str,
-    prev_thai: &[String],
+    translated: &str,
+    previous_translation: &[String],
+    terms: &[GlossaryTerm],
+) -> Vec<String> {
+    audit_translation_for_language(
+        TargetLanguage::Thai,
+        source_jp,
+        translated,
+        previous_translation,
+        terms,
+    )
+}
+
+pub fn audit_translation_for_language(
+    target_language: TargetLanguage,
+    source_jp: &str,
+    translated_text: &str,
+    previous: &[String],
     terms: &[GlossaryTerm],
 ) -> Vec<String> {
     let source = source_jp.trim();
-    let translated = thai.trim();
+    let translated = translated_text.trim();
     let mut findings = Vec::new();
 
     if translated.is_empty() {
@@ -73,7 +90,9 @@ pub fn audit_translation_with_terms(
 
     if translated.contains("<<SOURCE_JP>>")
         || translated.contains("<<END_SOURCE_JP>>")
+        || translated.contains("<<TRANSLATION_TARGET>>")
         || translated.contains("<<TRANSLATION_TH>>")
+        || translated.contains("<<TRANSLATION_EN>>")
         || translated.contains("<<REFERENCE")
         || translated.contains("<<CONTINUITY")
         || translated.contains("<<REVIEWER_FEEDBACK")
@@ -85,26 +104,29 @@ pub fn audit_translation_with_terms(
         || translated.starts_with("ต่อไปนี้คือคำแปล")
         || translated.starts_with("นี่คือคำแปล")
     {
-        findings.push(
-            "remove translation labels or assistant prefaces; translated_text must contain only the final Thai Markdown"
-                .to_string(),
-        );
+        findings.push(format!(
+            "remove translation labels or assistant prefaces; translated_text must contain only the final {} Markdown",
+            target_language.label()
+        ));
     }
 
-    if copied_continuity(prev_thai, translated) {
-        findings.push(
-            "translated_text appears to copy prior continuity context; remove already-translated Thai and translate only the current SOURCE_JP chunk"
-                .to_string(),
-        );
+    if copied_continuity(target_language, previous, translated) {
+        findings.push(format!(
+            "translated_text appears to copy prior continuity context; remove already-translated {} and translate only the current SOURCE_JP chunk",
+            target_language.label()
+        ));
     }
 
     if let Some(gloss) = japanese_parenthetical_gloss(translated) {
         findings.push(format!(
-            "remove Japanese parenthetical gloss `{gloss}` from translated_text; render ordinary names/terms in Thai only, and mention source Japanese only when it is plot-critical"
+            "remove Japanese parenthetical gloss `{gloss}` from translated_text; render ordinary names/terms in {} only, and mention source Japanese only when it is plot-critical",
+            target_language.label()
         ));
     }
 
-    if let Some(gloss) = translated_parenthetical_gloss(translated) {
+    if target_language == TargetLanguage::Thai
+        && let Some(gloss) = translated_parenthetical_gloss(translated)
+    {
         findings.push(format!(
             "remove reading/original gloss `{gloss}` from translated_text; choose the natural Thai wording only unless the original sound/spelling is plot-critical"
         ));
@@ -112,11 +134,12 @@ pub fn audit_translation_with_terms(
 
     if let Some(residue) = hard_japanese_punctuation_residue(translated) {
         findings.push(format!(
-            "replace Japanese punctuation/brackets `{residue}` in translated_text with natural Thai punctuation, unless the source explicitly requires visible Japanese story text"
+            "replace Japanese punctuation/brackets `{residue}` in translated_text with natural {} punctuation, unless the source explicitly requires visible Japanese story text",
+            target_language.label()
         ));
     }
 
-    if translated.contains(FORBIDDEN_THAI_SELF_PRONOUN) {
+    if target_language == TargetLanguage::Thai && translated.contains(FORBIDDEN_THAI_SELF_PRONOUN) {
         findings.push(
             "translated_text uses forbidden Thai self-pronoun `กู`; replace it with `ฉัน` or another non-vulgar form that fits the speaker, even when SOURCE_JP uses `俺` or older reference text suggests `กู`"
                 .to_string(),
@@ -156,12 +179,18 @@ pub fn audit_translation_with_terms(
     );
 
     let source_jp_chars = japanese_char_count(source);
-    let thai_chars = thai_char_count(translated);
-    if source_jp_chars > 0 && thai_chars == 0 {
-        findings.push(
-            "translated_text contains no Thai characters; translate the Japanese prose into Thai"
-                .to_string(),
-        );
+    let target_chars = target_script_char_count(target_language, translated);
+    if source_jp_chars > 0 && target_chars == 0 {
+        findings.push(match target_language {
+            TargetLanguage::Thai => {
+                "translated_text contains no Thai characters; translate the Japanese prose into Thai"
+                    .to_string()
+            }
+            TargetLanguage::English => {
+                "translated_text contains no English text; translate the Japanese prose into English"
+                    .to_string()
+            }
+        });
     }
 
     let translated_jp_chars = japanese_char_count(translated);
@@ -175,7 +204,9 @@ pub fn audit_translation_with_terms(
         );
     }
 
-    if let Some(garbage) = glyphs_absent_from_source(source, translated, is_non_cjk_alien) {
+    if target_language == TargetLanguage::Thai
+        && let Some(garbage) = glyphs_absent_from_source(source, translated, is_non_cjk_alien)
+    {
         findings.push(format!(
             "translated_text contains corrupted non-Thai glyphs ({garbage}) that are not in the source; these are decoding artifacts — re-translate the chunk into clean Thai without them"
         ));
@@ -199,15 +230,26 @@ pub fn audit_character_pronoun_rules(
 
 /// Soft Reviewer signals, not hard gates; false positives must never force reject.
 /// Catches dropped multi-digit numbers and severe length shortfalls.
-pub fn advisory_findings(source_jp: &str, thai: &str) -> Vec<String> {
+#[cfg(test)]
+pub fn advisory_findings(source_jp: &str, translated: &str) -> Vec<String> {
+    advisory_findings_for_language(TargetLanguage::Thai, source_jp, translated)
+}
+
+pub fn advisory_findings_for_language(
+    target_language: TargetLanguage,
+    source_jp: &str,
+    translated_text: &str,
+) -> Vec<String> {
     let source = source_jp.trim();
-    let translated = thai.trim();
+    let translated = translated_text.trim();
     let mut findings = Vec::new();
     if translated.is_empty() {
         return findings;
     }
 
-    if let Some((particle, preferred)) = discouraged_casual_particle(translated) {
+    if target_language == TargetLanguage::Thai
+        && let Some((particle, preferred)) = discouraged_casual_particle(translated)
+    {
         findings.push(format!(
             "discouraged casual Thai particle `{particle}` appears; prefer `{preferred}` unless this rare roughness is important to SOURCE_JP or an established character voice"
         ));
@@ -215,11 +257,14 @@ pub fn advisory_findings(source_jp: &str, thai: &str) -> Vec<String> {
 
     if let Some(residue) = japanese_punctuation_residue(translated) {
         findings.push(format!(
-            "translated_text contains Japanese punctuation/brackets `{residue}`; verify it is intentional story text, otherwise replace it with natural Thai punctuation or remove the leftover source markers"
+            "translated_text contains Japanese punctuation/brackets `{residue}`; verify it is intentional story text, otherwise replace it with natural {} punctuation or remove the leftover source markers",
+            target_language.label()
         ));
     }
 
-    if reciprocal_bond_rendered_as_gift(source, translated) {
+    if target_language == TargetLanguage::Thai
+        && reciprocal_bond_rendered_as_gift(source, translated)
+    {
         findings.push(
             "SOURCE_JP uses reciprocal bond wording such as `互い`/`向け合う`/`絆`, but translated_text uses `มอบให้`; verify this does not turn a mutual/shared bond into a one-way gift-like action, and prefer wording like `มีต่อกัน`, `ผูกพันกัน`, or `มีให้กัน` when faithful"
                 .to_string(),
@@ -235,25 +280,31 @@ pub fn advisory_findings(source_jp: &str, thai: &str) -> Vec<String> {
         }
         if !translated_numbers.contains(&num) && !reported.contains(&num) {
             findings.push(format!(
-                "source number `{num}` does not appear in the translation; confirm it was not dropped or altered (it may be spelled out in Thai)"
+                "source number `{num}` does not appear in the translation; confirm it was not dropped or altered (it may be spelled out in {})",
+                target_language.label()
             ));
             reported.push(num);
         }
     }
 
     let jp = japanese_char_count(source);
-    let th = thai_char_count(translated);
-    // Thai under ~3/4 of the source length is an omission smell on substantial chunks.
-    if jp >= 80 && th * 4 < jp * 3 {
+    let target_chars = target_script_char_count(target_language, translated);
+    let looks_too_short = match target_language {
+        TargetLanguage::Thai => target_chars * 4 < jp * 3,
+        TargetLanguage::English => target_chars * 2 < jp,
+    };
+    if jp >= 80 && looks_too_short {
         findings.push(format!(
-            "translation looks much shorter than the source ({th} Thai chars vs {jp} Japanese chars); verify no sentences or details were omitted"
+            "translation looks much shorter than the source ({target_chars} {} letters vs {jp} Japanese chars); verify no sentences or details were omitted",
+            target_language.label()
         ));
     }
 
     // Advisory only: the Reviewer decides whether stray Han is a name or corruption.
     if let Some(glyphs) = glyphs_absent_from_source(source, translated, is_cjk_ideograph) {
         findings.push(format!(
-            "translated_text contains Han/CJK characters ({glyphs}) not present in this source chunk; if they are a deliberately retained name/term keep them, otherwise they are stray corruption — verify against the source and re-render in Thai"
+            "translated_text contains Han/CJK characters ({glyphs}) not present in this source chunk; if they are a deliberately retained name/term keep them, otherwise they are stray corruption — verify against the source and re-render in {}",
+            target_language.label()
         ));
     }
 
@@ -264,16 +315,36 @@ pub fn advisory_findings(source_jp: &str, thai: &str) -> Vec<String> {
 /// this chunk. Character metadata is useful but not deterministic enough to force
 /// local retries: aliases and address forms can be contextual, and the Reviewer
 /// should make the final call.
+#[cfg(test)]
 pub fn advisory_findings_with_references(
     source_jp: &str,
-    thai: &str,
+    translated: &str,
     characters: &[Character],
 ) -> Vec<String> {
-    let mut findings = advisory_findings(source_jp, thai);
-    if thai.trim().is_empty() {
+    advisory_findings_with_references_for_language(
+        TargetLanguage::Thai,
+        source_jp,
+        translated,
+        characters,
+    )
+}
+
+pub fn advisory_findings_with_references_for_language(
+    target_language: TargetLanguage,
+    source_jp: &str,
+    translated: &str,
+    characters: &[Character],
+) -> Vec<String> {
+    let mut findings = advisory_findings_for_language(target_language, source_jp, translated);
+    if translated.trim().is_empty() {
         return findings;
     }
-    audit_character_names(&mut findings, source_jp.trim(), thai.trim(), characters);
+    audit_character_names(
+        &mut findings,
+        source_jp.trim(),
+        translated.trim(),
+        characters,
+    );
     findings
 }
 
@@ -353,7 +424,7 @@ fn audit_character_names(
 ) {
     let mut reported: Vec<(String, String)> = Vec::new();
     for c in characters {
-        let canonical = c.thai_name.trim();
+        let canonical = c.translated_name.trim();
         audit_character_surface(
             findings,
             &mut reported,
@@ -363,10 +434,10 @@ fn audit_character_names(
             canonical,
         );
         for alt in &c.also_called {
-            let expected = if alt.thai.trim().is_empty() {
+            let expected = if alt.translated_name.trim().is_empty() {
                 canonical
             } else {
-                alt.thai.trim()
+                alt.translated_name.trim()
             };
             audit_character_surface(
                 findings,
@@ -542,9 +613,9 @@ fn audit_terminology(
 }
 
 fn expected_hard_locked_rendering(term: &GlossaryTerm) -> &str {
-    let thai = term.thai_term.trim();
-    if !thai.is_empty() {
-        thai
+    let translated = term.translated_term.trim();
+    if !translated.is_empty() {
+        translated
     } else if matches!(term.do_not_translate, Some(true)) {
         term.jp_term.trim()
     } else {
@@ -693,18 +764,18 @@ fn is_latin_original_parenthetical(content: &str) -> bool {
 }
 
 fn is_thai_phonetic_parenthetical(content: &str) -> bool {
-    let mut thai = 0usize;
+    let mut translated = 0usize;
     for ch in content.chars() {
         if ch.is_whitespace() {
             return false;
         }
         if is_thai_char(ch) || matches!(ch, 'ๆ' | 'ฯ' | '์') {
-            thai += 1;
+            translated += 1;
             continue;
         }
         return false;
     }
-    (2..=24).contains(&thai)
+    (2..=24).contains(&translated)
         && !looks_like_thai_meaning_explanation(content)
         && looks_like_transliterated_japanese(content)
 }
@@ -777,16 +848,25 @@ fn is_thai_char(ch: char) -> bool {
 /// audit itself would flag (see [`copied_continuity`]'s thresholds). If stripping
 /// would leave nothing (the whole output was the copy) the original is returned
 /// untouched so the audit/Reviewer can still flag it rather than committing empty.
-pub fn strip_copied_continuity(prev_thai: &[String], translated: &str) -> String {
-    if prev_thai.is_empty() {
+#[cfg(test)]
+pub fn strip_copied_continuity(previous_translation: &[String], translated: &str) -> String {
+    strip_copied_continuity_for_language(TargetLanguage::Thai, previous_translation, translated)
+}
+
+pub fn strip_copied_continuity_for_language(
+    target_language: TargetLanguage,
+    previous: &[String],
+    translated: &str,
+) -> String {
+    if previous.is_empty() {
         return translated.to_string();
     }
 
     // The continuity lines the audit recognizes as a "substantial copy" if
     // echoed back, as char vectors for exact matching.
-    let mut continuity: Vec<Vec<char>> = prev_thai
+    let mut continuity: Vec<Vec<char>> = previous
         .iter()
-        .filter(|line| thai_char_count(line) >= 24)
+        .filter(|line| target_script_char_count(target_language, line) >= 24)
         .map(|line| {
             normalize_for_duplicate_check(line)
                 .chars()
@@ -852,18 +932,24 @@ pub fn strip_copied_continuity(prev_thai: &[String], translated: &str) -> String
     }
 }
 
-fn copied_continuity(prev_thai: &[String], translated: &str) -> bool {
+fn copied_continuity(
+    target_language: TargetLanguage,
+    previous: &[String],
+    translated: &str,
+) -> bool {
     let translated_norm = normalize_for_duplicate_check(translated);
     if translated_norm.is_empty() {
         return false;
     }
 
-    prev_thai.iter().any(|line| {
+    previous.iter().any(|line| {
         let line_norm = normalize_for_duplicate_check(line);
-        let thai_chars = thai_char_count(line);
+        let target_chars = target_script_char_count(target_language, line);
         // Short dialogue beats repeat naturally, so only flag substantial exact
         // copies of the injected continuity tail.
-        thai_chars >= 24 && line_norm.chars().count() >= 32 && translated_norm.contains(&line_norm)
+        target_chars >= 24
+            && line_norm.chars().count() >= 32
+            && translated_norm.contains(&line_norm)
     })
 }
 
@@ -895,6 +981,13 @@ fn thai_char_count(text: &str) -> usize {
     text.chars()
         .filter(|ch| matches!(*ch as u32, 0x0E00..=0x0E7F))
         .count()
+}
+
+fn target_script_char_count(target_language: TargetLanguage, text: &str) -> usize {
+    match target_language {
+        TargetLanguage::Thai => thai_char_count(text),
+        TargetLanguage::English => text.chars().filter(char::is_ascii_alphabetic).count(),
+    }
 }
 
 /// Non-CJK scripts that never legitimately appear in Thai prose translated from
@@ -986,15 +1079,15 @@ mod tests {
     use super::*;
     use crate::model::{GlossaryTerm, TermPolicy};
 
-    fn term(jp: &str, thai: &str, policy: TermPolicy) -> GlossaryTerm {
+    fn term(jp: &str, translated: &str, policy: TermPolicy) -> GlossaryTerm {
         GlossaryTerm {
             jp_term: jp.to_string(),
-            thai_term: thai.to_string(),
+            translated_term: translated.to_string(),
             romaji: None,
             category: None,
             gloss: None,
             policy: Some(policy),
-            forbidden_thai: Vec::new(),
+            forbidden_translations: Vec::new(),
             context_rule: None,
             protected: matches!(
                 policy,
@@ -1013,13 +1106,13 @@ mod tests {
     fn character_with_named_voice(
         id: &str,
         jp_name: &str,
-        thai_name: &str,
+        translated_name: &str,
         style: &str,
     ) -> Character {
         Character {
             id: id.to_string(),
             jp_name: jp_name.to_string(),
-            thai_name: thai_name.to_string(),
+            translated_name: translated_name.to_string(),
             romaji: None,
             gender: Some("male".to_string()),
             honorific: None,
@@ -1040,10 +1133,11 @@ mod tests {
     fn audit_accepts_clean_thai_markdown() {
         let source =
             "彼女は笑った。\n\n---\n\n![ภาพประกอบ](../images/a.webp)\n\n**強い光**が差した。";
-        let thai = "เธอหัวเราะ\n\n---\n\n![ภาพประกอบ](../images/a.webp)\n\n**แสงแรงกล้า**สาดเข้ามา";
+        let translated =
+            "เธอหัวเราะ\n\n---\n\n![ภาพประกอบ](../images/a.webp)\n\n**แสงแรงกล้า**สาดเข้ามา";
 
         assert_eq!(
-            audit_translation_with_terms(source, thai, &[], &[]),
+            audit_translation_with_terms(source, translated, &[], &[]),
             Vec::<String>::new()
         );
     }
@@ -1051,9 +1145,9 @@ mod tests {
     #[test]
     fn audit_flags_structural_and_language_failures() {
         let source = "一文目。\n\n---\n\n![ภาพประกอบ](../images/a.webp)\n\n**二文目。**";
-        let thai = "<div>一文目。</div>\n\n**二文目。** &nbsp;";
+        let translated = "<div>一文目。</div>\n\n**二文目。** &nbsp;";
 
-        let findings = audit_translation_with_terms(source, thai, &[], &[]);
+        let findings = audit_translation_with_terms(source, translated, &[], &[]);
         assert!(findings.iter().any(|f| f.contains("HTML tag")));
         assert!(findings.iter().any(|f| f.contains("&nbsp;")));
         assert!(findings.iter().any(|f| f.contains("scene divider")));
@@ -1065,9 +1159,9 @@ mod tests {
     fn audit_flags_copied_continuity() {
         let source = "彼女は振り返った。";
         let prev = vec!["เธอกำมือแน่นพลางฝืนยิ้มทั้งที่เสียงยังสั่นอยู่เล็กน้อย".to_string()];
-        let thai = "เธอกำมือแน่นพลางฝืนยิ้มทั้งที่เสียงยังสั่นอยู่เล็กน้อย\n\nเธอหันกลับไป";
+        let translated = "เธอกำมือแน่นพลางฝืนยิ้มทั้งที่เสียงยังสั่นอยู่เล็กน้อย\n\nเธอหันกลับไป";
 
-        let findings = audit_translation_with_terms(source, thai, &prev, &[]);
+        let findings = audit_translation_with_terms(source, translated, &prev, &[]);
 
         assert!(findings.iter().any(|f| f.contains("continuity context")));
     }
@@ -1187,9 +1281,10 @@ mod tests {
     #[test]
     fn audit_flags_japanese_parenthetical_glosses() {
         let source = "坂田 (さかた)は幼馴染 (おさななじみ)で、同好会と部に入った。";
-        let thai = "ซึ่ง ซากาตะ (さかた) เป็นเพื่อนสมัยเด็ก (おさななじみ) ที่ตั้งชมรม (同好会) กับแผนก (部)";
+        let translated =
+            "ซึ่ง ซากาตะ (さかた) เป็นเพื่อนสมัยเด็ก (おさななじみ) ที่ตั้งชมรม (同好会) กับแผนก (部)";
 
-        let findings = audit_translation_with_terms(source, thai, &[], &[]);
+        let findings = audit_translation_with_terms(source, translated, &[], &[]);
 
         assert!(
             findings
@@ -1202,9 +1297,9 @@ mod tests {
     #[test]
     fn audit_allows_plot_critical_quoted_japanese() {
         let source = "看板には「部」と書いてあった。";
-        let thai = "บนป้ายเขียนตัวอักษร \"部\" เอาไว้";
+        let translated = "บนป้ายเขียนตัวอักษร \"部\" เอาไว้";
 
-        let findings = audit_translation_with_terms(source, thai, &[], &[]);
+        let findings = audit_translation_with_terms(source, translated, &[], &[]);
 
         assert!(
             !findings
@@ -1217,9 +1312,9 @@ mod tests {
     #[test]
     fn audit_flags_thai_pronunciation_parenthetical_glosses() {
         let source = "「押忍！」";
-        let thai = "“รับทราบ (โอส)!”";
+        let translated = "“รับทราบ (โอส)!”";
 
-        let findings = audit_translation_with_terms(source, thai, &[], &[]);
+        let findings = audit_translation_with_terms(source, translated, &[], &[]);
 
         assert!(
             findings
@@ -1232,9 +1327,9 @@ mod tests {
     #[test]
     fn audit_flags_long_thai_transliteration_parenthetical_glosses() {
         let source = "一目惚れ？";
-        let thai = "หรือว่าจะเป็นรักแรกพบ (ฮิโตเมะโบเระ)?";
+        let translated = "หรือว่าจะเป็นรักแรกพบ (ฮิโตเมะโบเระ)?";
 
-        let findings = audit_translation_with_terms(source, thai, &[], &[]);
+        let findings = audit_translation_with_terms(source, translated, &[], &[]);
 
         assert!(
             findings
@@ -1247,9 +1342,9 @@ mod tests {
     #[test]
     fn audit_flags_latin_original_parenthetical_glosses() {
         let source = "Perfectだと思った。";
-        let thai = "พี่นึกว่าเป็นคำตอบที่เพอร์เฟกต์ (Perfect) แล้ว";
+        let translated = "พี่นึกว่าเป็นคำตอบที่เพอร์เฟกต์ (Perfect) แล้ว";
 
-        let findings = audit_translation_with_terms(source, thai, &[], &[]);
+        let findings = audit_translation_with_terms(source, translated, &[], &[]);
 
         assert!(
             findings
@@ -1262,9 +1357,9 @@ mod tests {
     #[test]
     fn audit_allows_longer_thai_parenthetical_as_story_text() {
         let source = "彼女は小さく（本当に小さく）頷いた。";
-        let thai = "เธอพยักหน้าเบา ๆ (เบาจริง ๆ) อย่างลังเล";
+        let translated = "เธอพยักหน้าเบา ๆ (เบาจริง ๆ) อย่างลังเล";
 
-        let findings = audit_translation_with_terms(source, thai, &[], &[]);
+        let findings = audit_translation_with_terms(source, translated, &[], &[]);
 
         assert!(
             !findings
@@ -1277,9 +1372,9 @@ mod tests {
     #[test]
     fn audit_allows_thai_meaning_parenthetical_for_loanword() {
         let source = "シスコンなの？";
-        let thai = "นายเข้าข่ายพวกซิสคอน (รักน้องสาวหลงน้องสาว) หรือเปล่า?";
+        let translated = "นายเข้าข่ายพวกซิสคอน (รักน้องสาวหลงน้องสาว) หรือเปล่า?";
 
-        let findings = audit_translation_with_terms(source, thai, &[], &[]);
+        let findings = audit_translation_with_terms(source, translated, &[], &[]);
 
         assert!(
             !findings
@@ -1308,8 +1403,8 @@ mod tests {
     fn advisory_flags_dropped_multidigit_number_but_not_single_digit() {
         // 2024 vanishes → flagged; the single digit 3 spelled out as สาม → not flagged.
         let source = "2024年、3人の少女がいた。";
-        let thai = "ในปีนั้น มีเด็กสาวสามคน";
-        let findings = advisory_findings(source, thai);
+        let translated = "ในปีนั้น มีเด็กสาวสามคน";
+        let findings = advisory_findings(source, translated);
         assert!(
             findings.iter().any(|f| f.contains("2024")),
             "multi-digit number drop flagged: {findings:?}"
@@ -1335,9 +1430,9 @@ mod tests {
     #[test]
     fn advisory_flags_severe_length_shortfall() {
         let source = "あ".repeat(100);
-        let thai = "สั้น";
+        let translated = "สั้น";
         assert!(
-            advisory_findings(&source, thai)
+            advisory_findings(&source, translated)
                 .iter()
                 .any(|f| f.contains("shorter")),
             "a translation far shorter than the source is flagged"
@@ -1347,8 +1442,8 @@ mod tests {
     #[test]
     fn advisory_does_not_flag_normal_length() {
         let source = "彼女は静かに笑って、窓の外を見つめていた。".to_string();
-        let thai = "เธอยิ้มอย่างเงียบ ๆ แล้วมองออกไปนอกหน้าต่างอย่างเหม่อลอย".to_string();
-        let findings = advisory_findings(&source, &thai);
+        let translated = "เธอยิ้มอย่างเงียบ ๆ แล้วมองออกไปนอกหน้าต่างอย่างเหม่อลอย".to_string();
+        let findings = advisory_findings(&source, &translated);
         assert!(
             findings.is_empty(),
             "ordinary translation should produce no advisory findings: {findings:?}"
@@ -1377,8 +1472,8 @@ mod tests {
     #[test]
     fn advisory_allows_preferred_particles_fuwa_name_and_tho_woei() {
         let source = "不破さんは叫んだ。";
-        let thai = "คุณฟูวะตะโกนว่า “นี่มันอะไรกันฟะ เฟ้ย! โธ่เว้ย!” จากนั้นพูดถึงจิโกกุ มิ○วะ";
-        let findings = advisory_findings(source, thai);
+        let translated = "คุณฟูวะตะโกนว่า “นี่มันอะไรกันฟะ เฟ้ย! โธ่เว้ย!” จากนั้นพูดถึงจิโกกุ มิ○วะ";
+        let findings = advisory_findings(source, translated);
         assert!(
             !findings.iter().any(|f| f.contains("casual Thai particle")),
             "preferred particles, Fuwa name, masked titles, and โธ่เว้ย are not flagged: {findings:?}"
@@ -1408,8 +1503,8 @@ mod tests {
         ];
 
         for ending in allowed {
-            let thai = format!("เรื่องนั้นคงเป็นแบบนี้{ending}");
-            let findings = advisory_findings(source, &thai);
+            let translated = format!("เรื่องนั้นคงเป็นแบบนี้{ending}");
+            let findings = advisory_findings(source, &translated);
             assert!(
                 !findings.iter().any(|f| f.contains("casual Thai particle")),
                 "{ending} should not be treated as banned วะ/ว่ะ: {findings:?}"
@@ -1420,8 +1515,8 @@ mod tests {
     #[test]
     fn advisory_allows_ore_narration_rendered_with_chan() {
         let source = "俺は、あの二人を見てそう思わずにはいられなかった。";
-        let thai = "ฉันกลับอดคิดแบบนี้ไม่ได้เมื่อมองสองคนนั้น";
-        let findings = advisory_findings(source, thai);
+        let translated = "ฉันกลับอดคิดแบบนี้ไม่ได้เมื่อมองสองคนนั้น";
+        let findings = advisory_findings(source, translated);
         assert!(
             !findings
                 .iter()
@@ -1433,9 +1528,9 @@ mod tests {
     #[test]
     fn advisory_ignores_chan_inside_non_ore_dialogue() {
         let source = "“……えとえと、それに、あの様子では、たとえ本人達に直接訊ねたところで、普通に否定するだけだったと思います……”\n\nだが、しかし。今の俺達三人が知りたいのは……そういうことでは、ないわけで。\n\n“ところで、上原君と亜玖璃さんがお付き合いなさっているというのは私も把握しておりますので”";
-        let thai = "“……เอ่อ คือว่า แล้วก็ ดูจากท่าทางแบบนั้นแล้ว ต่อให้ไปถามเจ้าตัวโดยตรง ฉันคิดว่าพวกเขาก็คงแค่ปฏิเสธตามปกติค่ะ……”\n\nแต่ว่า สิ่งที่พวกผมทั้งสามคนในตอนนี้อยากรู้……มันไม่ใช่เรื่องแบบนั้นนี่นา\n\n“จะว่าไป เรื่องที่อุเอฮาระคุงกับอากุริคบกันอยู่ฉันเองก็รับทราบแล้ว”";
+        let translated = "“……เอ่อ คือว่า แล้วก็ ดูจากท่าทางแบบนั้นแล้ว ต่อให้ไปถามเจ้าตัวโดยตรง ฉันคิดว่าพวกเขาก็คงแค่ปฏิเสธตามปกติค่ะ……”\n\nแต่ว่า สิ่งที่พวกผมทั้งสามคนในตอนนี้อยากรู้……มันไม่ใช่เรื่องแบบนั้นนี่นา\n\n“จะว่าไป เรื่องที่อุเอฮาระคุงกับอากุริคบกันอยู่ฉันเองก็รับทราบแล้ว”";
 
-        let findings = advisory_findings(source, thai);
+        let findings = advisory_findings(source, translated);
 
         assert!(
             !findings
@@ -1452,9 +1547,9 @@ mod tests {
             "ผู้บรรยาย/ตัวละครชายวัยรุ่น ใช้สรรพนาม 俺 (Ore); ในไทยให้ใช้ 'ผม' เป็นสรรพนามบุรุษที่ 1 ทั้งในบทบรรยาย/พูดกับตัวเอง น้ำเสียงจริงจังและเป็นผู้ชาย ไม่ใช้ 'ฉัน'",
         );
         let source = "俺は大きくため息をついた。";
-        let thai = "ฉันถอนหายใจเฮือกใหญ่";
+        let translated = "ฉันถอนหายใจเฮือกใหญ่";
 
-        let findings = audit_character_pronoun_rules(source, thai, None, &[character]);
+        let findings = audit_character_pronoun_rules(source, translated, None, &[character]);
 
         assert!(
             findings.is_empty(),
@@ -1469,9 +1564,9 @@ mod tests {
             "ผู้บรรยายชาย ใช้สรรพนาม 俺 (Ore); ในไทยให้ใช้ 'ผม' ไม่ใช้ 'ฉัน'",
         );
         let source = "“……えとえと、それに、あの様子では、たとえ本人達に直接訊ねたところで、普通に否定するだけだったと思います……”\n\nだが、しかし。今の俺達三人が知りたいのは……そういうことでは、ないわけで。\n\n“ところで、上原君と亜玖璃さんがお付き合いなさっているというのは私も把握しておりますので”";
-        let thai = "“……เอ่อ คือว่า แล้วก็ ดูจากท่าทางแบบนั้นแล้ว ต่อให้ไปถามเจ้าตัวโดยตรง ฉันคิดว่าพวกเขาก็คงแค่ปฏิเสธตามปกติค่ะ……”\n\nแต่ว่า สิ่งที่พวกผมทั้งสามคนในตอนนี้อยากรู้……มันไม่ใช่เรื่องแบบนั้นนี่นา\n\n“จะว่าไป เรื่องที่อุเอฮาระคุงกับอากุริคบกันอยู่ฉันเองก็รับทราบแล้ว”";
+        let translated = "“……เอ่อ คือว่า แล้วก็ ดูจากท่าทางแบบนั้นแล้ว ต่อให้ไปถามเจ้าตัวโดยตรง ฉันคิดว่าพวกเขาก็คงแค่ปฏิเสธตามปกติค่ะ……”\n\nแต่ว่า สิ่งที่พวกผมทั้งสามคนในตอนนี้อยากรู้……มันไม่ใช่เรื่องแบบนั้นนี่นา\n\n“จะว่าไป เรื่องที่อุเอฮาระคุงกับอากุริคบกันอยู่ฉันเองก็รับทราบแล้ว”";
 
-        let findings = audit_character_pronoun_rules(source, thai, None, &[character]);
+        let findings = audit_character_pronoun_rules(source, translated, None, &[character]);
 
         assert!(
             findings.is_empty(),
@@ -1612,8 +1707,8 @@ mod tests {
     #[test]
     fn advisory_flags_reciprocal_bond_rendered_as_gift() {
         let source = "あの二人が互いに向け合う以上の絆を、俺はそこに感じた。";
-        let thai = "ผมรู้สึกถึงสายสัมพันธ์ที่สองคนนั้นมอบให้กันอยู่ตรงนั้น";
-        let findings = advisory_findings(source, thai);
+        let translated = "ผมรู้สึกถึงสายสัมพันธ์ที่สองคนนั้นมอบให้กันอยู่ตรงนั้น";
+        let findings = advisory_findings(source, translated);
         assert!(
             findings
                 .iter()
@@ -1625,14 +1720,14 @@ mod tests {
     #[test]
     fn advisory_flags_japanese_punctuation_residue() {
         let source = "彼女は笑った。";
-        let thai = "เธอยิ้ม。";
-        let hard = audit_translation_with_terms(source, thai, &[], &[]);
+        let translated = "เธอยิ้ม。";
+        let hard = audit_translation_with_terms(source, translated, &[], &[]);
         assert!(
             hard.iter().any(|f| f.contains("Japanese punctuation")),
             "Japanese punctuation residue is a hard mechanical gate: {hard:?}"
         );
 
-        let findings = advisory_findings(source, thai);
+        let findings = advisory_findings(source, translated);
         assert!(
             findings
                 .iter()
@@ -1646,7 +1741,7 @@ mod tests {
         let character = Character {
             id: "amano".to_string(),
             jp_name: "雨野景太".to_string(),
-            thai_name: "อามาโนะ เคย์ตะ".to_string(),
+            translated_name: "อามาโนะ เคย์ตะ".to_string(),
             romaji: Some("Amano Keita".to_string()),
             gender: Some("male".to_string()),
             honorific: None,
@@ -1655,7 +1750,7 @@ mod tests {
             aliases: vec!["ケータ".to_string()],
             also_called: vec![crate::model::AltName {
                 jp: "雨野君".to_string(),
-                thai: "อามาโนะคุง".to_string(),
+                translated_name: "อามาโนะคุง".to_string(),
                 by: None,
             }],
             notes: None,
@@ -1684,7 +1779,7 @@ mod tests {
         let character = Character {
             id: "amano".to_string(),
             jp_name: "雨野景太".to_string(),
-            thai_name: "อามาโนะ เคย์ตะ".to_string(),
+            translated_name: "อามาโนะ เคย์ตะ".to_string(),
             romaji: Some("Amano Keita".to_string()),
             gender: Some("male".to_string()),
             honorific: None,
@@ -1697,15 +1792,15 @@ mod tests {
         };
 
         let source = "失礼します。雨野君はいらっしゃいますか？";
-        let thai = "ขออนุญาตค่ะ อามาโนะคุงอยู่ไหมคะ?";
+        let translated = "ขออนุญาตค่ะ อามาโนะคุงอยู่ไหมคะ?";
 
-        let hard = audit_translation_with_terms(source, thai, &[], &[]);
+        let hard = audit_translation_with_terms(source, translated, &[], &[]);
         assert!(
             !hard.iter().any(|f| f.contains("character/name surface")),
             "short aliases are context hints, not exact hard-gate surfaces: {hard:?}"
         );
 
-        let advisory = advisory_findings_with_references(source, thai, &[character]);
+        let advisory = advisory_findings_with_references(source, translated, &[character]);
         assert!(
             !advisory.iter().any(|f| f.contains("雨野")),
             "alias inside an honorific should not demand the canonical full name: {advisory:?}"
@@ -1718,8 +1813,8 @@ mod tests {
         // Thai — below the mass-untranslated-Japanese threshold, so only the
         // corruption gate catches them.
         let source = "彼女は黙って立ち上がった。";
-        let thai = "เธอเงียบงันแล้วลุกขึ้นยืน 그리고 อย่างช้า ๆ และเดินจากไป";
-        let findings = audit_translation_with_terms(source, thai, &[], &[]);
+        let translated = "เธอเงียบงันแล้วลุกขึ้นยืน 그리고 อย่างช้า ๆ และเดินจากไป";
+        let findings = audit_translation_with_terms(source, translated, &[], &[]);
         assert!(
             findings
                 .iter()
@@ -1744,15 +1839,15 @@ mod tests {
         // advisory (kanji may be a retained name) — never as a hard gate that
         // force-rejects, since that risks killing a legitimate translation.
         let source = "彼女は笑った。";
-        let thai = "เธอหัวเราะ东";
+        let translated = "เธอหัวเราะ东";
 
-        let hard = audit_translation_with_terms(source, thai, &[], &[]);
+        let hard = audit_translation_with_terms(source, translated, &[], &[]);
         assert!(
             !hard.iter().any(|f| f.contains("corrupted non-Thai glyphs")),
             "stray CJK must not be a hard gate: {hard:?}"
         );
 
-        let advisory = advisory_findings(source, thai);
+        let advisory = advisory_findings(source, translated);
         assert!(
             advisory.iter().any(|f| f.contains("Han/CJK characters")),
             "stray CJK surfaced as advisory: {advisory:?}"
@@ -1763,8 +1858,8 @@ mod tests {
     fn audit_flags_stray_vietnamese_but_not_plain_latin() {
         // Vietnamese-accented vowels bleeding into Thai are flagged...
         let source = "彼女は静かに頷いた。";
-        let thai = "เธอพยักหน้าอย่างเงียบ ๆ rồi bước đi";
-        let findings = audit_translation_with_terms(source, thai, &[], &[]);
+        let translated = "เธอพยักหน้าอย่างเงียบ ๆ rồi bước đi";
+        let findings = audit_translation_with_terms(source, translated, &[], &[]);
         assert!(
             findings
                 .iter()
@@ -1788,13 +1883,13 @@ mod tests {
         // A do-not-translate name kept verbatim from the source must trip neither
         // the hard gate nor the advisory — the same kanji appear in the source.
         let source = "田中は剣を抜いた。";
-        let thai = "田中ชักดาบออกมา";
-        let hard = audit_translation_with_terms(source, thai, &[], &[]);
+        let translated = "田中ชักดาบออกมา";
+        let hard = audit_translation_with_terms(source, translated, &[], &[]);
         assert!(
             !hard.iter().any(|f| f.contains("corrupted non-Thai glyphs")),
             "retained source kanji must not be a hard gate: {hard:?}"
         );
-        let advisory = advisory_findings(source, thai);
+        let advisory = advisory_findings(source, translated);
         assert!(
             !advisory.iter().any(|f| f.contains("Han/CJK characters")),
             "retained source kanji must not be an advisory: {advisory:?}"
@@ -1804,7 +1899,9 @@ mod tests {
     #[test]
     fn audit_enforces_hard_locked_and_forbidden_terms() {
         let mut forbidden = term("黒炎", "ไฟดำ", TermPolicy::Forbidden);
-        forbidden.forbidden_thai.push("เปลวไฟทมิฬ".to_string());
+        forbidden
+            .forbidden_translations
+            .push("เปลวไฟทมิฬ".to_string());
         let terms = vec![term("聖剣", "ดาบศักดิ์สิทธิ์", TermPolicy::HardLocked), forbidden];
 
         let findings =
@@ -1812,5 +1909,52 @@ mod tests {
 
         assert!(findings.iter().any(|f| f.contains("hard-locked")));
         assert!(findings.iter().any(|f| f.contains("forbidden glossary")));
+    }
+
+    #[test]
+    fn english_audit_accepts_clean_english_and_skips_thai_only_rules() {
+        let findings = audit_translation_for_language(
+            TargetLanguage::English,
+            "俺は静かに笑った。",
+            "I gave a quiet laugh (mostly to myself). กู",
+            &[],
+            &[],
+        );
+
+        assert!(!findings.iter().any(|f| f.contains("no Thai")));
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.contains("forbidden Thai self-pronoun"))
+        );
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.contains("reading/original gloss"))
+        );
+    }
+
+    #[test]
+    fn english_audit_rejects_output_without_english_text() {
+        let findings = audit_translation_for_language(
+            TargetLanguage::English,
+            "彼女は笑った。",
+            "เธอหัวเราะ",
+            &[],
+            &[],
+        );
+        assert!(findings.iter().any(|f| f.contains("no English text")));
+    }
+
+    #[test]
+    fn english_continuity_copy_is_detected_and_stripped() {
+        let previous = vec![
+            "She tightened her grip and forced a smile even though her voice still trembled."
+                .to_string(),
+        ];
+        let raw = format!("{}\n\nHe opened the door.", previous[0]);
+        let cleaned =
+            strip_copied_continuity_for_language(TargetLanguage::English, &previous, &raw);
+        assert_eq!(cleaned, "He opened the door.");
     }
 }

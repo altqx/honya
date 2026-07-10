@@ -79,11 +79,12 @@ pub enum Action {
     ImportFile {
         source: PathBuf,
         title: String,
-        /// Thai title from the wizard's translate step (empty = none).
-        title_th: String,
+        /// Target-language title from the wizard's translate step (empty = none).
+        translated_title: String,
         vol: u32,
         synopsis_raw: String,
-        synopsis_th: String,
+        translated_synopsis: String,
+        target_language: crate::model::TargetLanguage,
         /// Append the source's chapters after the volume's last one instead of
         /// scaffolding a fresh project/volume (the "add chapters" flow).
         append: bool,
@@ -92,22 +93,24 @@ pub enum Action {
     TranslateSynopsis {
         raw: String,
         attempt: u32,
+        target_language: crate::model::TargetLanguage,
     },
     /// Persist the active volume's synopsis (standalone editor accept).
     SaveSynopsis {
         raw: String,
-        th: String,
+        translated_synopsis: String,
     },
     /// Translator round-trip for title rerolls.
     TranslateProjectTitle {
         raw: String,
         attempt: u32,
+        target_language: crate::model::TargetLanguage,
     },
     /// Persist PROJECT.md title fields; `id` is the slug.
     SaveProjectTitle {
         id: String,
         raw: String,
-        th: String,
+        translated_title: String,
     },
     /// Persist a human Reader annotation anchored to a translated line.
     SaveReaderNote {
@@ -115,7 +118,7 @@ pub enum Action {
         line: u32,
         note: String,
     },
-    /// Open the chunk editor from raw on-disk Thai.
+    /// Open the chunk editor from raw on-disk translated text.
     OpenReaderEdit {
         chapter: u32,
         chunk: u32,
@@ -281,6 +284,8 @@ pub enum Action {
         release_channel: crate::model::ReleaseChannel,
         /// Provider request tier for every request (`None` = provider default).
         service_tier: Option<crate::model::ServiceTier>,
+        /// Default language initially selected for new projects.
+        preferred_language: crate::model::TargetLanguage,
         /// Max Translator↔Reviewer retry attempts per chunk (already clamped 1..=20).
         max_attempts: u32,
         /// Loop-watchdog stall window in seconds (already clamped; 0 disables it).
@@ -902,11 +907,18 @@ impl App {
                 self.push_log(LogLevel::Error, format!("translate: {msg}"));
                 self.toast = Some(Toast::error(format!("translate: {msg}")));
             }
-            AppEvent::CharacterUpserted { thai_name, .. } => {
-                self.toast = Some(Toast::info(format!("character → {thai_name}")));
+            AppEvent::CharacterUpserted {
+                translated_name, ..
+            } => {
+                self.toast = Some(Toast::info(format!("character → {translated_name}")));
             }
-            AppEvent::GlossaryUpserted { jp_term, thai_term } => {
-                self.toast = Some(Toast::info(format!("glossary {jp_term} → {thai_term}")));
+            AppEvent::GlossaryUpserted {
+                jp_term,
+                translated_term,
+            } => {
+                self.toast = Some(Toast::info(format!(
+                    "glossary {jp_term} → {translated_term}"
+                )));
             }
             AppEvent::ContinuityFlag { severity, note, .. } => {
                 self.push_log(LogLevel::Warn, format!("[{severity}] {note}"));
@@ -1095,6 +1107,7 @@ impl App {
             root: active.project.dir.clone(),
             default_vol: active.vol,
             model: refine_model,
+            target_language: active.project.target_language,
             tx: self.tx.clone(),
             cancel: cancel.clone(),
             session_id: self.refine_session_id.clone(),
@@ -1486,7 +1499,7 @@ impl App {
                 RemoteProject {
                     id: p.id.clone(),
                     title: p.title.clone(),
-                    title_th: p.title_th.clone(),
+                    translated_title: p.translated_title.clone(),
                     volumes: p.volumes.len() as u32,
                     chapters,
                     done,
@@ -1519,8 +1532,8 @@ impl App {
                 RemoteVolume {
                     number: v.number,
                     label: v.label.clone(),
-                    synopsis_th: if is_active {
-                        vd.synopsis_th.clone()
+                    translated_synopsis: if is_active {
+                        vd.translated_synopsis.clone()
                     } else {
                         String::new()
                     },
@@ -1547,7 +1560,7 @@ impl App {
             .into_iter()
             .map(|c| RemoteCharacter {
                 jp_name: c.jp_name,
-                thai_name: c.thai_name,
+                translated_name: c.translated_name,
                 romaji: c.romaji,
                 gender: c.gender,
                 honorific: c.honorific,
@@ -1561,7 +1574,7 @@ impl App {
                 let policy = remote_term_policy(crate::workspace::glossary::effective_policy(&t));
                 RemoteTerm {
                     jp_term: t.jp_term,
-                    thai_term: t.thai_term,
+                    translated_term: t.translated_term,
                     romaji: t.romaji,
                     category: t.category,
                     gloss: t.gloss,
@@ -2195,7 +2208,10 @@ impl App {
 
     fn route_mouse_to_screen(&mut self, m: MouseInput) -> Action {
         match self.screen {
-            Screen::Shelf => self.shelf.handle_mouse(m, &self.projects),
+            Screen::Shelf => {
+                self.shelf
+                    .handle_mouse(m, &self.projects, self.cfg.preferred_language)
+            }
             Screen::Project => self.project.handle_mouse(m, self.active.as_ref()),
             Screen::Translate => self.translate.handle_mouse(m),
             Screen::Reader => self.reader.handle_mouse(m),
@@ -2325,7 +2341,9 @@ impl App {
 
     fn route_to_screen(&mut self, k: KeyEvent) -> Action {
         match self.screen {
-            Screen::Shelf => self.shelf.handle_key(k, &self.projects),
+            Screen::Shelf => self
+                .shelf
+                .handle_key(k, &self.projects, self.cfg.preferred_language),
             Screen::Project => self.project.handle_key(k, self.active.as_ref()),
             Screen::Translate => self.translate.handle_key(k),
             Screen::Reader => self.reader.handle_key(k),
@@ -2549,33 +2567,50 @@ impl App {
             Action::ImportFile {
                 source,
                 title,
-                title_th,
+                translated_title,
                 vol,
                 synopsis_raw,
-                synopsis_th,
+                translated_synopsis,
+                target_language,
                 append,
             } => {
                 self.start_import(
                     source,
                     title,
-                    title_th,
+                    translated_title,
                     vol,
                     synopsis_raw,
-                    synopsis_th,
+                    translated_synopsis,
+                    target_language,
                     append,
                 );
             }
-            Action::TranslateSynopsis { raw, attempt } => {
-                self.translate_synopsis(raw, attempt);
+            Action::TranslateSynopsis {
+                raw,
+                attempt,
+                target_language,
+            } => {
+                self.translate_synopsis(raw, attempt, target_language);
             }
-            Action::SaveSynopsis { raw, th } => {
-                self.save_synopsis(raw, th);
+            Action::SaveSynopsis {
+                raw,
+                translated_synopsis,
+            } => {
+                self.save_synopsis(raw, translated_synopsis);
             }
-            Action::TranslateProjectTitle { raw, attempt } => {
-                self.translate_project_title(raw, attempt);
+            Action::TranslateProjectTitle {
+                raw,
+                attempt,
+                target_language,
+            } => {
+                self.translate_project_title(raw, attempt, target_language);
             }
-            Action::SaveProjectTitle { id, raw, th } => {
-                self.save_project_title(id, raw, th);
+            Action::SaveProjectTitle {
+                id,
+                raw,
+                translated_title,
+            } => {
+                self.save_project_title(id, raw, translated_title);
             }
             Action::SaveReaderNote {
                 chapter,
@@ -2709,6 +2744,7 @@ impl App {
                 update_mode,
                 release_channel,
                 service_tier,
+                preferred_language,
                 max_attempts,
                 loop_stall_secs,
                 max_chapter_retranslates,
@@ -2723,6 +2759,7 @@ impl App {
                     update_mode,
                     release_channel,
                     service_tier,
+                    preferred_language,
                     max_attempts,
                     loop_stall_secs,
                     max_chapter_retranslates,
@@ -2733,7 +2770,7 @@ impl App {
             }
             Action::OpenImport => {
                 let files = crate::workspace::scan::find_importable_files(&working_root());
-                self.overlay = Overlay::import(files, &self.projects);
+                self.overlay = Overlay::import(files, &self.projects, self.cfg.preferred_language);
             }
             Action::DismissWelcome => {
                 self.mark_onboarded();
@@ -2779,7 +2816,7 @@ impl App {
                 // OSC-52 has no reliable success signal, so always toast.
                 match crate::remote::copy_to_clipboard(&text) {
                     Ok(()) => {
-                        self.toast = Some(Toast::info(format!("copied {lines} lines of Thai")))
+                        self.toast = Some(Toast::info(format!("copied {lines} translated lines")))
                     }
                     Err(_) => {
                         self.toast = Some(Toast::warn("couldn't copy — terminal blocked clipboard"))
@@ -2985,6 +3022,7 @@ impl App {
             return;
         };
         let title = active.project.title.clone();
+        let target_language = active.project.target_language;
         let next = active
             .project
             .volumes
@@ -2994,7 +3032,7 @@ impl App {
             .unwrap_or(0)
             + 1;
         let files = crate::workspace::scan::find_importable_files(&working_root());
-        self.overlay = Overlay::import_into(files, &self.projects, title, next);
+        self.overlay = Overlay::import_into(files, &self.projects, title, next, target_language);
     }
 
     /// Open the import wizard in append mode: chapters land after `vol`'s last one.
@@ -3008,8 +3046,9 @@ impl App {
             return;
         };
         let title = active.project.title.clone();
+        let target_language = active.project.target_language;
         let files = crate::workspace::scan::find_importable_files(&working_root());
-        self.overlay = Overlay::import_append(files, &self.projects, title, vol);
+        self.overlay = Overlay::import_append(files, &self.projects, title, vol, target_language);
     }
 
     fn refresh_volume_images(&mut self, vol: u32) {
@@ -3563,7 +3602,7 @@ impl App {
             self.toast = Some(Toast::warn("a run is already in progress"));
             return;
         }
-        let Some((vol, project_dir, project_id, project_title, models)) =
+        let Some((vol, project_dir, project_id, project_title, models, target_language)) =
             self.active.as_ref().map(|active| {
                 (
                     active.active_vol(),
@@ -3571,6 +3610,7 @@ impl App {
                     active.project.id.clone(),
                     active.project.title.clone(),
                     active.models.clone(),
+                    active.project.target_language,
                 )
             })
         else {
@@ -3654,6 +3694,7 @@ impl App {
             ws,
             models,
             cfg: self.cfg.clone(),
+            target_language,
             tx: self.tx.clone(),
             ctl: ctl.clone(),
             queue: queue.clone(),
@@ -3813,7 +3854,7 @@ impl App {
             self.toast = Some(Toast::info("project already fully translated"));
             return;
         }
-        let Some((project_dir, project_id, project_title, models, history_vol)) =
+        let Some((project_dir, project_id, project_title, models, target_language, history_vol)) =
             self.active.as_ref().map(|active| {
                 // Key the run-history row to the project's LOWEST volume number,
                 // which is stable across resumes (earlier volumes finishing never
@@ -3832,6 +3873,7 @@ impl App {
                     active.project.id.clone(),
                     active.project.title.clone(),
                     active.models.clone(),
+                    active.project.target_language,
                     history_vol,
                 )
             })
@@ -3900,6 +3942,7 @@ impl App {
             ws,
             models,
             cfg: self.cfg.clone(),
+            target_language,
             tx: self.tx.clone(),
             ctl: ctl.clone(),
             queue: queue.clone(),
@@ -3931,7 +3974,8 @@ impl App {
         let Some(active) = self.active.as_ref() else {
             return Vec::new();
         };
-        let mut by_vol: std::collections::BTreeMap<u32, Vec<u32>> = std::collections::BTreeMap::new();
+        let mut by_vol: std::collections::BTreeMap<u32, Vec<u32>> =
+            std::collections::BTreeMap::new();
         for (vol, ch) in ids {
             by_vol.entry(*vol).or_default().push(*ch);
         }
@@ -3970,7 +4014,7 @@ impl App {
             self.toast = Some(Toast::warn("nothing selected"));
             return;
         }
-        let Some((project_dir, project_id, project_title, models, history_vol)) =
+        let Some((project_dir, project_id, project_title, models, target_language, history_vol)) =
             self.active.as_ref().map(|active| {
                 let history_vol = ids.iter().map(|(v, _)| *v).min().unwrap_or(active.vol);
                 (
@@ -3978,6 +4022,7 @@ impl App {
                     active.project.id.clone(),
                     active.project.title.clone(),
                     active.models.clone(),
+                    active.project.target_language,
                     history_vol,
                 )
             })
@@ -4057,6 +4102,7 @@ impl App {
             ws,
             models,
             cfg: self.cfg.clone(),
+            target_language,
             tx: self.tx.clone(),
             ctl: ctl.clone(),
             queue: queue.clone(),
@@ -4168,10 +4214,11 @@ impl App {
         &mut self,
         source: PathBuf,
         title: String,
-        title_th: String,
+        translated_title: String,
         vol: u32,
         synopsis_raw: String,
-        synopsis_th: String,
+        translated_synopsis: String,
+        target_language: crate::model::TargetLanguage,
         append: bool,
     ) {
         if self.run_active {
@@ -4194,11 +4241,12 @@ impl App {
                 source,
                 dest,
                 title,
-                title_th,
+                translated_title,
                 vol,
                 models,
+                target_language,
                 synopsis_raw,
-                synopsis_th,
+                translated_synopsis,
                 append,
                 &tx,
             )
@@ -4243,13 +4291,14 @@ impl App {
         let root = project.dir.clone();
         let project_id = project.id.clone();
         // Exports should use the translated title when available.
-        let title = if project.title_th.trim().is_empty() {
+        let title = if project.translated_title.trim().is_empty() {
             project.title.clone()
         } else {
-            project.title_th.clone()
+            project.translated_title.clone()
         };
         let vol_label = volume.label.clone();
         let chapters = volume.chapters.clone();
+        let target_language = project.target_language;
         let tx = self.tx.clone();
 
         self.export_active = true;
@@ -4261,8 +4310,16 @@ impl App {
 
         tokio::spawn(async move {
             let ws = Workspace::new(root, vol);
-            let book =
-                crate::export::gather(&ws, &title, &project_id, vol, vol_label, &chapters).await;
+            let book = crate::export::gather_for_language(
+                &ws,
+                &title,
+                &project_id,
+                vol,
+                vol_label,
+                &chapters,
+                target_language,
+            )
+            .await;
             match crate::export::export_volume(&ws, book, &formats, &tx).await {
                 Ok((paths, warnings)) => tx.send(AppEvent::ExportFinished { paths, warnings }),
                 Err(e) => tx.send(AppEvent::Error {
@@ -4300,7 +4357,12 @@ impl App {
         Some((client, model))
     }
 
-    fn translate_synopsis(&mut self, raw: String, attempt: u32) {
+    fn translate_synopsis(
+        &mut self,
+        raw: String,
+        attempt: u32,
+        target_language: crate::model::TargetLanguage,
+    ) {
         let Some((client, model)) = self.editor_translator() else {
             return;
         };
@@ -4310,6 +4372,7 @@ impl App {
             match crate::agents::synopsis::translate_synopsis(
                 client.as_ref(),
                 &model.model,
+                target_language,
                 &raw,
                 temperature,
             )
@@ -4321,7 +4384,12 @@ impl App {
         });
     }
 
-    fn translate_project_title(&mut self, raw: String, attempt: u32) {
+    fn translate_project_title(
+        &mut self,
+        raw: String,
+        attempt: u32,
+        target_language: crate::model::TargetLanguage,
+    ) {
         let Some((client, model)) = self.editor_translator() else {
             return;
         };
@@ -4331,6 +4399,7 @@ impl App {
             match crate::agents::synopsis::translate_title(
                 client.as_ref(),
                 &model.model,
+                target_language,
                 &raw,
                 temperature,
             )
@@ -4360,6 +4429,7 @@ impl App {
         update_mode: crate::model::UpdateMode,
         release_channel: crate::model::ReleaseChannel,
         service_tier: Option<crate::model::ServiceTier>,
+        preferred_language: crate::model::TargetLanguage,
         max_attempts: u32,
         loop_stall_secs: u64,
         max_chapter_retranslates: u32,
@@ -4371,6 +4441,8 @@ impl App {
         self.cfg.release_channel = release_channel;
         let tier_changed = self.cfg.service_tier != service_tier;
         self.cfg.service_tier = service_tier;
+        let language_changed = self.cfg.preferred_language != preferred_language;
+        self.cfg.preferred_language = preferred_language;
         self.cfg.max_attempts = max_attempts;
         self.cfg.loop_stall_secs = loop_stall_secs;
         self.cfg.max_chapter_retranslates = max_chapter_retranslates;
@@ -4428,6 +4500,15 @@ impl App {
                     "service tier → {} ({})",
                     crate::model::ServiceTier::label(self.cfg.service_tier),
                     crate::model::ServiceTier::desc(self.cfg.service_tier)
+                ),
+            );
+        }
+        if language_changed {
+            self.push_log(
+                LogLevel::Info,
+                format!(
+                    "preferred language → {}",
+                    self.cfg.preferred_language.label()
                 ),
             );
         }
@@ -4507,9 +4588,13 @@ impl App {
     }
 
     /// Persist the active volume's synopsis (from the standalone editor) and close.
-    fn save_synopsis(&mut self, raw: String, th: String) {
+    fn save_synopsis(&mut self, raw: String, translated_synopsis: String) {
         if let Some(active) = self.active.as_ref() {
-            match crate::workspace::volume::set_synopsis(&active.workspace, &raw, &th) {
+            match crate::workspace::volume::set_synopsis(
+                &active.workspace,
+                &raw,
+                &translated_synopsis,
+            ) {
                 Ok(()) => self.toast = Some(Toast::info("synopsis saved")),
                 Err(e) => self.toast = Some(Toast::error(format!("save failed: {e}"))),
             }
@@ -4518,7 +4603,7 @@ impl App {
     }
 
     /// Persist title edits without changing the project slug.
-    fn save_project_title(&mut self, id: String, raw: String, th: String) {
+    fn save_project_title(&mut self, id: String, raw: String, translated_title: String) {
         self.overlay = Overlay::None;
         let raw = raw.trim().to_string();
         if raw.is_empty() {
@@ -4535,17 +4620,17 @@ impl App {
             return;
         };
         let ws = Workspace::new(dir, 1);
-        match crate::workspace::scaffold::set_title(&ws, &raw, &th) {
+        match crate::workspace::scaffold::set_title(&ws, &raw, &translated_title) {
             Ok(()) => {
                 if let Some(p) = self.projects.iter_mut().find(|p| p.id == id) {
                     p.title = raw.clone();
-                    p.title_th = th.trim().to_string();
+                    p.translated_title = translated_title.trim().to_string();
                 }
                 if let Some(active) = self.active.as_mut()
                     && active.project.id == id
                 {
                     active.project.title = raw;
-                    active.project.title_th = th.trim().to_string();
+                    active.project.translated_title = translated_title.trim().to_string();
                 }
                 self.toast = Some(Toast::info("project name saved"));
             }
@@ -5238,12 +5323,12 @@ fn run_history_status(
 fn glossary_map(ws: &Workspace) -> HashMap<String, String> {
     crate::workspace::glossary::load(ws)
         .into_iter()
-        .map(|t| (t.jp_term.trim().to_string(), t.thai_term))
+        .map(|t| (t.jp_term.trim().to_string(), t.translated_term))
         .collect()
 }
 
 /// Diff two glossary snapshots by jp_term: `(added, changed)` jp_terms (sorted,
-/// capped). "Added" = a term absent before; "changed" = a term whose Thai differs.
+/// capped). "Added" = a term absent before; "changed" = a term whose translation differs.
 fn glossary_delta(
     before: &HashMap<String, String>,
     after: &HashMap<String, String>,
@@ -5251,10 +5336,10 @@ fn glossary_delta(
     const CAP: usize = 100;
     let mut added = Vec::new();
     let mut changed = Vec::new();
-    for (jp, thai) in after {
+    for (jp, translated) in after {
         match before.get(jp) {
             None => added.push(jp.clone()),
-            Some(prev) if prev != thai => changed.push(jp.clone()),
+            Some(prev) if prev != translated => changed.push(jp.clone()),
             _ => {}
         }
     }
@@ -5295,11 +5380,7 @@ fn chapter_ids_list_preview(ids: &[(u32, u32)]) -> String {
         .map(|(vol, ch)| format!("Vol.{vol:02} ch {ch:03}"))
         .collect();
     if ids.len() > shown.len() {
-        format!(
-            "{} +{} more",
-            shown.join(", "),
-            ids.len() - shown.len()
-        )
+        format!("{} +{} more", shown.join(", "), ids.len() - shown.len())
     } else {
         shown.join(", ")
     }
@@ -5386,11 +5467,12 @@ async fn run_import(
     source: PathBuf,
     dest: PathBuf,
     title: String,
-    title_th: String,
+    translated_title: String,
     vol: u32,
     models: ModelSet,
+    target_language: crate::model::TargetLanguage,
     synopsis_raw: String,
-    synopsis_th: String,
+    translated_synopsis: String,
     append: bool,
     tx: &EventTx,
 ) -> anyhow::Result<String> {
@@ -5412,15 +5494,21 @@ async fn run_import(
         let title = title.clone();
         let models = models.clone();
         tokio::task::spawn_blocking(move || {
-            crate::workspace::scaffold::create_project(&dest, &title, &models, vol)?;
+            crate::workspace::scaffold::create_project_for_language(
+                &dest,
+                &title,
+                &models,
+                vol,
+                target_language,
+            )?;
             let ws = Workspace::new(dest.clone(), vol);
-            // Persist the wizard's Thai title / volume synopsis (if any); empty
+            // Persist the wizard's translated title / volume synopsis (if any); empty
             // means skipped, and never clobbers an existing merge target's title.
-            if !title_th.trim().is_empty() {
-                crate::workspace::scaffold::set_title(&ws, &title, &title_th)?;
+            if !translated_title.trim().is_empty() {
+                crate::workspace::scaffold::set_title(&ws, &title, &translated_title)?;
             }
-            if !synopsis_raw.trim().is_empty() || !synopsis_th.trim().is_empty() {
-                crate::workspace::volume::set_synopsis(&ws, &synopsis_raw, &synopsis_th)?;
+            if !synopsis_raw.trim().is_empty() || !translated_synopsis.trim().is_empty() {
+                crate::workspace::volume::set_synopsis(&ws, &synopsis_raw, &translated_synopsis)?;
             }
             Ok::<(), std::io::Error>(())
         })
@@ -6179,7 +6267,8 @@ mod image_refresh_tests {
             id: "old-project".to_string(),
             dir: base.clone(),
             title: "Old Project".to_string(),
-            title_th: String::new(),
+            translated_title: String::new(),
+            target_language: crate::model::TargetLanguage::Thai,
             created: None,
             touched: None,
             volumes: vec![Volume {
@@ -6341,7 +6430,8 @@ mod remote_tests {
                 id: "novel".to_string(),
                 dir: base.clone(),
                 title: "Novel".to_string(),
-                title_th: String::new(),
+                translated_title: String::new(),
+                target_language: crate::model::TargetLanguage::Thai,
                 created: None,
                 touched: None,
                 volumes: vec![Volume {

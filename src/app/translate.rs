@@ -2,7 +2,7 @@
 //!
 //! Top panel: current chapter + chunk N/M LineGauge + three agent activity lines
 //! (role badge, spinner on the active one) + a token/retry meter. Bottom panel: the
-//! streaming Thai preview side-by-side with the JA source and an indigo caret.
+//! streaming translation preview side-by-side with the JA source and an indigo caret.
 
 use std::hash::{Hash, Hasher};
 
@@ -60,7 +60,7 @@ pub struct TranslateScreen {
     chapter_title: String,
     /// (current chunk index 1-based, total chunks).
     chunk: (usize, usize),
-    /// Accumulated Thai preview text.
+    /// Accumulated translated preview text.
     preview: String,
     pending_preview_separator: bool,
     thought_scene: String,
@@ -266,7 +266,7 @@ impl TranslateScreen {
             }
             AppEvent::TranslatorReturned {
                 thought_process,
-                thai_preview,
+                translated_preview,
                 tokens,
                 ..
             } => {
@@ -274,8 +274,8 @@ impl TranslateScreen {
                 self.agent_lines[1] =
                     format!("returned · {} tok", tokens.completion.max(tokens.total));
                 self.set_thought_process(thought_process);
-                if !thai_preview.is_empty() {
-                    // `thai_preview` now carries the chunk's full multi-line Thai.
+                if !translated_preview.is_empty() {
+                    // `translated_preview` now carries the chunk's full multi-line translation.
                     // Separate successive chunks with a blank line so the preview
                     // reads as flowing prose instead of one run-on paragraph.
                     if self.pending_preview_separator
@@ -284,7 +284,7 @@ impl TranslateScreen {
                         self.preview.push_str("\n\n");
                     }
                     self.pending_preview_separator = false;
-                    self.append_preview(thai_preview);
+                    self.append_preview(translated_preview);
                 }
                 // The authoritative running total arrives via UsageUpdate (emitted
                 // right after this event), so don't accumulate here.
@@ -1217,7 +1217,7 @@ impl TranslateScreen {
             .border_set(theme::hairline_set())
             .border_style(Style::default().fg(theme.rule))
             .title(Span::styled(
-                format!(" Thai preview — streaming  ({follow_note}) "),
+                format!(" Translation preview — streaming  ({follow_note}) "),
                 Style::default().fg(theme.ink_soft),
             ))
             .style(Style::default().bg(theme.bg_panel));
@@ -1226,7 +1226,7 @@ impl TranslateScreen {
         self.preview_area = inner;
 
         // Compose the preview lines: a faint placeholder when there's nothing yet,
-        // otherwise the streaming Thai rendered as Markdown. A trailing indigo
+        // otherwise the streaming translation rendered as Markdown. A trailing indigo
         // caret marks the live tail. The Markdown render is memoized so a paused /
         // idle pane is not re-parsed on every 100 ms tick; each streamed append
         // changes the preview's length + tail and so rebuilds.
@@ -1246,7 +1246,7 @@ impl TranslateScreen {
         } else {
             let preview = &self.preview;
             let width = inner.width as usize;
-            let fg = theme.th_text;
+            let fg = theme.translated_text;
             let mut h = std::collections::hash_map::DefaultHasher::new();
             preview.len().hash(&mut h);
             preview_tail(preview).hash(&mut h);
@@ -1574,7 +1574,7 @@ mod queue_panel_tests {
                 scene_analysis: "final tone".into(),
                 glossary_check: "final term".into(),
             },
-            thai_preview: String::new(),
+            translated_preview: String::new(),
             tokens: crate::model::TokenUsage::default(),
         });
         assert_eq!(screen.thought_scene, "final tone");

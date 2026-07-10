@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-honya (本屋) is a Ratatui terminal app for AI-assisted **Japanese → Thai** light-novel translation. It imports an EPUB, pre-processes it (spine-ordered chapters, relocated illustrations, HTML→Markdown cleanse), and runs a three-agent LLM pipeline (Orchestrator · Translator · Reviewer) over an OpenRouter-compatible API. Binary name is `honya`; Rust edition 2024.
+honya (本屋) is a Ratatui terminal app for AI-assisted **Japanese → Thai or English** light-novel translation. It imports an EPUB, pre-processes it (spine-ordered chapters, relocated illustrations, HTML→Markdown cleanse), and runs a three-agent LLM pipeline (Orchestrator · Translator · Reviewer) over an OpenRouter-compatible API. Binary name is `honya`; Rust edition 2024.
 
 ## Commands
 
@@ -60,14 +60,16 @@ Each screen module (`shelf.rs`, `project.rs`, `translate.rs`, `reader.rs`, `lexi
 `run_pipeline` drives a per-chapter / per-chunk state machine, emitting the full `AppEvent` sequence the UI renders. Per chunk: **Translator → Reviewer**, retrying up to `cfg.max_attempts`; the reviewer's feedback is routed back into the next translator attempt.
 
 Two design rules that look surprising but are deliberate:
-- **"Everything uses tools" — except the final append.** When the reviewer approves, the Thai is appended **deterministically, app-side** (`workspace::translation::append_chunk`), *not* via an LLM tool. Only *metadata* mutation (new characters/terms/recap) goes through the Orchestrator's tool loop afterward.
-- **Reference context is scoped per chunk.** `build_reference_ctx` injects only the glossary terms and characters whose JP form actually appears in the chunk text (capped at 80 / 40), re-read every chunk. This stops the injected context from ballooning with the whole accumulated roster as a volume progresses. Continuity = the previous chunk's last N Thai sentences, seeded from the previous *chapter's* tail at a chapter boundary.
+- **"Everything uses tools" — except the final append.** When the reviewer approves, the target-language text is appended **deterministically, app-side** (`workspace::translation::append_chunk`), *not* via an LLM tool. Only *metadata* mutation (new characters/terms/recap) goes through the Orchestrator's tool loop afterward.
+- **Reference context is scoped per chunk.** `build_reference_ctx` injects only the glossary terms and characters whose JP form actually appears in the chunk text (capped at 80 / 40), re-read every chunk. This stops the injected context from ballooning with the whole accumulated roster as a volume progresses. Continuity = the previous chunk's last N translated sentences, seeded from the previous *chapter's* tail at a chapter boundary.
 
 Image-only chapters skip the agents entirely. `RunControl` is a cloneable `AtomicU8` (0 run / 1 pause / 2 stop) the UI toggles and the pipeline polls **between chunks** (pause/stop take effect after the current chunk finishes).
 
 The live run queue is `ChapterQueue`, shared between the UI and pipeline like `RunControl`. It stores `(vol, chapter)` identities because chapter numbers repeat across volumes. The active chapter lives in a separate `running` slot, so UI mutations only touch pending items: enqueue, move up/down, sort, and remove. A single-volume run drains one workspace and rejects cross-volume enqueues; a whole-project run drains by volume and then sweeps any live-added volumes the original plan did not cover. Whenever the UI adds/removes chapters, `App` resyncs the recovery checkpoint so crash resume follows the live queue.
 
 The three agents (`translator.rs`, `reviewer.rs`, plus the Orchestrator metadata turn) — and the Refine agent — each pick their own **provider + model + reasoning effort** (`ModelSet` of `AgentModel { provider, model, effort }`); prompts live in `prompts.rs`. `AgentModel` deserializes a bare model-id string from legacy configs (→ OpenRouter, no effort). The effort, when set, is sent as the request's `reasoning: {"effort": …}` param.
+
+Language is project-owned: `PROJECT.md` persists `target_language`, and every translation, Refine, editor, resume, and export path reads it from the scanned active project. `AppConfig.preferred_language` only seeds the first language choice in the new-project wizard. Older configs accept the legacy `target_language` key as that preference; older projects with no language field default to Thai.
 
 ### LLM layer (`src/llm/`)
 

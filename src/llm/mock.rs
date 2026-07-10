@@ -13,23 +13,23 @@ use super::{
 
 /// Offline canned-response client.
 pub struct MockClient {
-    /// The Thai text returned as `translated_text` for every translation turn.
-    pub canned_thai: String,
+    /// The target-language text returned for every translation turn.
+    pub canned_translation: String,
 }
 
 impl Default for MockClient {
     fn default() -> Self {
         Self {
-            canned_thai: "(ข้อความแปลจำลอง — ไม่มีคีย์ API จึงใช้ไคลเอนต์จำลอง)".to_string(),
+            canned_translation: "(ข้อความแปลจำลอง — ไม่มีคีย์ API จึงใช้ไคลเอนต์จำลอง)".to_string(),
         }
     }
 }
 
 impl MockClient {
     #[allow(dead_code)]
-    pub fn new(canned_thai: impl Into<String>) -> Self {
+    pub fn new(canned_translation: impl Into<String>) -> Self {
         Self {
-            canned_thai: canned_thai.into(),
+            canned_translation: canned_translation.into(),
         }
     }
 
@@ -79,7 +79,7 @@ impl LlmClient for MockClient {
                         "scene_analysis": "(mock)",
                         "glossary_check": "(mock)"
                     },
-                    "translated_text": self.canned_thai,
+                    "translated_text": self.canned_translation,
                     "new_characters": [],
                     "new_terms": [],
                     "continuity_notes": []

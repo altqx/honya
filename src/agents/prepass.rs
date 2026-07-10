@@ -9,11 +9,11 @@
 
 use serde::Deserialize;
 
-use crate::agents::prompts::PREPASS_SYSTEM;
+use crate::agents::prompts::prepass_system;
 use crate::llm::client::{LlmClient, Result};
 use crate::llm::structured::{chat_structured, prepass_schema};
 use crate::llm::{ChatRequest, Message, Usage};
-use crate::model::{Character, GlossaryTerm, StyleExample};
+use crate::model::{Character, GlossaryTerm, StyleExample, TargetLanguage};
 use crate::workspace::{Workspace, characters, glossary, volume};
 
 /// Total raw-source characters fed to the extractor (sampled across chapters).
@@ -35,7 +35,8 @@ pub struct PrepassOut {
 #[derive(Debug, Clone, Deserialize)]
 pub struct PrepassCharacter {
     pub jp_name: String,
-    pub thai_name: String,
+    #[serde(alias = "thai_name")]
+    pub translated_name: String,
     #[serde(default)]
     pub romaji: String,
     #[serde(default)]
@@ -53,7 +54,8 @@ pub struct PrepassCharacter {
 #[derive(Debug, Clone, Deserialize)]
 pub struct PrepassTerm {
     pub jp_term: String,
-    pub thai_term: String,
+    #[serde(alias = "thai_term")]
+    pub translated_term: String,
     #[serde(default)]
     pub romaji: String,
     #[serde(default)]
@@ -65,7 +67,8 @@ pub struct PrepassTerm {
 #[derive(Debug, Clone, Deserialize)]
 pub struct PrepassExample {
     pub jp: String,
-    pub th: String,
+    #[serde(alias = "th")]
+    pub translated_text: String,
     #[serde(default)]
     pub note: String,
 }
@@ -84,18 +87,26 @@ pub async fn run_prepass(
     client: &dyn LlmClient,
     model: &crate::model::AgentModel,
     ws: &Workspace,
+    target_language: TargetLanguage,
 ) -> Result<Option<PrepassSeeded>> {
     let sample = sample_volume_raw(ws);
     if sample.trim().is_empty() {
         return Ok(None);
     }
 
-    let user = format!(
-        "<<VOLUME_RAW_SAMPLE: ตัวอย่างเนื้อหาต้นฉบับภาษาญี่ปุ่นจากหลายบทของเล่มนี้ ใช้สกัดข้อมูลอ้างอิงก่อนเริ่มแปล>>\n{sample}\n<<END_VOLUME_RAW_SAMPLE>>"
-    );
+    let instruction = match target_language {
+        TargetLanguage::Thai => "ตัวอย่างเนื้อหาต้นฉบับภาษาญี่ปุ่นจากหลายบทของเล่มนี้ ใช้สกัดข้อมูลอ้างอิงก่อนเริ่มแปล",
+        TargetLanguage::English => {
+            "Japanese source samples from across this volume; extract reference data before English translation begins"
+        }
+    };
+    let user = format!("<<VOLUME_RAW_SAMPLE: {instruction}>>\n{sample}\n<<END_VOLUME_RAW_SAMPLE>>");
     let req = ChatRequest {
         model: model.model.clone(),
-        messages: vec![Message::system(PREPASS_SYSTEM), Message::user(user)],
+        messages: vec![
+            Message::system(prepass_system(target_language)),
+            Message::user(user),
+        ],
         temperature: Some(0.2),
         reasoning: model.reasoning_param(),
         ..ChatRequest::default()
@@ -116,7 +127,7 @@ pub async fn run_prepass(
         let mut character = Character {
             id: String::new(),
             jp_name: c.jp_name.trim().to_string(),
-            thai_name: c.thai_name.trim().to_string(),
+            translated_name: c.translated_name.trim().to_string(),
             romaji: non_empty(&c.romaji),
             gender: non_empty(&c.gender),
             honorific: non_empty(&c.honorific),
@@ -132,16 +143,16 @@ pub async fn run_prepass(
             notes: non_empty(&c.notes),
             first_seen_chapter: None,
         };
-        // Blank thai_name so upsert preserves the existing rendering.
+        // Blank translated_name so upsert preserves the existing rendering.
         if existing_chars
             .iter()
             .any(|e| character_surface_eq(e, &character.jp_name))
             && existing_chars
                 .iter()
                 .filter(|e| character_surface_eq(e, &character.jp_name))
-                .any(|e| !e.thai_name.trim().is_empty())
+                .any(|e| !e.translated_name.trim().is_empty())
         {
-            character.thai_name = String::new();
+            character.translated_name = String::new();
         }
         // Best-effort: a single bad row must not sink the whole seed.
         if characters::upsert(ws, character).is_ok() {
@@ -165,12 +176,12 @@ pub async fn run_prepass(
         // still refine the rendering as the real translation proceeds.
         let term = GlossaryTerm {
             jp_term: t.jp_term.trim().to_string(),
-            thai_term: t.thai_term.trim().to_string(),
+            translated_term: t.translated_term.trim().to_string(),
             romaji: non_empty(&t.romaji),
             category: non_empty(&t.category),
             gloss: non_empty(&t.gloss),
             policy: None,
-            forbidden_thai: Vec::new(),
+            forbidden_translations: Vec::new(),
             context_rule: None,
             protected: None,
             do_not_translate: None,
@@ -184,10 +195,10 @@ pub async fn run_prepass(
     let examples: Vec<StyleExample> = out
         .style_examples
         .iter()
-        .filter(|e| !e.jp.trim().is_empty() && !e.th.trim().is_empty())
+        .filter(|e| !e.jp.trim().is_empty() && !e.translated_text.trim().is_empty())
         .map(|e| StyleExample {
             jp: e.jp.trim().to_string(),
-            th: e.th.trim().to_string(),
+            translated_text: e.translated_text.trim().to_string(),
             note: non_empty(&e.note),
         })
         .collect();
@@ -295,16 +306,16 @@ mod tests {
             let content = if schema == "prepass_result" {
                 serde_json::json!({
                     "characters": [{
-                        "jp_name": "有月勇", "thai_name": "อาริทสึกิ ยู", "romaji": "Aritsuki Yuu",
+                        "jp_name": "有月勇", "translated_name": "อาริทสึกิ ยู", "romaji": "Aritsuki Yuu",
                         "gender": "male", "aliases": ["勇"], "honorific": "", "speech_style": "ห้วน",
                         "notes": ""
                     }],
                     "terms": [{
-                        "jp_term": "聖剣", "thai_term": "ดาบศักดิ์สิทธิ์", "romaji": "Seiken",
+                        "jp_term": "聖剣", "translated_term": "ดาบศักดิ์สิทธิ์", "romaji": "Seiken",
                         "category": "item", "gloss": "canonical weapon"
                     }],
                     "style_examples": [{
-                        "jp": "彼は笑った。", "th": "เขาหัวเราะออกมา", "note": "สบาย ๆ"
+                        "jp": "彼は笑った。", "translated_text": "เขาหัวเราะออกมา", "note": "สบาย ๆ"
                     }]
                 })
                 .to_string()
@@ -346,6 +357,7 @@ mod tests {
             &SeedingClient,
             &crate::model::AgentModel::openrouter("mock"),
             &ws,
+            TargetLanguage::Thai,
         )
         .await
         .expect("run_prepass ok")
@@ -374,10 +386,25 @@ mod tests {
             &SeedingClient,
             &crate::model::AgentModel::openrouter("mock"),
             &ws,
+            TargetLanguage::Thai,
         )
         .await
         .unwrap();
         assert!(out.is_none(), "no raw chapters → nothing to do");
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn prepass_accepts_legacy_target_field_names() {
+        let out: PrepassOut = serde_json::from_value(serde_json::json!({
+            "characters": [{"jp_name": "鈴", "thai_name": "ริน"}],
+            "terms": [{"jp_term": "魔法", "thai_term": "เวทมนตร์"}],
+            "style_examples": [{"jp": "彼は笑った。", "th": "เขาหัวเราะ"}]
+        }))
+        .unwrap();
+
+        assert_eq!(out.characters[0].translated_name, "ริน");
+        assert_eq!(out.terms[0].translated_term, "เวทมนตร์");
+        assert_eq!(out.style_examples[0].translated_text, "เขาหัวเราะ");
     }
 }

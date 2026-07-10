@@ -18,10 +18,10 @@ pub fn load(ws: &Workspace) -> VolumeData {
 }
 
 /// Set the volume synopsis (raw source + Thai translation) and persist.
-pub fn set_synopsis(ws: &Workspace, raw: &str, thai: &str) -> std::io::Result<()> {
+pub fn set_synopsis(ws: &Workspace, raw: &str, translated: &str) -> std::io::Result<()> {
     let mut data = load(ws);
     data.synopsis_raw = raw.trim().to_string();
-    data.synopsis_th = thai.trim().to_string();
+    data.translated_synopsis = translated.trim().to_string();
     write(ws, &data)
 }
 
@@ -52,8 +52,8 @@ pub fn add_style_examples(ws: &Workspace, examples: Vec<StyleExample>) -> std::i
     let mut data = load(ws);
     for ex in examples {
         let jp = ex.jp.trim();
-        let th = ex.th.trim();
-        if jp.is_empty() || th.is_empty() {
+        let translated = ex.translated_text.trim();
+        if jp.is_empty() || translated.is_empty() {
             continue;
         }
         if data.style_examples.iter().any(|e| e.jp.trim() == jp) {
@@ -61,7 +61,7 @@ pub fn add_style_examples(ws: &Workspace, examples: Vec<StyleExample>) -> std::i
         }
         data.style_examples.push(StyleExample {
             jp: jp.to_string(),
-            th: th.to_string(),
+            translated_text: translated.to_string(),
             note: ex.note.filter(|n| !n.trim().is_empty()),
         });
     }
@@ -383,11 +383,11 @@ pub fn render_body(data: &VolumeData) -> String {
 
     // Volume synopsis (เรื่องย่อ): Thai used as context; raw source kept for reference/reroll.
     s.push_str("## เรื่องย่อเล่ม / Volume Synopsis\n\n");
-    if data.synopsis_th.trim().is_empty() && data.synopsis_raw.trim().is_empty() {
+    if data.translated_synopsis.trim().is_empty() && data.synopsis_raw.trim().is_empty() {
         s.push_str("_ยังไม่มีเรื่องย่อ_\n");
     } else {
-        if !data.synopsis_th.trim().is_empty() {
-            s.push_str(data.synopsis_th.trim());
+        if !data.translated_synopsis.trim().is_empty() {
+            s.push_str(data.translated_synopsis.trim());
             s.push('\n');
         }
         if !data.synopsis_raw.trim().is_empty() {
@@ -400,13 +400,13 @@ pub fn render_body(data: &VolumeData) -> String {
 
     if !data.style_examples.is_empty() {
         s.push_str("## ตัวอย่างสำนวน / Style Examples\n\n");
-        s.push_str("| 日本語 | ไทย | หมายเหตุ |\n");
+        s.push_str("| 日本語 | เป้าหมาย / Target | หมายเหตุ |\n");
         s.push_str("|--------|-----|----------|\n");
         for ex in &data.style_examples {
             s.push_str(&format!(
                 "| {} | {} | {} |\n",
                 cell(&ex.jp),
-                cell(&ex.th),
+                cell(&ex.translated_text),
                 ex.note
                     .as_deref()
                     .map(cell)
@@ -659,9 +659,9 @@ mod tests {
         set_synopsis(&v2, "二巻の原文", "เล่มสอง").unwrap();
 
         assert_eq!(load(&v1).synopsis_raw, "一巻の原文");
-        assert_eq!(load(&v1).synopsis_th, "เล่มหนึ่ง");
+        assert_eq!(load(&v1).translated_synopsis, "เล่มหนึ่ง");
         assert_eq!(load(&v2).synopsis_raw, "二巻の原文");
-        assert_eq!(load(&v2).synopsis_th, "เล่มสอง");
+        assert_eq!(load(&v2).translated_synopsis, "เล่มสอง");
 
         let _ = std::fs::remove_dir_all(&root);
     }

@@ -44,7 +44,7 @@ const NBSP_SENTINEL: &str = "&nbsp;";
 /// Render Markdown `md` into themed, owned ratatui lines.
 ///
 /// `base` is the default foreground for ordinary prose (e.g. `theme.ja_text` /
-/// `theme.th_text`). `width` sizes thematic-break rules; pass `0` if unknown.
+/// `theme.translated_text`). `width` sizes thematic-break rules; pass `0` if unknown.
 /// Wrapping is intentionally left to the `Paragraph` that consumes these lines.
 pub fn render(md: &str, base: Color, theme: &Theme, width: usize) -> Vec<Line<'static>> {
     if md.is_empty() {

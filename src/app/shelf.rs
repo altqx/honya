@@ -58,7 +58,12 @@ impl ShelfScreen {
         self.unimported.clone()
     }
 
-    pub fn handle_key(&mut self, key: KeyEvent, projects: &[Project]) -> Action {
+    pub fn handle_key(
+        &mut self,
+        key: KeyEvent,
+        projects: &[Project],
+        preferred_language: crate::model::TargetLanguage,
+    ) -> Action {
         let rows = self.row_count(projects);
         let sel = self
             .list
@@ -90,16 +95,22 @@ impl ShelfScreen {
             }
             KeyCode::Enter => {
                 if sel == self.import_row_index(projects) {
-                    Action::show_overlay(Overlay::import(self.import_files(), projects))
+                    Action::show_overlay(Overlay::import(
+                        self.import_files(),
+                        projects,
+                        preferred_language,
+                    ))
                 } else if let Some(p) = projects.get(sel) {
                     Action::OpenProject(p.id.clone())
                 } else {
                     Action::None
                 }
             }
-            KeyCode::Char('i') => {
-                Action::show_overlay(Overlay::import(self.import_files(), projects))
-            }
+            KeyCode::Char('i') => Action::show_overlay(Overlay::import(
+                self.import_files(),
+                projects,
+                preferred_language,
+            )),
             KeyCode::Char('d') => {
                 if let Some(p) = projects.get(sel) {
                     Action::show_overlay(Overlay::confirm(
@@ -119,7 +130,8 @@ impl ShelfScreen {
                     Action::show_overlay(Overlay::project_title_edit(
                         p.id.clone(),
                         p.title.clone(),
-                        p.title_th.clone(),
+                        p.translated_title.clone(),
+                        p.target_language,
                     ))
                 } else {
                     Action::None
@@ -137,7 +149,12 @@ impl ShelfScreen {
     /// Mouse: the wheel moves the cursor; a click selects the row under it; a
     /// double-click (or a click on the already-selected row) opens it — opening a
     /// project or, on the import row, the import wizard.
-    pub fn handle_mouse(&mut self, m: MouseInput, projects: &[Project]) -> Action {
+    pub fn handle_mouse(
+        &mut self,
+        m: MouseInput,
+        projects: &[Project],
+        preferred_language: crate::model::TargetLanguage,
+    ) -> Action {
         match m.gesture {
             MouseGesture::ScrollUp => {
                 self.select_delta(projects, -1);
@@ -161,6 +178,7 @@ impl ShelfScreen {
                         return Action::show_overlay(Overlay::import(
                             self.import_files(),
                             projects,
+                            preferred_language,
                         ));
                     }
                     if let Some(p) = projects.get(target) {
@@ -378,10 +396,10 @@ fn project_row(p: &Project, selected: bool, name_w: usize, theme: &Theme) -> Lis
         Style::default().fg(theme.ink).bg(row_bg)
     };
 
-    let name_src = if p.title_th.trim().is_empty() {
+    let name_src = if p.translated_title.trim().is_empty() {
         p.title.clone()
     } else {
-        format!("{} · {}", p.title, p.title_th)
+        format!("{} · {}", p.title, p.translated_title)
     };
     let name = truncate_cols(&thai_display_safe(&name_src), name_w);
     let name_padded = pad_to_cols(&name, name_w);
@@ -528,7 +546,8 @@ mod tests {
             id: id.to_string(),
             dir: std::env::temp_dir().join(id),
             title: id.to_string(),
-            title_th: String::new(),
+            translated_title: String::new(),
+            target_language: crate::model::TargetLanguage::Thai,
             created: None,
             touched: None,
             volumes: Vec::new(),
@@ -557,12 +576,20 @@ mod tests {
         let la = s.list_area;
 
         // Row 0 starts selected; click the second project row → selects, no open.
-        let a = s.handle_mouse(click(false, la.x + 4, la.y + 1), &projects);
+        let a = s.handle_mouse(
+            click(false, la.x + 4, la.y + 1),
+            &projects,
+            crate::model::TargetLanguage::Thai,
+        );
         assert!(matches!(a, Action::None));
         assert_eq!(s.list.selected(), Some(1));
 
         // Clicking the already-selected project opens it.
-        match s.handle_mouse(click(false, la.x + 4, la.y + 1), &projects) {
+        match s.handle_mouse(
+            click(false, la.x + 4, la.y + 1),
+            &projects,
+            crate::model::TargetLanguage::Thai,
+        ) {
             Action::OpenProject(id) => assert_eq!(id, "beta"),
             other => panic!("expected OpenProject, got {other:?}"),
         }
@@ -580,6 +607,7 @@ mod tests {
                 row: 0,
             },
             &projects,
+            crate::model::TargetLanguage::Thai,
         );
         assert_eq!(s.list.selected(), Some(0), "scroll up at the top stays put");
         for _ in 0..5 {
@@ -590,6 +618,7 @@ mod tests {
                     row: 0,
                 },
                 &projects,
+                crate::model::TargetLanguage::Thai,
             );
         }
         assert_eq!(s.list.selected(), Some(2), "clamps at the import row");

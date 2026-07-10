@@ -143,7 +143,7 @@ pub fn chunk_marker_line_in(text: &str, chunk: u32) -> Option<u32> {
         .map(|i| i as u32)
 }
 
-/// Readable Thai prose for `chunk`, with honya markers and review banner stripped.
+/// Readable translated prose for `chunk`, with honya markers and review banner stripped.
 /// Returns `None` when the chunk marker is absent.
 pub fn chunk_prose_in(text: &str, chunk: u32) -> Option<String> {
     chunk_block_ranges(text)
@@ -416,15 +416,15 @@ pub async fn append_chunk(
     ws: &Workspace,
     chapter: u32,
     chunk_index: u32,
-    thai_text: &str,
+    translated_text: &str,
 ) -> std::io::Result<usize> {
     let marker = chunk_marker(chunk_index);
 
     // Trailing blank line keeps successive chunks separated.
-    let mut block = String::with_capacity(thai_text.len() + marker.len() + 4);
+    let mut block = String::with_capacity(translated_text.len() + marker.len() + 4);
     block.push_str(&marker);
     block.push('\n');
-    block.push_str(thai_text.trim_end_matches('\n'));
+    block.push_str(translated_text.trim_end_matches('\n'));
     block.push_str("\n\n");
 
     append_guarded(ws, chapter, &marker, &block).await
@@ -439,7 +439,7 @@ pub async fn append_chunk_needs_review(
     ws: &Workspace,
     chapter: u32,
     chunk_index: u32,
-    thai_text: &str,
+    translated_text: &str,
     attempts: u32,
     reason: &str,
 ) -> std::io::Result<usize> {
@@ -466,7 +466,7 @@ pub async fn append_chunk_needs_review(
         }
     }
     block.push('\n');
-    block.push_str(thai_text.trim_end_matches('\n'));
+    block.push_str(translated_text.trim_end_matches('\n'));
     block.push_str("\n\n");
 
     append_guarded(ws, chapter, &marker, &block).await
@@ -748,7 +748,7 @@ mod tests {
         );
         assert!(
             body.contains("คำแปลที่ยังไม่ผ่านการตรวจ"),
-            "the last attempt's Thai is committed, not dropped"
+            "the last attempted translation is committed, not dropped"
         );
         assert!(body.contains("meaning drift"), "reviewer's reason surfaced");
 

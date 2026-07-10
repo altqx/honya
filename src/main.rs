@@ -1,4 +1,4 @@
-//! honya 本屋 — a Ratatui TUI for AI-assisted Japanese→Thai light-novel translation.
+//! honya 本屋 — a Ratatui TUI for AI-assisted Japanese→Thai/English light-novel translation.
 //! Owns config load, terminal lifecycle, and async event fan-in.
 
 // Needed for the refine agent's large `json!` tool schema.
@@ -203,7 +203,7 @@ pub fn build_clients(cfg: &AppConfig) -> anyhow::Result<llm::ClientSet> {
 }
 
 fn print_help() {
-    println!("honya 本屋 — AI-assisted Japanese → Thai light-novel translation\n");
+    println!("honya 本屋 — AI-assisted Japanese → Thai / English light-novel translation\n");
     println!("USAGE:");
     println!("    honya             Launch the TUI in the current directory");
     println!("    honya --remote    Launch and enable web remote control for this session");

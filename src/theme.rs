@@ -29,7 +29,7 @@ pub struct Theme {
     pub status_warn: Color,
     pub status_image: Color,
     pub ja_text: Color,
-    pub th_text: Color,
+    pub translated_text: Color,
     pub stream_cursor: Color,
 }
 
@@ -53,7 +53,7 @@ impl Theme {
             status_warn: Color::Rgb(176, 138, 74),   // 琥珀
             status_image: Color::Rgb(150, 120, 96),  // clay
             ja_text: Color::Rgb(45, 42, 38),         // = ink
-            th_text: Color::Rgb(38, 46, 58),         // a hair cooler than ink
+            translated_text: Color::Rgb(38, 46, 58), // a hair cooler than ink
             stream_cursor: Color::Rgb(58, 80, 120),  // = accent
         }
     }
@@ -78,7 +78,7 @@ impl Theme {
             status_warn: rgb(212, 176, 110),    // 琥珀
             status_image: rgb(186, 152, 120),   // clay
             ja_text: rgb(232, 228, 220),
-            th_text: rgb(214, 224, 236),
+            translated_text: rgb(214, 224, 236),
             stream_cursor: rgb(132, 156, 204),
         }
     }
@@ -110,7 +110,7 @@ impl Theme {
             status_warn: Color::Indexed(3),
             status_image: Color::Indexed(5), // magenta (no ANSI brown)
             ja_text: Color::Reset,
-            th_text: Color::Reset,
+            translated_text: Color::Reset,
             stream_cursor: Color::Indexed(6),
         }
     }
@@ -134,7 +134,7 @@ impl Theme {
             status_warn: rgb(250, 189, 47),
             status_image: rgb(254, 128, 25),
             ja_text: rgb(235, 219, 178),
-            th_text: rgb(235, 219, 178),
+            translated_text: rgb(235, 219, 178),
             stream_cursor: rgb(131, 165, 152),
         }
     }
@@ -158,7 +158,7 @@ impl Theme {
             status_warn: rgb(235, 203, 139),  // nord13
             status_image: rgb(208, 135, 112), // nord12
             ja_text: rgb(236, 239, 244),
-            th_text: rgb(229, 233, 240), // nord5
+            translated_text: rgb(229, 233, 240), // nord5
             stream_cursor: rgb(136, 192, 208),
         }
     }
@@ -182,7 +182,7 @@ impl Theme {
             status_warn: rgb(224, 175, 104),
             status_image: rgb(255, 158, 100),
             ja_text: rgb(192, 202, 245),
-            th_text: rgb(192, 202, 245),
+            translated_text: rgb(192, 202, 245),
             stream_cursor: rgb(122, 162, 247),
         }
     }
@@ -206,7 +206,7 @@ impl Theme {
             status_warn: rgb(241, 250, 140),
             status_image: rgb(255, 184, 108),
             ja_text: rgb(248, 248, 242),
-            th_text: rgb(248, 248, 242),
+            translated_text: rgb(248, 248, 242),
             stream_cursor: rgb(189, 147, 249),
         }
     }
@@ -230,7 +230,7 @@ impl Theme {
             status_warn: rgb(249, 226, 175),
             status_image: rgb(250, 179, 135), // peach
             ja_text: rgb(205, 214, 244),
-            th_text: rgb(205, 214, 244),
+            translated_text: rgb(205, 214, 244),
             stream_cursor: rgb(137, 180, 250),
         }
     }
@@ -254,7 +254,7 @@ impl Theme {
             status_warn: rgb(181, 137, 0),
             status_image: rgb(203, 75, 22),
             ja_text: rgb(147, 161, 161),
-            th_text: rgb(147, 161, 161),
+            translated_text: rgb(147, 161, 161),
             stream_cursor: rgb(38, 139, 210),
         }
     }
@@ -278,7 +278,7 @@ impl Theme {
             status_warn: rgb(181, 137, 0),
             status_image: rgb(203, 75, 22),
             ja_text: rgb(88, 110, 117),
-            th_text: rgb(71, 91, 98),
+            translated_text: rgb(71, 91, 98),
             stream_cursor: rgb(38, 139, 210),
         }
     }
@@ -302,7 +302,7 @@ impl Theme {
             status_warn: rgb(219, 188, 127),
             status_image: rgb(230, 152, 117),
             ja_text: rgb(211, 198, 170),
-            th_text: rgb(211, 198, 170),
+            translated_text: rgb(211, 198, 170),
             stream_cursor: rgb(127, 187, 179),
         }
     }
@@ -327,7 +327,7 @@ impl Theme {
             status_warn: rgb(246, 193, 119),    // gold
             status_image: rgb(235, 188, 186),   // rose
             ja_text: rgb(224, 222, 244),
-            th_text: rgb(224, 222, 244),
+            translated_text: rgb(224, 222, 244),
             stream_cursor: rgb(196, 167, 231),
         }
     }

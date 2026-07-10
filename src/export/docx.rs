@@ -131,9 +131,9 @@ fn document_xml(book: &ExportBook, embedded: &HashMap<String, Embedded>) -> Stri
     if let Some(label) = book.volume_label.as_ref().filter(|l| !l.trim().is_empty()) {
         body.push_str(&para_runs(&[run(label.trim(), true, false)]));
     }
-    let synopsis = book.synopsis_th.trim();
+    let synopsis = book.translated_synopsis.trim();
     if !synopsis.is_empty() {
-        body.push_str(&heading_p("เรื่องย่อ", 28));
+        body.push_str(&heading_p(book.synopsis_heading(), 28));
         for para in synopsis.split("\n\n") {
             let p = para.trim();
             if !p.is_empty() {
@@ -427,7 +427,7 @@ mod tests {
             project_id: "t".to_string(),
             volume_number: 1,
             volume_label: None,
-            synopsis_th: "ย่อ".to_string(),
+            translated_synopsis: "ย่อ".to_string(),
             language: "th".to_string(),
             chapters: vec![ExportChapter {
                 number: 1,

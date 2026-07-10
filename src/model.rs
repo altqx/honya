@@ -16,9 +16,12 @@ pub struct Project {
     pub dir: PathBuf,
     /// Display title from PROJECT.md (falls back to id).
     pub title: String,
-    /// Thai title, empty until set.
+    /// Target-language title, empty until set.
+    #[serde(default, alias = "title_th")]
+    pub translated_title: String,
+    /// Language this project is translated into. Older projects default to Thai.
     #[serde(default)]
-    pub title_th: String,
+    pub target_language: TargetLanguage,
     #[serde(default)]
     pub created: Option<DateTime<Utc>>,
     #[serde(default)]
@@ -90,7 +93,7 @@ impl Chapter {
         self.status == ChapterStatus::NeedsReview && self.skipped_chunks > 0
     }
 
-    /// Chunks that carry real Thai (committed total minus skipped-empty chunks).
+    /// Chunks that carry translated text (committed total minus skipped-empty chunks).
     pub fn translated_chunks(&self) -> u32 {
         self.committed_chunks.saturating_sub(self.skipped_chunks)
     }
@@ -622,6 +625,37 @@ impl ServiceTier {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum TargetLanguage {
+    #[default]
+    Thai,
+    English,
+}
+
+impl TargetLanguage {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Thai => "Thai",
+            Self::English => "English",
+        }
+    }
+
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Thai => "th",
+            Self::English => "en",
+        }
+    }
+
+    pub fn cycled(self) -> Self {
+        match self {
+            Self::Thai => Self::English,
+            Self::English => Self::Thai,
+        }
+    }
+}
+
 /// Global, persisted app configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -633,8 +667,11 @@ pub struct AppConfig {
     pub chunk_target_tokens: usize,
     /// Hard ceiling for a single chunk.
     pub chunk_hard_cap_tokens: usize,
-    /// Sentences of prior Thai injected for continuity.
+    /// Sentences of prior target-language text injected for continuity.
     pub continuity_sentences: usize,
+    /// Initial language selected when creating a new project.
+    #[serde(default, alias = "target_language")]
+    pub preferred_language: TargetLanguage,
     /// Loop watchdog: a chapter that makes no pipeline progress for this many
     /// seconds — a degenerate repetition loop or a dead stall — is abandoned and
     /// re-translated whole. `0` disables the time/stall arm of the watchdog (the
@@ -752,6 +789,7 @@ impl Default for AppConfig {
             chunk_target_tokens: 1000,
             chunk_hard_cap_tokens: 1200,
             continuity_sentences: 5,
+            preferred_language: TargetLanguage::default(),
             loop_stall_secs: default_loop_stall_secs(),
             max_chapter_retranslates: default_max_chapter_retranslates(),
             referer: Some("https://github.com/altqx/honya".into()),
@@ -780,7 +818,7 @@ pub struct TranslatorOut {
     pub thought_process: ThoughtProcess,
     pub translated_text: String,
     /// Who is narrating at the END of this chunk — the first-person POV character
-    /// and their Thai self-pronoun, or third-person. Carried into the next chunk so
+    /// and their target-language self-reference, or third-person. Carried into the next chunk so
     /// a POV section that spans a chunk boundary keeps the right "I". Empty when
     /// unknown/unchanged.
     #[serde(default)]
@@ -811,7 +849,8 @@ pub enum ThoughtProcessField {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewCharacter {
     pub jp_name: String,
-    pub thai_name: String,
+    #[serde(alias = "thai_name")]
+    pub translated_name: String,
     pub gender: String,
     pub notes: String,
 }
@@ -819,13 +858,14 @@ pub struct NewCharacter {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewTerm {
     pub jp_term: String,
-    pub thai_term: String,
+    #[serde(alias = "thai_term")]
+    pub translated_term: String,
     pub category: String,
     pub gloss: String,
     #[serde(default)]
     pub policy: Option<TermPolicy>,
-    #[serde(default)]
-    pub forbidden_thai: Vec<String>,
+    #[serde(default, alias = "forbidden_thai")]
+    pub forbidden_translations: Vec<String>,
     #[serde(default)]
     pub context_rule: Option<String>,
     #[serde(default)]
@@ -869,7 +909,8 @@ pub enum ReviewVerdict {
 pub struct Character {
     pub id: String,
     pub jp_name: String,
-    pub thai_name: String,
+    #[serde(alias = "thai_name")]
+    pub translated_name: String,
     #[serde(default)]
     pub romaji: Option<String>,
     #[serde(default)]
@@ -880,10 +921,10 @@ pub struct Character {
     pub speech_style: Option<String>,
     #[serde(default)]
     pub relationships: Vec<Relationship>,
-    /// JP variants that render to this character's canonical Thai name.
+    /// JP variants that render to this character's canonical translated name.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub aliases: Vec<String>,
-    /// Address forms for this character, each with its own Thai rendering.
+    /// Address forms for this character, each with its own translated rendering.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub also_called: Vec<AltName>,
     #[serde(default)]
@@ -892,12 +933,12 @@ pub struct Character {
     pub first_seen_chapter: Option<u32>,
 }
 
-/// Alternate address form with a fixed Thai rendering.
+/// Alternate address form with a fixed translated rendering.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AltName {
     pub jp: String,
-    #[serde(default)]
-    pub thai: String,
+    #[serde(default, alias = "thai")]
+    pub translated_name: String,
     /// Who uses this name, when that context matters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub by: Option<String>,
@@ -926,7 +967,8 @@ pub enum TermPolicy {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GlossaryTerm {
     pub jp_term: String,
-    pub thai_term: String,
+    #[serde(alias = "thai_term")]
+    pub translated_term: String,
     #[serde(default)]
     pub romaji: Option<String>,
     #[serde(default)]
@@ -937,9 +979,13 @@ pub struct GlossaryTerm {
     /// to [`TermPolicy::HardLocked`]; otherwise the entry is treated as preferred.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy: Option<TermPolicy>,
-    /// Thai renderings that must not be used for this Japanese term.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub forbidden_thai: Vec<String>,
+    /// Target-language renderings that must not be used for this Japanese term.
+    #[serde(
+        default,
+        alias = "forbidden_thai",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub forbidden_translations: Vec<String>,
     /// Context rule for [`TermPolicy::ContextDependent`] entries.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_rule: Option<String>,
@@ -959,17 +1005,17 @@ pub struct VolumeData {
     /// User-provided volume synopsis (เรื่องย่อ), raw untranslated source text.
     #[serde(default)]
     pub synopsis_raw: String,
-    /// Thai translation of `synopsis_raw` — injected into every chunk's reference
+    /// Target-language translation of `synopsis_raw` — injected into every chunk's reference
     /// context so the agents share the volume's overall arc.
-    #[serde(default)]
-    pub synopsis_th: String,
+    #[serde(default, alias = "synopsis_th")]
+    pub translated_synopsis: String,
     #[serde(default)]
     pub running_recap: String,
     /// True once the pre-extraction pass has seeded the roster/glossary for this
     /// volume, so a re-run or resume does not repeat it.
     #[serde(default)]
     pub prepass_done: bool,
-    /// A few short JP→TH exemplar pairs demonstrating the target register, injected
+    /// A few short Japanese→target exemplar pairs demonstrating the target register, injected
     /// into every Translator call as few-shot style anchors. Seeded by the
     /// pre-extraction pass and editable by hand in VOLUME.md.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1003,15 +1049,16 @@ pub struct VolumeData {
     pub bookmarks: Vec<ReaderBookmark>,
 }
 
-/// One short JP→TH exemplar pair anchoring the target translation register. A
+/// One short Japanese→target exemplar pair anchoring the translation register. A
 /// handful of these injected into the Translator prompt steer voice/tone far more
 /// concretely than abstract STYLE.md prose.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StyleExample {
     /// Source Japanese sentence/snippet.
     pub jp: String,
-    /// Its target-register Thai rendering.
-    pub th: String,
+    /// Its target-register rendering.
+    #[serde(alias = "th")]
+    pub translated_text: String,
     /// Optional one-line note on what the pair demonstrates (register, pronoun, …).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
@@ -1351,7 +1398,7 @@ pub enum AppEvent {
         chunk: usize,
         attempt: u32,
         thought_process: ThoughtProcess,
-        thai_preview: String,
+        translated_preview: String,
         tokens: TokenUsage,
     },
     ReviewerRequested {
@@ -1399,11 +1446,11 @@ pub enum AppEvent {
     CharacterUpserted {
         id: String,
         jp_name: String,
-        thai_name: String,
+        translated_name: String,
     },
     GlossaryUpserted {
         jp_term: String,
-        thai_term: String,
+        translated_term: String,
     },
     VolumeRecapUpdated {
         chapter: u32,
@@ -1676,7 +1723,8 @@ mod progress_tests {
             id: "p".into(),
             dir: PathBuf::from("/tmp/p"),
             title: "p".into(),
-            title_th: String::new(),
+            translated_title: String::new(),
+            target_language: TargetLanguage::Thai,
             created: None,
             touched: None,
             volumes: volumes
@@ -1853,6 +1901,132 @@ mod provider_model_tests {
         let ms: ModelSet = serde_json::from_str(json).unwrap();
         assert_eq!(ms.translator, AgentModel::openrouter("a/t"));
         assert_eq!(ms.refine, default_refine_model()); // serde default fills it
+    }
+
+    #[test]
+    fn app_config_defaults_missing_preferred_language_to_thai() {
+        let mut value = serde_json::to_value(AppConfig::default()).unwrap();
+        value.as_object_mut().unwrap().remove("preferred_language");
+
+        let cfg: AppConfig = serde_json::from_value(value).unwrap();
+        assert_eq!(cfg.preferred_language, TargetLanguage::Thai);
+    }
+
+    #[test]
+    fn app_config_round_trips_english_preferred_language() {
+        let cfg = AppConfig {
+            preferred_language: TargetLanguage::English,
+            ..AppConfig::default()
+        };
+        let value = serde_json::to_value(&cfg).unwrap();
+        assert_eq!(value["preferred_language"], "english");
+        assert!(value.get("target_language").is_none());
+
+        let loaded: AppConfig = serde_json::from_value(value).unwrap();
+        assert_eq!(loaded.preferred_language, TargetLanguage::English);
+    }
+
+    #[test]
+    fn app_config_migrates_legacy_target_language_to_preference() {
+        let mut value = serde_json::to_value(AppConfig::default()).unwrap();
+        let object = value.as_object_mut().unwrap();
+        object.remove("preferred_language");
+        object.insert("target_language".into(), serde_json::json!("english"));
+
+        let cfg: AppConfig = serde_json::from_value(value).unwrap();
+        assert_eq!(cfg.preferred_language, TargetLanguage::English);
+    }
+
+    #[test]
+    fn legacy_target_field_names_load_and_serialize_as_neutral_names() {
+        let project: Project = serde_json::from_value(serde_json::json!({
+            "id": "novel",
+            "dir": "/tmp/novel",
+            "title": "小説",
+            "title_th": "นิยาย"
+        }))
+        .unwrap();
+        assert_eq!(project.translated_title, "นิยาย");
+        assert_eq!(project.target_language, TargetLanguage::Thai);
+        let project_json = serde_json::to_value(&project).unwrap();
+        assert_eq!(project_json["translated_title"], "นิยาย");
+        assert!(project_json.get("title_th").is_none());
+
+        let character: Character = serde_json::from_value(serde_json::json!({
+            "id": "rin",
+            "jp_name": "鈴",
+            "thai_name": "ริน",
+            "also_called": [{"jp": "鈴ちゃん", "thai": "รินจัง"}]
+        }))
+        .unwrap();
+        assert_eq!(character.translated_name, "ริน");
+        assert_eq!(character.also_called[0].translated_name, "รินจัง");
+        let character_json = serde_json::to_value(&character).unwrap();
+        assert_eq!(character_json["translated_name"], "ริน");
+        assert_eq!(character_json["also_called"][0]["translated_name"], "รินจัง");
+        assert!(character_json.get("thai_name").is_none());
+        assert!(character_json["also_called"][0].get("thai").is_none());
+
+        let term: GlossaryTerm = serde_json::from_value(serde_json::json!({
+            "jp_term": "魔法",
+            "thai_term": "เวทมนตร์",
+            "forbidden_thai": ["มายากล"]
+        }))
+        .unwrap();
+        assert_eq!(term.translated_term, "เวทมนตร์");
+        assert_eq!(term.forbidden_translations, ["มายากล"]);
+        let term_json = serde_json::to_value(&term).unwrap();
+        assert_eq!(term_json["translated_term"], "เวทมนตร์");
+        assert_eq!(term_json["forbidden_translations"][0], "มายากล");
+        assert!(term_json.get("thai_term").is_none());
+        assert!(term_json.get("forbidden_thai").is_none());
+
+        let volume: VolumeData = serde_json::from_value(serde_json::json!({
+            "synopsis_th": "เรื่องย่อ",
+            "style_examples": [{"jp": "彼は笑った。", "th": "เขาหัวเราะ"}]
+        }))
+        .unwrap();
+        assert_eq!(volume.translated_synopsis, "เรื่องย่อ");
+        assert_eq!(volume.style_examples[0].translated_text, "เขาหัวเราะ");
+        let volume_json = serde_json::to_value(&volume).unwrap();
+        assert_eq!(volume_json["translated_synopsis"], "เรื่องย่อ");
+        assert_eq!(
+            volume_json["style_examples"][0]["translated_text"],
+            "เขาหัวเราะ"
+        );
+        assert!(volume_json.get("synopsis_th").is_none());
+        assert!(volume_json["style_examples"][0].get("th").is_none());
+    }
+
+    #[test]
+    fn legacy_translator_discovery_fields_remain_readable() {
+        let out: TranslatorOut = serde_json::from_value(serde_json::json!({
+            "thought_process": {"scene_analysis": "", "glossary_check": ""},
+            "translated_text": "ข้อความ",
+            "new_characters": [{
+                "jp_name": "鈴",
+                "thai_name": "ริน",
+                "gender": "female",
+                "notes": ""
+            }],
+            "new_terms": [{
+                "jp_term": "魔法",
+                "thai_term": "เวทมนตร์",
+                "category": "concept",
+                "gloss": "",
+                "forbidden_thai": ["มายากล"]
+            }]
+        }))
+        .unwrap();
+
+        assert_eq!(out.new_characters[0].translated_name, "ริน");
+        assert_eq!(out.new_terms[0].translated_term, "เวทมนตร์");
+        assert_eq!(out.new_terms[0].forbidden_translations, ["มายากล"]);
+        let value = serde_json::to_value(out).unwrap();
+        assert!(value["new_characters"][0].get("thai_name").is_none());
+        assert!(value["new_terms"][0].get("thai_term").is_none());
+        assert_eq!(value["new_characters"][0]["translated_name"], "ริน");
+        assert_eq!(value["new_terms"][0]["translated_term"], "เวทมนตร์");
     }
 
     #[test]

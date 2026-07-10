@@ -85,8 +85,8 @@ pub struct RemoteChapter {
 pub struct RemoteProject {
     pub id: String,
     pub title: String,
-    #[serde(default)]
-    pub title_th: String,
+    #[serde(default, rename = "title_th", alias = "translated_title")]
+    pub translated_title: String,
     pub volumes: u32,
     pub chapters: u32,
     pub done: u32,
@@ -94,15 +94,15 @@ pub struct RemoteProject {
 }
 
 /// One volume of the open project, projected for the volume switcher + recap.
-/// `recap` / `synopsis_th` are only populated for the *active* volume (a single
+/// `recap` / translated synopsis are only populated for the *active* volume (a single
 /// disk read); other volumes carry the counts and label only.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemoteVolume {
     pub number: u32,
     #[serde(default)]
     pub label: Option<String>,
-    #[serde(default)]
-    pub synopsis_th: String,
+    #[serde(default, rename = "synopsis_th", alias = "translated_synopsis")]
+    pub translated_synopsis: String,
     #[serde(default)]
     pub recap: String,
     pub done: u32,
@@ -114,7 +114,8 @@ pub struct RemoteVolume {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemoteCharacter {
     pub jp_name: String,
-    pub thai_name: String,
+    #[serde(rename = "thai_name", alias = "translated_name")]
+    pub translated_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub romaji: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -133,7 +134,8 @@ pub struct RemoteCharacter {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemoteTerm {
     pub jp_term: String,
-    pub thai_term: String,
+    #[serde(rename = "thai_term", alias = "translated_term")]
+    pub translated_term: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub romaji: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -333,7 +335,7 @@ mod tests {
             projects: vec![RemoteProject {
                 id: "some-ln".into(),
                 title: "Some LN".into(),
-                title_th: "ไลท์โนเวลบางเล่ม".into(),
+                translated_title: "ไลท์โนเวลบางเล่ม".into(),
                 volumes: 2,
                 chapters: 20,
                 done: 7,
@@ -342,7 +344,7 @@ mod tests {
             volumes: vec![RemoteVolume {
                 number: 1,
                 label: Some("黎明".into()),
-                synopsis_th: "เรื่องย่อ".into(),
+                translated_synopsis: "เรื่องย่อ".into(),
                 recap: "สรุปจนถึงตอนนี้".into(),
                 done: 2,
                 total: 5,
@@ -351,14 +353,14 @@ mod tests {
             lexicon: RemoteLexicon {
                 characters: vec![RemoteCharacter {
                     jp_name: "鈴".into(),
-                    thai_name: "ริน".into(),
+                    translated_name: "ริน".into(),
                     romaji: Some("Rin".into()),
                     first_seen_chapter: Some(1),
                     ..Default::default()
                 }],
                 glossary: vec![RemoteTerm {
                     jp_term: "魔法".into(),
-                    thai_term: "เวทมนตร์".into(),
+                    translated_term: "เวทมนตร์".into(),
                     policy: "preferred".into(),
                     ..Default::default()
                 }],
@@ -396,12 +398,12 @@ mod tests {
         let d = RemoteDelta::Lexicon(RemoteLexicon {
             characters: vec![RemoteCharacter {
                 jp_name: "鈴".into(),
-                thai_name: "ริน".into(),
+                translated_name: "ริน".into(),
                 ..Default::default()
             }],
             glossary: vec![RemoteTerm {
                 jp_term: "魔法".into(),
-                thai_term: "เวทมนตร์".into(),
+                translated_term: "เวทมนตร์".into(),
                 policy: "preferred".into(),
                 ..Default::default()
             }],
@@ -410,6 +412,9 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&wire).unwrap();
         assert_eq!(v["data"]["kind"], "lexicon");
         assert_eq!(v["data"]["characters"][0]["thai_name"], "ริน");
+        assert_eq!(v["data"]["glossary"][0]["thai_term"], "เวทมนตร์");
+        assert!(v["data"]["characters"][0].get("translated_name").is_none());
+        assert!(v["data"]["glossary"][0].get("translated_term").is_none());
         assert_eq!(v["data"]["glossary"][0]["policy"], "preferred");
         let back: RemoteDelta = serde_json::from_value(v["data"].clone()).unwrap();
         assert_eq!(back, d);

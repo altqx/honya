@@ -1,6 +1,6 @@
 //! Drives the per-chapter / per-chunk pipeline and emits the UI `AppEvent` stream.
 //! Image-only chapters skip agents; prose runs translate → audit → review. Approved
-//! Thai is appended app-side, not via an LLM tool; exhausted retries are committed
+//! Target-language text is appended app-side; exhausted retries are committed
 //! with a review-needed marker so the chapter can finish.
 
 use std::collections::{HashSet, VecDeque};
@@ -10,14 +10,15 @@ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::agents::audit::{
-    advisory_findings_with_references, audit_character_pronoun_rules, audit_translation_with_terms,
-    normalize_japanese_punctuation_residue, strip_copied_continuity,
+    advisory_findings_with_references_for_language, audit_character_pronoun_rules,
+    audit_translation_for_language, normalize_japanese_punctuation_residue,
+    strip_copied_continuity_for_language,
 };
 use crate::agents::chunk::{Chunk, chunk_chapter};
 use crate::agents::coherence;
 use crate::agents::continuity;
 use crate::agents::prepass;
-use crate::agents::prompts::{ORCHESTRATOR_SYSTEM, build_orchestrator_metadata_msg};
+use crate::agents::prompts::{build_orchestrator_metadata_msg, orchestrator_system};
 use crate::agents::reviewer::review_chunk;
 use crate::agents::tools::{WorkspaceTools, orchestrator_tools};
 use crate::agents::translator::{TranslatorStreamError, translate_chunk_streaming};
@@ -27,8 +28,8 @@ use crate::llm::tool_loop::run_tool_loop;
 use crate::llm::{ChatRequest, Message, Tool, Usage};
 use crate::model::{
     AgentModel, AgentRole, AppConfig, AppEvent, ChapterStatus, ChunkState, ContinuityNote, EventTx,
-    GlossaryTerm, LogLevel, ModelSet, ReviewVerdict, ReviewerOut, ServiceTier, TokenUsage,
-    TranslatorOut, UsageStats,
+    GlossaryTerm, LogLevel, ModelSet, ReviewVerdict, ReviewerOut, ServiceTier, TargetLanguage,
+    TokenUsage, TranslatorOut, UsageStats,
 };
 use crate::workspace::{Workspace, characters, data_block, glossary, translation, volume};
 
@@ -521,6 +522,7 @@ pub struct PipelineCtx {
     pub ws: Workspace,
     pub models: ModelSet,
     pub cfg: AppConfig,
+    pub target_language: TargetLanguage,
     pub tx: EventTx,
     pub ctl: RunControl,
     /// The live chapter queue this run drains. Shared with the UI so chapters can be
@@ -562,6 +564,7 @@ impl PipelineCtx {
             ws: Workspace::new(self.ws.root.clone(), vol),
             models: self.models.clone(),
             cfg: self.cfg.clone(),
+            target_language: self.target_language,
             tx: self.tx.clone(),
             ctl: self.ctl.clone(),
             queue: self.queue.clone(),
@@ -685,7 +688,14 @@ async fn maybe_run_prepass(ctx: &PipelineCtx, acc: &mut Acc) {
             return;
         }
     };
-    match prepass::run_prepass(prepass_client.as_ref(), &ctx.models.translator, &ctx.ws).await {
+    match prepass::run_prepass(
+        prepass_client.as_ref(),
+        &ctx.models.translator,
+        &ctx.ws,
+        ctx.target_language,
+    )
+    .await
+    {
         Ok(Some(seeded)) => {
             acc.run.add(&stats_from_usage(&seeded.usage));
             note_served_tier(ctx, acc, &ctx.models.translator, &seeded.usage);
@@ -1164,7 +1174,17 @@ fn characters_for_chunk(
 /// take effect immediately. `prev_chunk_text` (the previous chunk's source) keeps a
 /// character in scope across a chunk boundary even when this chunk refers to them
 /// only by pronoun — the case the POV/pronoun handling most needs.
+#[cfg(test)]
 fn build_reference_ctx(ws: &Workspace, chunk_text: &str, prev_chunk_text: Option<&str>) -> String {
+    build_reference_ctx_for_language(ws, chunk_text, prev_chunk_text, TargetLanguage::Thai)
+}
+
+fn build_reference_ctx_for_language(
+    ws: &Workspace,
+    chunk_text: &str,
+    prev_chunk_text: Option<&str>,
+    target_language: TargetLanguage,
+) -> String {
     fn section(out: &mut String, open: &str, body: &str, close: &str) {
         let b = body.trim();
         if !b.is_empty() {
@@ -1186,60 +1206,174 @@ fn build_reference_ctx(ws: &Workspace, chunk_text: &str, prev_chunk_text: Option
     }
 
     let mut s = String::new();
-    let terms = glossary_terms_for_chunk(ws, chunk_text, MAX_GLOSSARY_IN_CTX);
+    let terms = target_glossary_terms(
+        glossary_terms_for_chunk(ws, chunk_text, MAX_GLOSSARY_IN_CTX),
+        target_language,
+    );
+    let glossary_label = match target_language {
+        TargetLanguage::Thai => {
+            "<<GLOSSARY: นโยบายคำศัพท์ (hard lock / preferred / forbidden / context)>>"
+        }
+        TargetLanguage::English => {
+            "<<GLOSSARY: target terminology policies (hard lock / preferred / forbidden / context)>>"
+        }
+    };
     section(
         &mut s,
-        "<<GLOSSARY: นโยบายคำศัพท์ (hard lock / preferred / forbidden / context)>>",
-        &glossary::render_context_blurb(&terms),
+        glossary_label,
+        &glossary::render_context_blurb_for_language(&terms, target_language),
         "<<END_GLOSSARY>>",
     );
-    let chars = characters_for_chunk(ws, chunk_text, prev_chunk_text, MAX_CHARACTERS_IN_CTX);
+    let chars = target_characters(
+        characters_for_chunk(ws, chunk_text, prev_chunk_text, MAX_CHARACTERS_IN_CTX),
+        target_language,
+    );
     section(
         &mut s,
-        "<<CHARACTERS: สรรพนาม/น้ำเสียงที่กำหนด>>",
-        &characters::render_context_blurb(&chars),
+        match target_language {
+            TargetLanguage::Thai => "<<CHARACTERS: สรรพนาม/น้ำเสียงที่กำหนด>>",
+            TargetLanguage::English => {
+                "<<CHARACTERS: canonical names, address forms, voice, and POV cues>>"
+            }
+        },
+        &characters::render_context_blurb_for_language(&chars, target_language),
         "<<END_CHARACTERS>>",
     );
     section(
         &mut s,
-        "<<STYLE_EXAMPLES: ตัวอย่างคู่ ญี่ปุ่น→ไทย ใช้เป็นแนวสำนวน/น้ำเสียงที่ต้องการ ห้ามคัดลอกลงคำแปล>>",
-        &render_style_examples(&volume::load(ws).style_examples),
+        match target_language {
+            TargetLanguage::Thai => {
+                "<<STYLE_EXAMPLES: ตัวอย่างคู่ ญี่ปุ่น→ไทย ใช้เป็นแนวสำนวน/น้ำเสียงที่ต้องการ ห้ามคัดลอกลงคำแปล>>"
+            }
+            TargetLanguage::English => {
+                "<<STYLE_EXAMPLES: Japanese→English examples defining the desired voice; imitate the style, never copy their text>>"
+            }
+        },
+        &render_style_examples(&volume::load(ws).style_examples, target_language),
         "<<END_STYLE_EXAMPLES>>",
     );
     section(
         &mut s,
-        "<<VOLUME_SYNOPSIS: เรื่องย่อของเล่มนี้ ใช้เป็นบริบทภาพรวม>>",
-        &excerpt(volume::load(ws).synopsis_th, 1200),
+        match target_language {
+            TargetLanguage::Thai => "<<VOLUME_SYNOPSIS: เรื่องย่อของเล่มนี้ ใช้เป็นบริบทภาพรวม>>",
+            TargetLanguage::English => {
+                "<<VOLUME_SYNOPSIS: translated volume synopsis for high-level context>>"
+            }
+        },
+        &excerpt(volume::load(ws).translated_synopsis, 1200),
         "<<END_VOLUME_SYNOPSIS>>",
     );
     section(
         &mut s,
-        "<<PROJECT: บริบท/โครงเรื่องโดยรวม>>",
+        match target_language {
+            TargetLanguage::Thai => "<<PROJECT: บริบท/โครงเรื่องโดยรวม>>",
+            TargetLanguage::English => "<<PROJECT: project-wide story context>>",
+        },
         &excerpt(data_block::read_body(&ws.project_md()), 1400),
         "<<END_PROJECT>>",
     );
     section(
         &mut s,
-        "<<STYLE: แนวทางโทน/สำนวน>>",
-        &excerpt(data_block::read_body(&ws.style_md()), 1400),
+        match target_language {
+            TargetLanguage::Thai => "<<STYLE: แนวทางโทน/สำนวน>>",
+            TargetLanguage::English => "<<STYLE: target voice and prose guidance>>",
+        },
+        &excerpt(target_style_context(ws, target_language), 1400),
         "<<END_STYLE>>",
     );
     s
 }
 
+fn contains_thai_script(text: &str) -> bool {
+    text.chars().any(|ch| matches!(ch as u32, 0x0E00..=0x0E7F))
+}
+
+fn target_style_context(ws: &Workspace, target_language: TargetLanguage) -> String {
+    let body = data_block::read_body(&ws.style_md());
+    if target_language == TargetLanguage::Thai {
+        return body;
+    }
+    let body = body.replace(
+        "2. หลีกเลี่ยงการแปลตรงตัว เรียบเรียงให้เป็นภาษาไทยที่เป็นธรรมชาติ",
+        "2. Avoid literal translation and write natural, publication-ready English.",
+    );
+    format!(
+        "Target language: English. Treat any remaining Thai labels as legacy template text, not as an instruction to translate into Thai.\n\n{body}"
+    )
+}
+
+fn target_glossary_terms(
+    mut terms: Vec<GlossaryTerm>,
+    target_language: TargetLanguage,
+) -> Vec<GlossaryTerm> {
+    if target_language == TargetLanguage::Thai {
+        return terms;
+    }
+    for term in &mut terms {
+        if contains_thai_script(&term.translated_term) {
+            term.translated_term = term.romaji.clone().unwrap_or_default();
+            term.policy = Some(crate::model::TermPolicy::Preferred);
+            term.protected = None;
+        }
+        term.forbidden_translations
+            .retain(|value| !contains_thai_script(value));
+    }
+    terms
+}
+
+fn target_characters(
+    mut characters: Vec<crate::model::Character>,
+    target_language: TargetLanguage,
+) -> Vec<crate::model::Character> {
+    if target_language == TargetLanguage::Thai {
+        return characters;
+    }
+    for character in &mut characters {
+        if contains_thai_script(&character.translated_name) {
+            character.translated_name = character.romaji.clone().unwrap_or_default();
+        }
+        if character
+            .honorific
+            .as_deref()
+            .is_some_and(contains_thai_script)
+        {
+            character.honorific = None;
+        }
+        if character
+            .speech_style
+            .as_deref()
+            .is_some_and(contains_thai_script)
+        {
+            character.speech_style = None;
+        }
+        for alternate in &mut character.also_called {
+            if contains_thai_script(&alternate.translated_name) {
+                alternate.translated_name.clear();
+            }
+        }
+    }
+    characters
+}
+
 /// Render the few-shot style exemplars as `JP → TH` bullets for the prompt.
-fn render_style_examples(examples: &[crate::model::StyleExample]) -> String {
+fn render_style_examples(
+    examples: &[crate::model::StyleExample],
+    target_language: TargetLanguage,
+) -> String {
     let mut s = String::new();
     for ex in examples {
         let jp = ex.jp.trim();
-        let th = ex.th.trim();
-        if jp.is_empty() || th.is_empty() {
+        let translated = ex.translated_text.trim();
+        if jp.is_empty() || translated.is_empty() {
             continue;
         }
         s.push_str("- JP: ");
         s.push_str(jp);
-        s.push_str("\n  TH: ");
-        s.push_str(th);
+        s.push_str(match target_language {
+            TargetLanguage::Thai => "\n  TH: ",
+            TargetLanguage::English => "\n  EN: ",
+        });
+        s.push_str(translated);
         if let Some(note) = ex.note.as_deref().filter(|n| !n.trim().is_empty()) {
             s.push_str(&format!("  ({})", note.trim()));
         }
@@ -1286,11 +1420,11 @@ fn reviewer_rejected_without_actionable_feedback(
     !review.approved() && audit_findings.is_empty() && review.feedback_text().trim().is_empty()
 }
 
-const REFUSAL_RETRY_FEEDBACK: &str = "The previous output was a refusal or policy notice, not a translation. Treat this as neutral literary translation work: translate only SOURCE_JP into Thai, preserve Markdown, do not add explicit detail or commentary, and return the final Thai story text in translated_text.";
-const PARTIAL_STREAM_RETRY_FEEDBACK: &str = "The previous stream stopped after an incomplete translated_text. Discard that partial output and translate the entire SOURCE_JP again from scratch. Keep neutral literary wording, preserve Markdown, do not add commentary, and return complete final Thai story text in valid translated_text JSON.";
-const LENGTH_RETRY_FEEDBACK: &str = "The previous attempt ran out of output tokens before completing translated_text. Be far more concise: keep thought_process to a few short words or leave it empty, never draft the translation there, and spend the budget on translated_text only. Translate the ENTIRE SOURCE_JP without omitting anything and return the complete final Thai in valid JSON.";
-const REPETITION_RETRY_FEEDBACK: &str = "The previous translated_text started repeating inside this chunk. Discard that output and redo only this SOURCE_JP chunk from the beginning. Do not copy any repeated tail, do not continue the loop, preserve Markdown, and return complete final Thai story text in valid JSON.";
-const STALL_RETRY_FEEDBACK: &str = "The previous attempt made no progress for too long. Redo only this SOURCE_JP chunk from the beginning, keep the output concise, preserve Markdown, and return complete final Thai story text in valid JSON.";
+const REFUSAL_RETRY_FEEDBACK: &str = "The previous output was a refusal or policy notice, not a translation. Treat this as neutral literary translation work: translate only SOURCE_JP into the selected target language, preserve Markdown, do not add explicit detail or commentary, and return only final story text in translated_text.";
+const PARTIAL_STREAM_RETRY_FEEDBACK: &str = "The previous stream stopped after an incomplete translated_text. Discard that partial output and translate the entire SOURCE_JP again from scratch in the selected target language. Keep neutral literary wording, preserve Markdown, do not add commentary, and return complete final story text in valid translated_text JSON.";
+const LENGTH_RETRY_FEEDBACK: &str = "The previous attempt ran out of output tokens before completing translated_text. Be far more concise: keep thought_process to a few short words or leave it empty, never draft the translation there, and spend the budget on translated_text only. Translate the ENTIRE SOURCE_JP without omitting anything and return the complete target-language text in valid JSON.";
+const REPETITION_RETRY_FEEDBACK: &str = "The previous translated_text started repeating inside this chunk. Discard that output and redo only this SOURCE_JP chunk from the beginning. Do not copy any repeated tail, do not continue the loop, preserve Markdown, and return complete final target-language story text in valid JSON.";
+const STALL_RETRY_FEEDBACK: &str = "The previous attempt made no progress for too long. Redo only this SOURCE_JP chunk from the beginning, keep the output concise, preserve Markdown, and return complete final target-language story text in valid JSON.";
 
 /// User-facing NeedsReview reason for token-budget cutoffs.
 fn length_reason(length_trunc: bool, base: &str) -> String {
@@ -1446,16 +1580,26 @@ async fn process_chunk(
     });
 
     // Context and continuity are stable across this chunk's attempts.
-    let reference_ctx = build_reference_ctx(&ctx.ws, &chunk.text, prev_chunk_text);
-    let audit_characters =
-        characters_for_chunk(&ctx.ws, &chunk.text, prev_chunk_text, MAX_CHARACTERS_IN_CTX);
-    let mut prev_thai =
-        continuity::last_thai_sentences(&ctx.ws, chapter, ctx.cfg.continuity_sentences).await;
+    let reference_ctx = build_reference_ctx_for_language(
+        &ctx.ws,
+        &chunk.text,
+        prev_chunk_text,
+        ctx.target_language,
+    );
+    let audit_characters = target_characters(
+        characters_for_chunk(&ctx.ws, &chunk.text, prev_chunk_text, MAX_CHARACTERS_IN_CTX),
+        ctx.target_language,
+    );
+    let mut previous_translation =
+        continuity::last_translated_sentences(&ctx.ws, chapter, ctx.cfg.continuity_sentences).await;
     // Seed chunk 0 from the previous chapter when this one has no Thai yet.
-    if prev_thai.is_empty() && chunk.index == 0 && chapter > 1 {
-        prev_thai =
-            continuity::last_thai_sentences(&ctx.ws, chapter - 1, ctx.cfg.continuity_sentences)
-                .await;
+    if previous_translation.is_empty() && chunk.index == 0 && chapter > 1 {
+        previous_translation = continuity::last_translated_sentences(
+            &ctx.ws,
+            chapter - 1,
+            ctx.cfg.continuity_sentences,
+        )
+        .await;
     }
 
     let max = ctx.cfg.max_attempts.max(1);
@@ -1491,8 +1635,9 @@ async fn process_chunk(
             let translate = translate_chunk_streaming(
                 translator_client.as_ref(),
                 &ctx.models.translator,
+                ctx.target_language,
                 &reference_ctx,
-                &prev_thai,
+                &previous_translation,
                 pov.as_deref(),
                 &chunk.text,
                 feedback.as_deref(),
@@ -1560,13 +1705,18 @@ async fn process_chunk(
                     }
 
                     match candidate {
-                        Some(thai) => {
+                        Some(translated) => {
                             let reason = format!(
                                 "translator output kept repeating on chunk {} after {max} attempts; committed the best available result for review",
                                 chunk.index + 1
                             );
                             return commit_chunk_needs_review(
-                                ctx, chapter, chunk, &thai, attempt, reason,
+                                ctx,
+                                chapter,
+                                chunk,
+                                &translated,
+                                attempt,
+                                reason,
                             )
                             .await;
                         }
@@ -1604,23 +1754,27 @@ async fn process_chunk(
                         }
                         // Prefer an earlier complete translation; otherwise salvage
                         // the partial stream and flag the chunk for human review.
-                        let (thai, reason) = match candidate {
-                            Some(thai) => (
-                                thai,
+                        let (translated, reason) = match candidate {
+                            Some(translated) => (
+                                translated,
                                 length_reason(
                                     length_trunc,
                                     "translator stream stopped after partial output on the final attempt",
                                 ),
                             ),
                             None => {
-                                let salvaged = strip_copied_continuity(&prev_thai, &partial);
-                                let thai = if salvaged.trim().is_empty() {
+                                let salvaged = strip_copied_continuity_for_language(
+                                    ctx.target_language,
+                                    &previous_translation,
+                                    &partial,
+                                );
+                                let translated = if salvaged.trim().is_empty() {
                                     partial.clone()
                                 } else {
                                     salvaged
                                 };
                                 (
-                                    thai,
+                                    translated,
                                     length_reason(
                                         length_trunc,
                                         "translator stream cut off mid-output; salvaged the partial translation for review",
@@ -1629,7 +1783,12 @@ async fn process_chunk(
                             }
                         };
                         return commit_chunk_needs_review(
-                            ctx, chapter, chunk, &thai, attempt, reason,
+                            ctx,
+                            chapter,
+                            chunk,
+                            &translated,
+                            attempt,
+                            reason,
                         )
                         .await;
                     }
@@ -1675,12 +1834,12 @@ async fn process_chunk(
                         continue;
                     }
                     match candidate {
-                        Some(thai) => {
+                        Some(translated) => {
                             return commit_chunk_needs_review(
                                 ctx,
                                 chapter,
                                 chunk,
-                                &thai,
+                                &translated,
                                 attempt,
                                 format!("translator failed on the final attempt: {e}"),
                             )
@@ -1732,13 +1891,18 @@ async fn process_chunk(
                 }
 
                 match candidate {
-                    Some(thai) => {
+                    Some(translated) => {
                         let reason = format!(
                             "translator output kept repeating on chunk {} after {max} attempts; committed the best available result for review",
                             chunk.index + 1
                         );
                         return commit_chunk_needs_review(
-                            ctx, chapter, chunk, &thai, attempt, reason,
+                            ctx,
+                            chapter,
+                            chunk,
+                            &translated,
+                            attempt,
+                            reason,
                         )
                         .await;
                     }
@@ -1778,13 +1942,18 @@ async fn process_chunk(
                 }
 
                 match candidate {
-                    Some(thai) => {
+                    Some(translated) => {
                         let reason = format!(
                             "translator stalled on chunk {} after {max} attempts; committed the best available result for review",
                             chunk.index + 1
                         );
                         return commit_chunk_needs_review(
-                            ctx, chapter, chunk, &thai, attempt, reason,
+                            ctx,
+                            chapter,
+                            chunk,
+                            &translated,
+                            attempt,
+                            reason,
                         )
                         .await;
                     }
@@ -1802,11 +1971,15 @@ async fn process_chunk(
 
         // Drop echoed continuity and normalize mechanical punctuation residue
         // before audit/review/append; neither needs another model turn.
-        let thai = strip_copied_continuity(&prev_thai, &out.translated_text);
-        let thai = normalize_japanese_punctuation_residue(&thai);
-        let refusal_feedback = refusal_retry_feedback(&thai);
-        if refusal_feedback.is_none() && !thai.trim().is_empty() {
-            candidate = Some(thai.clone());
+        let translated = strip_copied_continuity_for_language(
+            ctx.target_language,
+            &previous_translation,
+            &out.translated_text,
+        );
+        let translated = normalize_japanese_punctuation_residue(&translated);
+        let refusal_feedback = refusal_retry_feedback(&translated);
+        if refusal_feedback.is_none() && !translated.trim().is_empty() {
+            candidate = Some(translated.clone());
         }
         // Carry the ending narrator forward even when this chunk becomes NeedsReview.
         // Otherwise the next chunk can inherit a stale pre-switch POV.
@@ -1823,10 +1996,10 @@ async fn process_chunk(
             thought_process: out.thought_process.clone(),
             // If the streaming path emitted translated_text deltas, avoid
             // appending the same chunk again when the final schema lands.
-            thai_preview: if streamed_preview {
+            translated_preview: if streamed_preview {
                 String::new()
             } else {
-                thai.clone()
+                translated.clone()
             },
             tokens: tok,
         });
@@ -1870,17 +2043,30 @@ async fn process_chunk(
             }
         }
 
-        let audit_terms = glossary_terms_for_chunk(&ctx.ws, &chunk.text, MAX_GLOSSARY_IN_CTX);
-        let mut audit_findings =
-            audit_translation_with_terms(&chunk.text, &thai, &prev_thai, &audit_terms);
+        let audit_terms = target_glossary_terms(
+            glossary_terms_for_chunk(&ctx.ws, &chunk.text, MAX_GLOSSARY_IN_CTX),
+            ctx.target_language,
+        );
+        let mut audit_findings = audit_translation_for_language(
+            ctx.target_language,
+            &chunk.text,
+            &translated,
+            &previous_translation,
+            &audit_terms,
+        );
         audit_findings.extend(audit_character_pronoun_rules(
             &chunk.text,
-            &thai,
+            &translated,
             pov.as_deref(),
             &audit_characters,
         ));
         // Non-gating signals for the Reviewer to verify.
-        let advisory = advisory_findings_with_references(&chunk.text, &thai, &audit_characters);
+        let advisory = advisory_findings_with_references_for_language(
+            ctx.target_language,
+            &chunk.text,
+            &translated,
+            &audit_characters,
+        );
         ctx.tx.send(AppEvent::ChunkStateChanged {
             chapter,
             chunk: chunk.index,
@@ -1906,12 +2092,13 @@ async fn process_chunk(
                     let review = review_chunk(
                         reviewer_client.as_ref(),
                         &ctx.models.reviewer,
+                        ctx.target_language,
                         &chunk.text,
-                        &thai,
+                        &translated,
                         &reference_ctx,
                         &audit_findings,
                         &advisory,
-                        &prev_thai,
+                        &previous_translation,
                         review_attempt,
                     );
                     tokio::pin!(review);
@@ -1943,7 +2130,7 @@ async fn process_chunk(
                                 ctx,
                                 chapter,
                                 chunk,
-                                &thai,
+                                &translated,
                                 attempt,
                                 format!(
                                     "reviewer rejected without feedback after {review_attempt} attempts; committed without review"
@@ -1981,7 +2168,7 @@ async fn process_chunk(
                             ctx,
                             chapter,
                             chunk,
-                            &thai,
+                            &translated,
                             attempt,
                             format!(
                                 "reviewer stalled on chunk {} after {max} attempts; committed without review",
@@ -2012,7 +2199,7 @@ async fn process_chunk(
                             ctx,
                             chapter,
                             chunk,
-                            &thai,
+                            &translated,
                             attempt,
                             format!(
                                 "reviewer returned no verdict after {review_attempt} attempts; committed without review: {e}"
@@ -2056,9 +2243,10 @@ async fn process_chunk(
                 state: ChunkState::Approved,
             });
 
-            let bytes = translation::append_chunk(&ctx.ws, chapter, chunk.index as u32, &thai)
-                .await
-                .map_err(|e| anyhow::anyhow!("append chunk {} failed: {e}", chunk.index))?;
+            let bytes =
+                translation::append_chunk(&ctx.ws, chapter, chunk.index as u32, &translated)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("append chunk {} failed: {e}", chunk.index))?;
 
             ctx.tx.send(AppEvent::ChunkCommitted {
                 chapter,
@@ -2116,7 +2304,7 @@ async fn process_chunk(
             } else {
                 fb_text
             };
-            return commit_chunk_needs_review(ctx, chapter, chunk, &thai, max, reason).await;
+            return commit_chunk_needs_review(ctx, chapter, chunk, &translated, max, reason).await;
         }
     }
 
@@ -2214,7 +2402,7 @@ async fn commit_chunk_needs_review(
     ctx: &PipelineCtx,
     chapter: u32,
     chunk: &Chunk,
-    thai: &str,
+    translated: &str,
     attempts: u32,
     reason: String,
 ) -> anyhow::Result<ChunkOutcome> {
@@ -2222,7 +2410,7 @@ async fn commit_chunk_needs_review(
         &ctx.ws,
         chapter,
         chunk.index as u32,
-        thai,
+        translated,
         attempts,
         &reason,
     )
@@ -2246,7 +2434,7 @@ async fn commit_chunk_needs_review(
         chunk: chunk.index,
         attempts,
         reason,
-        salvaged: !thai.trim().is_empty(),
+        salvaged: !translated.trim().is_empty(),
     });
 
     Ok(ChunkOutcome::NeedsReview)
@@ -2272,14 +2460,14 @@ fn controlled_terms_for_orchestrator(ws: &Workspace, out: &TranslatorOut) -> Vec
 
 fn controlled_term_matches_discovery(term: &GlossaryTerm, out: &TranslatorOut) -> bool {
     let jp = term.jp_term.trim();
-    let th = term.thai_term.trim();
+    let translated = term.translated_term.trim();
     out.new_terms.iter().any(|new| {
         let new_jp = new.jp_term.trim();
-        let new_th = new.thai_term.trim();
+        let new_translation = new.translated_term.trim();
         (!jp.is_empty() && !new_jp.is_empty() && (jp.contains(new_jp) || new_jp.contains(jp)))
-            || (!th.is_empty()
-                && !new_th.is_empty()
-                && (th.contains(new_th) || new_th.contains(th)))
+            || (!translated.is_empty()
+                && !new_translation.is_empty()
+                && (translated.contains(new_translation) || new_translation.contains(translated)))
     })
 }
 
@@ -2291,7 +2479,10 @@ async fn run_orchestrator_metadata_turn(
     chapter: u32,
     out: &TranslatorOut,
 ) -> anyhow::Result<(Usage, usize)> {
-    let controlled_terms = controlled_terms_for_orchestrator(&ctx.ws, out);
+    let controlled_terms = target_glossary_terms(
+        controlled_terms_for_orchestrator(&ctx.ws, out),
+        ctx.target_language,
+    );
     let user = build_orchestrator_metadata_msg(chapter, out, &controlled_terms);
 
     let tools: Vec<Tool> = serde_json::from_value(orchestrator_tools())
@@ -2301,7 +2492,10 @@ async fn run_orchestrator_metadata_turn(
     // Leaving tool_choice at its Default avoids coupling to its exact field type.
     let req = ChatRequest {
         model: ctx.models.orchestrator.model.clone(),
-        messages: vec![Message::system(ORCHESTRATOR_SYSTEM), Message::user(user)],
+        messages: vec![
+            Message::system(orchestrator_system(ctx.target_language)),
+            Message::user(user),
+        ],
         temperature: Some(0.2),
         tools: Some(tools),
         reasoning: ctx.models.orchestrator.reasoning_param(),
@@ -2340,13 +2534,13 @@ async fn run_coherence_sweep(
     wd: &Watchdog,
 ) {
     let assembled = translation::read_translated(&ctx.ws, chapter).await;
-    let thai = strip_translation_markers(&assembled);
-    if thai.trim().is_empty() {
+    let translated = strip_translation_markers(&assembled);
+    if translated.trim().is_empty() {
         return;
     }
     // Scope the reference bundle to the whole chapter source so every character and
     // term the chapter uses is available to the auditor.
-    let reference_ctx = build_reference_ctx(&ctx.ws, raw, None);
+    let reference_ctx = build_reference_ctx_for_language(&ctx.ws, raw, None, ctx.target_language);
 
     let coherence_client = match ctx.client_for(&ctx.models.reviewer) {
         Ok(c) => c,
@@ -2363,8 +2557,9 @@ async fn run_coherence_sweep(
         let fut = coherence::coherence_sweep(
             coherence_client.as_ref(),
             &ctx.models.reviewer,
-            &thai,
+            &translated,
             &reference_ctx,
+            ctx.target_language,
         );
         tokio::pin!(fut);
         loop {
@@ -2458,20 +2653,20 @@ fn reconcile_coherence_issue(ws: &Workspace, issue: &coherence::CoherenceIssue) 
         return None;
     }
     let jp = issue.resolve_jp.trim();
-    let th = issue.resolve_canonical_th.trim();
-    if jp.is_empty() || th.is_empty() {
+    let translated = issue.resolve_canonical_translation.trim();
+    if jp.is_empty() || translated.is_empty() {
         return None;
     }
     match issue.resolve_kind.trim() {
         "term" => {
             let term = GlossaryTerm {
                 jp_term: jp.to_string(),
-                thai_term: th.to_string(),
+                translated_term: translated.to_string(),
                 romaji: None,
                 category: None,
                 gloss: Some("canonical rendering pinned by the coherence sweep".to_string()),
                 policy: Some(crate::model::TermPolicy::Preferred),
-                forbidden_thai: Vec::new(),
+                forbidden_translations: Vec::new(),
                 context_rule: None,
                 protected: None,
                 do_not_translate: None,
@@ -2479,19 +2674,19 @@ fn reconcile_coherence_issue(ws: &Workspace, issue: &coherence::CoherenceIssue) 
             };
             match glossary::upsert_from_orchestrator(ws, term) {
                 Ok(glossary::GlossaryUpsertOutcome::Protected { .. }) | Err(_) => None,
-                Ok(_) => Some(format!("pinned term {jp} → {th} (preferred)")),
+                Ok(_) => Some(format!("pinned term {jp} → {translated} (preferred)")),
             }
         }
         "character" => {
             let existing = characters::get(ws, Some(jp), None)
                 .into_iter()
                 .find(|c| character_matches_surface(c, jp))?;
-            if existing.thai_name.trim() == th {
+            if existing.translated_name.trim() == translated {
                 return None;
             }
             Some(format!(
-                "kept character {jp} → {} unchanged; suggested {th} left as a note",
-                existing.thai_name.trim()
+                "kept character {jp} → {} unchanged; suggested {translated} left as a note",
+                existing.translated_name.trim()
             ))
         }
         _ => None,
@@ -2724,15 +2919,15 @@ mod tests {
         (base, ws)
     }
 
-    fn term(jp: &str, th: &str) -> GlossaryTerm {
+    fn term(jp: &str, translated: &str) -> GlossaryTerm {
         GlossaryTerm {
             jp_term: jp.into(),
-            thai_term: th.into(),
+            translated_term: translated.into(),
             romaji: None,
             category: None,
             gloss: None,
             policy: None,
-            forbidden_thai: Vec::new(),
+            forbidden_translations: Vec::new(),
             context_rule: None,
             protected: None,
             do_not_translate: None,
@@ -2740,11 +2935,11 @@ mod tests {
         }
     }
 
-    fn character(id: &str, jp: &str, th: &str) -> Character {
+    fn character(id: &str, jp: &str, translated: &str) -> Character {
         Character {
             id: id.into(),
             jp_name: jp.into(),
-            thai_name: th.into(),
+            translated_name: translated.into(),
             romaji: None,
             gender: None,
             honorific: None,
@@ -2758,7 +2953,7 @@ mod tests {
     }
 
     #[test]
-    fn coherence_character_resolution_keeps_canonical_thai_name() {
+    fn coherence_character_resolution_keeps_canonical_translated_name() {
         let (base, ws) = temp_ws("coherence_character_name");
         characters::upsert(&ws, character("ai", "清水愛", "ชิมิซุ ไอ")).unwrap();
 
@@ -2767,13 +2962,13 @@ mod tests {
             note: "context form drift".into(),
             resolve_kind: "character".into(),
             resolve_jp: "清水愛".into(),
-            resolve_canonical_th: "คุณไอ".into(),
+            resolve_canonical_translation: "คุณไอ".into(),
         };
         let msg = reconcile_coherence_issue(&ws, &issue).unwrap();
 
         let chars = characters::load(&ws);
         assert_eq!(chars.len(), 1);
-        assert_eq!(chars[0].thai_name, "ชิมิซุ ไอ");
+        assert_eq!(chars[0].translated_name, "ชิมิซุ ไอ");
         assert!(
             msg.contains("unchanged"),
             "coherence should report without mutating: {msg}"
@@ -3098,6 +3293,7 @@ mod tests {
                 max_attempts: 2,
                 ..crate::model::AppConfig::default()
             },
+            target_language: TargetLanguage::Thai,
             tx: crate::model::EventTx(tx),
             ctl: RunControl::new(),
             queue: ChapterQueue::new(vec![]),
@@ -3168,6 +3364,7 @@ mod tests {
                 max_attempts: 1,
                 ..crate::model::AppConfig::default()
             },
+            target_language: TargetLanguage::Thai,
             tx: crate::model::EventTx(tx),
             ctl: RunControl::new(),
             queue: ChapterQueue::new(vec![]),
@@ -3224,6 +3421,7 @@ mod tests {
                 max_attempts: 2,
                 ..crate::model::AppConfig::default()
             },
+            target_language: TargetLanguage::Thai,
             tx: crate::model::EventTx(tx),
             ctl: RunControl::new(),
             queue: ChapterQueue::new(vec![]),
@@ -3304,6 +3502,7 @@ mod tests {
                 max_attempts: 3,
                 ..crate::model::AppConfig::default()
             },
+            target_language: TargetLanguage::Thai,
             tx: crate::model::EventTx(tx),
             ctl: RunControl::new(),
             queue: ChapterQueue::new(vec![]),
@@ -3356,6 +3555,7 @@ mod tests {
                 max_attempts: 2,
                 ..crate::model::AppConfig::default()
             },
+            target_language: TargetLanguage::Thai,
             tx: crate::model::EventTx(tx),
             ctl: RunControl::new(),
             queue: ChapterQueue::new(vec![]),
@@ -3431,6 +3631,7 @@ mod tests {
             ws: ws.clone(),
             models: crate::model::ModelSet::default(),
             cfg,
+            target_language: TargetLanguage::Thai,
             tx: crate::model::EventTx(tx),
             ctl: RunControl::new(),
             queue: ChapterQueue::new(vec![]),
@@ -3529,6 +3730,7 @@ mod tests {
             ws,
             models: crate::model::ModelSet::default(),
             cfg,
+            target_language: TargetLanguage::Thai,
             tx: crate::model::EventTx(tx),
             ctl: RunControl::new(),
             queue: ChapterQueue::new(vec![]),
@@ -3585,7 +3787,7 @@ mod tests {
             Character {
                 id: "subaru".into(),
                 jp_name: "スバル".into(),
-                thai_name: "สบารุ".into(),
+                translated_name: "สบารุ".into(),
                 romaji: None,
                 gender: None,
                 honorific: None,
@@ -3625,7 +3827,7 @@ mod tests {
         let yuu = Character {
             id: "yuu".into(),
             jp_name: "有月勇".into(),
-            thai_name: "อาริทสึกิ ยู".into(),
+            translated_name: "อาริทสึกิ ยู".into(),
             romaji: Some("Aritsuki Yuu".into()),
             gender: None,
             honorific: None,
@@ -3660,7 +3862,7 @@ mod tests {
             Character {
                 id: "hikari".into(),
                 jp_name: "ひかり".into(),
-                thai_name: "ฮิคาริ".into(),
+                translated_name: "ฮิคาริ".into(),
                 romaji: None,
                 gender: None,
                 honorific: None,
@@ -3705,7 +3907,7 @@ mod tests {
             &ws,
             vec![StyleExample {
                 jp: "彼は笑った。".into(),
-                th: "เขาหัวเราะออกมา".into(),
+                translated_text: "เขาหัวเราะออกมา".into(),
                 note: Some("น้ำเสียงสบาย ๆ".into()),
             }],
         )
@@ -3721,6 +3923,36 @@ mod tests {
             "exemplar Thai injected:\n{ctx}"
         );
 
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn english_target_neutralizes_stale_thai_reference_values() {
+        let mut locked = term("聖剣", "ดาบศักดิ์สิทธิ์");
+        locked.romaji = Some("Seiken".to_string());
+        locked.policy = Some(crate::model::TermPolicy::HardLocked);
+        locked.forbidden_translations = vec!["ดาบเทพ".to_string()];
+        let terms = target_glossary_terms(vec![locked], TargetLanguage::English);
+        assert_eq!(terms[0].translated_term, "Seiken");
+        assert_eq!(terms[0].policy, Some(crate::model::TermPolicy::Preferred));
+        assert!(terms[0].forbidden_translations.is_empty());
+
+        let mut character = character("amana", "天野", "อามาโนะ");
+        character.romaji = Some("Amano".to_string());
+        character.speech_style = Some("ใช้สรรพนาม ผม".to_string());
+        let characters = target_characters(vec![character], TargetLanguage::English);
+        assert_eq!(characters[0].translated_name, "Amano");
+        assert!(characters[0].speech_style.is_none());
+
+        let (base, ws) = temp_ws("english_style_override");
+        std::fs::write(
+            ws.style_md(),
+            "# Style\n2. หลีกเลี่ยงการแปลตรงตัว เรียบเรียงให้เป็นภาษาไทยที่เป็นธรรมชาติ\n",
+        )
+        .unwrap();
+        let style = target_style_context(&ws, TargetLanguage::English);
+        assert!(style.contains("publication-ready English"));
+        assert!(!style.contains("เรียบเรียงให้เป็นภาษาไทย"));
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -3804,6 +4036,7 @@ mod tests {
             ws: ws.clone(),
             models: crate::model::ModelSet::default(),
             cfg,
+            target_language: TargetLanguage::Thai,
             tx: crate::model::EventTx(tx),
             ctl: RunControl::new(),
             queue: ChapterQueue::new(vec![]),
@@ -3862,6 +4095,101 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    struct EnglishPipelineClient {
+        saw_english_prompt: Arc<AtomicBool>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::llm::client::LlmClient for EnglishPipelineClient {
+        async fn chat(
+            &self,
+            req: &crate::llm::ChatRequest,
+        ) -> crate::llm::client::Result<crate::llm::ChatResponse> {
+            if req
+                .messages
+                .first()
+                .and_then(|m| m.content.as_deref())
+                .is_some_and(|s| s.contains("Japanese-to-English"))
+            {
+                self.saw_english_prompt.store(true, Ordering::Relaxed);
+            }
+            let schema_name = match &req.response_format {
+                Some(crate::llm::ResponseFormat::JsonSchema { json_schema }) => {
+                    Some(json_schema.name.as_str())
+                }
+                _ => None,
+            };
+            let content = match schema_name {
+                Some("translation_result") => serde_json::json!({
+                    "thought_process": {"scene_analysis": "", "glossary_check": ""},
+                    "translated_text": "She laughed.",
+                    "pov": "third-person",
+                    "new_characters": [],
+                    "new_terms": [],
+                    "continuity_notes": []
+                })
+                .to_string(),
+                Some("review_result") => {
+                    serde_json::json!({"status": "approve", "feedback": []}).to_string()
+                }
+                _ => "metadata complete".to_string(),
+            };
+            Ok(crate::llm::ChatResponse {
+                id: Some("english-pipeline".to_string()),
+                model: Some("honya/test".to_string()),
+                choices: vec![crate::llm::Choice {
+                    index: 0,
+                    message: crate::llm::ResponseMessage {
+                        role: Some("assistant".to_string()),
+                        content: Some(content),
+                        tool_calls: None,
+                    },
+                    finish_reason: Some("stop".to_string()),
+                }],
+                usage: Some(crate::llm::Usage {
+                    prompt_tokens: 1,
+                    completion_tokens: 1,
+                    total_tokens: 2,
+                    ..Default::default()
+                }),
+                service_tier: None,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn english_pipeline_uses_english_prompts_and_commits_english() {
+        let (base, ws) = temp_ws("english_pipeline");
+        translation::write_raw(&ws, 1, "彼女は笑った。").unwrap();
+        let saw_english_prompt = Arc::new(AtomicBool::new(false));
+        let client = EnglishPipelineClient {
+            saw_english_prompt: Arc::clone(&saw_english_prompt),
+        };
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = PipelineCtx {
+            clients: ClientSet::single(Arc::new(client) as Arc<dyn LlmClient>),
+            ws: ws.clone(),
+            models: ModelSet::default(),
+            cfg: AppConfig {
+                prepass_extract: false,
+                coherence_check: false,
+                ..AppConfig::default()
+            },
+            target_language: TargetLanguage::English,
+            tx: EventTx(tx),
+            ctl: RunControl::new(),
+            queue: ChapterQueue::new(vec![]),
+        };
+
+        run_pipeline(ctx, vec![1]).await.unwrap();
+
+        assert!(saw_english_prompt.load(Ordering::Relaxed));
+        let translated = translation::read_translated(&ws, 1).await;
+        assert!(translated.contains("She laughed."));
+        assert!(!translated.contains(translation::REVIEW_NEEDED_MARKER));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn synopsis_injected_into_context_and_round_trips() {
         let (base, ws) = temp_ws("syn");
@@ -3870,7 +4198,7 @@ mod tests {
         // Round-trips both fields on disk.
         let loaded = volume::load(&ws);
         assert_eq!(loaded.synopsis_raw, "原文のあらすじ");
-        assert_eq!(loaded.synopsis_th, "เรื่องย่อสำหรับบริบท");
+        assert_eq!(loaded.translated_synopsis, "เรื่องย่อสำหรับบริบท");
 
         // The Thai synopsis is injected into every chunk's reference context.
         let ctx = build_reference_ctx(&ws, "無関係なテキスト", None);
@@ -4040,6 +4368,7 @@ mod tests {
                 coherence_check: false,
                 ..crate::model::AppConfig::default()
             },
+            target_language: TargetLanguage::Thai,
             tx: crate::model::EventTx(tx),
             ctl: RunControl::new(),
             queue: ChapterQueue::new(vec![(1, 1)]),
@@ -4125,6 +4454,7 @@ mod tests {
             ws: ws1.clone(),
             models: crate::model::ModelSet::default(),
             cfg: crate::model::AppConfig::default(),
+            target_language: TargetLanguage::Thai,
             tx: crate::model::EventTx(tx),
             ctl: RunControl::new(),
             queue: ChapterQueue::new(vec![]),
@@ -4202,6 +4532,7 @@ mod tests {
             ws: ws.clone(),
             models: crate::model::ModelSet::default(),
             cfg: crate::model::AppConfig::default(),
+            target_language: TargetLanguage::Thai,
             tx: crate::model::EventTx(tx),
             ctl: RunControl::new(),
             queue: queue.clone(),
@@ -4259,6 +4590,7 @@ mod tests {
             ws: ws1.clone(),
             models: crate::model::ModelSet::default(),
             cfg: crate::model::AppConfig::default(),
+            target_language: TargetLanguage::Thai,
             tx: crate::model::EventTx(tx),
             ctl: RunControl::new(),
             queue: queue.clone(),
@@ -4320,6 +4652,7 @@ mod tests {
             ws: ws1.clone(),
             models: crate::model::ModelSet::default(),
             cfg: crate::model::AppConfig::default(),
+            target_language: TargetLanguage::Thai,
             tx: crate::model::EventTx(tx),
             ctl: RunControl::new(),
             queue: queue.clone(),

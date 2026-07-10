@@ -2,7 +2,7 @@
 
 # honya 本屋
 
-**A calm, literary terminal app for AI-assisted Japanese → Thai light-novel translation.**
+**A calm, literary terminal app for AI-assisted Japanese → Thai or English light-novel translation.**
 
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-3A5078.svg)](LICENSE)
 [![Latest release](https://img.shields.io/github/v/release/altqx/honya?color=6A8258&label=release)](https://github.com/altqx/honya/releases)
@@ -14,7 +14,7 @@
 
 ---
 
-Drop an EPUB, PDF, DOCX, HTML, or text-based file into a folder and honya turns it into a finished Thai translation. EPUBs keep true spine order; other formats are converted through MarkItDown-style Rust converters into tidy Markdown before the same pipeline runs.
+Drop an EPUB, PDF, DOCX, HTML, or text-based file into a folder and honya turns it into a finished Thai or English translation. Settings holds your preferred language; the new-project wizard starts there, and stores the chosen target language on that project. Thai remains the default. EPUBs keep true spine order, while other formats are converted through MarkItDown-style Rust converters into tidy Markdown before the same pipeline runs.
 
 For EPUBs, honya reads the book
 in true spine order, relocates the illustrations, cleanses the XHTML into tidy Markdown, then runs
@@ -31,12 +31,12 @@ telemetry — just a quiet workspace in your terminal.
 
 ## Highlights
 
-- **Many sources in, Thai out** — EPUB, PDF, Word, HTML, Markdown/Text, CSV, JSON, and XML; EPUBs keep spine order, illustration relocation, and light-novel cleanse rules.
+- **Many sources in, Thai or English out** — EPUB, PDF, Word, HTML, Markdown/Text, CSV, JSON, and XML; EPUBs keep spine order, illustration relocation, and light-novel cleanse rules.
 - **Three specialized agents** — Translator and Reviewer iterate per chunk; the Orchestrator persists new terms and characters.
 - **One-press runs with a live queue** — translate a chapter, a volume, or the whole project (`A`) across multiple volumes, reordering the queue mid-run.
 - **Resilient by default** — crash/partial-chapter resume, a stall watchdog that retries stuck chunks, and `NeedsReview` flags instead of failed chapters.
 - **Continuity & cost** — per-chunk glossary/character context, protected term locks, honorific rules, and a live token + USD meter rolled up per chapter/volume/project.
-- **Proofread & export** — synced JA ↔ TH reader with notes and search, then export finished volumes to Markdown, EPUB, or DOCX.
+- **Proofread & export** — synced source ↔ translation reader with notes and search, then export finished volumes to Markdown, EPUB, or DOCX.
 - **Yours to keep** — Glossary/Characters/Style as editable Markdown, 12 live themes (`Ctrl-T`), mouse + full keyboard, and self-update with stable/dev channels.
 
 ## Installation
@@ -138,8 +138,8 @@ Settings — see [API key & models](#api-key--models).
 |----|----|---------|
 | `1` | **書架 Shelf** | Pick a project or import a new source file (`i`). |
 | `2` | **棚 Project** | Volume/chapter tree with waxing-moon status (`○ ◐ ◑ ●`), context files, and a detail card with per-chapter token/cost roll-up. `t` chapter · `T` / `Shift-T` volume · `A` whole project · `i` queue chapters. |
-| `3` | **訳 Translate** | The live run: chunk gauge, three agent lines, token + USD meter, streaming Thai preview. `p` pause · `s` stop · `f` follow. |
-| `4` | **読 Reader** | Synced side-by-side JA ↔ TH proofreading with inline notes. `[ ]` chapters · `z` sync · `o` layout · `n` note. |
+| `3` | **訳 Translate** | The live run: chunk gauge, three agent lines, token + USD meter, streaming translation preview. `p` pause · `s` stop · `f` follow. |
+| `4` | **読 Reader** | Synced side-by-side source ↔ translation proofreading with inline notes. `[ ]` chapters · `z` sync · `o` layout · `n` note. |
 | `5` | **辞 Lexicon** | Browse/edit Glossary, Characters, Style. `n` new · `e` edit · `d` delete · `/` search. |
 
 In **Lexicon → Glossary**, set `Protected` to `yes` to lock a human-approved term. Protected terms are shown in GLOSSARY.md and surfaced to the Orchestrator when term discoveries are processed; automatic upserts cannot overwrite them.
@@ -225,12 +225,12 @@ caution, and red reserved **only** for failure — so status always reads the sa
 ### The pipeline
 
 Per chapter: chunk to ~1000 tokens (1200 hard cap) → for each chunk, inject the previous chunk's
-last 5 Thai sentences for continuity and the **per-chunk** reference context (only the glossary terms
+last 5 translated sentences for continuity and the **per-chunk** reference context (only the glossary terms
 and characters whose Japanese form actually appears in this chunk, capped at 80 / 40), then run
 **Translator → Reviewer**.
 
 - On *reject*, the reviewer's itemized feedback is routed back for a retry (up to a configurable cap, default 3).
-- On *approve*, the Thai is appended **deterministically, app-side** — not via an LLM tool — and the
+- On *approve*, the target-language text is appended **deterministically, app-side** — not via an LLM tool — and the
   **Orchestrator** runs a tool turn to persist any new characters/terms/notes and advance the recap, while respecting protected glossary locks.
 - If retries are exhausted, the best attempt is committed with a `[REVIEW NEEDED]` marker and the chapter
   is flagged **NeedsReview** (rather than failing the whole chapter); the Orchestrator metadata turn is
@@ -266,7 +266,7 @@ your_project/
 └── Vol_01/
     ├── VOLUME.md     # running recap + chapter summaries + usage + run history + reader notes
     ├── raw/          # ch_001.md … pre-processed clean Japanese Markdown
-    └── translated/   # ch_001.md … final verified Thai Markdown
+    └── translated/   # ch_001.md … final verified target-language Markdown
 ```
 
 Each metadata file keeps its machine state in a `<!-- honya:data … honya:data -->` JSON block below

@@ -1,11 +1,12 @@
 //! Last-N Thai sentence extraction + Translator user-message assembly.
 //!
-//! `last_thai_sentences` returns the previous chunk's tail sentences so the next
+//! `last_translated_sentences` returns the previous chunk's tail sentences so the next
 //! chunk's prompt keeps tone/pronouns continuous without re-translating them.
 
 use once_cell::sync::Lazy;
 use regex::Regex;
 
+use crate::model::TargetLanguage;
 use crate::workspace::Workspace;
 use crate::workspace::translation::read_translated;
 
@@ -23,7 +24,7 @@ const MAX_CONTINUITY_CHARS: usize = 1200;
 
 /// Return the last `n` non-empty Thai sentences of `chapter` (in order) to seed
 /// continuity. Bounded twice: at most `n` sentences AND [`MAX_CONTINUITY_CHARS`] total.
-pub async fn last_thai_sentences(ws: &Workspace, chapter: u32, n: usize) -> Vec<String> {
+pub async fn last_translated_sentences(ws: &Workspace, chapter: u32, n: usize) -> Vec<String> {
     if n == 0 {
         return Vec::new();
     }
@@ -97,8 +98,52 @@ fn push_trimmed(current: &mut String, out: &mut Vec<String>) {
 
 /// Assemble the Translator user message: optional continuity block, a scoped
 /// task reminder, then the source delimited by `<<SOURCE_JP>> … <<END_SOURCE_JP>>`.
+#[cfg(test)]
 pub fn build_translator_user_msg(
-    prev_thai: &[String],
+    previous_translation: &[String],
+    current_pov: Option<&str>,
+    raw_chunk: &str,
+    retry_feedback: Option<&str>,
+    attempt: u32,
+) -> String {
+    build_translator_user_msg_for_language(
+        TargetLanguage::Thai,
+        previous_translation,
+        current_pov,
+        raw_chunk,
+        retry_feedback,
+        attempt,
+    )
+}
+
+pub fn build_translator_user_msg_for_language(
+    target: TargetLanguage,
+    previous: &[String],
+    current_pov: Option<&str>,
+    raw_chunk: &str,
+    retry_feedback: Option<&str>,
+    attempt: u32,
+) -> String {
+    match target {
+        TargetLanguage::Thai => build_translator_user_msg_thai(
+            previous,
+            current_pov,
+            raw_chunk,
+            retry_feedback,
+            attempt,
+        ),
+        TargetLanguage::English => build_translator_user_msg_english(
+            previous,
+            current_pov,
+            raw_chunk,
+            retry_feedback,
+            attempt,
+        ),
+    }
+}
+
+fn build_translator_user_msg_thai(
+    previous_translation: &[String],
     current_pov: Option<&str>,
     raw_chunk: &str,
     retry_feedback: Option<&str>,
@@ -114,12 +159,12 @@ pub fn build_translator_user_msg(
         s.push_str("\n<<END_CURRENT_POV>>\n\n");
     }
 
-    if !prev_thai.is_empty() {
+    if !previous_translation.is_empty() {
         s.push_str(&format!(
             "<<CONTINUITY: ประโยคแปลล่าสุด {} ประโยคก่อนหน้า (ห้ามแปลซ้ำ ใช้เพื่อความต่อเนื่องเท่านั้น)>>\n",
-            prev_thai.len()
+            previous_translation.len()
         ));
-        for line in prev_thai {
+        for line in previous_translation {
             s.push_str(line.trim());
             s.push('\n');
         }
@@ -169,6 +214,60 @@ pub fn build_translator_user_msg(
     s
 }
 
+fn build_translator_user_msg_english(
+    previous: &[String],
+    current_pov: Option<&str>,
+    raw_chunk: &str,
+    retry_feedback: Option<&str>,
+    attempt: u32,
+) -> String {
+    let mut s = String::new();
+    if let Some(pov) = current_pov.map(str::trim).filter(|p| !p.is_empty()) {
+        s.push_str("<<CURRENT_POV: narrator carried from the previous chunk; use as the opening anchor, but follow any clear POV switch in this chunk>>\n");
+        s.push_str(pov);
+        s.push_str("\n<<END_CURRENT_POV>>\n\n");
+    }
+    if !previous.is_empty() {
+        s.push_str(&format!(
+            "<<CONTINUITY_EN: previous {} translated sentence(s), for voice and flow only; DO NOT repeat them>>\n",
+            previous.len()
+        ));
+        for line in previous {
+            s.push_str(line.trim());
+            s.push('\n');
+        }
+        s.push_str("<<END_CONTINUITY_EN>>\n\n");
+    }
+    s.push_str(
+        "<<TASK: translate only SOURCE_JP into final English Markdown>>\n\
+         - Use REFERENCE, CONTINUITY, CURRENT_POV, and REVIEWER_FEEDBACK as constraints, never as text to copy.\n\
+         - Produce polished, idiomatic English for native light-novel readers. Recast Japanese syntax naturally while preserving every fact, beat, speaker, implication, and line of content.\n\
+         - Preserve Markdown, scene dividers, image links, emphasis, questions, interruptions, ellipses, repetition, and comic timing.\n\
+         - Keep character voices distinct. Follow exact name, address-form, glossary, POV, and style mappings. Do not expand a short source name to a full name.\n\
+         - Do not mechanically overuse names, explicit subjects, honorifics, stock Japanese calques, profanity, translator notes, or parenthetical source readings. Do not Westernize the setting.\n\
+         - Resolve omitted subjects and modifier chains from Japanese syntax and context. Track scene-boundary POV changes and save the narrator at the END of this chunk in `pov`.\n\
+         - Use natural English punctuation and dialogue. Do not leave ordinary raw kana, kanji glosses, or Japanese punctuation in the story text unless visible Japanese is plot-critical.\n\
+         - Put English target renderings in `translated_name`, `translated_term`, `forbidden_translations`, and `also_called[].translated_name`.\n\
+         - Before responding, compare SOURCE_JP and translated_text line by line. translated_text must contain only the complete story translation, with no preface or explanation.\n\
+         <<END_TASK>>\n\n",
+    );
+    if let Some(feedback) = retry_feedback.map(str::trim).filter(|fb| !fb.is_empty()) {
+        s.push_str(&format!(
+            "<<REVIEWER_FEEDBACK: RETRY {attempt} — every item is mandatory>>\n\
+             Re-read the relevant SOURCE_JP, revise the complete translation, fix every rejected point, and do not reintroduce an earlier error. REFERENCE remains authoritative.\n\n\
+             {feedback}\n\
+             <<END_REVIEWER_FEEDBACK>>\n\n"
+        ));
+    }
+    s.push_str("<<SOURCE_JP>>\n");
+    s.push_str(raw_chunk);
+    if !raw_chunk.ends_with('\n') {
+        s.push('\n');
+    }
+    s.push_str("<<END_SOURCE_JP>>");
+    s
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -205,5 +304,24 @@ mod tests {
                 < msg.find("<<SOURCE_JP>>").expect("source marker")
         );
         assert!(msg.contains("เงื่อนไขผ่าน/ตก"));
+    }
+
+    #[test]
+    fn english_user_msg_requests_polished_english_without_thai_rules() {
+        let msg = build_translator_user_msg_for_language(
+            TargetLanguage::English,
+            &["She glanced away.".to_string()],
+            Some("Keita / first-person"),
+            "俺は笑った。",
+            Some("Make the dialogue less literal."),
+            2,
+        );
+
+        assert!(msg.contains("<<CONTINUITY_EN"));
+        assert!(msg.contains("polished, idiomatic English"));
+        assert!(msg.contains("Do not Westernize"));
+        assert!(msg.contains("`translated_name`, `translated_term`"));
+        assert!(msg.contains("Make the dialogue less literal."));
+        assert!(!msg.contains("ห้ามใช้ \"กู\""));
     }
 }

@@ -5,7 +5,7 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use crate::model::{Chapter, ChapterKind, ChapterStatus};
+use crate::model::{Chapter, ChapterKind, ChapterStatus, TargetLanguage};
 use crate::workspace::{Workspace, translation, volume};
 
 use super::blocks;
@@ -17,8 +17,8 @@ pub struct ExportBook {
     pub project_id: String,
     pub volume_number: u32,
     pub volume_label: Option<String>,
-    pub synopsis_th: String,
-    /// BCP-47 language of the output (always Thai here).
+    pub translated_synopsis: String,
+    /// BCP-47 language of the output.
     pub language: String,
     pub chapters: Vec<ExportChapter>,
     /// Absolute path to the project's shared `images/` directory (image source).
@@ -43,11 +43,24 @@ pub struct ExportChapter {
 /// `# {project} — เล่ม {NN}` style book title.
 impl ExportBook {
     pub fn display_title(&self) -> String {
-        format!("{} — เล่ม {:02}", self.project_title, self.volume_number)
+        if self.language == "th" {
+            format!("{} — เล่ม {:02}", self.project_title, self.volume_number)
+        } else {
+            format!("{} — Volume {:02}", self.project_title, self.volume_number)
+        }
+    }
+
+    pub fn synopsis_heading(&self) -> &'static str {
+        if self.language == "th" {
+            "เรื่องย่อ"
+        } else {
+            "Synopsis"
+        }
     }
 }
 
 /// Read the volume's chapters off disk and assemble the export book.
+#[cfg(test)]
 pub async fn gather(
     ws: &Workspace,
     project_title: &str,
@@ -55,6 +68,28 @@ pub async fn gather(
     vol: u32,
     vol_label: Option<String>,
     chapters: &[Chapter],
+) -> ExportBook {
+    gather_for_language(
+        ws,
+        project_title,
+        project_id,
+        vol,
+        vol_label,
+        chapters,
+        TargetLanguage::Thai,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn gather_for_language(
+    ws: &Workspace,
+    project_title: &str,
+    project_id: &str,
+    vol: u32,
+    vol_label: Option<String>,
+    chapters: &[Chapter],
+    target_language: TargetLanguage,
 ) -> ExportBook {
     let vol_data = volume::load(ws);
     let images_dir = ws.images_dir();
@@ -112,8 +147,8 @@ pub async fn gather(
         project_id: project_id.to_string(),
         volume_number: vol,
         volume_label: vol_label,
-        synopsis_th: vol_data.synopsis_th,
-        language: "th".to_string(),
+        translated_synopsis: vol_data.translated_synopsis,
+        language: target_language.code().to_string(),
         chapters: out_chapters,
         images_dir,
         images: all_images.into_iter().collect(),
@@ -177,5 +212,23 @@ mod tests {
         assert!(book.warnings.iter().any(|w| w.contains("no translation")));
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn english_export_uses_english_metadata_labels() {
+        let book = ExportBook {
+            project_title: "Night Shadow".to_string(),
+            project_id: "night-shadow".to_string(),
+            volume_number: 2,
+            volume_label: None,
+            translated_synopsis: "Synopsis".to_string(),
+            language: TargetLanguage::English.code().to_string(),
+            chapters: Vec::new(),
+            images_dir: PathBuf::new(),
+            images: Vec::new(),
+            warnings: Vec::new(),
+        };
+        assert_eq!(book.display_title(), "Night Shadow — Volume 02");
+        assert_eq!(book.synopsis_heading(), "Synopsis");
     }
 }
