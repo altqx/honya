@@ -170,18 +170,22 @@ pub fn reviewer_system(target: TargetLanguage) -> &'static str {
 /// volume before chunk 1 so early chapters get the same roster/glossary depth as
 /// late ones. Uses the Translator model so its Thai names/terms/exemplars match how
 /// the volume will actually be translated.
-pub const PREPASS_SYSTEM: &str = r#"You are the pre-flight analyst for a Japanese-to-Thai light-novel translation pipeline. You are given sampled passages from across one volume's raw Japanese chapters. Your job is to seed the project's reference data BEFORE translation begins, so the translator has the cast and terminology from the very first chunk.
+pub const PREPASS_SYSTEM: &str = r#"You are the pre-flight analyst for a Japanese-to-Thai light-novel translation pipeline. You are given an optional volume synopsis plus sampled passages from across one volume's raw Japanese chapters. Your job is to seed the project's reference data BEFORE translation begins, so the translator has the cast and terminology from the very first chunk.
 
 Return a strict JSON object matching the schema. Do NOT translate the passages; extract reference data only.
+
+Use VOLUME_SYNOPSIS_SOURCE as high-level plot evidence. Use VOLUME_SYNOPSIS_TRANSLATED as the project's established Thai naming and terminology guide. A character or term may be supported by either the source synopsis or the sampled chapters. When the translated synopsis establishes a rendering for the same entity, preserve it unless it clearly conflicts with the Japanese evidence.
 
 1. characters: every named person who appears. Use the FULL name (surname + given) as jp_name when both are known, and list other surface forms (bare given name, alternate kanji, nicknames) in `aliases`. Give a natural Thai rendering (translated_name), a romaji reading, gender if inferable ("male"/"female"/""), the honorific they are usually addressed with (e.g. さん→คุณ, 先輩→รุ่นพี่, or "" if none), and a short speech_style note (pronoun/register cues) when the text reveals it. Keep notes brief.
 1a. When a female character uses `僕/ぼく/ボク`, record `เรา` as her Thai self-pronoun in speech_style, never `ผม` or `โบคุ`. Do not infer gender from `僕` alone; apply this only when the character is independently identifiable as female.
 2. terms: recurring proper nouns and setting/world terminology (place names, organizations, skills, items, titles) — NOT ordinary vocabulary. Give a natural Thai rendering, a category, and a one-line gloss. Do not invent terms that are not in the text.
 3. style_examples: 2-4 SHORT representative sentence pairs (one source sentence each) with your best Thai rendering, demonstrating the target register and tone for this book. These anchor the translator's voice — make the Thai natural, literary, and faithful. Keep each side to one sentence.
 
-Only record what the sampled text actually supports. Empty arrays are fine. Be neutral about mature content; record it plainly if it bears on the cast or terms."#;
+Only record what the source synopsis or sampled text actually supports. Empty arrays are fine. Be neutral about mature content; record it plainly if it bears on the cast or terms."#;
 
-pub const PREPASS_SYSTEM_ENGLISH: &str = r#"You are the pre-flight analyst for a Japanese-to-English light-novel translation. From sampled Japanese passages, extract only evidence-backed reference data; do not translate the passages wholesale. Return strict `prepass_result` JSON.
+pub const PREPASS_SYSTEM_ENGLISH: &str = r#"You are the pre-flight analyst for a Japanese-to-English light-novel translation. From an optional volume synopsis plus sampled Japanese passages, extract only evidence-backed reference data; do not translate the passages wholesale. Return strict `prepass_result` JSON.
+
+Use VOLUME_SYNOPSIS_SOURCE as high-level plot evidence. Use VOLUME_SYNOPSIS_TRANSLATED as the project's established English naming and terminology guide. A character or term may be supported by either the source synopsis or the sampled chapters. Preserve an established translated rendering unless it clearly conflicts with the Japanese evidence.
 
 Record named characters with the fullest known Japanese name, source-side aliases, a stable natural English/romanized display name, gender when inferable, forms of address, and concise voice/register notes. Record recurring proper nouns and setting terms, not ordinary vocabulary, with one publication-ready English rendering and a short gloss. Add 2-4 short Japanese-to-English style examples that demonstrate fluent, commercially published English light-novel prose, distinct character voice, and the source's tone.
 

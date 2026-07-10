@@ -1,8 +1,9 @@
 //! One-time per-volume pre-extraction pass.
 //!
-//! Before chunk 1 of a volume is translated, sample its raw Japanese chapters and
-//! ask the Translator model to extract the cast, recurring terminology, and a few
-//! style exemplars — then seed CHARACTERS.md / GLOSSARY.md / VOLUME.md. This lifts
+//! Before chunk 1 of a volume is translated, provide its synopsis and sampled raw
+//! Japanese chapters to the Translator model to extract the cast, recurring
+//! terminology, and a few style exemplars, then seed CHARACTERS.md / GLOSSARY.md /
+//! VOLUME.md. This lifts
 //! early chapters out of the "sparse context" hole (the roster is otherwise built
 //! up incrementally as translation proceeds, so chapter 1 is translated nearly
 //! blind). Idempotency is the caller's job via `VolumeData.prepass_done`.
@@ -21,6 +22,7 @@ const SAMPLE_BUDGET_CHARS: usize = 48_000;
 /// Per-chapter head sample bounds, so a many-chapter volume still spreads coverage.
 const PER_CHAPTER_MIN: usize = 1_500;
 const PER_CHAPTER_MAX: usize = 8_000;
+const SYNOPSIS_MAX_CHARS: usize = 8_000;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct PrepassOut {
@@ -81,7 +83,8 @@ pub struct PrepassSeeded {
     pub usage: Usage,
 }
 
-/// Run the extraction over `ws`'s sampled raw chapters and seed the project files.
+/// Run the extraction over `ws`'s synopsis and sampled raw chapters, then seed the
+/// project files.
 /// Returns `Ok(None)` when there is no raw source to sample (nothing to do).
 pub async fn run_prepass(
     client: &dyn LlmClient,
@@ -100,7 +103,21 @@ pub async fn run_prepass(
             "Japanese source samples from across this volume; extract reference data before English translation begins"
         }
     };
-    let user = format!("<<VOLUME_RAW_SAMPLE: {instruction}>>\n{sample}\n<<END_VOLUME_RAW_SAMPLE>>");
+    let volume_data = volume::load(ws);
+    let mut user = String::new();
+    push_synopsis_section(
+        &mut user,
+        "VOLUME_SYNOPSIS_SOURCE",
+        &volume_data.synopsis_raw,
+    );
+    push_synopsis_section(
+        &mut user,
+        "VOLUME_SYNOPSIS_TRANSLATED",
+        &volume_data.translated_synopsis,
+    );
+    user.push_str(&format!(
+        "<<VOLUME_RAW_SAMPLE: {instruction}>>\n{sample}\n<<END_VOLUME_RAW_SAMPLE>>"
+    ));
     let req = ChatRequest {
         model: model.model.clone(),
         messages: vec![
@@ -230,6 +247,15 @@ fn non_empty(s: &str) -> Option<String> {
     }
 }
 
+fn push_synopsis_section(out: &mut String, tag: &str, text: &str) {
+    let text = text.trim();
+    if text.is_empty() {
+        return;
+    }
+    let excerpt: String = text.chars().take(SYNOPSIS_MAX_CHARS).collect();
+    out.push_str(&format!("<<{tag}>>\n{excerpt}\n<<END_{tag}>>\n\n"));
+}
+
 /// Concatenate a head sample from each raw chapter (in numeric order) under a global
 /// budget, so names/terms introduced later in the volume still get represented.
 fn sample_volume_raw(ws: &Workspace) -> String {
@@ -345,6 +371,19 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct RecordingClient {
+        request: std::sync::Mutex<Option<ChatRequest>>,
+    }
+
+    #[async_trait]
+    impl LlmClient for RecordingClient {
+        async fn chat(&self, req: &ChatRequest) -> LlmResult<ChatResponse> {
+            *self.request.lock().unwrap() = Some(req.clone());
+            SeedingClient.chat(req).await
+        }
+    }
+
     #[tokio::test]
     async fn prepass_seeds_characters_terms_and_examples() {
         let base = std::env::temp_dir().join(format!("honya_prepass_{}", std::process::id()));
@@ -373,6 +412,43 @@ mod tests {
         // Seeded unprotected so the Orchestrator can still refine it.
         assert!(!terms.iter().any(glossary::blocks_automatic_update));
         assert_eq!(volume::load(&ws).style_examples.len(), 1);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn prepass_receives_source_and_translated_synopsis() {
+        let base =
+            std::env::temp_dir().join(format!("honya_prepass_synopsis_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let ws = Workspace::new(base.clone(), 1);
+        crate::workspace::translation::write_raw(&ws, 1, "有月勇は聖剣を抜いた。").unwrap();
+        volume::set_synopsis(
+            &ws,
+            "有月勇は聖剣を求めて旅に出る。",
+            "อาริทสึกิ ยูออกเดินทางตามหาดาบศักดิ์สิทธิ์",
+        )
+        .unwrap();
+        let client = RecordingClient::default();
+
+        run_prepass(
+            &client,
+            &crate::model::AgentModel::openrouter("mock"),
+            &ws,
+            TargetLanguage::Thai,
+        )
+        .await
+        .expect("run_prepass ok")
+        .expect("had raw to sample");
+
+        let request = client.request.lock().unwrap().clone().unwrap();
+        let system = request.messages[0].content.as_deref().unwrap();
+        let user = request.messages[1].content.as_deref().unwrap();
+        assert!(system.contains("volume synopsis"));
+        assert!(user.contains("<<VOLUME_SYNOPSIS_SOURCE>>"));
+        assert!(user.contains("有月勇は聖剣を求めて旅に出る。"));
+        assert!(user.contains("<<VOLUME_SYNOPSIS_TRANSLATED>>"));
+        assert!(user.contains("อาริทสึกิ ยูออกเดินทางตามหาดาบศักดิ์สิทธิ์"));
 
         let _ = std::fs::remove_dir_all(&base);
     }
