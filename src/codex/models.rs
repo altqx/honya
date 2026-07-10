@@ -6,8 +6,8 @@ use super::CodexAuth;
 use crate::model::{AppEvent, EventTx, LogLevel};
 
 const MODELS_URL: &str = "https://chatgpt.com/backend-api/codex/models";
-/// Backend-required client version, mirrored from Codex CLI.
-const CLIENT_VERSION: &str = "0.141.0";
+const CODEX_PACKAGE_URL: &str = "https://registry.npmjs.org/@openai/codex/latest";
+const FALLBACK_CLIENT_VERSION: &str = "0.144.1";
 
 /// Fetch models and log fallback reasons for the activity log.
 pub fn spawn_fetch_models(auth: CodexAuth, tx: EventTx) {
@@ -38,10 +38,10 @@ pub async fn fetch_models(auth: &CodexAuth) -> anyhow::Result<Vec<String>> {
         .timeout(Duration::from_secs(20))
         .user_agent(concat!("honya/", env!("CARGO_PKG_VERSION")))
         .build()?;
-    let resp = http
-        .get(format!("{MODELS_URL}?client_version={CLIENT_VERSION}"))
-        .bearer_auth(&auth.access_token)
-        .header("chatgpt-account-id", &auth.account_id)
+    let client_version = fetch_client_version(&http)
+        .await
+        .unwrap_or_else(|| FALLBACK_CLIENT_VERSION.to_string());
+    let resp = models_request(&http, MODELS_URL, auth, &client_version)?
         .send()
         .await?;
     let status = resp.status();
@@ -54,6 +54,42 @@ pub async fn fetch_models(auth: &CodexAuth) -> anyhow::Result<Vec<String>> {
     let json: serde_json::Value =
         serde_json::from_str(&body).map_err(|e| anyhow::anyhow!("bad JSON: {e}"))?;
     Ok(parse_models(&json))
+}
+
+async fn fetch_client_version(http: &reqwest::Client) -> Option<String> {
+    let resp = http
+        .get(CODEX_PACKAGE_URL)
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+        .ok()?
+        .error_for_status()
+        .ok()?;
+    let body = resp.text().await.ok()?;
+    let json: serde_json::Value = serde_json::from_str(&body).ok()?;
+    parse_client_version(&json).map(str::to_string)
+}
+
+fn parse_client_version(v: &serde_json::Value) -> Option<&str> {
+    v.get("version")
+        .and_then(|version| version.as_str())
+        .map(str::trim)
+        .filter(|version| !version.is_empty())
+}
+
+fn models_request(
+    http: &reqwest::Client,
+    url: &str,
+    auth: &CodexAuth,
+    client_version: &str,
+) -> anyhow::Result<reqwest::RequestBuilder> {
+    let mut url = reqwest::Url::parse(url)?;
+    url.query_pairs_mut()
+        .append_pair("client_version", client_version);
+    Ok(http
+        .get(url)
+        .bearer_auth(&auth.access_token)
+        .header("chatgpt-account-id", &auth.account_id))
 }
 
 /// Accept both `{data:[{id}]}` and `{models:[{id|slug}]}` response shapes.
