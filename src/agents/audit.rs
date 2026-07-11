@@ -34,6 +34,30 @@ static TRANSLATION_LABEL: Lazy<Regex> = Lazy::new(|| {
 const DISCOURAGED_CASUAL_PARTICLES: [(&str, &str); 2] = [("ว่ะ", "ฟะ"), ("วะ", "ฟะ")];
 const FORBIDDEN_THAI_SELF_PRONOUN: &str = "กู";
 
+/// Thai tone/diacritic marks that can follow a vowel and form a different
+/// syllable (e.g. `กู่` in `จนกู่ไม่กลับ`). A bare `contains("กู")` would
+/// false-positive on those.
+fn is_thai_combining_after_vowel(c: char) -> bool {
+    matches!(
+        c,
+        '\u{0E31}' | '\u{0E34}'..='\u{0E3A}' | '\u{0E47}'..='\u{0E4E}'
+    )
+}
+
+/// True when `translated` contains the vulgar self-pronoun `กู`, but not when
+/// those two codepoints are only the stem of a longer syllable like `กู่`.
+fn contains_forbidden_thai_self_pronoun(translated: &str) -> bool {
+    let mut rest = translated;
+    while let Some(idx) = rest.find(FORBIDDEN_THAI_SELF_PRONOUN) {
+        let after = &rest[idx + FORBIDDEN_THAI_SELF_PRONOUN.len()..];
+        if !after.chars().next().is_some_and(is_thai_combining_after_vowel) {
+            return true;
+        }
+        rest = after;
+    }
+    false
+}
+
 /// A blank-line run — two or more newlines with any surrounding spaces/tabs —
 /// left behind after excising a copied span. Collapsed to a single blank line so
 /// removing a copy from the middle of a chunk doesn't leave a gap.
@@ -139,7 +163,7 @@ pub fn audit_translation_for_language(
         ));
     }
 
-    if target_language == TargetLanguage::Thai && translated.contains(FORBIDDEN_THAI_SELF_PRONOUN) {
+    if target_language == TargetLanguage::Thai && contains_forbidden_thai_self_pronoun(translated) {
         findings.push(
             "translated_text uses forbidden Thai self-pronoun `กู`; replace it with `ฉัน` or another non-vulgar form that fits the speaker, even when SOURCE_JP uses `俺` or older reference text suggests `กู`"
                 .to_string(),
@@ -1308,6 +1332,42 @@ mod tests {
                 .iter()
                 .any(|f| f.contains("forbidden Thai self-pronoun") && f.contains("กู")),
             "กู should be a deterministic hard audit finding: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn audit_allows_kuu_idiom_with_tone_mark() {
+        // `กู่` (mai ek) is a different syllable from the pronoun `กู`; the
+        // idiom จนกู่ไม่กลับ must not trip the deterministic ban.
+        let findings = audit_translation_with_terms(
+            "死ぬまで忘れない。",
+            "จนกู่ไม่กลับ ฉันจะไม่ลืม",
+            &[],
+            &[],
+        );
+
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.contains("forbidden Thai self-pronoun")),
+            "กู่ in จนกู่ไม่กลับ must not be flagged as กู: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn audit_still_flags_koo_beside_kuu_idiom() {
+        let findings = audit_translation_with_terms(
+            "俺は死ぬまで忘れない。",
+            "จนกู่ไม่กลับ กูจะไม่ลืม",
+            &[],
+            &[],
+        );
+
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.contains("forbidden Thai self-pronoun")),
+            "real กู next to กู่ idiom must still be flagged: {findings:?}"
         );
     }
 
