@@ -6,7 +6,7 @@
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::agents::audit::{
@@ -194,61 +194,128 @@ impl LoopReason {
 
 // Repetition-detector tuning. A degenerate loop repeats a short unit many times;
 // these thresholds are high enough that ordinary prose (even with a refrain) does
-// not trip, while a model spinning on the same phrase does.
+// not trip, while a model spinning on the same phrase does. Literary source
+// repetition (e.g. ごめん×17) is measured up front and allowed in the stream.
 const REP_WINDOW: usize = 400; // chars of streamed tail examined
-const REP_MIN_UNIT: usize = 4; // shortest repeating unit considered
+const REP_MIN_UNIT: usize = 4; // shortest repeating unit considered in the stream
+const REP_SOURCE_MIN_UNIT: usize = 2; // JP literary beats are often 2–3 chars
 const REP_MIN_REPEATS: usize = 8; // consecutive copies of the unit to call it a loop
 const REP_MIN_TOTAL: usize = 48; // don't judge until this much text has streamed
-const REP_MIN_LINES: usize = 6; // identical consecutive lines to call it a loop
 const REP_MIN_LINE_LEN: usize = 3; // ignore repeated blank/tiny lines
 const REP_CHECK_EVERY: usize = 48; // re-run the (bounded) scan every N new chars
+const REP_SOURCE_SLACK: usize = 3; // allow a few extra target-language copies
+const REP_SOURCE_MAX_UNIT: usize = 40; // cap source unit scan
 const STALL_EXTERNAL_WAIT_GRACE: u32 = 2; // active model calls get one extra window
 
-/// True when the tail of streamed text looks like a degenerate repetition loop:
-/// either a short character-level cycle repeated many times, or the same non-empty
-/// line repeated several times in a row. Pure + bounded (examines only the last
-/// [`REP_WINDOW`] chars) so it is cheap to call as text streams in.
-fn looks_like_repetition_loop(text: &str) -> bool {
+/// Longest consecutive signaled-unit run anywhere in `text`. Used as the per-chunk
+/// budget so faithful echoes of SOURCE_JP repetition are not treated as loops.
+fn source_repetition_budget(text: &str) -> usize {
+    let chars: Vec<char> = text.chars().collect();
+    let n = chars.len();
+    if n < REP_SOURCE_MIN_UNIT * 2 {
+        return line_repetition_run(text);
+    }
+    let max_unit = (n / 2).min(REP_SOURCE_MAX_UNIT);
+    let mut best = 0usize;
+    let mut p = REP_SOURCE_MIN_UNIT;
+    while p <= max_unit {
+        let mut i = 0;
+        while i + p * 2 <= n {
+            let unit = &chars[i..i + p];
+            if !repeating_unit_has_signal(unit) {
+                i += 1;
+                continue;
+            }
+            let mut run = 1;
+            while i + (run + 1) * p <= n && &chars[i + run * p..i + (run + 1) * p] == unit {
+                run += 1;
+            }
+            best = best.max(run);
+            i += if run > 1 { run * p } else { 1 };
+        }
+        p += 1;
+    }
+    best.max(line_repetition_run(text))
+}
+
+fn line_repetition_run(text: &str) -> usize {
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    if lines.is_empty() {
+        return 0;
+    }
+    let mut best = 1usize;
+    let mut run = 1usize;
+    for pair in lines.windows(2) {
+        if pair[0].chars().count() >= REP_MIN_LINE_LEN && pair[0] == pair[1] {
+            run += 1;
+            best = best.max(run);
+        } else {
+            run = 1;
+        }
+    }
+    best
+}
+
+/// How many consecutive copies of a short unit (or identical line) sit at the
+/// streamed tail. Pure + bounded (last [`REP_WINDOW`] chars).
+fn stream_tail_repetition_run(text: &str) -> usize {
     let trimmed = text.trim_end();
     if trimmed.chars().count() < REP_MIN_TOTAL {
-        return false;
+        return 0;
     }
 
-    // Character-cycle check over the last REP_WINDOW chars.
     let window: Vec<char> = {
         let mut rev: Vec<char> = trimmed.chars().rev().take(REP_WINDOW).collect();
         rev.reverse();
         rev
     };
     let n = window.len();
-    let max_unit = n / REP_MIN_REPEATS;
+    let max_unit = n / 2;
+    let mut best = 0usize;
     let mut p = REP_MIN_UNIT;
     while p <= max_unit {
-        let needed = p * REP_MIN_REPEATS;
-        let start = n - needed;
-        let unit = &window[start..start + p];
-        let is_cycle =
-            (1..REP_MIN_REPEATS).all(|r| &window[start + r * p..start + (r + 1) * p] == unit);
-        if is_cycle && repeating_unit_has_signal(unit) {
-            return true;
+        let unit = &window[n - p..];
+        if repeating_unit_has_signal(unit) {
+            let mut run = 1;
+            while run * p + p <= n && &window[n - (run + 1) * p..n - run * p] == unit {
+                run += 1;
+            }
+            best = best.max(run);
         }
         p += 1;
     }
 
-    // Line-repeat check: the last REP_MIN_LINES non-empty lines are all identical.
     let lines: Vec<&str> = trimmed
         .lines()
         .map(str::trim)
         .filter(|l| !l.is_empty())
         .collect();
-    if lines.len() >= REP_MIN_LINES {
-        let tail = &lines[lines.len() - REP_MIN_LINES..];
-        let first = tail[0];
-        if first.chars().count() >= REP_MIN_LINE_LEN && tail.iter().all(|l| *l == first) {
-            return true;
+    if lines.len() >= 2 {
+        let last = lines[lines.len() - 1];
+        if last.chars().count() >= REP_MIN_LINE_LEN {
+            let mut run = 1usize;
+            for line in lines.iter().rev().skip(1) {
+                if *line == last {
+                    run += 1;
+                } else {
+                    break;
+                }
+            }
+            best = best.max(run);
         }
     }
-    false
+    best
+}
+
+/// True when the streamed tail looks like a model loop — not a faithful echo of
+/// intentional SOURCE_JP repetition (budgeted via [`source_repetition_budget`]).
+fn looks_like_degenerate_repetition(text: &str, source_budget: usize) -> bool {
+    let run = stream_tail_repetition_run(text);
+    run >= REP_MIN_REPEATS && run > source_budget.saturating_add(REP_SOURCE_SLACK)
 }
 
 fn repeating_unit_has_signal(unit: &[char]) -> bool {
@@ -299,6 +366,8 @@ struct Watchdog {
     since_check: Mutex<usize>,
     /// Set once the repetition detector fires; cleared per chunk/chapter.
     repetition: AtomicBool,
+    /// Max consecutive SOURCE_JP unit run for this chunk (literary-repeat budget).
+    source_budget: AtomicUsize,
 }
 
 impl Watchdog {
@@ -313,6 +382,7 @@ impl Watchdog {
             repeat_buf: Mutex::new(String::new()),
             since_check: Mutex::new(0),
             repetition: AtomicBool::new(false),
+            source_budget: AtomicUsize::new(0),
         }
     }
 
@@ -328,6 +398,7 @@ impl Watchdog {
             repeat_buf: Mutex::new(String::new()),
             since_check: Mutex::new(0),
             repetition: AtomicBool::new(false),
+            source_budget: AtomicUsize::new(0),
         }
     }
 
@@ -368,7 +439,8 @@ impl Watchdog {
         *since += delta.chars().count();
         if *since >= REP_CHECK_EVERY {
             *since = 0;
-            if looks_like_repetition_loop(&buf) {
+            let budget = self.source_budget.load(Ordering::Relaxed);
+            if looks_like_degenerate_repetition(&buf, budget) {
                 self.repetition.store(true, Ordering::Relaxed);
             }
         }
@@ -379,7 +451,16 @@ impl Watchdog {
         self.repeat_buf.lock().unwrap().clear();
         *self.since_check.lock().unwrap() = 0;
         self.repetition.store(false, Ordering::Relaxed);
+        self.source_budget.store(0, Ordering::Relaxed);
         self.ping();
+    }
+
+    /// Begin a translator attempt: clear stream state and budget literary repeats
+    /// already present in SOURCE_JP so faithful echoes do not trip the loop arm.
+    fn begin_chunk(&self, source_jp: &str) {
+        self.reset_chunk();
+        self.source_budget
+            .store(source_repetition_budget(source_jp), Ordering::Relaxed);
     }
 
     /// Reset everything for a fresh chapter attempt.
@@ -1838,7 +1919,7 @@ async fn run_translator_attempt(
     ctl: &RunControl,
     sink: TranslatorEventSink,
 ) -> TranslatorAttemptRun {
-    wd.reset_chunk();
+    wd.begin_chunk(&input.raw_chunk);
     let stream_sink = sink.clone();
     let reasoning_sink = sink.clone();
     let thought_sink = sink;
@@ -6259,8 +6340,62 @@ mod tests {
     fn repetition_detector_flags_char_cycle() {
         let looped = "ก็ได้ครับ".repeat(20);
         assert!(
-            looks_like_repetition_loop(&looped),
+            looks_like_degenerate_repetition(&looped, 0),
             "a phrase repeated 20× must read as a loop"
+        );
+    }
+
+    #[test]
+    fn repetition_detector_allows_faithful_source_echo() {
+        // Literary beat: SOURCE_JP itself repeats a short apology many times.
+        // The Thai echo must not be treated as a model loop.
+        let source = "ごめん".repeat(17);
+        let translated = "ขอโทษ ".repeat(17);
+        let budget = source_repetition_budget(&source);
+        assert!(
+            budget >= 17,
+            "source budget should count the JP literary run, got {budget}"
+        );
+        assert!(
+            !looks_like_degenerate_repetition(&translated, budget),
+            "faithful echo of SOURCE_JP repetition must not trip"
+        );
+        assert!(
+            looks_like_degenerate_repetition(&translated, 0),
+            "the same Thai without a source budget must still look like a loop"
+        );
+    }
+
+    #[test]
+    fn repetition_detector_still_flags_runaway_beyond_source() {
+        let source = "ごめん".repeat(8);
+        let runaway = "ขอโทษ ".repeat(20);
+        let budget = source_repetition_budget(&source);
+        assert!(
+            looks_like_degenerate_repetition(&runaway, budget),
+            "a stream that far exceeds the source run must still trip"
+        );
+    }
+
+    #[test]
+    fn watchdog_begin_chunk_budgets_source_repetition() {
+        let wd = Watchdog::with_stall(Some(Duration::from_secs(30)));
+        wd.begin_chunk(&"ごめん".repeat(17));
+        for _ in 0..20 {
+            wd.feed_stream("ขอโทษ ");
+        }
+        assert!(
+            !wd.repetition_triggered(),
+            "watchdog must honor the SOURCE_JP repetition budget"
+        );
+
+        wd.begin_chunk("これは短い文です。");
+        for _ in 0..20 {
+            wd.feed_stream("ก็ได้ครับ");
+        }
+        assert!(
+            wd.repetition_triggered(),
+            "ordinary source must still trip on a streamed loop"
         );
     }
 
@@ -6268,7 +6403,7 @@ mod tests {
     fn repetition_detector_flags_repeated_lines() {
         let looped = "เขาเดินเข้ามาในห้อง\n".repeat(8);
         assert!(
-            looks_like_repetition_loop(&looped),
+            looks_like_degenerate_repetition(&looped, 0),
             "the same line repeated 8× must read as a loop"
         );
     }
@@ -6279,7 +6414,7 @@ mod tests {
             แล้วเดินไปชงกาแฟสักแก้ว กลิ่นหอมอบอวลไปทั่วทั้งห้องครัวเล็ก ๆ ของเธอ \
             เสียงนกร้องดังมาจากต้นไม้ใหญ่หน้าบ้าน วันใหม่ได้เริ่มต้นขึ้นอีกครั้ง";
         assert!(
-            !looks_like_repetition_loop(prose),
+            !looks_like_degenerate_repetition(prose, 0),
             "ordinary varied prose must not read as a loop"
         );
     }
@@ -6288,7 +6423,7 @@ mod tests {
     fn repetition_detector_allows_elongated_thai_shout() {
         let shout = format!("โว้ย{}\nเธอสูดหายใจแล้วพูดต่อ", "ย".repeat(80));
         assert!(
-            !looks_like_repetition_loop(&shout),
+            !looks_like_degenerate_repetition(&shout, 0),
             "an elongated single Thai character followed by another line is not a loop"
         );
     }
@@ -6297,7 +6432,7 @@ mod tests {
     fn repetition_detector_allows_streaming_elongated_tail() {
         let shout = format!("โว้ย{}", "ย".repeat(80));
         assert!(
-            !looks_like_repetition_loop(&shout),
+            !looks_like_degenerate_repetition(&shout, 0),
             "a stretched single-character tail should not trip before the next line arrives"
         );
     }
@@ -6305,7 +6440,7 @@ mod tests {
     #[test]
     fn repetition_detector_ignores_short_text() {
         assert!(
-            !looks_like_repetition_loop("สั้น"),
+            !looks_like_degenerate_repetition("สั้น", 0),
             "too little text to judge must not trip"
         );
     }
