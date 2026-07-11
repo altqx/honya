@@ -179,24 +179,10 @@ fn build_translator_user_msg_thai(
     }
 
     s.push_str(
-        "<<TASK: แปลเฉพาะข้อความใน SOURCE_JP เป็นภาษาไทยเท่านั้น>>\n\
-         - ใช้ CONTINUITY/REFERENCE/REVIEWER_FEEDBACK เป็นบริบท ห้ามคัดลอกลง translated_text\n\
-         - ถ้ามี REVIEWER_FEEDBACK ให้ถือเป็นเงื่อนไขผ่าน/ตกของรอบนี้ ไม่ใช่คำแนะนำเสริม: translated_text ใหม่ต้องแก้ทุกข้อที่ถูกตีกลับจริง และห้ามย้อนกลับไปใช้รูปที่ Reviewer เพิ่งบอกว่าผิด\n\
-         - translated_text ต้องเป็น Markdown ภาษาไทยฉบับสุดท้าย ไม่มีหัวข้อ \"คำแปล:\" ไม่มีคำเกริ่น และไม่มีคำอธิบายงาน\n\
-         - อย่าใส่วงเล็บคำอ่าน/คำเดิมหลังคำไทยสำหรับชื่อหรือคำธรรมดา เช่น \"สุดาตะ (さかた)\", \"ชมรม (同好会)\", \"รับทราบ (โอส)!\", \"รักแรกพบ (ฮิโตเมะโบเระ)\" หรือ \"เพอร์เฟกต์ (Perfect)\"; อ้างรูปเดิมเฉพาะเมื่อเป็นข้อมูลพล็อตที่จำเป็นจริง ๆ\n\
-         - เลี่ยง \"วะ\" และ \"ว่ะ\" เป็นคำลงท้าย/คำอุทานทั่วไป ให้ใช้ \"ฟะ\" แทน; แต่คำลงท้ายเชิงนึกขึ้นได้/ถามตัวเองอย่าง \"นี่หว่า\", \"อะไรหว่า\", \"ทำไมหว่า\", \"ยังไงหว่า\", \"ไหนหว่า\", \"ใครหว่า\", \"เมื่อไหร่หว่า\", \"เท่าไหร่หว่า\", \"ใช่ไหม/ใช่มั้ยหว่า\", \"งั้นเหรอหว่า\" รวมถึง \"แฮะ\", \"นี่นา\", \"สินะ\", \"ล่ะมั้ง\" ไม่ใช่ \"วะ/ว่ะ\" และใช้ได้เมื่อเข้ากับ SOURCE_JP; \"เว้ย\" ใช้ได้แบบหายากเมื่อเป็นคำอุทานแรง ๆ ที่จำเป็น เช่น \"โธ่เว้ย\" ถ้าเป็นเสียงโวยวายทั่วไปให้ใช้ \"เฟ้ย\"\n\
-         - ใช้ชื่อ/คำเรียกจาก REFERENCE ให้ตรงตัว โดยเฉพาะรายการ \"เรียกอีกชื่อ\" เช่น JP surface ใดมีรูปไทยกำกับ ต้องใช้รูปนั้น ห้ามสลับกับชื่อหลักหรือสะกดเองใหม่; ถ้าเป็นชื่อคันจิ + さん เช่น `亜玖璃さん` ให้รักษาเป็น \"คุณ...\" เว้นแต่มีรายการ exact surface กำหนดต่างออกไป\n\
-         - ถ้า SOURCE_JP มี `俺` ในข้อความเล่าเรื่องหรือบทพูด ให้ถือเป็นสัญญาณสรรพนามบุรุษที่ 1/เสียงกันเองของต้นฉบับ ไม่ใช่คำสั่งให้ใช้คำหยาบในไทย; ใช้ \"ฉัน\" ได้เมื่ออ่านเป็นไทยธรรมชาติหรือสอดคล้องกับเสียงตัวละคร และห้ามใช้ \"กู\" ทุกกรณีแม้ REFERENCE/CHARACTERS/GLOSSARY เก่าจะเสนอไว้; อย่าลากสรรพนามจาก CONTINUITY ข้าม POV\n\
-         - ถ้าผู้เล่าหรือผู้พูดเป็นตัวละครหญิงและ SOURCE_JP ใช้ `僕/ぼく/ボク` เป็นสรรพนามตัวเอง ให้แปลเป็น \"เรา\" เท่านั้น ห้ามใช้ \"ผม\" หรือถอดเสียงเป็น \"โบคุ\" แม้ REFERENCE/CHARACTERS/GLOSSARY เก่าจะเสนอไว้; อย่าเดาเพศจาก `僕` เพียงอย่างเดียว ให้ระบุตัวละครจากบริบทก่อน\n\
-         - ถ้าบทพูดญี่ปุ่นไม่มีสรรพนามตัวเอง (私/自分/俺 ฯลฯ) อย่าเติม \"ฉันคิดว่า\" หรือสรรพนามไทยโดยไม่จำเป็น ให้ละประธานได้เมื่อผู้พูดชัดอยู่แล้ว\n\
-         - ระวังวลีขยายคำนามแบบญี่ปุ่น: ถ้ามีกริยาต่อเนื่องก่อนคำนาม เช่น `...睨みつけてくる女二人に、俺は...` กริยาเหล่านั้นเป็นของคำนาม `女二人` ไม่ใช่ของ `俺は` ที่ตามมา\n\
-         - ห้ามใช้ \"ฟะ/เฟ้ย\" กับบทพูดสุภาพ です/ます/ません หรือผู้พูดหญิงสุภาพ เว้นแต่ SOURCE_JP/REFERENCE ระบุเสียงหยาบชัดเจน; ประโยคพร้อมกันแบบ `訊けたら苦労しません！` ควรคงความสุภาพ/ตะโกน ไม่ทำให้เป็นเสียงชายห้วน\n\
-         - ก่อนส่งให้เทียบ SOURCE_JP กับ translated_text ครบทุกบรรทัด: ห้ามตกประโยคหลังตัวแบ่งฉาก หัวเรื่อง เครดิต บทพูดในวงเล็บ หรือประโยคท้ายชังก์; ต้นฉบับที่จบด้วย `。` ไม่ต้องเติมจุด `.` ในภาษาไทยโดยอัตโนมัติ แต่ประโยคไทยต้องอ่านจบสมบูรณ์ และให้รักษาน้ำเสียงคำถาม/อุทาน/ทอดเสียงจาก `？` `！` `…` ด้วยสำนวนหรือเครื่องหมายที่เหมาะสม\n\
-         - ถ้าเจอ 互いに/お互い/互いへの/向け合う/向き合う กับ 絆/関係/思い/気持/感情 ให้แปลเป็นความสัมพันธ์/ความรู้สึกที่มีต่อกันหรือผูกพันกัน ไม่ใช่ \"มอบให้\" แบบการให้ฝ่ายเดียว และอย่าให้ `互いへの感情` กลายเป็นความรู้สึกกว้าง ๆ ของใครก็ได้\n\
-         - แปลสำนวนบรรยากาศให้เป็นธรรมชาติ เช่น `場の空気が冷えた` คือบรรยากาศกร่อย/เย็นชา/เงียบลง ไม่ใช่ \"เย็นลงอย่างสมบูรณ์\" แบบอุณหภูมิ\n\
-         - ห้ามทิ้งเครื่องหมายญี่ปุ่น `。` `、` `「」` `『』` `（）` ไว้ใน translated_text เว้นแต่เป็นข้อความญี่ปุ่นที่เรื่องต้องการให้ผู้อ่านเห็นจริง ๆ\n\
-         - รักษาย่อหน้าและจังหวะของต้นฉบับเท่าที่ทำได้ โดยเรียบเรียงให้เป็นภาษาไทยธรรมชาติ\n\
-         - ระบุผู้เล่า (POV) ของแต่ละช่วง เลือกสรรพนามบุรุษที่ 1 ให้ตรงผู้เล่า และสลับเมื่อข้ามตัวแบ่งฉากที่เปลี่ยนมุมมอง แล้วบันทึกผู้เล่าท้ายชังก์ลงฟิลด์ pov\n\
+        "<<TASK: แปลเฉพาะ SOURCE_JP เป็น Markdown ไทยฉบับสุดท้ายตาม system prompt>>\n\
+         - CONTINUITY / REFERENCE / REVIEWER_FEEDBACK เป็นบริบท — ห้ามคัดลอกลง translated_text\n\
+         - ถ้ามี REVIEWER_FEEDBACK ให้ถือเป็นเงื่อนไขผ่าน/ตกของรอบนี้: แก้ทุกข้อที่ถูกตีกลับจริง ห้ามย้อนรูปที่เพิ่งถูกบอกว่าผิด\n\
+         - ก่อนตอบ เทียบ SOURCE_JP กับ translated_text ครบทุกบรรทัด; บันทึกผู้เล่าท้ายชังก์ใน `pov`\n\
          <<END_TASK>>\n\n",
     );
 
@@ -247,16 +233,9 @@ fn build_translator_user_msg_english(
         s.push_str("<<END_CONTINUITY_EN>>\n\n");
     }
     s.push_str(
-        "<<TASK: translate only SOURCE_JP into final English Markdown>>\n\
+        "<<TASK: translate only SOURCE_JP into final English Markdown per the system prompt>>\n\
          - Use REFERENCE, CONTINUITY, CURRENT_POV, and REVIEWER_FEEDBACK as constraints, never as text to copy.\n\
-         - Produce polished, idiomatic English for native light-novel readers. Recast Japanese syntax naturally while preserving every fact, beat, speaker, implication, and line of content.\n\
-         - Preserve Markdown, scene dividers, image links, emphasis, questions, interruptions, ellipses, repetition, and comic timing.\n\
-         - Keep character voices distinct. Follow exact name, address-form, glossary, POV, and style mappings. Do not expand a short source name to a full name.\n\
-         - Do not mechanically overuse names, explicit subjects, honorifics, stock Japanese calques, profanity, translator notes, or parenthetical source readings. Do not Westernize the setting.\n\
-         - Resolve omitted subjects and modifier chains from Japanese syntax and context. Track scene-boundary POV changes and save the narrator at the END of this chunk in `pov`.\n\
-         - Use natural English punctuation and dialogue. Do not leave ordinary raw kana, kanji glosses, or Japanese punctuation in the story text unless visible Japanese is plot-critical.\n\
-         - Put English target renderings in `translated_name`, `translated_term`, `forbidden_translations`, and `also_called[].translated_name`.\n\
-         - Before responding, compare SOURCE_JP and translated_text line by line. translated_text must contain only the complete story translation, with no preface or explanation.\n\
+         - Before responding, compare SOURCE_JP and translated_text line by line; save the narrator at chunk end in `pov`.\n\
          <<END_TASK>>\n\n",
     );
     if let Some(feedback) = retry_feedback.map(str::trim).filter(|fb| !fb.is_empty()) {
@@ -284,24 +263,12 @@ mod tests {
     fn translator_user_msg_carries_quality_reminders() {
         let msg = build_translator_user_msg(&[], None, "雨野君は笑った。", None, 1);
 
-        assert!(msg.contains("เรียกอีกชื่อ"));
+        assert!(msg.contains("<<TASK:"));
+        assert!(msg.contains("เงื่อนไขผ่าน/ตก"));
         assert!(msg.contains("ครบทุกบรรทัด"));
-        assert!(msg.contains("เครื่องหมายญี่ปุ่น"));
-        assert!(msg.contains("睨みつけてくる女二人"));
-        assert!(msg.contains("訊けたら苦労しません"));
-        assert!(msg.contains("亜玖璃さん"));
-        assert!(msg.contains("ฉันคิดว่า"));
-        assert!(msg.contains("ห้ามใช้ \"กู\" ทุกกรณี"));
-        assert!(msg.contains("ใช้ \"ฉัน\" ได้"));
-        assert!(msg.contains("ตัวละครหญิง"));
-        assert!(msg.contains("`僕/ぼく/ボク`"));
-        assert!(msg.contains("ให้แปลเป็น \"เรา\" เท่านั้น"));
-        assert!(msg.contains("ถอดเสียงเป็น \"โบคุ\""));
-        assert!(msg.contains("นี่หว่า"));
-        assert!(msg.contains("ล่ะมั้ง"));
-        assert!(msg.contains("互いへの"));
-        assert!(msg.contains("場の空気が冷えた"));
+        assert!(msg.contains("`pov`"));
         assert!(msg.contains("<<SOURCE_JP>>"));
+        assert!(!msg.contains("睨みつけてくる女二人"));
     }
 
     #[test]
@@ -330,11 +297,10 @@ mod tests {
         );
 
         assert!(msg.contains("<<CONTINUITY_EN"));
-        assert!(msg.contains("polished, idiomatic English"));
-        assert!(msg.contains("Do not Westernize"));
-        assert!(msg.contains("`translated_name`, `translated_term`"));
+        assert!(msg.contains("per the system prompt"));
         assert!(msg.contains("Make the dialogue less literal."));
         assert!(!msg.contains("ห้ามใช้ \"กู\""));
+        assert!(!msg.contains("Do not Westernize"));
     }
 
     #[tokio::test]
