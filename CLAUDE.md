@@ -145,3 +145,13 @@ rtk pip list            rtk pnpm install        rtk npm run <script>
 - For debugging, use raw command without rtk prefix
 - `rtk proxy <cmd>` runs command without filtering but tracks usage
 <!-- /headroom:rtk-instructions -->
+
+## Cursor Cloud specific instructions
+
+Single Rust (edition 2024) TUI crate — no companion services, DB, or Docker. Standard build/lint/test/run commands live in this file's **Commands** section and the README's **Development** section; use those.
+
+- **Toolchain:** edition 2024 needs `rustc` ≥ 1.85. The base image may ship an older default (seen: 1.83), so the startup update script bumps the `stable` toolchain and adds `clippy`. If a build fails with an "edition 2024 is unstable"/edition error, run `rustup update stable && rustup default stable`.
+- **Tests need no API key or network** — the suite uses the in-tree mock LLM client (`src/llm/mock.rs`); `cargo test --locked` runs fully offline.
+- **Running the app needs a real TTY.** In a headless agent, launch it inside a PTY (a `tmux` session or a desktop terminal), not as a plain piped process. Set `HONYA_NO_UPDATE_CHECK=1` to skip the startup network update check.
+- **No API key is required just to launch or to import.** With no key, honya shows a Welcome/sample-project offline path; EPUB/PDF/HTML/Markdown import + cleanse is pure Rust pre-processing (no LLM), so importing a source file into a new project is a good offline smoke test. A provider key (`HONYA_API_KEY`/`OPENROUTER_API_KEY`, etc.) is only needed to actually translate.
+- **The current working directory is the "shelf."** Run `honya` from a folder that holds your projects and loose source files, not from the repo root.
