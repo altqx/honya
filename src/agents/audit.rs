@@ -34,26 +34,97 @@ static TRANSLATION_LABEL: Lazy<Regex> = Lazy::new(|| {
 const DISCOURAGED_CASUAL_PARTICLES: [(&str, &str); 2] = [("ว่ะ", "ฟะ"), ("วะ", "ฟะ")];
 const FORBIDDEN_THAI_SELF_PRONOUN: &str = "กู";
 
-/// Thai tone/diacritic marks that can follow a vowel and form a different
-/// syllable (e.g. `กู่` in `จนกู่ไม่กลับ`). A bare `contains("กู")` would
-/// false-positive on those.
-fn is_thai_combining_after_vowel(c: char) -> bool {
-    matches!(
-        c,
-        '\u{0E31}' | '\u{0E34}'..='\u{0E3A}' | '\u{0E47}'..='\u{0E4E}'
-    )
+/// Hosts that attach before the vulgar self-pronoun (`พวกกู`, `ของกู`, …).
+/// Omit bare `ที่` — it collides with names like `ที่กูรัน`.
+const KOO_PRONOUN_PREFIXES: &[&str] = &[
+    "พวก",
+    "ของ",
+    "ให้",
+    "น่ะ",
+    "บอก",
+    "ถาม",
+    "ขอ",
+    "หมัด",
+    "แนะนำ",
+    "โดน",
+    "หา",
+    "เรียก",
+    "กับ",
+    "แทน",
+    "เห็น",
+];
+
+/// Continuations that mark `กู` as the pronoun (`กูจะ`, `กูไม่`, `กูรู้`, …).
+/// Keep these specific so loanwords (`กูรู`, `กูเกิล`, `กูรัน`) do not match.
+const KOO_PRONOUN_SUFFIXES: &[&str] = &[
+    "จะ",
+    "ไม่",
+    "ว่า",
+    "เอง",
+    "น่ะ",
+    "ต้อง",
+    "ไป",
+    "เข้า",
+    "รู้",
+    "ก็",
+    "สิ",
+    "ดิ",
+    "ไง",
+    "นะ",
+    "ละ",
+    "ล่ะ",
+    "เลย",
+    "แน่",
+    "กับ",
+    "มา",
+    "อยู่",
+    "ถาม",
+    "บอก",
+];
+
+fn is_thai_script(c: char) -> bool {
+    matches!(c, '\u{0E00}'..='\u{0E7F}')
 }
 
-/// True when `translated` contains the vulgar self-pronoun `กู`, but not when
-/// those two codepoints are only the stem of a longer syllable like `กู่`.
+/// True when this `กู` occurrence is framed like the vulgar self-pronoun.
+fn is_koo_pronoun_frame(before: &str, after: &str) -> bool {
+    if KOO_PRONOUN_PREFIXES
+        .iter()
+        .any(|prefix| before.ends_with(prefix))
+    {
+        return true;
+    }
+
+    let prev_boundary = match before.chars().next_back() {
+        None => true,
+        Some(c) => !is_thai_script(c),
+    };
+    let next_boundary = match after.chars().next() {
+        None => true,
+        Some(c) => !is_thai_script(c),
+    };
+    if prev_boundary && next_boundary {
+        return true;
+    }
+
+    // Suffixes only when `กู` starts a token — not inside names like `อากู`/`ลากู`.
+    // Allow `ที่กูจะ…` (omit bare `ที่` from prefixes to avoid `ที่กูรัน`).
+    let koo_token_start = prev_boundary || before.ends_with("ที่");
+    koo_token_start
+        && KOO_PRONOUN_SUFFIXES
+            .iter()
+            .any(|suffix| after.starts_with(suffix))
+}
+
 fn contains_forbidden_thai_self_pronoun(translated: &str) -> bool {
-    let mut rest = translated;
-    while let Some(idx) = rest.find(FORBIDDEN_THAI_SELF_PRONOUN) {
-        let after = &rest[idx + FORBIDDEN_THAI_SELF_PRONOUN.len()..];
-        if !after.chars().next().is_some_and(is_thai_combining_after_vowel) {
+    let mut search_from = 0;
+    while let Some(rel) = translated[search_from..].find(FORBIDDEN_THAI_SELF_PRONOUN) {
+        let idx = search_from + rel;
+        let after_at = idx + FORBIDDEN_THAI_SELF_PRONOUN.len();
+        if is_koo_pronoun_frame(&translated[..idx], &translated[after_at..]) {
             return true;
         }
-        rest = after;
+        search_from = after_at;
     }
     false
 }
@@ -1325,32 +1396,87 @@ mod tests {
 
     #[test]
     fn audit_flags_forbidden_koo_pronoun() {
-        let findings = audit_translation_with_terms("俺は帰る。", "กูจะกลับแล้ว", &[], &[]);
-
-        assert!(
-            findings
-                .iter()
-                .any(|f| f.contains("forbidden Thai self-pronoun") && f.contains("กู")),
-            "กู should be a deterministic hard audit finding: {findings:?}"
-        );
+        for thai in [
+            "กูจะกลับแล้ว",
+            "กูไม่ไป",
+            "ของกู",
+            "ให้กูสิ",
+            "กูว่าแล้ว",
+            "กูเอง",
+            "กูน่ะ",
+            "“กู”",
+            "พวกกูต้องการความบันเทิง",
+            "น่ะกูเข้าใจอยู่หรอก",
+            "แนะนำกูไปตรงๆ",
+            "ขอกูถามอะไรอย่างนึง",
+            "โดนหมัดกูแน่",
+            "ที่กูจะบอกก็คือ",
+            "กูรู้แล้ว",
+            "มาหากู",
+        ] {
+            let findings = audit_translation_with_terms("俺は帰る。", thai, &[], &[]);
+            assert!(
+                findings
+                    .iter()
+                    .any(|f| f.contains("forbidden Thai self-pronoun")),
+                "pronoun form should be flagged: {thai:?} findings={findings:?}"
+            );
+        }
     }
 
     #[test]
-    fn audit_allows_kuu_idiom_with_tone_mark() {
-        // `กู่` (mai ek) is a different syllable from the pronoun `กู`; the
-        // idiom จนกู่ไม่กลับ must not trip the deterministic ban.
-        let findings = audit_translation_with_terms(
-            "死ぬまで忘れない。",
+    fn audit_allows_koo_inside_longer_thai_words() {
+        // Only pronoun-framed `กู` is banned. Vocabulary / loanwords / names that
+        // merely contain the substring must pass — including open-ended JP names.
+        for thai in [
             "จนกู่ไม่กลับ ฉันจะไม่ลืม",
-            &[],
-            &[],
-        );
+            "หดหู่จนกู่ไม่กลับ",
+            "เกือบกู้กลับมาได้",
+            "สามารถกู้ข้อมูลกลับมาได้",
+            "คนในตระกูลของฉัน",
+            "บ้านตระกูลโฮชิโนะโมริ",
+            "พืชตระกูลส้ม",
+            "ยัยสิ่งปฏิกูล",
+            "เป็นกูรูด้านความรัก",
+            "ห้ามกูเกิลนะ",
+            "แฟนเขาที่เป็นยากูซ่าสายปัญญาชน",
+            "กูรันผู้ทรยศ",
+            "หมู่บ้านลากู",
+            "เธอกับอากูดูสนิทกัน",
+            "รุ่นพี่อากู๋",
+            "อากูกับอุเอฮาระคุง",
+            "หมู่บ้านลากูก็พุ่งสูง",
+            "สกู๊ปพิเศษ",
+            "ลำเอียงสุดกู่",
+            "กู่ร้องด้วยความยินดี",
+            "กอบกู้โลก",
+            "ชาติตระกูล",
+        ] {
+            let findings = audit_translation_with_terms("彼は言った。", thai, &[], &[]);
+            assert!(
+                !findings
+                    .iter()
+                    .any(|f| f.contains("forbidden Thai self-pronoun")),
+                "must not flag non-pronoun กู stem in: {thai:?} findings={findings:?}"
+            );
+        }
+    }
 
+    #[test]
+    fn audit_still_flags_koo_know_vs_guru() {
+        let findings = audit_translation_with_terms("俺は知っている。", "กูรู้แล้ว", &[], &[]);
         assert!(
-            !findings
+            findings
                 .iter()
                 .any(|f| f.contains("forbidden Thai self-pronoun")),
-            "กู่ in จนกู่ไม่กลับ must not be flagged as กู: {findings:?}"
+            "กูรู้ (I know) must still be flagged: {findings:?}"
+        );
+        let guru = audit_translation_with_terms("彼は専門家だ。", "เขาเป็นกูรูด้านนี้", &[], &[]);
+        assert!(
+            !guru
+                .iter()
+                .any(|f| f.contains("forbidden Thai self-pronoun")),
+            "กูรู (guru) must not be flagged: {guru:?}"
         );
     }
 
