@@ -11,8 +11,8 @@ use serde_json::{Map, Value, json};
 use crate::model::ServiceTier;
 
 use super::client::{
-    ClientConfig, LlmClient, LlmError, Result, StreamDelta, parse_retry_after, retry_after_hint,
-    retry_backoff,
+    ClientConfig, LlmClient, LlmError, Result, StreamDelta, max_attempts_for_error,
+    parse_retry_after, retry_after_hint, retry_backoff,
 };
 use super::{
     ChatRequest, ChatResponse, Choice, FunctionCall, Message, ResponseFormat, ResponseMessage,
@@ -128,7 +128,7 @@ impl LlmClient for GoogleInteractionsClient {
         let mut retry = 0u32;
         loop {
             match self.send_once(req).await {
-                Err(e) if retry + 1 < max && e.is_retryable() => {
+                Err(e) if retry + 1 < max_attempts_for_error(&e, max) && e.is_retryable() => {
                     retry += 1;
                     tokio::time::sleep(retry_backoff(retry, retry_after_hint(&e))).await;
                 }
@@ -152,7 +152,7 @@ impl LlmClient for GoogleInteractionsClient {
         loop {
             match self.send_stream_once(req, &mut tracked).await {
                 Err(e)
-                    if retry + 1 < max
+                    if retry + 1 < max_attempts_for_error(&e, max)
                         && e.is_retryable()
                         && !emitted.load(std::sync::atomic::Ordering::Relaxed) =>
                 {

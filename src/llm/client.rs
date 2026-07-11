@@ -105,6 +105,11 @@ impl LlmError {
         )
     }
 
+    /// True for an HTTP 429 / explicit rate-limit fault.
+    pub fn is_rate_limited(&self) -> bool {
+        matches!(self, LlmError::RateLimited { .. })
+    }
+
     /// True for a fault a verbatim replay might clear — the classifier the
     /// transport-level retry loop uses. Excludes deterministic failures (other
     /// `4xx`, content-policy blocks, empty/parse results). Absorbing these here
@@ -190,6 +195,20 @@ impl ClientConfig {
             Some(ServiceTier::Flex) => 5,
             _ => 3,
         }
+    }
+}
+
+/// Rate-limit hits get a deeper send budget than other transient faults.
+/// Exhausting it aborts the pipeline instead of salvaging a NeedsReview chunk.
+pub(super) const RATE_LIMIT_MAX_SEND_ATTEMPTS: u32 = 10;
+
+/// Send-attempt budget for one transport error: rate limits use
+/// [`RATE_LIMIT_MAX_SEND_ATTEMPTS`]; other retryable faults use `general_max`.
+pub(super) fn max_attempts_for_error(err: &LlmError, general_max: u32) -> u32 {
+    if err.is_rate_limited() {
+        RATE_LIMIT_MAX_SEND_ATTEMPTS
+    } else {
+        general_max
     }
 }
 
@@ -500,7 +519,7 @@ impl LlmClient for OpenRouterClient {
         let mut retry = 0u32;
         loop {
             match self.send_once(req).await {
-                Err(e) if retry + 1 < max && e.is_retryable() => {
+                Err(e) if retry + 1 < max_attempts_for_error(&e, max) && e.is_retryable() => {
                     retry += 1;
                     tokio::time::sleep(retry_backoff(retry, retry_after_hint(&e))).await;
                 }
@@ -529,7 +548,9 @@ impl LlmClient for OpenRouterClient {
                 // Only retry while nothing has reached the caller: replaying after
                 // partial output would double-feed the field-stream parser.
                 Err(e)
-                    if retry + 1 < max && e.is_retryable() && !emitted.load(Ordering::Relaxed) =>
+                    if retry + 1 < max_attempts_for_error(&e, max)
+                        && e.is_retryable()
+                        && !emitted.load(Ordering::Relaxed) =>
                 {
                     retry += 1;
                     tokio::time::sleep(retry_backoff(retry, retry_after_hint(&e))).await;
@@ -1159,6 +1180,23 @@ mod tests {
             3
         );
         assert_eq!(client_with_tier(None).cfg.max_send_attempts(), 3);
+    }
+
+    #[test]
+    fn rate_limits_get_a_deeper_send_budget_than_other_faults() {
+        let rate_limited = LlmError::RateLimited {
+            retry_after: 1,
+            message: "slow down".into(),
+        };
+        let transport = LlmError::Api {
+            status: 503,
+            message: "unavailable".into(),
+        };
+        assert_eq!(max_attempts_for_error(&rate_limited, 3), 10);
+        assert_eq!(max_attempts_for_error(&transport, 3), 3);
+        assert_eq!(max_attempts_for_error(&transport, 5), 5);
+        assert!(rate_limited.is_rate_limited());
+        assert!(!transport.is_rate_limited());
     }
 
     #[test]

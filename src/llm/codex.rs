@@ -11,7 +11,8 @@ use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
 use super::client::{
-    LlmClient, LlmError, Result, StreamDelta, parse_retry_after, retry_after_hint, retry_backoff,
+    LlmClient, LlmError, Result, StreamDelta, max_attempts_for_error, parse_retry_after,
+    retry_after_hint, retry_backoff,
 };
 use super::{
     ChatRequest, ChatResponse, Choice, FunctionCall, ResponseFormat, ResponseMessage, Role,
@@ -155,7 +156,7 @@ impl CodexClient {
         loop {
             match self.run_once(req, &mut tracked).await {
                 Err(e)
-                    if retry + 1 < MAX_SEND_ATTEMPTS
+                    if retry + 1 < max_attempts_for_error(&e, MAX_SEND_ATTEMPTS)
                         && e.is_retryable()
                         && (replay_after_delta || !emitted.load(Ordering::Relaxed)) =>
                 {

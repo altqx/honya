@@ -47,6 +47,11 @@ impl TranslatorStreamError {
         self.source.is_length_truncation()
     }
 
+    /// True for an HTTP 429 / explicit rate-limit fault after transport retries.
+    pub fn is_rate_limited(&self) -> bool {
+        self.source.is_rate_limited()
+    }
+
     pub fn is_provider_pressure(&self) -> bool {
         matches!(
             self.source,

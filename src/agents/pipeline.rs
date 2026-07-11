@@ -497,11 +497,13 @@ enum Outcome {
     Aborted { reason: String },
 }
 
-/// How a single chunk resolved: committed after approval, or committed unreviewed
-/// after exhausting its review attempts (the resilient path).
+/// How a single chunk resolved: committed after approval, committed unreviewed
+/// after exhausting its review attempts (the resilient path), or aborted without
+/// writing when rate limits exhausted their retry budget.
 enum ChunkOutcome {
     Committed,
     NeedsReview,
+    Aborted { reason: String },
 }
 
 enum TranslatorAttemptRun {
@@ -1283,6 +1285,17 @@ async fn process_chapter(
         .await?
         {
             ChunkOutcome::Committed | ChunkOutcome::NeedsReview => {}
+            ChunkOutcome::Aborted { reason } => {
+                let on_disk = translation::read_translated(&ctx.ws, chapter).await;
+                let state = if translation::committed_chunk_indices_in(&on_disk).is_empty() {
+                    ChapterStatus::Pending
+                } else {
+                    ChapterStatus::Partial
+                };
+                ctx.tx
+                    .send(AppEvent::ChapterStateChanged { chapter, state });
+                return Ok(Outcome::Aborted { reason });
+            }
         }
         prev_chunk_text = Some(chunk.text.as_str());
     }
@@ -2279,6 +2292,17 @@ async fn process_chunk_with_lookahead(
                         context: format!("translator ch{chapter} chunk{}", chunk.index),
                         msg: e.to_string(),
                     });
+                    // Transport already retried rate limits up to its budget; do not
+                    // salvage or burn review attempts — abort without writing.
+                    if e.is_rate_limited() {
+                        return Ok(abort_on_rate_limit(
+                            ctx,
+                            chapter,
+                            chunk,
+                            "translator",
+                            &e,
+                        ));
+                    }
                     if !partial.is_empty() {
                         if attempt < max {
                             let fb = if length_trunc {
@@ -2729,6 +2753,15 @@ async fn process_chunk_with_lookahead(
                             context: format!("reviewer ch{chapter} chunk{}", chunk.index),
                             msg: e.to_string(),
                         });
+                        if e.is_rate_limited() {
+                            return Ok(abort_on_rate_limit(
+                                ctx,
+                                chapter,
+                                chunk,
+                                "reviewer",
+                                &e,
+                            ));
+                        }
                         if review_attempt < max {
                             ctx.tx.send(AppEvent::ChunkRetry {
                                 chapter,
@@ -2867,7 +2900,17 @@ async fn process_chunk_with_lookahead(
                         chapter: acc.chapter,
                     });
                 }
-                // Metadata persistence is best-effort; never fail the chunk on it.
+                // Rate-limit exhaustion aborts the run; other metadata failures
+                // stay best-effort so an approved chunk is never rolled back.
+                Err(e) if error_is_rate_limited(&e) => {
+                    return Ok(abort_on_rate_limit(
+                        ctx,
+                        chapter,
+                        chunk,
+                        "orchestrator",
+                        &e,
+                    ));
+                }
                 Err(e) => {
                     ctx.tx.send(AppEvent::Error {
                         context: format!("orchestrator ch{chapter} chunk{}", chunk.index),
@@ -3011,6 +3054,36 @@ fn emit_attempt_failed_retry(
         max,
         feedback: feedback.to_string(),
     });
+}
+
+/// Abort the run when an agent exhausted its rate-limit retry budget. Translator
+/// and Reviewer paths call this *before* writing; Orchestrator may have already
+/// committed the approved chunk and only stops further work.
+fn abort_on_rate_limit(
+    ctx: &PipelineCtx,
+    chapter: u32,
+    chunk: &Chunk,
+    agent: &str,
+    err: &impl std::fmt::Display,
+) -> ChunkOutcome {
+    let reason = format!(
+        "{agent} rate limited on chapter {chapter} chunk {} after retries — aborting run: {err}",
+        chunk.index + 1
+    );
+    ctx.tx.send(AppEvent::Log {
+        level: LogLevel::Error,
+        msg: reason.clone(),
+    });
+    ChunkOutcome::Aborted { reason }
+}
+
+fn error_is_rate_limited(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<crate::llm::client::LlmError>()
+            .is_some_and(crate::llm::client::LlmError::is_rate_limited)
+            || cause.to_string().contains("rate limited")
+    })
 }
 
 /// Commit a chunk's best-available translation flagged for manual review, emitting
@@ -4511,6 +4584,114 @@ mod tests {
         )));
     }
 
+    struct AlwaysRateLimitedClient;
+
+    #[async_trait::async_trait]
+    impl LlmClient for AlwaysRateLimitedClient {
+        async fn chat(
+            &self,
+            _req: &crate::llm::ChatRequest,
+        ) -> crate::llm::client::Result<crate::llm::ChatResponse> {
+            Err(crate::llm::client::LlmError::RateLimited {
+                retry_after: 0,
+                message: "persistent limit".to_string(),
+            })
+        }
+
+        async fn chat_stream(
+            &self,
+            req: &crate::llm::ChatRequest,
+            _on_delta: &mut (dyn for<'a> FnMut(crate::llm::StreamDelta<'a>) + Send),
+        ) -> crate::llm::client::Result<crate::llm::ChatResponse> {
+            self.chat(req).await
+        }
+    }
+
+    #[tokio::test]
+    async fn exhausted_rate_limits_abort_without_saving_chunk() {
+        let (base, ws) = temp_ws("rate_limit_abort");
+        let client = Arc::new(AlwaysRateLimitedClient);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let cfg = AppConfig {
+            max_attempts: 3,
+            parallel_lookahead: false,
+            prepass_extract: false,
+            coherence_check: false,
+            ..AppConfig::default()
+        };
+        let ctx = PipelineCtx {
+            clients: ClientSet::single(client as Arc<dyn LlmClient>),
+            ws: ws.clone(),
+            models: ModelSet::default(),
+            cfg: cfg.clone(),
+            target_language: TargetLanguage::Thai,
+            tx: EventTx(tx),
+            ctl: RunControl::new(),
+            queue: ChapterQueue::default(),
+        };
+        let chunk = Chunk {
+            index: 0,
+            text: "これはテストです。".to_string(),
+            est_tokens: 8,
+        };
+        let wd = Watchdog::new(&cfg);
+        let owner = LookaheadOwner::default();
+        let mut state = LookaheadState::new(&cfg);
+        let mut acc = Acc::default();
+        let mut next_prepared = None;
+
+        let outcome = process_chunk_with_lookahead(
+            &ctx,
+            1,
+            &chunk,
+            &mut acc,
+            &wd,
+            &mut None,
+            None,
+            None,
+            None,
+            &mut state,
+            &mut next_prepared,
+            &owner,
+        )
+        .await
+        .expect("process_chunk");
+
+        match outcome {
+            ChunkOutcome::Aborted { reason } => {
+                assert!(reason.contains("rate limited"));
+                assert!(reason.contains("aborting run"));
+            }
+            ChunkOutcome::Committed | ChunkOutcome::NeedsReview => {
+                panic!("rate-limit exhaustion must abort without committing")
+            }
+        }
+
+        let translated = translation::read_translated(&ws, 1).await;
+        assert!(
+            translated.trim().is_empty(),
+            "must not save a NeedsReview stub: {translated}"
+        );
+        assert!(!translated.contains(translation::REVIEW_NEEDED_MARKER));
+
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AppEvent::Log { level: LogLevel::Error, msg, .. } if msg.contains("rate limited")
+        )));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, AppEvent::ChunkNeedsReview { .. })));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, AppEvent::ChunkCommitted { .. })));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     #[tokio::test]
     async fn promoted_refusal_uses_the_authoritative_retry_loop() {
         let run = run_speculative_mode("lookahead_refusal", SpeculativeMode::Refusal, 2, 2).await;
@@ -5165,7 +5346,9 @@ mod tests {
             .expect("process_chunk")
         {
             ChunkOutcome::Committed => {}
-            ChunkOutcome::NeedsReview => panic!("clean retry should be approved"),
+            ChunkOutcome::NeedsReview | ChunkOutcome::Aborted { .. } => {
+                panic!("clean retry should be approved")
+            }
         }
 
         assert_eq!(
@@ -5236,7 +5419,9 @@ mod tests {
             .expect("process_chunk")
         {
             ChunkOutcome::Committed => {}
-            ChunkOutcome::NeedsReview => panic!("normalized punctuation should be approved"),
+            ChunkOutcome::NeedsReview | ChunkOutcome::Aborted { .. } => {
+                panic!("normalized punctuation should be approved")
+            }
         }
 
         assert_eq!(client.schema_calls("translation_result"), 1);
@@ -5293,7 +5478,9 @@ mod tests {
             .expect("process_chunk")
         {
             ChunkOutcome::Committed => {}
-            ChunkOutcome::NeedsReview => panic!("clean retry should be approved"),
+            ChunkOutcome::NeedsReview | ChunkOutcome::Aborted { .. } => {
+                panic!("clean retry should be approved")
+            }
         }
 
         assert_eq!(
@@ -5374,7 +5561,9 @@ mod tests {
             .expect("process_chunk")
         {
             ChunkOutcome::Committed => {}
-            ChunkOutcome::NeedsReview => panic!("final retry should be approved"),
+            ChunkOutcome::NeedsReview | ChunkOutcome::Aborted { .. } => {
+                panic!("final retry should be approved")
+            }
         }
 
         assert_eq!(client.schema_calls("translation_result"), 3);
@@ -5427,7 +5616,9 @@ mod tests {
             .expect("process_chunk")
         {
             ChunkOutcome::Committed => {}
-            ChunkOutcome::NeedsReview => panic!("reviewer retry should approve"),
+            ChunkOutcome::NeedsReview | ChunkOutcome::Aborted { .. } => {
+                panic!("reviewer retry should approve")
+            }
         }
 
         assert_eq!(client.schema_calls("translation_result"), 1);

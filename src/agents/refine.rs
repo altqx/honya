@@ -30,6 +30,7 @@ use crate::workspace::{Workspace, characters, glossary, style, translation, volu
 const READ_CAP: usize = 12_000;
 const CANCEL_POLL: std::time::Duration = std::time::Duration::from_millis(50);
 const SUBAGENT_RATE_LIMIT_MAX_SLEEP_SECS: u64 = 60;
+const SUBAGENT_RATE_LIMIT_MAX_RETRIES: u32 = 10;
 
 pub fn refine_tools_schema() -> serde_json::Value {
     json!([
@@ -1126,6 +1127,14 @@ async fn subagent_chat_resuming_after_rate_limit(
                 message,
             }) => {
                 retry += 1;
+                if retry > SUBAGENT_RATE_LIMIT_MAX_RETRIES {
+                    return Err(LlmError::RateLimited {
+                        retry_after,
+                        message: format!(
+                            "rate limited {SUBAGENT_RATE_LIMIT_MAX_RETRIES} times while {phase}: {message}"
+                        ),
+                    });
+                }
                 let wait = subagent_rate_limit_wait(retry_after);
                 let msg = if message.trim().is_empty() {
                     format!("rate limited while {phase}; retrying in {wait}s")
@@ -1138,7 +1147,7 @@ async fn subagent_chat_resuming_after_rate_limit(
                 emit_subagent_activity(tx, parent_path, task_depth, msg.clone());
                 tx.send(AppEvent::Log {
                     level: LogLevel::Warn,
-                    msg: format!("Refine sub-agent {msg} (retry {retry})"),
+                    msg: format!("Refine sub-agent {msg} (retry {retry}/{SUBAGENT_RATE_LIMIT_MAX_RETRIES})"),
                 });
                 tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
             }
