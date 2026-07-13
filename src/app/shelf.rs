@@ -223,7 +223,14 @@ impl ShelfScreen {
         None
     }
 
-    pub fn render(&mut self, f: &mut Frame, area: Rect, projects: &[Project], theme: &Theme) {
+    pub fn render(
+        &mut self,
+        f: &mut Frame,
+        area: Rect,
+        projects: &[Project],
+        foreign_busy: Option<&std::path::Path>,
+        theme: &Theme,
+    ) {
         let rows = self.row_count(projects);
         if self.list.selected().is_none_or(|s| s >= rows) {
             self.list.select(Some(rows.saturating_sub(1)));
@@ -289,7 +296,8 @@ impl ShelfScreen {
         let name_w = list_area.width.saturating_sub(48).max(20) as usize;
 
         for (i, p) in projects.iter().enumerate() {
-            items.push(project_row(p, i == selected, name_w, theme));
+            let busy = foreign_busy.is_some_and(|d| d == p.dir.as_path());
+            items.push(project_row(p, i == selected, name_w, busy, theme));
         }
 
         // Separator is folded into the import ListItem (not standalone) so the
@@ -375,10 +383,24 @@ impl Default for ShelfScreen {
     }
 }
 
-fn project_row(p: &Project, selected: bool, name_w: usize, theme: &Theme) -> ListItem<'static> {
-    let (glyph, gcolor) = overall_glyph(p, theme);
+fn project_row(
+    p: &Project,
+    selected: bool,
+    name_w: usize,
+    foreign_busy: bool,
+    theme: &Theme,
+) -> ListItem<'static> {
+    let (glyph, gcolor) = if foreign_busy {
+        ('↻', theme.status_working)
+    } else {
+        overall_glyph(p, theme)
+    };
     let tally = tally_of(p);
-    let touched = touched_label(p);
+    let touched = if foreign_busy {
+        "running elsewhere".to_string()
+    } else {
+        touched_label(p)
+    };
     let vol = p.volumes.first().map(|v| v.number).unwrap_or(1);
 
     let bar = if selected {
@@ -571,7 +593,7 @@ mod tests {
         let mut s = ShelfScreen::new();
         let theme = ThemeId::default().build();
         let mut term = Terminal::new(TestBackend::new(90, 20)).unwrap();
-        term.draw(|f| s.render(f, f.area(), &projects, &theme))
+        term.draw(|f| s.render(f, f.area(), &projects, None, &theme))
             .unwrap();
         let la = s.list_area;
 

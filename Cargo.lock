@@ -1127,6 +1127,7 @@ dependencies = [
  "encoding_rs",
  "futures",
  "htmd",
+ "libc",
  "once_cell",
  "pdf-extract",
  "ratatui",

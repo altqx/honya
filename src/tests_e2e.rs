@@ -1162,6 +1162,132 @@ fn resume_uses_the_projects_language_not_the_current_preference() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
+/// A checkpoint whose owner PID is still alive (another honya window) must not
+/// raise the resume modal — it is recorded as `foreign_run` and opening that
+/// project is refused.
+#[test]
+fn live_foreign_run_suppresses_resume_and_blocks_open() {
+    use crate::workspace::session::{self, SessionCheckpoint, with_live_elsewhere_override};
+
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    let tmp = std::env::temp_dir().join(format!("honya_recover_live_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    let session_file = tmp.join("session.json");
+    unsafe {
+        std::env::set_var("HONYA_SESSION_FILE", &session_file);
+    }
+
+    let project_dir = tmp.join("re-zero");
+    crate::workspace::scaffold::create_project(&project_dir, "Re:Zero", &ModelSet::default(), 1)
+        .expect("scaffold project");
+
+    let mut cp = SessionCheckpoint::new(
+        project_dir.clone(),
+        "re-zero".to_string(),
+        "Re:Zero".to_string(),
+        1,
+        vec![1, 2],
+    );
+    // Pretend another process owns the run.
+    cp.pid = std::process::id().wrapping_add(424_242).max(1);
+    session::save(&cp).expect("write checkpoint");
+
+    let prev_cwd = std::env::current_dir().ok();
+    std::env::set_current_dir(&tmp).expect("chdir into shelf root");
+
+    with_live_elsewhere_override(Some(true), || {
+        let mut app = fresh_app();
+        app.init_recovery_prompt();
+        assert!(
+            matches!(app.overlay, Overlay::None),
+            "a live foreign run must not raise the resume modal"
+        );
+        assert!(
+            app.pending_recovery.is_none(),
+            "pending_recovery stays empty for a live foreign run"
+        );
+        assert!(
+            app.foreign_run.is_some(),
+            "foreign_run holds the live checkpoint"
+        );
+        assert!(
+            session::load().is_some(),
+            "live foreign checkpoint file is left intact"
+        );
+
+        // Shelf Enter → OpenProject for the busy project.
+        app.screen = Screen::Shelf;
+        app.shelf.select_first();
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+        assert!(
+            app.active.is_none(),
+            "cannot open a project owned by another live honya"
+        );
+        assert!(
+            app.toast
+                .as_ref()
+                .is_some_and(|t| t.msg.contains("another honya")),
+            "opening is refused with a clear toast"
+        );
+    });
+
+    if let Some(cwd) = prev_cwd {
+        let _ = std::env::set_current_dir(cwd);
+    }
+    unsafe {
+        std::env::remove_var("HONYA_SESSION_FILE");
+    }
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// A checkpoint with a dead/foreign-stale owner still raises the normal resume prompt.
+#[test]
+fn dead_foreign_pid_still_prompts_resume() {
+    use crate::workspace::session::{self, SessionCheckpoint, with_live_elsewhere_override};
+
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    let tmp = std::env::temp_dir().join(format!("honya_recover_dead_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    let session_file = tmp.join("session.json");
+    unsafe {
+        std::env::set_var("HONYA_SESSION_FILE", &session_file);
+    }
+
+    let project_dir = tmp.join("re-zero");
+    crate::workspace::scaffold::create_project(&project_dir, "Re:Zero", &ModelSet::default(), 1)
+        .expect("scaffold project");
+
+    let mut cp = SessionCheckpoint::new(
+        project_dir,
+        "re-zero".to_string(),
+        "Re:Zero".to_string(),
+        1,
+        vec![1, 2],
+    );
+    cp.pid = std::process::id().wrapping_add(777_777).max(1);
+    session::save(&cp).expect("write checkpoint");
+
+    with_live_elsewhere_override(Some(false), || {
+        let mut app = fresh_app();
+        app.init_recovery_prompt();
+        assert!(
+            matches!(app.overlay, Overlay::Modal(_)),
+            "dead/stale foreign owner still raises resume"
+        );
+        assert!(app.pending_recovery.is_some());
+        assert!(app.foreign_run.is_none());
+    });
+
+    unsafe {
+        std::env::remove_var("HONYA_SESSION_FILE");
+    }
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
 /// Resuming a run whose project has vanished since the checkpoint was written
 /// fails gracefully: the checkpoint is cleared and the user gets an error toast,
 /// rather than the app silently doing nothing or panicking.

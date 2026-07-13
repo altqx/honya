@@ -136,7 +136,7 @@ async fn run(
 
         tokio::select! {
             _ = ticker.tick() => {
-                app.frame = app.frame.wrapping_add(1);
+                app.on_tick();
                 full = false;
             }
             maybe_event = events.next() => {

@@ -74,3 +74,6 @@ chrono = { version = "0.4.45", features = [
   "clock",
   "serde",
 ] } # timestamps in PROJECT.md/run logs
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2" # kill(pid, 0) for live-run detection across honya windows

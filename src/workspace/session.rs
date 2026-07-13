@@ -7,10 +7,13 @@
 //! being translated. This module persists just that, so the next launch can offer
 //! a one-keystroke resume back into the existing chunk-level resume path.
 //!
-//! Invariant: the checkpoint file exists **iff** a run is in flight. It is written
-//! when a run starts ([`save`]) and removed when the pipeline finishes ([`clear`]).
-//! A checkpoint that survives to the next launch therefore means the previous run
-//! was interrupted (crash, power loss, or a hard kill) and is resumable.
+//! Invariant: the checkpoint file exists **iff** a run is in flight (or was
+//! interrupted before a clean finish). It is written when a run starts ([`save`])
+//! and removed when the pipeline finishes ([`clear`]). The owner fields
+//! [`SessionCheckpoint::pid`] and [`SessionCheckpoint::heartbeat_at`] distinguish a
+//! **live** run in another honya window from a true interrupt: fresh heartbeat and
+//! an alive foreign PID mean leave the file alone and block opening that project;
+//! dead or stale means the normal resume prompt.
 
 use std::path::{Path, PathBuf};
 
@@ -20,6 +23,9 @@ use serde::{Deserialize, Serialize};
 /// Bumped if the on-disk shape changes incompatibly; an older/newer file is
 /// treated as absent rather than mis-deserialized.
 const SCHEMA_VERSION: u32 = 1;
+
+/// Heartbeats older than this mean the owner is gone or hung → treat as interrupt.
+const HEARTBEAT_STALE_SECS: i64 = 90;
 
 /// The single in-flight run honya can resume. honya runs one pipeline at a time
 /// (enforced by `App::run_active`), so a single global checkpoint is sufficient.
@@ -52,6 +58,17 @@ pub struct SessionCheckpoint {
     /// checkpoint time. Default keeps older checkpoints loadable.
     #[serde(default)]
     pub whole_project: bool,
+    /// Process id of the honya instance that owns this run. `0` = legacy checkpoint
+    /// without an owner (treated as interrupted, not live elsewhere).
+    #[serde(default)]
+    pub pid: u32,
+    /// Last time the owner refreshed this file while the run was active.
+    #[serde(default = "epoch")]
+    pub heartbeat_at: DateTime<Utc>,
+}
+
+fn epoch() -> DateTime<Utc> {
+    DateTime::<Utc>::UNIX_EPOCH
 }
 
 impl SessionCheckpoint {
@@ -65,6 +82,7 @@ impl SessionCheckpoint {
         chapters: Vec<u32>,
     ) -> Self {
         let started_at = Utc::now();
+        let now = started_at;
         Self {
             version: SCHEMA_VERSION,
             project_dir,
@@ -76,6 +94,8 @@ impl SessionCheckpoint {
             run_id: make_run_id(started_at),
             honya_version: crate::update::current_version().to_string(),
             whole_project: false,
+            pid: std::process::id(),
+            heartbeat_at: now,
         }
     }
 
@@ -91,6 +111,84 @@ impl SessionCheckpoint {
         if self.run_id.trim().is_empty() {
             self.run_id = make_run_id(self.started_at);
         }
+    }
+
+    /// Claim this checkpoint for the current process (pid + fresh heartbeat).
+    /// Call before saving when this instance starts or resumes a run.
+    pub fn claim_owner(&mut self) {
+        self.pid = std::process::id();
+        self.touch_heartbeat();
+    }
+
+    /// Refresh the live-run heartbeat timestamp.
+    pub fn touch_heartbeat(&mut self) {
+        self.heartbeat_at = Utc::now();
+    }
+
+    /// True when another honya process still owns this run (alive PID + fresh
+    /// heartbeat). Used to suppress the false "interrupted" resume prompt and to
+    /// lock the project in a second window.
+    pub fn is_live_elsewhere(&self) -> bool {
+        #[cfg(test)]
+        if let Some(forced) = live_elsewhere_override() {
+            return forced && self.pid != 0 && self.pid != std::process::id();
+        }
+
+        let me = std::process::id();
+        if self.pid == 0 || self.pid == me {
+            return false;
+        }
+        if !heartbeat_fresh(self.heartbeat_at) {
+            return false;
+        }
+        process_alive(self.pid)
+    }
+}
+
+fn heartbeat_fresh(at: DateTime<Utc>) -> bool {
+    let age = Utc::now().signed_duration_since(at);
+    age.num_seconds() >= 0 && age.num_seconds() <= HEARTBEAT_STALE_SECS
+}
+
+fn process_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        // Signal 0: existence check only (no signal delivered).
+        unsafe { libc::kill(pid as i32, 0) == 0 }
+    }
+    #[cfg(windows)]
+    {
+        windows_process_alive(pid)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = pid;
+        false
+    }
+}
+
+#[cfg(windows)]
+fn windows_process_alive(pid: u32) -> bool {
+    type Handle = *mut core::ffi::c_void;
+    extern "system" {
+        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> Handle;
+        fn CloseHandle(handle: Handle) -> i32;
+        fn GetExitCodeProcess(handle: Handle, exit_code: *mut u32) -> i32;
+    }
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    const STILL_ACTIVE: u32 = 259;
+    unsafe {
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if h.is_null() {
+            return false;
+        }
+        let mut code = 0u32;
+        let ok = GetExitCodeProcess(h, &mut code);
+        CloseHandle(h);
+        ok != 0 && code == STILL_ACTIVE
     }
 }
 
@@ -155,6 +253,28 @@ fn clear_at(path: &Path) {
 }
 
 #[cfg(test)]
+thread_local! {
+    static LIVE_ELSEWHERE_OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn live_elsewhere_override() -> Option<bool> {
+    LIVE_ELSEWHERE_OVERRIDE.with(|c| c.get())
+}
+
+/// Test-only: force [`SessionCheckpoint::is_live_elsewhere`] to `Some(true/false)`,
+/// or `None` to restore real PID/heartbeat checks. Nested calls restore the prior value.
+#[cfg(test)]
+pub fn with_live_elsewhere_override<R>(value: Option<bool>, f: impl FnOnce() -> R) -> R {
+    LIVE_ELSEWHERE_OVERRIDE.with(|c| {
+        let prev = c.replace(value);
+        let out = f();
+        c.set(prev);
+        out
+    })
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -184,6 +304,8 @@ mod tests {
         save_at(&file, &cp).unwrap();
         let loaded = load_at(&file).expect("checkpoint loads back");
         assert_eq!(loaded, cp, "checkpoint survives a save/load round-trip");
+        assert_eq!(loaded.pid, std::process::id());
+        assert!(heartbeat_fresh(loaded.heartbeat_at));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -204,6 +326,66 @@ mod tests {
         assert_eq!(loaded, cp);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_checkpoint_defaults_pid_and_epoch_heartbeat() {
+        let dir = scratch("legacy");
+        let file = dir.join("session.json");
+        // Pre-liveness shape (no pid / heartbeat_at).
+        let json = format!(
+            r#"{{
+              "version": 1,
+              "project_dir": "{}",
+              "project_id": "re-zero",
+              "project_title": "Re:Zero",
+              "vol": 1,
+              "chapters": [1],
+              "started_at": "2024-01-01T00:00:00Z",
+              "run_id": "run-old",
+              "honya_version": "0.1.0",
+              "whole_project": false
+            }}"#,
+            dir.display()
+        );
+        std::fs::write(&file, json).unwrap();
+        let loaded = load_at(&file).expect("legacy loads");
+        assert_eq!(loaded.pid, 0);
+        assert_eq!(loaded.heartbeat_at, DateTime::<Utc>::UNIX_EPOCH);
+        assert!(
+            !loaded.is_live_elsewhere(),
+            "legacy checkpoints are interrupted, not live elsewhere"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn own_pid_is_never_live_elsewhere() {
+        let cp = sample(scratch("own_pid"));
+        assert_eq!(cp.pid, std::process::id());
+        assert!(!cp.is_live_elsewhere());
+    }
+
+    #[test]
+    fn live_elsewhere_respects_override_and_foreign_pid() {
+        let mut cp = sample(scratch("override"));
+        cp.pid = std::process::id().wrapping_add(999_991).max(1);
+        with_live_elsewhere_override(Some(true), || {
+            assert!(cp.is_live_elsewhere());
+        });
+        with_live_elsewhere_override(Some(false), || {
+            assert!(!cp.is_live_elsewhere());
+        });
+    }
+
+    #[test]
+    fn touch_heartbeat_advances_timestamp() {
+        let mut cp = sample(scratch("touch"));
+        let before = cp.heartbeat_at;
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        cp.touch_heartbeat();
+        assert!(cp.heartbeat_at > before);
     }
 
     #[test]
