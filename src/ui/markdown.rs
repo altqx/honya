@@ -6,8 +6,10 @@
 //! [`Line`]s/ [`Span`]s using the active [`Theme`].  A tiny pre/post layer keeps
 //! honya-specific behavior that termimad intentionally doesn't cover: EPUB image
 //! chips, ordinary link labels, underscore emphasis from older cleanses,
-//! ordered-list markers, preserved leading prose indentation, and the legacy
-//! `&nbsp;` hard-break sentinel.
+//! preserved leading prose indentation, and the legacy `&nbsp;` hard-break
+//! sentinel. Ordered lists are rendered from termimad's native
+//! [`CompositeKind::OrderedListItem`] (whole lines still get a small pre-pass so
+//! the number keeps honya's accent styling).
 //!
 //! The caller still owns wrapping through `Paragraph::wrap`; `width` is used only
 //! for full-width thematic rules.  Every emitted text run passes through
@@ -372,6 +374,17 @@ fn append_composite_inline(
     theme: &Theme,
     spans: &mut Vec<Span<'static>>,
 ) {
+    // termimad 0.35+ strips list markers into CompositeKind; re-emit them here
+    // so table cells don't lose "1. "/"• " the way whole-line prefix_spans recovers.
+    if matches!(
+        fc.kind,
+        CompositeKind::ListItem(_)
+            | CompositeKind::ListItemFollowUp(_)
+            | CompositeKind::OrderedListItem { .. }
+            | CompositeKind::OrderedListItemFollowUp { .. }
+    ) {
+        spans.extend(prefix_spans(fc.kind, theme));
+    }
     let mut state = MarkerState::default();
     let mut ignored_breaks = Vec::new();
     for compound in &fc.compounds {
@@ -404,6 +417,14 @@ fn prefix_spans(kind: CompositeKind, theme: &Theme) -> Vec<Span<'static>> {
         )],
         CompositeKind::ListItemFollowUp(depth) => {
             vec![Span::raw(format!("{}  ", " ".repeat(depth as usize)))]
+        }
+        CompositeKind::OrderedListItem { level, index } => vec![Span::styled(
+            format!("{}{}. ", " ".repeat(level as usize), index),
+            Style::default().fg(theme.accent_soft),
+        )],
+        CompositeKind::OrderedListItemFollowUp { level, index } => {
+            let indent = index.to_string().len() + 2 + level as usize;
+            vec![Span::raw(" ".repeat(indent))]
         }
         _ => Vec::new(),
     }
@@ -1261,6 +1282,52 @@ mod tests {
         let t = line_text(&line);
         assert!(t.contains("3."));
         assert!(t.contains("third"));
+    }
+
+    #[test]
+    fn ordered_list_in_table_cell_keeps_number() {
+        // termimad 0.35 parses "1. a" inside a cell as OrderedListItem and
+        // strips the marker from compounds — we must re-emit it.
+        let lines = render(
+            "| 1. a | b |\n| --- | --- |\n| 2. c | d |",
+            Color::Reset,
+            &theme(),
+            40,
+        );
+        let texts: Vec<String> = lines.iter().map(line_text).collect();
+        assert!(
+            texts.iter().any(|t| t.contains("1.") && t.contains('a')),
+            "ordered marker missing from cell: {texts:?}"
+        );
+        assert!(
+            texts.iter().any(|t| t.contains("2.") && t.contains('c')),
+            "ordered marker missing from cell: {texts:?}"
+        );
+    }
+
+    #[test]
+    fn unordered_list_in_table_cell_keeps_bullet() {
+        let lines = render(
+            "| - a | b |\n| --- | --- |\n| - c | d |",
+            Color::Reset,
+            &theme(),
+            40,
+        );
+        let texts: Vec<String> = lines.iter().map(line_text).collect();
+        assert!(
+            texts.iter().any(|t| t.contains('•') && t.contains('a')),
+            "bullet missing from cell: {texts:?}"
+        );
+    }
+
+    #[test]
+    fn ragged_table_at_narrow_widths_does_not_panic() {
+        // Regression guard for termimad 0.35.0 Table::fix_columns OOB (#77),
+        // fixed upstream in 0.35.1.
+        let md = "| a | b |\n| --- | --- |\n| only-one-cell |";
+        for width in [8usize, 12, 16, 20, 24, 30, 40] {
+            let _ = render(md, Color::Reset, &theme(), width);
+        }
     }
 
     #[test]

@@ -20,7 +20,7 @@ crossterm = { version = "0.29.0", features = [
 ] } # added directly ONLY for EventStream; unifies with ratatui's copy
 unicode-width = "0.2" # column width for CJK/Thai layout
 unicode-segmentation = "1" # grapheme-safe truncation
-termimad = "0.34.1" # Markdown parser/terminal renderer; shares crossterm 0.29 via crokey
+termimad = "0.35.1" # Markdown parser/terminal renderer; shares crossterm 0.29 via crokey
 
 # --- async runtime + HTTP ---
 tokio = { version = "1.52", features = [
@@ -34,7 +34,7 @@ reqwest = { version = "0.13", default-features = false, features = [
 ] } # NOTE: feature is "rustls", NOT "rustls-tls"
 futures = "0.3" # FutureExt::fuse, StreamExt::next for select!
 async-trait = "0.1" # dyn-compatible async LlmClient / ToolExecutor traits
-tokio-tungstenite = { version = "0.29", default-features = false, features = [
+tokio-tungstenite = { version = "0.30", default-features = false, features = [
   "connect",
   "rustls-tls-webpki-roots",
 ] } # WebSocket client for the remote-control relay. NOTE: webpki-roots variant to
@@ -62,7 +62,7 @@ htmd = "0.5"         # MarkItDown-style HTML -> Markdown for non-EPUB HTML impor
 csv = "1.4"          # Text-based MarkItDown import format
 chardetng = "1"
 encoding_rs = "0.8"
-regex = "1.12"
+regex = "1.13"
 once_cell = "1.21.4" # Lazy statics for compiled regexes + response_format payloads
 
 # --- infra ---
