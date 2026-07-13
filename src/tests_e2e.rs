@@ -1183,8 +1183,20 @@ fn live_foreign_run_suppresses_resume_and_blocks_open() {
     crate::workspace::scaffold::create_project(&project_dir, "Re:Zero", &ModelSet::default(), 1)
         .expect("scaffold project");
 
+    // Checkpoint path may differ from the shelf scan path by a symlink alias
+    // (macOS `/var` → `/private/var`). Force that mismatch on Unix so the
+    // open-guard cannot rely on string equality alone.
+    #[cfg(unix)]
+    let checkpoint_project_dir = {
+        let alias_root = tmp.join("shelf_alias");
+        std::os::unix::fs::symlink(&tmp, &alias_root).expect("symlink shelf alias");
+        alias_root.join("re-zero")
+    };
+    #[cfg(not(unix))]
+    let checkpoint_project_dir = project_dir.clone();
+
     let mut cp = SessionCheckpoint::new(
-        project_dir.clone(),
+        checkpoint_project_dir,
         "re-zero".to_string(),
         "Re:Zero".to_string(),
         1,

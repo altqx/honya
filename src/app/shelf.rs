@@ -296,7 +296,9 @@ impl ShelfScreen {
         let name_w = list_area.width.saturating_sub(48).max(20) as usize;
 
         for (i, p) in projects.iter().enumerate() {
-            let busy = foreign_busy.is_some_and(|d| d == p.dir.as_path());
+            let busy = foreign_busy.is_some_and(|d| {
+                crate::workspace::session::same_project_dir(d, p.dir.as_path())
+            });
             items.push(project_row(p, i == selected, name_w, busy, theme));
         }
 

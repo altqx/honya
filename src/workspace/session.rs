@@ -173,7 +173,8 @@ fn process_alive(pid: u32) -> bool {
 #[cfg(windows)]
 fn windows_process_alive(pid: u32) -> bool {
     type Handle = *mut core::ffi::c_void;
-    extern "system" {
+    // Edition 2024: extern blocks are unsafe.
+    unsafe extern "system" {
         fn OpenProcess(access: u32, inherit: i32, pid: u32) -> Handle;
         fn CloseHandle(handle: Handle) -> i32;
         fn GetExitCodeProcess(handle: Handle, exit_code: *mut u32) -> i32;
@@ -189,6 +190,18 @@ fn windows_process_alive(pid: u32) -> bool {
         let ok = GetExitCodeProcess(h, &mut code);
         CloseHandle(h);
         ok != 0 && code == STILL_ACTIVE
+    }
+}
+
+/// True when `a` and `b` name the same directory, even across symlink aliases
+/// (macOS `/var` → `/private/var`, Windows `\\?\` prefixes after canonicalize).
+pub fn same_project_dir(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(ca), Ok(cb)) => ca == cb,
+        _ => false,
     }
 }
 
@@ -420,6 +433,32 @@ mod tests {
         clear_at(&file);
         assert!(!file.exists(), "clear removes the checkpoint");
         clear_at(&file); // second clear is a no-op, not an error
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn same_project_dir_follows_symlink_aliases() {
+        let dir = scratch("same_dir");
+        let real = dir.join("real_project");
+        std::fs::create_dir_all(&real).unwrap();
+        let alias = dir.join("alias_project");
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&real, &alias).unwrap();
+            assert!(
+                same_project_dir(&real, &alias),
+                "symlink alias must match the real project dir"
+            );
+        }
+        #[cfg(not(unix))]
+        {
+            // No symlink fixture on this target; exact-path equality still holds.
+            assert!(same_project_dir(&real, &real));
+            let _ = alias;
+        }
+        assert!(same_project_dir(&real, &real));
+        assert!(!same_project_dir(&real, &dir.join("other")));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

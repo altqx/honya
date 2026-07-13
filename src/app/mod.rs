@@ -691,7 +691,7 @@ impl App {
         let Some(cp) = self.foreign_run.as_ref() else {
             return false;
         };
-        if cp.project_dir != project_dir {
+        if !crate::workspace::session::same_project_dir(&cp.project_dir, project_dir) {
             return false;
         }
         self.toast = Some(Toast::warn(format!(
@@ -709,7 +709,7 @@ impl App {
         let project = self
             .projects
             .iter()
-            .find(|p| p.dir == cp.project_dir)
+            .find(|p| crate::workspace::session::same_project_dir(&p.dir, &cp.project_dir))
             .cloned()
             .or_else(|| crate::workspace::scan::scan_one_project(&cp.project_dir));
         if cp.whole_project {
@@ -2146,7 +2146,7 @@ impl App {
     fn recovery_need_review(&self, cp: &crate::workspace::session::SessionCheckpoint) -> usize {
         self.projects
             .iter()
-            .find(|p| p.dir == cp.project_dir)
+            .find(|p| crate::workspace::session::same_project_dir(&p.dir, &cp.project_dir))
             .map(|p| need_review_recovery_chapters(p, cp))
             .or_else(|| {
                 crate::workspace::scan::scan_one_project(&cp.project_dir)
@@ -3359,14 +3359,14 @@ impl App {
         };
         cp.ensure_run_id();
         self.overlay = Overlay::None;
-        // Match strictly on the absolute project directory — never on the slug
+        // Match on the project directory (symlink-aware) — never on the slug
         // alone, or launching from elsewhere could resume into a *different*
         // same-named project. The scan fallback covers an out-of-shelf project.
         self.refresh_projects();
         let project = self
             .projects
             .iter()
-            .find(|p| p.dir == cp.project_dir)
+            .find(|p| crate::workspace::session::same_project_dir(&p.dir, &cp.project_dir))
             .cloned()
             .or_else(|| crate::workspace::scan::scan_one_project(&cp.project_dir));
         let Some(project) = project else {
