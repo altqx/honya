@@ -345,23 +345,21 @@ mod tests {
     fn legacy_checkpoint_defaults_pid_and_epoch_heartbeat() {
         let dir = scratch("legacy");
         let file = dir.join("session.json");
-        // Pre-liveness shape (no pid / heartbeat_at).
-        let json = format!(
-            r#"{{
-              "version": 1,
-              "project_dir": "{}",
-              "project_id": "re-zero",
-              "project_title": "Re:Zero",
-              "vol": 1,
-              "chapters": [1],
-              "started_at": "2024-01-01T00:00:00Z",
-              "run_id": "run-old",
-              "honya_version": "0.1.0",
-              "whole_project": false
-            }}"#,
-            dir.display()
-        );
-        std::fs::write(&file, json).unwrap();
+        // Pre-liveness shape (no pid / heartbeat_at). Build via Value so Windows
+        // backslashes in project_dir are JSON-escaped correctly.
+        let json = serde_json::json!({
+            "version": 1,
+            "project_dir": dir,
+            "project_id": "re-zero",
+            "project_title": "Re:Zero",
+            "vol": 1,
+            "chapters": [1],
+            "started_at": "2024-01-01T00:00:00Z",
+            "run_id": "run-old",
+            "honya_version": "0.1.0",
+            "whole_project": false
+        });
+        std::fs::write(&file, serde_json::to_string_pretty(&json).unwrap()).unwrap();
         let loaded = load_at(&file).expect("legacy loads");
         assert_eq!(loaded.pid, 0);
         assert_eq!(loaded.heartbeat_at, DateTime::<Utc>::UNIX_EPOCH);

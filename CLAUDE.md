@@ -103,48 +103,6 @@ Terminal layout is computed in **display columns, never bytes or chars** — use
 `Cargo.toml` carries comments explaining several deliberate version/feature choices — do **not** "upgrade" or "fix" these without reason: exactly one `crossterm` (0.29, re-exported via ratatui — only added directly for `EventStream`) and one `zip` (8.6, not 9.x prerelease) must be in the lockfile; `reqwest`'s TLS feature is `rustls` (not `rustls-tls`); `tokio-tungstenite` (WebSocket client for `src/remote`) uses `rustls-tls-webpki-roots` to share reqwest's rustls + bundled CA roots — **not** `native-tls` or `rustls-tls-native-roots` (a single `rustls` ends up in the tree; only the `webpki-roots` *data* crate has a benign duplicate); `ego-tree` is a direct dep because `scraper` doesn't re-export it; `quick-xml` is intentionally omitted (roxmltree covers all XML).
 
 
-<!-- headroom:rtk-instructions -->
-# RTK (Rust Token Killer) - Token-Optimized Commands
-
-When running shell commands, **always prefix with `rtk`**. This reduces context
-usage by 60-90% with zero behavior change. If rtk has no filter for a command,
-it passes through unchanged — so it is always safe to use.
-
-## Key Commands
-```bash
-# Git (59-80% savings)
-rtk git status          rtk git diff            rtk git log
-
-# Files & Search (60-75% savings)
-rtk ls <path>           rtk read <file>         rtk grep <pattern>
-rtk find <pattern>      rtk diff <file>
-
-# Test (90-99% savings) — shows failures only
-rtk pytest tests/       rtk cargo test          rtk test <cmd>
-
-# Build & Lint (80-90% savings) — shows errors only
-rtk tsc                 rtk lint                rtk cargo build
-rtk prettier --check    rtk mypy                rtk ruff check
-
-# Analysis (70-90% savings)
-rtk err <cmd>           rtk log <file>          rtk json <file>
-rtk summary <cmd>       rtk deps                rtk env
-
-# GitHub (26-87% savings)
-rtk gh pr view <n>      rtk gh run list         rtk gh issue list
-
-# Infrastructure (85% savings)
-rtk docker ps           rtk kubectl get         rtk docker logs <c>
-
-# Package managers (70-90% savings)
-rtk pip list            rtk pnpm install        rtk npm run <script>
-```
-
-## Rules
-- In command chains, prefix each segment: `rtk git add . && rtk git commit -m "msg"`
-- For debugging, use raw command without rtk prefix
-- `rtk proxy <cmd>` runs command without filtering but tracks usage
-<!-- /headroom:rtk-instructions -->
 
 ## Cursor Cloud specific instructions
 
