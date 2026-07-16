@@ -1235,6 +1235,7 @@ fn refine(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
                 }
             });
             if ui.button("New session").clicked() {
+                nav.refine_input.clear();
                 app.apply(Action::RefineNewSession);
             }
             let active_id = app.refine.active_session_id().to_string();
@@ -1250,6 +1251,7 @@ fn refine(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
                     for s in &sessions {
                         let label = format!("{}  ·  {} msgs", s.title, s.message_count);
                         if ui.selectable_label(s.id == active_id, label).clicked() {
+                            nav.refine_input.clear();
                             app.apply(Action::RefineSwitchSession { id: s.id.clone() });
                         }
                     }
