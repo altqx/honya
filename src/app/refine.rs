@@ -252,6 +252,18 @@ fn is_compacted_summary(content: &str) -> bool {
     content.starts_with(COMPACT_SUMMARY_PREFIX)
 }
 
+/// Read-only view of a blocking refine prompt, for the GUI's prompt card.
+#[derive(Debug, Clone)]
+pub struct PendingPromptView {
+    pub id: u64,
+    pub question: String,
+    /// Diff text for approval prompts (empty otherwise).
+    pub detail: String,
+    /// Choice buttons; empty = free-text answer expected.
+    pub options: Vec<String>,
+    pub is_approval: bool,
+}
+
 /// Blocking prompt awaiting user input.
 #[derive(Debug, Clone)]
 enum RefinePending {
@@ -364,6 +376,46 @@ impl RefineScreen {
     /// Consulted by `App::screen_is_capturing()` to suppress single-letter globals.
     pub fn is_capturing(&self) -> bool {
         self.focused || self.picker.is_some()
+    }
+
+    pub fn approval_mode(&self) -> crate::agents::refine::ApprovalMode {
+        self.approval_mode
+    }
+
+    pub fn active_session_id(&self) -> &str {
+        &self.active_session
+    }
+
+    /// (used, max) context tokens after the last turn (GUI meter).
+    pub fn context_meter(&self) -> (u32, u32) {
+        (self.last_context, self.context_max)
+    }
+
+    /// Read-only projection of the blocking prompt awaiting the user, if any.
+    /// Empty `options` means a free-text answer; `is_approval` prompts carry a
+    /// diff and answer with `"approve"` / `""` (reject).
+    pub fn pending_prompt(&self) -> Option<PendingPromptView> {
+        self.pending.as_ref().map(|p| match p {
+            RefinePending::Approval { id, summary, diff } => PendingPromptView {
+                id: *id,
+                question: summary.clone(),
+                detail: diff.clone(),
+                options: Vec::new(),
+                is_approval: true,
+            },
+            RefinePending::Decision {
+                id,
+                question,
+                options,
+                ..
+            } => PendingPromptView {
+                id: *id,
+                question: question.clone(),
+                detail: String::new(),
+                options: options.clone(),
+                is_approval: false,
+            },
+        })
     }
 
     pub fn load_turns(&mut self, turns: Vec<Turn>, active_session: String) {

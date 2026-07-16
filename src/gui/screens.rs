@@ -1,14 +1,18 @@
 //! Native screen bodies — lists, cards, and side-by-side panels (not a terminal grid).
 
-use std::collections::HashSet;
+use egui::{
+    Align, Color32, Layout, RichText, ScrollArea, Sense, TextEdit, Ui,
+    scroll_area::ScrollBarVisibility,
+};
 
-use egui::{Align, Color32, Layout, RichText, ScrollArea, Sense, Ui, scroll_area::ScrollBarVisibility};
-
+use crate::app::overlay::Overlay;
+use crate::app::refine::TurnRole;
 use crate::app::{Action, App, Screen};
-use crate::model::{Chapter, ChapterKind, ChapterStatus, Project, Volume};
+use crate::model::{Chapter, ChapterKind, ChapterStatus, PlanStepStatus, Project, Volume};
 use crate::theme;
 
 use super::theme_map::{GuiPalette, card_fill, card_frame, inset_frame};
+use super::widgets::{hint, primary_button};
 
 /// Vertical scroller that always reserves its bar — avoids content width jiggle
 /// when scrolling becomes necessary (or on hover with floating bars).
@@ -28,24 +32,17 @@ fn toolbar_row(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
     );
 }
 
+#[derive(Default)]
 pub struct GuiNav {
     pub shelf_sel: usize,
     pub project_sel: Option<(u32, u32)>,
     pub project_vol: Option<u32>,
     pub lexicon_tab: usize,
     pub lexicon_filter: String,
-}
-
-impl Default for GuiNav {
-    fn default() -> Self {
-        Self {
-            shelf_sel: 0,
-            project_sel: None,
-            project_vol: None,
-            lexicon_tab: 0,
-            lexicon_filter: String::new(),
-        }
-    }
+    /// Set by the File menu; the Shelf rescans + clears it on its next frame.
+    pub rescan_requested: bool,
+    /// Draft text in the Refine input box (App's RefineScreen input is TUI-only).
+    pub refine_input: String,
 }
 
 pub fn render_body(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
@@ -55,27 +52,35 @@ pub fn render_body(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalett
         Screen::Translate => translate(ui, app, pal),
         Screen::Reader => reader(ui, app, pal),
         Screen::Lexicon => lexicon(ui, app, nav, pal),
-        Screen::Refine => refine(ui, app, pal),
+        Screen::Refine => refine(ui, app, nav, pal),
     }
 }
 
 // ─── Shelf ───────────────────────────────────────────────────────────────────
 
+fn rescan_shelf(app: &mut App) {
+    let root = std::env::current_dir().unwrap_or_default();
+    app.shelf.rescan(&root);
+    app.projects = crate::workspace::scan::scan_projects(&root);
+}
+
 fn shelf(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
+    if nav.rescan_requested {
+        nav.rescan_requested = false;
+        rescan_shelf(app);
+    }
+
     toolbar_row(ui, |ui| {
         ui.heading(RichText::new("書架  Shelf").color(pal.ink));
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if ui.button("Import source…").clicked() {
+            if primary_button(ui, pal, "Import source…").clicked() {
                 app.apply(Action::OpenImport);
             }
             if ui.button("Sample project").clicked() {
                 app.apply(Action::CreateSample);
             }
             if ui.button("Rescan").clicked() {
-                app.shelf.rescan(&std::env::current_dir().unwrap_or_default());
-                app.projects = crate::workspace::scan::scan_projects(
-                    &std::env::current_dir().unwrap_or_default(),
-                );
+                rescan_shelf(app);
             }
         });
     });
@@ -88,10 +93,7 @@ fn shelf(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
     ui.add_space(8.0);
 
     let projects = app.projects.clone();
-    let foreign = app
-        .foreign_run
-        .as_ref()
-        .map(|cp| cp.project_dir.clone());
+    let foreign = app.foreign_run.as_ref().map(|cp| cp.project_dir.clone());
 
     if projects.is_empty() {
         card_frame(pal).show(ui, |ui| {
@@ -112,12 +114,7 @@ fn shelf(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
         for (i, p) in projects.iter().enumerate() {
             let selected = nav.shelf_sel == i;
             let busy = foreign.as_ref().is_some_and(|d| d == &p.dir);
-            project_card(ui, p, selected, busy, pal, |open| {
-                nav.shelf_sel = i;
-                if open {
-                    app.apply(Action::OpenProject(p.id.clone()));
-                }
-            });
+            project_card(ui, app, p, selected, busy, pal, |sel| nav.shelf_sel = sel.unwrap_or(i));
             ui.add_space(8.0);
         }
     });
@@ -125,11 +122,12 @@ fn shelf(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
 
 fn project_card(
     ui: &mut Ui,
+    app: &mut App,
     p: &Project,
     selected: bool,
     busy: bool,
     pal: &GuiPalette,
-    mut on_click: impl FnMut(bool),
+    mut select: impl FnMut(Option<usize>),
 ) {
     let fill = if selected { pal.accent_bg } else { pal.bg_panel };
     let stroke = if selected { pal.accent } else { pal.rule };
@@ -171,12 +169,13 @@ fn project_card(
                         .count();
                     ui.label(
                         RichText::new(format!(
-                            "{} · {} vol · {} ch · {} done · {}",
+                            "{} · {} vol · {} ch · {} done · {}{}",
                             p.id,
                             vols,
                             chs,
                             done,
-                            p.target_language.label()
+                            p.target_language.label(),
+                            if busy { " · running elsewhere" } else { "" }
                         ))
                         .color(pal.ink_faint)
                         .small(),
@@ -184,7 +183,22 @@ fn project_card(
                 });
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if ui.button("Open").clicked() {
-                        on_click(true);
+                        select(None);
+                        app.apply(Action::OpenProject(p.id.clone()));
+                    }
+                    if ui
+                        .button(RichText::new("Delete…").color(pal.status_failed))
+                        .clicked()
+                    {
+                        select(None);
+                        app.apply(Action::show_overlay(Overlay::confirm(
+                            "Delete project",
+                            format!(
+                                "Permanently delete “{}” — raw chapters, translations, and metadata?",
+                                p.title
+                            ),
+                            Action::DeleteProject { id: p.id.clone() },
+                        )));
                     }
                 });
             });
@@ -192,10 +206,11 @@ fn project_card(
         .response
         .interact(Sense::click());
     if response.clicked() {
-        on_click(false);
+        select(None);
     }
     if response.double_clicked() {
-        on_click(true);
+        select(None);
+        app.apply(Action::OpenProject(p.id.clone()));
     }
 }
 
@@ -241,34 +256,68 @@ fn project(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
     let active_vol = active.vol;
 
     toolbar_row(ui, |ui| {
-        ui.heading(RichText::new(&project.title).color(pal.ink));
-        if !project.translated_title.is_empty() {
-            ui.label(RichText::new(&project.translated_title).color(pal.ink_soft));
-        }
+        // Truncate the title into a stable max width so the toolbar never reflows.
+        let title = if project.translated_title.is_empty() {
+            project.title.clone()
+        } else {
+            format!("{} · {}", project.title, project.translated_title)
+        };
+        let title_w = (ui.available_width() - 480.0).clamp(120.0, 420.0);
+        ui.add_sized(
+            [title_w, 26.0],
+            egui::Label::new(RichText::new(title).color(pal.ink).strong().size(17.0)).truncate(),
+        );
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if ui.button("Translate all…").clicked() {
-                app.apply(Action::StartProjectTranslation);
-            }
-            if ui
-                .button(format!("Translate Vol.{}…", active_vol))
-                .clicked()
-            {
+            if primary_button(ui, pal, &format!("Translate Vol.{active_vol}")).clicked() {
                 app.apply(Action::StartVolumeTranslation { vol: active_vol });
             }
+            if ui.button("Translate all").clicked() {
+                app.apply(Action::StartProjectTranslation);
+            }
+            if ui.button("QA").clicked() {
+                app.apply(Action::show_overlay(Overlay::qa_placeholder()));
+            }
             if ui.button("Export…").clicked() {
-                app.apply(Action::show_overlay(crate::app::overlay::Overlay::Export(
-                    crate::app::overlay::ExportState {
-                        vol: active_vol,
-                        formats: [true, true, true],
-                        sel: 0,
-                        progress: None,
-                        done: None,
-                    },
-                )));
+                app.apply(Action::show_overlay(Overlay::export(active_vol)));
             }
-            if ui.button("Add volume…").clicked() {
-                app.apply(Action::AddVolume);
-            }
+            ui.menu_button("⋯", |ui| {
+                if ui.button("Edit volume synopsis…").clicked() {
+                    let data = crate::workspace::volume::load(
+                        &app.active.as_ref().expect("active project").workspace,
+                    );
+                    app.apply(Action::show_overlay(Overlay::synopsis_edit(
+                        data.synopsis_raw,
+                        data.translated_synopsis,
+                        active_vol,
+                        project.title.clone(),
+                        project.target_language,
+                    )));
+                }
+                if ui.button("Edit project title…").clicked() {
+                    app.apply(Action::show_overlay(Overlay::project_title_edit(
+                        project.id.clone(),
+                        project.title.clone(),
+                        project.translated_title.clone(),
+                        project.target_language,
+                    )));
+                }
+                ui.separator();
+                if ui.button("Add volume…").clicked() {
+                    app.apply(Action::AddVolume);
+                }
+                if ui.button("Add chapters to this volume…").clicked() {
+                    app.apply(Action::AddChapters { vol: active_vol });
+                }
+                if ui.button("Update volume images…").clicked() {
+                    app.apply(Action::show_overlay(Overlay::confirm(
+                        "Update volume images",
+                        format!(
+                            "Re-import the source for Vol.{active_vol:02} and rewrite image links. Translation prose stays unchanged."
+                        ),
+                        Action::RefreshVolumeImages { vol: active_vol },
+                    )));
+                }
+            });
         });
     });
     ui.add_space(6.0);
@@ -326,12 +375,7 @@ fn project(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
                                 app.apply(Action::SetActiveVolume { vol: vol.number });
                             }
                             if response.double_clicked() {
-                                nav.project_sel = Some((vol.number, ch.number));
-                                nav.project_vol = Some(vol.number);
-                                app.apply(Action::SetActiveVolume { vol: vol.number });
-                                app.apply(Action::OpenChapter {
-                                    chapter: ch.number,
-                                });
+                                app.apply(Action::OpenChapter { chapter: ch.number });
                             }
                         }
                     });
@@ -356,10 +400,26 @@ fn project(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
                         if ui.button("Open in Reader").clicked() {
                             app.apply(Action::OpenChapter { chapter: c });
                         }
-                        if ui.button("Translate chapter").clicked() {
-                            app.apply(Action::StartTranslation {
-                                chapters: vec![c],
+                        if ui.button("Translate").clicked() {
+                            app.apply(Action::StartTranslation { chapters: vec![c] });
+                        }
+                        if ui.button("Enqueue").clicked() {
+                            app.apply(Action::EnqueueChapters {
+                                chapters: vec![(v, c)],
                             });
+                        }
+                        if ui
+                            .button(RichText::new("Delete…").color(pal.status_failed))
+                            .clicked()
+                        {
+                            app.apply(Action::show_overlay(Overlay::confirm(
+                                "Delete chapters",
+                                format!("Delete chapter {c:03} from Vol.{v:02}?"),
+                                Action::DeleteChapters {
+                                    vol: v,
+                                    chapters: vec![c],
+                                },
+                            )));
                         }
                     });
                 }
@@ -367,6 +427,15 @@ fn project(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
                 let vol_n = nav.project_vol.unwrap_or(active_vol);
                 if let Some(vol) = project.volumes.iter().find(|v| v.number == vol_n) {
                     detail_volume(ui, vol, pal);
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        if ui.button(format!("Translate Vol.{vol_n}")).clicked() {
+                            app.apply(Action::StartVolumeTranslation { vol: vol_n });
+                        }
+                        if ui.button("Export…").clicked() {
+                            app.apply(Action::show_overlay(Overlay::export(vol_n)));
+                        }
+                    });
                 } else {
                     ui.label(RichText::new("Select a volume or chapter.").color(pal.ink_faint));
                 }
@@ -395,10 +464,7 @@ fn detail_volume(ui: &mut Ui, vol: &Volume, pal: &GuiPalette) {
             )
         })
         .count();
-    ui.label(
-        RichText::new(format!("{done} / {total} chapters done"))
-            .color(pal.ink_soft),
-    );
+    ui.label(RichText::new(format!("{done} / {total} chapters done")).color(pal.ink_soft));
     if total > 0 {
         let frac = done as f32 / total as f32;
         let progress = egui::ProgressBar::new(frac).show_percentage().desired_width(220.0);
@@ -429,10 +495,7 @@ fn detail_chapter(ui: &mut Ui, vol: u32, ch: &Chapter, pal: &GuiPalette) {
         });
     });
     ui.add_space(8.0);
-    ui.label(
-        RichText::new(format!("Status: {}", status_label(ch.status)))
-            .color(color),
-    );
+    ui.label(RichText::new(format!("Status: {}", status_label(ch.status))).color(color));
     if ch.total_chunks > 0 {
         ui.label(
             RichText::new(format!(
@@ -505,8 +568,8 @@ fn translate(ui: &mut Ui, app: &mut App, pal: &GuiPalette) {
     let reasoning = app.translate.thought_reasoning.clone();
     let scene = app.translate.thought_scene.clone();
     let glossary = app.translate.thought_glossary.clone();
-    let run = app.translate.run.clone();
-    let ch_usage = app.translate.chapter.clone();
+    let run = app.translate.run;
+    let ch_usage = app.translate.chapter;
     let retries = app.translate.retries;
     let note = app.translate.last_note.clone();
     let queue = app.translate.queue.clone();
@@ -536,11 +599,12 @@ fn translate(ui: &mut Ui, app: &mut App, pal: &GuiPalette) {
             } else if !can_stop {
                 ui.add_enabled(false, egui::Button::new("Stop"));
             }
-            if can_pause && ui.button("Pause").clicked() {
-                app.apply(Action::PauseRun);
-            } else if can_resume && ui.button("Resume").clicked() {
-                app.apply(Action::PauseRun);
-            } else if !can_pause && !can_resume {
+            if can_pause || can_resume {
+                let label = if can_resume { "Resume" } else { "Pause" };
+                if ui.button(label).clicked() {
+                    app.apply(Action::PauseRun);
+                }
+            } else {
                 ui.add_enabled(false, egui::Button::new("Pause"));
             }
         });
@@ -612,9 +676,7 @@ fn translate(ui: &mut Ui, app: &mut App, pal: &GuiPalette) {
                     .small(),
                 ),
             );
-            ui.add(
-                egui::Label::new(RichText::new(&note).color(pal.ink_soft).small()).truncate(),
-            );
+            ui.add(egui::Label::new(RichText::new(&note).color(pal.ink_soft).small()).truncate());
         });
     });
     ui.add_space(8.0);
@@ -657,7 +719,7 @@ fn translate(ui: &mut Ui, app: &mut App, pal: &GuiPalette) {
 
             ui.separator();
             ui.label(RichText::new("Thoughts").color(pal.ink_soft).strong());
-            scroll_y("thoughts").max_height(160.0).show(ui, |ui| {
+            scroll_y("thoughts").max_height(140.0).show(ui, |ui| {
                 if scene.is_empty() && glossary.is_empty() && reasoning.is_empty() {
                     ui.label(RichText::new("—").color(pal.ink_faint).small());
                 }
@@ -676,25 +738,59 @@ fn translate(ui: &mut Ui, app: &mut App, pal: &GuiPalette) {
             });
 
             ui.separator();
-            ui.label(RichText::new("Queue").color(pal.ink_soft).strong());
-            scroll_y("queue").max_height(120.0).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Queue").color(pal.ink_soft).strong());
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if !queue.is_empty() && ui.small_button("Sort").clicked() {
+                        app.apply(Action::SortQueue);
+                    }
+                });
+            });
+            scroll_y("queue").show(ui, |ui| {
                 if queue.is_empty() {
                     ui.label(RichText::new("empty").color(pal.ink_faint).small());
                 }
                 for row in &queue {
-                    let mark = if row.running { "▶" } else { "·" };
-                    ui.label(
-                        RichText::new(format!(
-                            "{mark} V{} ch {:03}  {}",
-                            row.vol, row.number, row.title
-                        ))
-                        .color(if row.running {
-                            pal.status_working
-                        } else {
-                            pal.ink_soft
-                        })
-                        .small(),
-                    );
+                    ui.horizontal(|ui| {
+                        let mark = if row.running { "▶" } else { "·" };
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(format!(
+                                    "{mark} V{} ch {:03}  {}",
+                                    row.vol, row.number, row.title
+                                ))
+                                .color(if row.running {
+                                    pal.status_working
+                                } else {
+                                    pal.ink_soft
+                                })
+                                .small(),
+                            )
+                            .truncate(),
+                        );
+                        if !row.running {
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if ui.small_button("✕").clicked() {
+                                    app.apply(Action::DequeueChapter {
+                                        vol: row.vol,
+                                        ch: row.number,
+                                    });
+                                }
+                                if ui.small_button("▼").clicked() {
+                                    app.apply(Action::QueueMoveDown {
+                                        vol: row.vol,
+                                        ch: row.number,
+                                    });
+                                }
+                                if ui.small_button("▲").clicked() {
+                                    app.apply(Action::QueueMoveUp {
+                                        vol: row.vol,
+                                        ch: row.number,
+                                    });
+                                }
+                            });
+                        }
+                    });
                 }
             });
         });
@@ -710,11 +806,7 @@ fn translate(ui: &mut Ui, app: &mut App, pal: &GuiPalette) {
                             .italics(),
                     );
                 } else {
-                    ui.label(
-                        RichText::new(&preview)
-                            .color(pal.translated_text)
-                            .size(15.0),
-                    );
+                    ui.label(RichText::new(&preview).color(pal.translated_text).size(15.0));
                 }
             });
         });
@@ -772,7 +864,7 @@ fn reader(ui: &mut Ui, app: &mut App, pal: &GuiPalette) {
             });
         egui::ComboBox::from_id_salt("reader_ch")
             .selected_text(current_label)
-            .width(280.0)
+            .width(190.0)
             .show_ui(ui, |ui| {
                 for (n, t) in &chapters {
                     let label = if t.is_empty() {
@@ -788,6 +880,20 @@ fn reader(ui: &mut Ui, app: &mut App, pal: &GuiPalette) {
         if ui.button("▶").clicked() {
             app.apply(Action::ReaderStepChapter { forward: true });
         }
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if ui.button("Copy translation").clicked() && !translated.is_empty() {
+                ui.ctx().copy_text(translated.clone());
+            }
+            if ui.button("QA").clicked() {
+                app.apply(Action::show_overlay(Overlay::qa_placeholder()));
+            }
+            if ui.button("Jump…").clicked() {
+                app.apply(Action::show_overlay(Overlay::reader_jump_placeholder()));
+            }
+            if ui.button("Search…").clicked() {
+                app.apply(Action::show_overlay(Overlay::reader_search()));
+            }
+        });
     });
     ui.add_space(8.0);
 
@@ -815,11 +921,7 @@ fn reader(ui: &mut Ui, app: &mut App, pal: &GuiPalette) {
             });
         });
         card_fill(&mut cols[1], pal, |ui| {
-            ui.label(
-                RichText::new("翻訳  Translation")
-                    .color(pal.ink_soft)
-                    .strong(),
-            );
+            ui.label(RichText::new("翻訳  Translation").color(pal.ink_soft).strong());
             ui.add_space(4.0);
             scroll_y("reader_tr").show(ui, |ui| {
                 if translated.is_empty() {
@@ -829,11 +931,7 @@ fn reader(ui: &mut Ui, app: &mut App, pal: &GuiPalette) {
                             .italics(),
                     );
                 } else {
-                    ui.label(
-                        RichText::new(&translated)
-                            .color(pal.translated_text)
-                            .size(15.0),
-                    );
+                    ui.label(RichText::new(&translated).color(pal.translated_text).size(15.0));
                 }
             });
         });
@@ -847,7 +945,7 @@ fn lexicon(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
         empty_state(ui, pal, "No project open", "Open a project to browse the lexicon.");
         return;
     };
-    let ws = &active.workspace;
+    let ws = active.workspace.clone();
 
     toolbar_row(ui, |ui| {
         ui.heading(RichText::new("辞  Lexicon").color(pal.ink));
@@ -876,7 +974,7 @@ fn lexicon(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
     let filter = nav.lexicon_filter.to_lowercase();
     match nav.lexicon_tab {
         0 => {
-            let terms = crate::workspace::glossary::load(ws);
+            let terms = crate::workspace::glossary::load(&ws);
             let terms: Vec<_> = terms
                 .into_iter()
                 .filter(|t| {
@@ -893,13 +991,14 @@ fn lexicon(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
                 );
                 scroll_y("glossary_list").show(ui, |ui| {
                     egui::Grid::new("glossary_grid")
-                        .num_columns(3)
+                        .num_columns(4)
                         .striped(true)
                         .spacing([16.0, 6.0])
                         .show(ui, |ui| {
                             ui.label(RichText::new("Japanese").color(pal.ink_soft).strong());
                             ui.label(RichText::new("Translation").color(pal.ink_soft).strong());
                             ui.label(RichText::new("Category").color(pal.ink_soft).strong());
+                            ui.label("");
                             ui.end_row();
                             for t in &terms {
                                 ui.label(RichText::new(&t.jp_term).color(pal.ja_text));
@@ -910,6 +1009,15 @@ fn lexicon(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
                                     RichText::new(t.category.as_deref().unwrap_or("—"))
                                         .color(pal.ink_faint),
                                 );
+                                if ui.small_button("✕").clicked() {
+                                    app.apply(Action::show_overlay(Overlay::confirm(
+                                        "Delete glossary term",
+                                        format!("Delete “{}” → “{}”?", t.jp_term, t.translated_term),
+                                        Action::DeleteGlossary {
+                                            jp_term: t.jp_term.clone(),
+                                        },
+                                    )));
+                                }
                                 ui.end_row();
                             }
                         });
@@ -917,7 +1025,7 @@ fn lexicon(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
             });
         }
         1 => {
-            let chars = crate::workspace::characters::load(ws);
+            let chars = crate::workspace::characters::load(&ws);
             let chars: Vec<_> = chars
                 .into_iter()
                 .filter(|c| {
@@ -936,6 +1044,7 @@ fn lexicon(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
                 scroll_y("chars_list").show(ui, |ui| {
                     for c in &chars {
                         inset_frame(pal).show(ui, |ui| {
+                            ui.set_min_width(ui.available_width());
                             ui.horizontal(|ui| {
                                 ui.label(RichText::new(&c.jp_name).color(pal.ja_text).strong());
                                 ui.label(RichText::new("→").color(pal.ink_faint));
@@ -949,6 +1058,18 @@ fn lexicon(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
                                         .color(pal.ink_faint)
                                         .small(),
                                 );
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    if ui.small_button("✕").clicked() {
+                                        app.apply(Action::show_overlay(Overlay::confirm(
+                                            "Delete character",
+                                            format!(
+                                                "Delete “{}” ({})?",
+                                                c.translated_name, c.id
+                                            ),
+                                            Action::DeleteCharacter { id: c.id.clone() },
+                                        )));
+                                    }
+                                });
                             });
                             if let Some(style) = &c.speech_style {
                                 ui.label(RichText::new(style).color(pal.ink_soft).small());
@@ -980,46 +1101,274 @@ fn lexicon(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
 
 // ─── Refine ──────────────────────────────────────────────────────────────────
 
-fn refine(ui: &mut Ui, app: &mut App, pal: &GuiPalette) {
+fn refine(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
     if app.active.is_none() {
         empty_state(ui, pal, "No project open", "Open a project to refine translations.");
         return;
     }
 
-    ui.heading(RichText::new("磨  Refine").color(pal.ink));
+    let in_flight = app.refine.is_in_flight();
+    let mode = app.refine.approval_mode();
+    let (ctx_used, ctx_max) = app.refine.context_meter();
+    let plan = app.refine.plan().to_vec();
+    let pending = app.refine.pending_prompt();
+    let sessions = app.refine_sessions.clone();
+    let turns: Vec<(TurnRole, String, bool)> = app
+        .refine
+        .conversation
+        .iter()
+        .map(|t| (t.role, t.text.clone(), t.streaming))
+        .collect();
+
+    toolbar_row(ui, |ui| {
+        ui.heading(RichText::new("磨  Refine").color(pal.ink));
+        ui.add_space(8.0);
+        if ui
+            .button(format!("approval: {}", mode.label()))
+            .on_hover_text("cycle always-approve → ask → auto")
+            .clicked()
+        {
+            app.apply(Action::RefineCycleApprovalMode);
+        }
+        if ctx_used > 0 {
+            let pct = (ctx_used as f32 / ctx_max.max(1) as f32 * 100.0).round() as u32;
+            ui.label(
+                RichText::new(format!("context {pct}%"))
+                    .color(pal.ink_faint)
+                    .small(),
+            );
+        }
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.menu_button("⋯", |ui| {
+                if ui.button("Undo last edit").clicked() {
+                    app.apply(Action::RefineUndo);
+                }
+                if ui.button("Show diff").clicked() {
+                    app.apply(Action::RefineOpenDiff);
+                }
+                if ui.button("Compact context").clicked() {
+                    app.apply(Action::RefineCompact);
+                }
+                if ui.button("Export conversation").clicked() {
+                    app.apply(Action::RefineExport);
+                }
+                ui.separator();
+                if ui.button("Clear conversation").clicked() {
+                    app.apply(Action::RefineClear);
+                }
+            });
+            if ui.button("New session").clicked() {
+                app.apply(Action::RefineNewSession);
+            }
+            let active_id = app.refine.active_session_id().to_string();
+            let current = sessions
+                .iter()
+                .find(|s| s.id == active_id)
+                .map(|s| s.title.clone())
+                .unwrap_or_else(|| "session".to_string());
+            egui::ComboBox::from_id_salt("refine_sessions")
+                .selected_text(current)
+                .width(200.0)
+                .show_ui(ui, |ui| {
+                    for s in &sessions {
+                        let label = format!("{}  ·  {} msgs", s.title, s.message_count);
+                        if ui.selectable_label(s.id == active_id, label).clicked() {
+                            app.apply(Action::RefineSwitchSession { id: s.id.clone() });
+                        }
+                    }
+                });
+        });
+    });
     ui.add_space(6.0);
-    card_frame(pal).show(ui, |ui| {
-        ui.label(
-            RichText::new(
-                "The Refine agent polishes existing translations with steering prompts.\n\
-                 Full multi-turn refine is available in the TUI; use the terminal for long refine sessions.",
-            )
-            .color(pal.ink_soft),
-        );
-        ui.add_space(10.0);
-        ui.label(RichText::new("Quick actions").color(pal.ink_soft).strong());
+
+    // Reserve the input strip + optional prompt card at the bottom.
+    let prompt_h = if pending.is_some() { 150.0 } else { 0.0 };
+    let input_h = 92.0;
+    let transcript_h = (ui.available_height() - input_h - prompt_h - 8.0).max(120.0);
+
+    ui.allocate_ui(egui::vec2(ui.available_width(), transcript_h), |ui| {
+        let has_plan = !plan.is_empty();
+        let plan_w = 240.0;
         ui.horizontal(|ui| {
-            if ui.button("Open Reader").clicked() {
-                app.apply(Action::Goto(Screen::Reader));
-            }
-            if ui.button("Open Lexicon").clicked() {
-                app.apply(Action::Goto(Screen::Lexicon));
-            }
-            if ui.button("View activity log").clicked() {
-                app.apply(Action::show_overlay(crate::app::overlay::Overlay::Log(0)));
+            let transcript_w = if has_plan {
+                ui.available_width() - plan_w - 8.0
+            } else {
+                ui.available_width()
+            };
+            ui.allocate_ui(egui::vec2(transcript_w, transcript_h), |ui| {
+                card_fill(ui, pal, |ui| {
+                    scroll_y("refine_chat").stick_to_bottom(true).show(ui, |ui| {
+                        if turns.is_empty() {
+                            ui.label(
+                                RichText::new(
+                                    "Steer the Refine agent: “soften ch 3's dialogue”, “fix the honorifics in vol 2”…",
+                                )
+                                .color(pal.ink_faint)
+                                .italics(),
+                            );
+                        }
+                        for (role, text, streaming) in &turns {
+                            match role {
+                                TurnRole::User => {
+                                    ui.with_layout(Layout::top_down(Align::Max), |ui| {
+                                        inset_frame(pal).show(ui, |ui| {
+                                            ui.label(RichText::new(text).color(pal.ink));
+                                        });
+                                    });
+                                }
+                                TurnRole::Assistant => {
+                                    ui.label(RichText::new(text).color(pal.ink));
+                                    if *streaming {
+                                        ui.label(
+                                            RichText::new(theme::spinner_frame(app.frame))
+                                                .color(pal.status_working),
+                                        );
+                                    }
+                                }
+                                TurnRole::Reasoning => {
+                                    ui.label(
+                                        RichText::new(text).color(pal.ink_faint).italics().small(),
+                                    );
+                                }
+                                TurnRole::Tool => {
+                                    ui.label(
+                                        RichText::new(format!("⚒ {text}"))
+                                            .color(pal.status_image)
+                                            .monospace()
+                                            .small(),
+                                    );
+                                }
+                            }
+                            ui.add_space(6.0);
+                        }
+                        if in_flight {
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui.label(
+                                    RichText::new("working…").color(pal.status_working).small(),
+                                );
+                            });
+                        }
+                    });
+                });
+            });
+            if has_plan {
+                ui.allocate_ui(egui::vec2(plan_w, transcript_h), |ui| {
+                    card_fill(ui, pal, |ui| {
+                        ui.label(RichText::new("Plan").color(pal.ink_soft).strong());
+                        ui.add_space(4.0);
+                        scroll_y("refine_plan").show(ui, |ui| {
+                            for step in &plan {
+                                let (glyph, color) = match step.status {
+                                    PlanStepStatus::Pending => ("○", pal.ink_faint),
+                                    PlanStepStatus::InProgress => ("◐", pal.status_working),
+                                    PlanStepStatus::Completed => ("●", pal.status_done),
+                                };
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new(glyph).color(color));
+                                    ui.label(RichText::new(&step.step).color(pal.ink).small());
+                                });
+                            }
+                        });
+                    });
+                });
             }
         });
-        if !app.refine_sessions.is_empty() {
-            ui.add_space(10.0);
-            ui.label(RichText::new("Recent refine sessions").color(pal.ink_soft).strong());
-            for s in app.refine_sessions.iter().take(8) {
-                ui.label(
-                    RichText::new(format!("· {}", s.id))
-                        .color(pal.ink_faint)
-                        .small(),
-                );
+    });
+    ui.add_space(4.0);
+
+    if let Some(prompt) = pending {
+        egui::Frame::NONE
+            .fill(pal.bg_inset)
+            .stroke(egui::Stroke::new(1.0_f32, pal.status_warn))
+            .corner_radius(egui::CornerRadius::same(8))
+            .inner_margin(egui::Margin::symmetric(10, 8))
+            .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                ui.label(RichText::new(&prompt.question).color(pal.ink).strong());
+                if !prompt.detail.is_empty() {
+                    scroll_y("refine_diff").max_height(60.0).show(ui, |ui| {
+                        ui.label(
+                            RichText::new(&prompt.detail)
+                                .color(pal.ink_soft)
+                                .monospace()
+                                .small(),
+                        );
+                    });
+                }
+                ui.horizontal(|ui| {
+                    if prompt.is_approval {
+                        if primary_button(ui, pal, "Approve").clicked() {
+                            app.apply(Action::RefineRespondInteraction {
+                                id: prompt.id,
+                                answer: "approve".to_string(),
+                            });
+                        }
+                        if ui.button("Reject").clicked() {
+                            app.apply(Action::RefineRespondInteraction {
+                                id: prompt.id,
+                                answer: String::new(),
+                            });
+                        }
+                    } else if prompt.options.is_empty() {
+                        hint(ui, pal, "Answer in the input box below and press Send.");
+                    } else {
+                        for opt in &prompt.options {
+                            if ui.button(opt).clicked() {
+                                app.apply(Action::RefineRespondInteraction {
+                                    id: prompt.id,
+                                    answer: opt.clone(),
+                                });
+                            }
+                        }
+                    }
+                });
+            });
+        ui.add_space(4.0);
+    }
+
+    // Input strip.
+    let free_text_prompt = app
+        .refine
+        .pending_prompt()
+        .map(|p| !p.is_approval && p.options.is_empty())
+        .unwrap_or(false);
+    ui.horizontal(|ui| {
+        let send_w = 90.0;
+        ui.add_sized(
+            [ui.available_width() - send_w - 8.0, 80.0],
+            TextEdit::multiline(&mut nav.refine_input)
+                .hint_text("Message the Refine agent…  (@ch3, @vol2 to scope)")
+                .desired_rows(3),
+        );
+        ui.vertical(|ui| {
+            let can_send = !nav.refine_input.trim().is_empty();
+            if in_flight && !free_text_prompt {
+                if ui.add_sized([send_w, 38.0], egui::Button::new("Cancel")).clicked() {
+                    app.apply(Action::RefineCancel);
+                }
+            } else if ui
+                .add_enabled_ui(can_send, |ui| {
+                    primary_button(ui, pal, if free_text_prompt { "Answer" } else { "Send" })
+                })
+                .inner
+                .clicked()
+                && can_send
+            {
+                let text = nav.refine_input.trim().to_string();
+                nav.refine_input.clear();
+                if free_text_prompt {
+                    if let Some(p) = app.refine.pending_prompt() {
+                        app.apply(Action::RefineRespondInteraction {
+                            id: p.id,
+                            answer: text,
+                        });
+                    }
+                } else {
+                    app.apply(Action::RefineSubmit { text });
+                }
             }
-        }
+        });
     });
 }
 
@@ -1031,10 +1380,4 @@ fn empty_state(ui: &mut Ui, pal: &GuiPalette, title: &str, body: &str) {
         ui.label(RichText::new(title).color(pal.ink_soft).strong().size(18.0));
         ui.label(RichText::new(body).color(pal.ink_faint));
     });
-}
-
-// Keep HashSet import used if we expand multi-select later.
-#[allow(dead_code)]
-fn _hs() -> HashSet<u32> {
-    HashSet::new()
 }

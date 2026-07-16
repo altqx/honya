@@ -293,10 +293,10 @@ pub struct ImportState {
     /// Caret byte-offset into `name` (the wizard's name step).
     pub name_cursor: usize,
     /// True once the user edited the name; stops re-seeding it from the file stem.
-    name_touched: bool,
+    pub name_touched: bool,
     pub vol: u32,
     /// True once the user adjusted the volume; stops the next-volume auto-suggest.
-    vol_touched: bool,
+    pub vol_touched: bool,
     /// True for the "add volume" flow: the name is the open project's and locked,
     /// so the wizard skips the name step (pick → volume → synopsis).
     pub lock_name: bool,
@@ -397,7 +397,7 @@ impl ImportState {
         }
     }
 
-    fn selected_file(&self) -> Option<&PathBuf> {
+    pub fn selected_file(&self) -> Option<&PathBuf> {
         self.files.get(self.sel).map(|(p, _)| p)
     }
 
@@ -419,7 +419,7 @@ impl ImportState {
 
     /// When the name targets an existing project and the user hasn't picked a
     /// volume yet, default to one past its highest (instead of a colliding 1).
-    fn suggest_volume(&mut self) {
+    pub fn suggest_volume(&mut self) {
         if self.vol_touched {
             return;
         }
@@ -448,7 +448,7 @@ impl ImageSourceState {
         Self { vol, files, sel: 0 }
     }
 
-    fn selected_file(&self) -> Option<&PathBuf> {
+    pub fn selected_file(&self) -> Option<&PathBuf> {
         self.files.get(self.sel).map(|(p, _)| p)
     }
 
@@ -555,7 +555,7 @@ fn provider_model_fallback(
     next.default_model().to_string()
 }
 /// Index of the OpenRouter API-key field (callers open Settings focused here).
-const SETTINGS_KEY_FIELD: u8 = 12;
+pub const SETTINGS_KEY_FIELD: u8 = 12;
 
 /// Settings tabs group contiguous field ranges; Account has only actions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -568,7 +568,7 @@ pub enum SettingsTab {
 }
 
 impl SettingsTab {
-    const ALL: [SettingsTab; 5] = [
+    pub const ALL: [SettingsTab; 5] = [
         SettingsTab::Agents,
         SettingsTab::Providers,
         SettingsTab::Pipeline,
@@ -576,7 +576,7 @@ impl SettingsTab {
         SettingsTab::Account,
     ];
 
-    fn title(self) -> &'static str {
+    pub fn title(self) -> &'static str {
         match self {
             SettingsTab::Agents => "Agents",
             SettingsTab::Providers => "Providers",
@@ -998,6 +998,47 @@ impl SettingsState {
             .unwrap_or_else(|_| AppConfig::default().max_chapter_retranslates)
             .min(10)
     }
+
+    /// The `SaveSettings` action for the current working copy — shared by the
+    /// TUI's Enter key and the GUI's Save button. Env-supplied keys stay `None`
+    /// so they never overwrite saved config.
+    pub fn save_action(&self) -> Action {
+        let mut models = self.models.clone();
+        models.remember_active_models();
+        Action::SaveSettings {
+            models: Box::new(models),
+            openrouter_key: (!self.api_key_env).then(|| self.openrouter_key.clone()),
+            tokenrouter_key: (!self.tokenrouter_key_env).then(|| self.tokenrouter_key.clone()),
+            google_key: (!self.google_key_env).then(|| self.google_key.clone()),
+            cloudflare_account_id: (!self.cloudflare_account_id_env)
+                .then(|| self.cloudflare_account_id.clone()),
+            cloudflare_api_token: (!self.cloudflare_api_token_env)
+                .then(|| self.cloudflare_api_token.clone()),
+            update_mode: self.update_mode,
+            release_channel: self.release_channel,
+            service_tier: self.service_tier,
+            preferred_language: self.preferred_language,
+            max_attempts: self.max_attempts_value(),
+            continuity_sentences: self.continuity_sentences_value(),
+            loop_stall_secs: self.loop_stall_secs_value(),
+            max_chapter_retranslates: self.max_chapter_retranslates_value(),
+            parallel_lookahead: self.parallel_lookahead,
+        }
+    }
+
+    /// Switch one agent's provider (0 orchestrator · 1 translator · 2 reviewer ·
+    /// 3 refine), carrying the same model fallbacks as the TUI's cycle key.
+    pub fn switch_agent_provider(&mut self, agent: usize, next: crate::model::Provider) {
+        let codex_models = self.codex_models.clone();
+        let a = match agent {
+            0 => &mut self.models.orchestrator,
+            1 => &mut self.models.translator,
+            2 => &mut self.models.reviewer,
+            _ => &mut self.models.refine,
+        };
+        let fallback = provider_model_fallback(a.provider, next, &a.model, &codex_models);
+        a.switch_provider(next, Some(&fallback));
+    }
 }
 
 /// Theme picker; navigating live-previews via `PreviewTheme`, so the whole UI
@@ -1101,7 +1142,7 @@ impl PaletteState {
     }
 
     /// Indices of items matching the current (case-insensitive substring) query.
-    fn matches(&self) -> Vec<usize> {
+    pub fn matches(&self) -> Vec<usize> {
         if self.query.is_empty() {
             return (0..self.items.len()).collect();
         }
@@ -1565,7 +1606,7 @@ impl Overlay {
     /// A settings overlay placeholder — used by callers without an `&AppConfig`
     /// handle (palette, Welcome); the App swaps in the real config field values on
     /// show, preserving the requested focused `field`.
-    fn settings_at(field: u8) -> Self {
+    pub fn settings_at(field: u8) -> Self {
         Overlay::Settings(SettingsState {
             models: crate::model::ModelSet::default(),
             openrouter_key: String::new(),
@@ -2365,48 +2406,7 @@ impl Overlay {
                     Action::None
                 }
             }
-            KeyCode::Enter => {
-                let mut models = st.models.clone();
-                models.remember_active_models();
-                Action::SaveSettings {
-                    models: Box::new(models),
-                    // Env keys must not overwrite saved config.
-                    openrouter_key: if st.api_key_env {
-                        None
-                    } else {
-                        Some(st.openrouter_key.clone())
-                    },
-                    tokenrouter_key: if st.tokenrouter_key_env {
-                        None
-                    } else {
-                        Some(st.tokenrouter_key.clone())
-                    },
-                    google_key: if st.google_key_env {
-                        None
-                    } else {
-                        Some(st.google_key.clone())
-                    },
-                    cloudflare_account_id: if st.cloudflare_account_id_env {
-                        None
-                    } else {
-                        Some(st.cloudflare_account_id.clone())
-                    },
-                    cloudflare_api_token: if st.cloudflare_api_token_env {
-                        None
-                    } else {
-                        Some(st.cloudflare_api_token.clone())
-                    },
-                    update_mode: st.update_mode,
-                    release_channel: st.release_channel,
-                    service_tier: st.service_tier,
-                    preferred_language: st.preferred_language,
-                    max_attempts: st.max_attempts_value(),
-                    continuity_sentences: st.continuity_sentences_value(),
-                    loop_stall_secs: st.loop_stall_secs_value(),
-                    max_chapter_retranslates: st.max_chapter_retranslates_value(),
-                    parallel_lookahead: st.parallel_lookahead,
-                }
-            }
+            KeyCode::Enter => st.save_action(),
             // Tab switches between Settings tabs; Up/Down move fields within a tab.
             KeyCode::Tab => {
                 st.switch_tab(true);
@@ -5891,7 +5891,7 @@ fn mask_secret(s: &str) -> String {
 
 /// Turn an epub file stem into a readable default title: `_`/`-` → spaces,
 /// trailing `_vNN` volume tags dropped, then word-cased lightly.
-fn prettify_stem(stem: &str) -> String {
+pub fn prettify_stem(stem: &str) -> String {
     let replaced: String = stem
         .chars()
         .map(|c| if c == '_' || c == '-' { ' ' } else { c })

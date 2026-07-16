@@ -2887,7 +2887,11 @@ impl App {
                     Ok(()) => self.toast = Some(Toast::info(format!("theme → {}", id.label()))),
                     Err(e) => self.toast = Some(Toast::error(format!("save failed: {e}"))),
                 }
-                self.overlay = Overlay::None;
+                // Close the picker; other overlays (GUI Settings saves the theme
+                // from its Appearance tab) stay open.
+                if matches!(self.overlay, Overlay::Theme(_)) {
+                    self.overlay = Overlay::None;
+                }
             }
             Action::CancelTheme => {
                 // Revert any preview to the saved theme and close.
@@ -5129,6 +5133,11 @@ impl App {
                 hint_area,
             );
         }
+    }
+
+    /// Live relay link status + dashboard watcher count (GUI header badge).
+    pub(crate) fn remote_status(&self) -> (crate::remote::protocol::RemoteState, u32) {
+        (self.remote_state, self.remote_watchers)
     }
 
     pub(crate) fn crumb(&self) -> String {
