@@ -117,6 +117,8 @@ impl eframe::App for GuiApp {
         }
 
         // Global shortcuts that don't fight text fields.
+        // Snapshot before the input borrow — digit keys must not steal focus from edits.
+        let text_focused = ctx.text_edit_focused();
         ctx.input(|i| {
             for ev in &i.events {
                 if let egui::Event::Key {
@@ -143,8 +145,8 @@ impl eframe::App for GuiApp {
                         }
                         continue;
                     }
-                    // Digits switch tabs when no overlay is capturing.
-                    if matches!(self.app.overlay, Overlay::None) {
+                    // Digits switch tabs when no overlay / text field is capturing.
+                    if matches!(self.app.overlay, Overlay::None) && !text_focused {
                         let screen = match key {
                             egui::Key::Num1 => Some(Screen::Shelf),
                             egui::Key::Num2 => Some(Screen::Project),

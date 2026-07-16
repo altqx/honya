@@ -163,7 +163,6 @@ impl TranslateScreen {
         self.chapter_title = title;
     }
 
-    /// The agent currently doing work, so the tab bar can mirror its spinner.
     /// GUI-facing run phase label (Idle / Preparing / Running / Paused).
     pub(crate) fn phase_label(&self) -> &'static str {
         match self.phase {
@@ -182,6 +181,7 @@ impl TranslateScreen {
         matches!(self.phase, RunPhase::Paused)
     }
 
+    /// The agent currently doing work, so the tab bar can mirror its spinner.
     pub fn active_agent_role(&self) -> AgentRole {
         match self.active_agent {
             0 => AgentRole::Orchestrator,

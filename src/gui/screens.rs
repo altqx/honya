@@ -43,6 +43,75 @@ pub struct GuiNav {
     pub rescan_requested: bool,
     /// Draft text in the Refine input box (App's RefineScreen input is TUI-only).
     pub refine_input: String,
+    /// Avoid re-parsing GLOSSARY/CHARACTERS/STYLE every egui frame.
+    lexicon_cache: LexiconCache,
+}
+
+#[derive(Default)]
+struct LexiconCache {
+    root: std::path::PathBuf,
+    glossary: Option<(Option<std::time::SystemTime>, Vec<crate::model::GlossaryTerm>)>,
+    characters: Option<(Option<std::time::SystemTime>, Vec<crate::model::Character>)>,
+    style: Option<(Option<std::time::SystemTime>, String)>,
+}
+
+fn file_mtime(path: &std::path::Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+}
+
+impl LexiconCache {
+    fn ensure_root(&mut self, root: &std::path::Path) {
+        if self.root != root {
+            self.root = root.to_path_buf();
+            self.glossary = None;
+            self.characters = None;
+            self.style = None;
+        }
+    }
+
+    fn glossary(&mut self, ws: &crate::workspace::Workspace) -> &[crate::model::GlossaryTerm] {
+        self.ensure_root(&ws.root);
+        let path = ws.glossary_md();
+        let mtime = file_mtime(&path);
+        let stale = self
+            .glossary
+            .as_ref()
+            .is_none_or(|(cached, _)| *cached != mtime);
+        if stale {
+            self.glossary = Some((mtime, crate::workspace::glossary::load(ws)));
+        }
+        &self.glossary.as_ref().expect("just populated").1
+    }
+
+    fn characters(&mut self, ws: &crate::workspace::Workspace) -> &[crate::model::Character] {
+        self.ensure_root(&ws.root);
+        let path = ws.characters_md();
+        let mtime = file_mtime(&path);
+        let stale = self
+            .characters
+            .as_ref()
+            .is_none_or(|(cached, _)| *cached != mtime);
+        if stale {
+            self.characters = Some((mtime, crate::workspace::characters::load(ws)));
+        }
+        &self.characters.as_ref().expect("just populated").1
+    }
+
+    fn style_md(&mut self, ws: &crate::workspace::Workspace) -> &str {
+        self.ensure_root(&ws.root);
+        let path = ws.style_md();
+        let mtime = file_mtime(&path);
+        let stale = self
+            .style
+            .as_ref()
+            .is_none_or(|(cached, _)| *cached != mtime);
+        if stale {
+            self.style = Some((mtime, std::fs::read_to_string(&path).unwrap_or_default()));
+        }
+        &self.style.as_ref().expect("just populated").1
+    }
 }
 
 pub fn render_body(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
@@ -398,9 +467,13 @@ fn project(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
                     ui.add_space(10.0);
                     ui.horizontal(|ui| {
                         if ui.button("Open in Reader").clicked() {
+                            // Details can show a chapter whose volume is not the
+                            // live active one (e.g. after VolumeStarted); restore it.
+                            app.apply(Action::SetActiveVolume { vol: v });
                             app.apply(Action::OpenChapter { chapter: c });
                         }
                         if ui.button("Translate").clicked() {
+                            app.apply(Action::SetActiveVolume { vol: v });
                             app.apply(Action::StartTranslation { chapters: vec![c] });
                         }
                         if ui.button("Enqueue").clicked() {
@@ -974,14 +1047,16 @@ fn lexicon(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
     let filter = nav.lexicon_filter.to_lowercase();
     match nav.lexicon_tab {
         0 => {
-            let terms = crate::workspace::glossary::load(&ws);
-            let terms: Vec<_> = terms
-                .into_iter()
+            let terms: Vec<_> = nav
+                .lexicon_cache
+                .glossary(&ws)
+                .iter()
                 .filter(|t| {
                     filter.is_empty()
                         || t.jp_term.to_lowercase().contains(&filter)
                         || t.translated_term.to_lowercase().contains(&filter)
                 })
+                .cloned()
                 .collect();
             card_frame(pal).show(ui, |ui| {
                 ui.label(
@@ -1025,15 +1100,17 @@ fn lexicon(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
             });
         }
         1 => {
-            let chars = crate::workspace::characters::load(&ws);
-            let chars: Vec<_> = chars
-                .into_iter()
+            let chars: Vec<_> = nav
+                .lexicon_cache
+                .characters(&ws)
+                .iter()
                 .filter(|c| {
                     filter.is_empty()
                         || c.jp_name.to_lowercase().contains(&filter)
                         || c.translated_name.to_lowercase().contains(&filter)
                         || c.id.to_lowercase().contains(&filter)
                 })
+                .cloned()
                 .collect();
             card_frame(pal).show(ui, |ui| {
                 ui.label(
@@ -1081,7 +1158,7 @@ fn lexicon(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
             });
         }
         _ => {
-            let style_md = std::fs::read_to_string(ws.style_md()).unwrap_or_default();
+            let style_md = nav.lexicon_cache.style_md(&ws).to_owned();
             card_frame(pal).show(ui, |ui| {
                 scroll_y("style_md").show(ui, |ui| {
                     if style_md.is_empty() {

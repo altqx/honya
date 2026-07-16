@@ -219,7 +219,7 @@ fn print_help() {
     println!("honya 本屋 — AI-assisted Japanese → Thai / English light-novel translation\n");
     println!("USAGE:");
     println!("    honya             Launch the TUI in the current directory");
-    println!("    honya --gui       Launch the native desktop UI (themes, every OS)");
+    println!("    honya --gui, -g   Launch the native desktop UI (themes, every OS)");
     println!("    honya --remote    Launch and enable web remote control for this session");
     println!(
         "    honya update      Update honya to the latest release (aliases: self-update, upgrade)"
