@@ -123,11 +123,11 @@ pub struct ReaderScreen {
     sync: bool,
     wrap: bool,
     layout_mode: u8,
-    ja: String,
-    translated_text: String,
+    pub(crate) ja: String,
+    pub(crate) translated_text: String,
     annotations: Vec<ReaderAnnotation>,
     show_annotations: bool,
-    chapter: u32,
+    pub(crate) chapter: u32,
     /// Rerun comparison for the current chapter, present only when an earlier
     /// version is archived (i.e. the chapter has been retranslated at least once).
     compare: Option<RerunCompare>,
