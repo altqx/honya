@@ -53,34 +53,34 @@ pub struct TranslateScreen {
     /// sentinel into a concrete offset the first time the user scrolls up.
     last_bottom: u16,
     /// [orchestrator, translator, reviewer] one-line activity strings.
-    agent_lines: [String; 3],
+    pub(crate) agent_lines: [String; 3],
     /// Which agent line is "active" (drives the spinner). 0..=2.
-    active_agent: usize,
-    current_chapter: Option<u32>,
-    chapter_title: String,
+    pub(crate) active_agent: usize,
+    pub(crate) current_chapter: Option<u32>,
+    pub(crate) chapter_title: String,
     /// (current chunk index 1-based, total chunks).
-    chunk: (usize, usize),
+    pub(crate) chunk: (usize, usize),
     /// Accumulated translated preview text.
-    preview: String,
+    pub(crate) preview: String,
     pending_preview_separator: bool,
-    thought_reasoning: String,
-    thought_scene: String,
-    thought_glossary: String,
+    pub(crate) thought_reasoning: String,
+    pub(crate) thought_scene: String,
+    pub(crate) thought_glossary: String,
     thought_chunk: Option<usize>,
     thought_attempt: Option<u32>,
     /// Whole-run cumulative usage (tokens / cost / tool calls), from `UsageUpdate`.
-    run: UsageStats,
+    pub(crate) run: UsageStats,
     /// Current chapter's running usage sub-total, from `UsageUpdate`.
-    chapter: UsageStats,
-    retries: u32,
-    last_note: String,
+    pub(crate) chapter: UsageStats,
+    pub(crate) retries: u32,
+    pub(crate) last_note: String,
     /// Idle until a run starts; drives the header, border, and spinners.
     phase: RunPhase,
     /// Mouse hit-test rects, refreshed every frame: the 3-row agent block (click
     /// a line to focus that agent) and the streaming preview pane.
     agent_area: Rect,
     preview_area: Rect,
-    queue: Vec<QueueRow>,
+    pub(crate) queue: Vec<QueueRow>,
     queue_sel: usize,
     queue_focused: bool,
     queue_area: Rect,
@@ -161,6 +161,24 @@ impl TranslateScreen {
     /// project when a `ChapterStarted` event arrives).
     pub fn set_chapter_title(&mut self, title: String) {
         self.chapter_title = title;
+    }
+
+    /// GUI-facing run phase label (Idle / Preparing / Running / Paused).
+    pub(crate) fn phase_label(&self) -> &'static str {
+        match self.phase {
+            RunPhase::Idle => "Idle",
+            RunPhase::Preparing => "Preparing",
+            RunPhase::Running => "Running",
+            RunPhase::Paused => "Paused",
+        }
+    }
+
+    pub(crate) fn is_running(&self) -> bool {
+        matches!(self.phase, RunPhase::Running | RunPhase::Preparing)
+    }
+
+    pub(crate) fn is_paused(&self) -> bool {
+        matches!(self.phase, RunPhase::Paused)
     }
 
     /// The agent currently doing work, so the tab bar can mirror its spinner.

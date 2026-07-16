@@ -494,7 +494,7 @@ pub struct App {
     refine_steering: Option<Arc<Mutex<VecDeque<crate::agents::refine::UserTurn>>>>,
     /// Shared approval/ask_user channel for Refine.
     refine_interact: crate::agents::refine::RefineInteract,
-    refine_sessions: Vec<crate::workspace::refine_session::SessionMeta>,
+    pub(crate) refine_sessions: Vec<crate::workspace::refine_session::SessionMeta>,
     refine_session_id: String,
     /// Last Refine-edited chapter `(vol, ch)`, for `/undo` and `/diff`.
     refine_last_edit: Option<(u32, u32)>,
@@ -2474,7 +2474,9 @@ impl App {
         }
     }
 
-    fn apply(&mut self, a: Action) {
+    /// Apply an `Action` through the single mutation funnel. Used by the TUI
+    /// key/mouse router and by the native GUI.
+    pub(crate) fn apply(&mut self, a: Action) {
         match a {
             Action::None => {}
             Action::Quit => {
@@ -2885,7 +2887,11 @@ impl App {
                     Ok(()) => self.toast = Some(Toast::info(format!("theme → {}", id.label()))),
                     Err(e) => self.toast = Some(Toast::error(format!("save failed: {e}"))),
                 }
-                self.overlay = Overlay::None;
+                // Close the picker; other overlays (GUI Settings saves the theme
+                // from its Appearance tab) stay open.
+                if matches!(self.overlay, Overlay::Theme(_)) {
+                    self.overlay = Overlay::None;
+                }
             }
             Action::CancelTheme => {
                 // Revert any preview to the saved theme and close.
@@ -5129,7 +5135,12 @@ impl App {
         }
     }
 
-    fn crumb(&self) -> String {
+    /// Live relay link status + dashboard watcher count (GUI header badge).
+    pub(crate) fn remote_status(&self) -> (crate::remote::protocol::RemoteState, u32) {
+        (self.remote_state, self.remote_watchers)
+    }
+
+    pub(crate) fn crumb(&self) -> String {
         match (&self.active, self.screen) {
             (Some(active), Screen::Shelf) => format!("honya 本屋   {}", active.project.title),
             (Some(active), _) => {
@@ -5150,7 +5161,7 @@ impl App {
         }
     }
 
-    fn tally(&self) -> StatusTally {
+    pub(crate) fn tally(&self) -> StatusTally {
         let mut t = StatusTally {
             done: 0,
             working: 0,

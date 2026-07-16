@@ -13,6 +13,7 @@ mod document_import;
 mod epub;
 mod error;
 mod export;
+mod gui;
 mod llm;
 mod model;
 mod remote;
@@ -61,6 +62,9 @@ async fn main() -> anyhow::Result<()> {
         _ => {}
     }
 
+    let want_gui = std::env::args().any(|a| a == "--gui" || a == "-g")
+        || config::env_truthy("HONYA_GUI");
+
     let mut cfg = config::load();
     if cfg.codex_auth.is_none()
         && let Some(auth) = codex::import_codex_cli_auth()
@@ -85,6 +89,15 @@ async fn main() -> anyhow::Result<()> {
     let remote_opt_in =
         std::env::args().any(|a| a == "--remote") || config::env_truthy("HONYA_REMOTE");
     app.init_remote(remote_opt_in);
+
+    if want_gui {
+        // Native window: same App / themes / Action funnel, no terminal setup.
+        let result = gui::run(app, rx);
+        if let Err(err) = &result {
+            eprintln!("honya: fatal error: {err:?}");
+        }
+        return result;
+    }
 
     // Restore the terminal before panic output; normal teardown does not run on panic.
     let prev_hook = std::panic::take_hook();
@@ -206,6 +219,7 @@ fn print_help() {
     println!("honya 本屋 — AI-assisted Japanese → Thai / English light-novel translation\n");
     println!("USAGE:");
     println!("    honya             Launch the TUI in the current directory");
+    println!("    honya --gui, -g   Launch the native desktop UI (themes, every OS)");
     println!("    honya --remote    Launch and enable web remote control for this session");
     println!(
         "    honya update      Update honya to the latest release (aliases: self-update, upgrade)"
@@ -233,6 +247,9 @@ fn print_help() {
     );
     println!(
         "    HONYA_REMOTE                         Enable web remote control for this session (= --remote)"
+    );
+    println!(
+        "    HONYA_GUI                            Launch the native GUI window (= --gui)"
     );
     println!(
         "    HONYA_SESSION_FILE                   Override the crash-recovery checkpoint path"

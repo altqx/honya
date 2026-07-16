@@ -297,7 +297,8 @@ launch onward, and the moved-aside file is reaped automatically the next time ho
 At startup honya does a **best-effort, non-blocking** check for a newer release and shows a footer
 hint (`⬆ … honya update`) when one is out. Opt out with `HONYA_NO_UPDATE_CHECK=1`.
 
-Other commands: `honya --version` (`-V`), `honya --help` (`-h`).
+Other commands: `honya --gui` (`-g`; native desktop UI with the same themes), `honya --version` (`-V`),
+`honya --help` (`-h`). Set `HONYA_GUI=1` to prefer the GUI without the flag.
 
 ## Development
 
