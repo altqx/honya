@@ -140,23 +140,63 @@ fn combined_image_block(docs: &[&DocInput]) -> LogicalChapter {
     }
 }
 
+/// TOC labels that name spine chrome (cover / title door / TOC / colophon), not
+/// chapters. Kadokawa nav lists these alongside real chapter entries; an
+/// image-only page targeting one of these must stay front/back matter.
+fn is_structural_toc_title(title: &str) -> bool {
+    let t = title.trim();
+    if t.is_empty() {
+        return true;
+    }
+    let lower = t.to_ascii_lowercase();
+    matches!(
+        t,
+        "表紙"
+            | "カバー"
+            | "扉"
+            | "本扉"
+            | "目次"
+            | "奥付"
+            | "奥づけ"
+            | "コロフォン"
+            | "広告"
+    ) || matches!(
+        lower.as_str(),
+        "cover" | "contents" | "toc" | "colophon" | "titlepage" | "title page"
+    )
+}
+
+/// Chapter-start TOC label on a spine doc, if any (structural chrome excluded).
+fn chapter_toc_title(doc: &DocInput) -> Option<&str> {
+    doc.toc_title
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty() && !is_structural_toc_title(t))
+}
+
 /// Group spine docs (reading order) into logical chapters.
 pub fn segment(docs: &[DocInput]) -> Vec<LogicalChapter> {
     let n = docs.len();
     let classes: Vec<DocClass> = docs.iter().map(classify).collect();
 
-    // No header image and no prose TOC anchor → fall back to one chapter per prose doc.
+    // Kadokawa often puts the chapter title on its own image-only spine page
+    // (`m###.png`) that the nav points at, with prose in the following file(s).
+    // Those image pages must count as start signals — otherwise one stray
+    // ChapterHeaderImage makes `has_any_start_signal` true and every untitled
+    // prose page gets absorbed into a single giant chapter.
     let has_any_start_signal = classes.contains(&DocClass::ChapterHeaderImage)
         || docs.iter().zip(&classes).any(|(d, c)| {
-            d.toc_title.is_some()
-                && !matches!(c, DocClass::NavToc | DocClass::ImageOnly | DocClass::Empty)
+            chapter_toc_title(d).is_some() && !matches!(c, DocClass::NavToc | DocClass::Empty)
         });
 
     let is_start = |i: usize| -> bool {
         match classes[i] {
-            DocClass::NavToc | DocClass::Empty | DocClass::ImageOnly => false,
+            DocClass::NavToc | DocClass::Empty => false,
+            // Image-only TOC targets (chapter title plates) open a chapter so
+            // the following prose is absorbed under that title.
+            DocClass::ImageOnly => chapter_toc_title(&docs[i]).is_some(),
             DocClass::ChapterHeaderImage => true,
-            DocClass::Prose => docs[i].toc_title.is_some() || !has_any_start_signal,
+            DocClass::Prose => chapter_toc_title(&docs[i]).is_some() || !has_any_start_signal,
         }
     };
 
@@ -175,9 +215,11 @@ pub fn segment(docs: &[DocInput]) -> Vec<LogicalChapter> {
         out.push(combined_image_block(&front));
     }
 
-    // Back matter: maximal trailing run of image-only pages (colophon).
+    // Back matter: maximal trailing run of image-only pages (colophon), but do
+    // not steal a trailing image-only chapter title plate.
     let mut back_start = n;
-    while back_start > i && classes[back_start - 1] == DocClass::ImageOnly {
+    while back_start > i && classes[back_start - 1] == DocClass::ImageOnly && !is_start(back_start - 1)
+    {
         back_start -= 1;
     }
 
@@ -396,6 +438,67 @@ mod tests {
         assert_eq!(out.len(), 2, "{:#?}", out);
         assert_eq!(out[0].kind, LogicalKind::ImageOnly);
         assert_eq!(out[1].kind, LogicalKind::Prose);
+    }
+
+    #[test]
+    fn kadokawa_image_only_toc_plates_start_chapters() {
+        // Real Kadokawa spines often put the m### title plate on its own XHTML
+        // page (image-only) that nav points at; prose lives in the next file(s).
+        // Those plates must open chapters — otherwise everything collapses.
+        let docs = vec![
+            doc("p-cover", img("cover.png")),
+            doc_titled("p-titlepage", img("p001.png"), "扉"),
+            toc_doc("p-toc"),
+            doc_titled("p-001", img("m003.png"), "プロローグ"),
+            doc("p-002", "プロローグの本文が続く。".to_string()),
+            doc_titled("p-003", img("m005.png"), "一章『潮の匂いが届かない』"),
+            doc("p-004", img("illust.png")),
+            doc("p-005", "一章の続きの本文。".to_string()),
+            doc_titled("p-006", img("m022.png"), "二章『放課後の共犯』"),
+            doc("p-007", "二章の本文。".to_string()),
+            doc("p-colophon", img("ok.png")),
+        ];
+
+        let out = segment(&docs);
+        assert_eq!(out.len(), 5, "logical chapter count: {:#?}", out);
+
+        assert_eq!(out[0].kind, LogicalKind::ImageOnly);
+        assert!(out[0].body.contains("cover.png"));
+        assert!(out[0].body.contains("p001.png"));
+
+        assert_eq!(out[1].kind, LogicalKind::Prose);
+        assert_eq!(out[1].title.as_deref(), Some("プロローグ"));
+        assert!(out[1].body.contains("m003.png"));
+        assert!(out[1].body.contains("プロローグの本文"));
+
+        assert_eq!(out[2].kind, LogicalKind::Prose);
+        assert_eq!(out[2].title.as_deref(), Some("一章『潮の匂いが届かない』"));
+        assert!(out[2].body.contains("m005.png"));
+        assert!(out[2].body.contains("illust.png"));
+        assert!(out[2].body.contains("一章の続き"));
+
+        assert_eq!(out[3].kind, LogicalKind::Prose);
+        assert_eq!(out[3].title.as_deref(), Some("二章『放課後の共犯』"));
+        assert!(out[3].body.contains("二章の本文"));
+
+        assert_eq!(out[4].kind, LogicalKind::ImageOnly);
+        assert!(out[4].body.contains("ok.png"));
+    }
+
+    #[test]
+    fn structural_toc_image_does_not_block_fallback_split() {
+        // Cover/扉 TOC labels must not count as chapter-start signals, or a
+        // book with only those TOC hits would merge all prose into one chapter.
+        let docs = vec![
+            doc_titled("cover", img("cover.png"), "表紙"),
+            doc("p1", "第一話の本文。".to_string()),
+            doc("p2", "第二話の本文。".to_string()),
+        ];
+        let out = segment(&docs);
+        assert_eq!(out.len(), 3, "{:#?}", out);
+        assert_eq!(out[0].kind, LogicalKind::ImageOnly);
+        assert!(out[1].body.contains("第一話"));
+        assert!(out[2].body.contains("第二話"));
     }
 
     #[test]

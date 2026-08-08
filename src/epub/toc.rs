@@ -90,9 +90,9 @@ pub fn parse_nav_xhtml(nav_xml: &str, nav_path: &str) -> Result<Vec<TocEntry>> {
 
     let mut out: Vec<TocEntry> = Vec::new();
     if let Some(nav) = toc_nav
-        && let Some(ol) = nav.children().find(|n| is_xhtml_elem(n, "ol"))
+        && let Some(list) = first_nav_list(&nav)
     {
-        walk_ol(&ol, &base_dir, 0, &mut out);
+        walk_list(&list, &base_dir, 0, &mut out);
     }
 
     Ok(out)
@@ -106,9 +106,24 @@ fn is_xhtml_elem(node: &Node, local: &str) -> bool {
     tag.name() == local && ns_matches(tag.namespace(), ns::XHTML)
 }
 
-fn walk_ol(ol: &Node, base_dir: &str, depth: usize, out: &mut Vec<TocEntry>) {
-    for li in ol.children().filter(|n| is_xhtml_elem(n, "li")) {
-        if let Some(a) = li.children().find(|n| is_xhtml_elem(n, "a")) {
+fn is_nav_list(node: &Node) -> bool {
+    is_xhtml_elem(node, "ol") || is_xhtml_elem(node, "ul")
+}
+
+/// Prefer a direct-child list; some publishers wrap the toc `<ol>` in a `<div>`.
+fn first_nav_list<'a, 'input>(nav: &Node<'a, 'input>) -> Option<Node<'a, 'input>> {
+    nav.children()
+        .find(|n| is_nav_list(n))
+        .or_else(|| {
+            nav.children()
+                .filter(|n| n.is_element() && !is_nav_list(n))
+                .find_map(|child| child.children().find(|n| is_nav_list(n)))
+        })
+}
+
+fn walk_list(list: &Node, base_dir: &str, depth: usize, out: &mut Vec<TocEntry>) {
+    for li in list.children().filter(|n| is_xhtml_elem(n, "li")) {
+        if let Some(a) = li_primary_anchor(&li) {
             let title = anchor_title(&a);
             if let Some(href) = a.attribute("href") {
                 let (_, fragment) = split_fragment(href);
@@ -122,10 +137,27 @@ fn walk_ol(ol: &Node, base_dir: &str, depth: usize, out: &mut Vec<TocEntry>) {
             }
         }
 
-        if let Some(sub) = li.children().find(|n| is_xhtml_elem(n, "ol")) {
-            walk_ol(&sub, base_dir, depth + 1, out);
+        if let Some(sub) = li.children().find(|n| is_nav_list(n)) {
+            walk_list(&sub, base_dir, depth + 1, out);
         }
     }
+}
+
+/// Direct-child `<a>`, or the first `<a>` nested before a child list (e.g.
+/// `<li><span><a href=…>`).
+fn li_primary_anchor<'a, 'input>(li: &Node<'a, 'input>) -> Option<Node<'a, 'input>> {
+    if let Some(a) = li.children().find(|n| is_xhtml_elem(n, "a")) {
+        return Some(a);
+    }
+    for child in li.children() {
+        if is_nav_list(&child) {
+            break;
+        }
+        if let Some(a) = child.descendants().find(|n| is_xhtml_elem(n, "a")) {
+            return Some(a);
+        }
+    }
+    None
 }
 
 fn anchor_title(a: &Node) -> String {
@@ -242,5 +274,34 @@ mod tests {
         assert!(t[1].title.contains("雨が降る"));
         assert_eq!(t[1].content_path, "item/xhtml/p-003.xhtml");
         assert_eq!(t[1].fragment.as_deref(), Some("toc-002"));
+    }
+
+    const WRAPPED_NAV: &str = r#"<?xml version="1.0"?>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
+  <body>
+    <nav epub:type="toc">
+      <h1>Contents</h1>
+      <div class="toc-wrap">
+        <ol>
+          <li><span class="label"><a href="Text/ch1.xhtml">第一章</a></span></li>
+          <li><div><a href="Text/ch2.xhtml">第二章</a></div>
+            <ol><li><a href="Text/ch2.xhtml#s1">第一節</a></li></ol>
+          </li>
+        </ol>
+      </div>
+    </nav>
+  </body>
+</html>"#;
+
+    #[test]
+    fn nav_finds_wrapped_list_and_nested_anchors() {
+        let t = parse_nav_xhtml(WRAPPED_NAV, "OEBPS/nav.xhtml").unwrap();
+        assert_eq!(t.len(), 3);
+        assert_eq!(t[0].title, "第一章");
+        assert_eq!(t[0].content_path, "OEBPS/Text/ch1.xhtml");
+        assert_eq!(t[1].title, "第二章");
+        assert_eq!(t[2].title, "第一節");
+        assert_eq!(t[2].depth, 1);
+        assert_eq!(t[2].fragment.as_deref(), Some("s1"));
     }
 }
