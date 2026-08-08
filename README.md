@@ -189,7 +189,8 @@ Priority, `Ctrl-Y`), and choose a **release channel** (stable / dev, `Ctrl-G`).
 | `HONYA_CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_API_KEY` / `CF_API_TOKEN` | Cloudflare Workers AI API token. |
 | `XDG_CONFIG_HOME` | Override the config directory root (`$XDG_CONFIG_HOME/honya`). |
 | `HONYA_NO_UPDATE_CHECK` | Set to any value to skip the startup update check. |
-| `HONYA_SESSION_FILE` | Override the crash-recovery checkpoint path (absolute). |
+| `HONYA_SESSION_DIR` | Override the crash-recovery checkpoint directory (absolute). One file per in-flight project. |
+| `HONYA_SESSION_FILE` | Legacy alias: treats the file's parent directory as `HONYA_SESSION_DIR`. |
 
 </details>
 

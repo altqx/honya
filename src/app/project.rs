@@ -874,12 +874,19 @@ impl ProjectScreen {
         &[
             ("↵", "read"),
             ("Space", "mark"),
-            ("t", "queue"),
+            ("t/a", "queue"),
             ("T", "vol"),
-            ("A", "project"),
-            ("d", "delete"),
+            ("A", "all"),
+            ("V", "add vol"),
+            ("i", "add ch"),
+            ("M", "images"),
+            ("x", "export"),
+            ("e", "title"),
+            ("y", "synopsis"),
+            ("d", "del"),
             ("h/l", "nav"),
             ("z/Z", "fold"),
+            ("Q", "QA"),
         ]
     }
 }

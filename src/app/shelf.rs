@@ -228,7 +228,7 @@ impl ShelfScreen {
         f: &mut Frame,
         area: Rect,
         projects: &[Project],
-        foreign_busy: Option<&std::path::Path>,
+        foreign_busy: &[std::path::PathBuf],
         theme: &Theme,
     ) {
         let rows = self.row_count(projects);
@@ -296,8 +296,8 @@ impl ShelfScreen {
         let name_w = list_area.width.saturating_sub(48).max(20) as usize;
 
         for (i, p) in projects.iter().enumerate() {
-            let busy = foreign_busy.is_some_and(|d| {
-                crate::workspace::session::same_project_dir(d, p.dir.as_path())
+            let busy = foreign_busy.iter().any(|d| {
+                crate::workspace::session::same_project_dir(d.as_path(), p.dir.as_path())
             });
             items.push(project_row(p, i == selected, name_w, busy, theme));
         }
@@ -595,7 +595,7 @@ mod tests {
         let mut s = ShelfScreen::new();
         let theme = ThemeId::default().build();
         let mut term = Terminal::new(TestBackend::new(90, 20)).unwrap();
-        term.draw(|f| s.render(f, f.area(), &projects, None, &theme))
+        term.draw(|f| s.render(f, f.area(), &projects, &[], &theme))
             .unwrap();
         let la = s.list_area;
 

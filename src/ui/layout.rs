@@ -20,16 +20,18 @@ pub struct Skeleton {
 }
 
 /// Split `area` into the standard six-row [`Skeleton`]; toast row is height 0
-/// unless `show_toast`, so the body reclaims that line when hidden.
-pub fn skeleton(area: Rect, show_toast: bool) -> Skeleton {
+/// unless `show_toast`, so the body reclaims that line when hidden. `footer_h`
+/// is 1 normally, or 2–3 when the hint bar wraps.
+pub fn skeleton(area: Rect, show_toast: bool, footer_h: u16) -> Skeleton {
     let toast_h = if show_toast { 1 } else { 0 };
+    let footer_h = footer_h.clamp(1, 3);
     let [header, tabs, rule, body, toast, footer] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Min(0),
         Constraint::Length(toast_h),
-        Constraint::Length(1),
+        Constraint::Length(footer_h),
     ])
     .areas(area);
 

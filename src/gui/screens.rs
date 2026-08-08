@@ -162,7 +162,7 @@ fn shelf(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
     ui.add_space(8.0);
 
     let projects = app.projects.clone();
-    let foreign = app.foreign_run.as_ref().map(|cp| cp.project_dir.clone());
+    let foreign = app.foreign_busy_dirs();
 
     if projects.is_empty() {
         card_frame(pal).show(ui, |ui| {
@@ -182,7 +182,9 @@ fn shelf(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
     scroll_y("shelf_list").show(ui, |ui| {
         for (i, p) in projects.iter().enumerate() {
             let selected = nav.shelf_sel == i;
-            let busy = foreign.as_ref().is_some_and(|d| d == &p.dir);
+            let busy = foreign.iter().any(|d| {
+                crate::workspace::session::same_project_dir(d.as_path(), p.dir.as_path())
+            });
             project_card(ui, app, p, selected, busy, pal, |sel| nav.shelf_sel = sel.unwrap_or(i));
             ui.add_space(8.0);
         }

@@ -226,10 +226,87 @@ pub fn render_tabbar(
     zones
 }
 
+/// Columns taken by the always-present right-aligned global cluster (and any
+/// update badge sitting ahead of it).
+fn global_cluster_cols(update: Option<&str>, installed: Option<&str>) -> usize {
+    let mut n = col_width("?help  :cmd  Ctrl-C quit");
+    if let Some(version) = installed {
+        n += col_width("✓ ") + col_width(&format!("{version} · restart to apply  "));
+    } else if let Some(version) = update {
+        n += col_width("⬆ ") + col_width(&format!("{version} · honya update  "));
+    }
+    n
+}
+
+fn hint_piece_cols(key: &str, label: &str) -> usize {
+    col_width(key) + 1 + col_width(label) + 3
+}
+
+/// How many footer rows are needed to show `hints` at `width` (1 normally;
+/// 2–3 when wrapping). Cap is 3 — beyond that we still ellipsis.
+pub fn footer_height(
+    hints: &[(&str, &str)],
+    width: u16,
+    update: Option<&str>,
+    installed: Option<&str>,
+) -> u16 {
+    if width == 0 || hints.is_empty() {
+        return 1;
+    }
+    let total = width as usize;
+    let global = global_cluster_cols(update, installed);
+    let bottom_budget = total.saturating_sub(global + 2);
+
+    // Try 1 row (hints share the line with the global cluster).
+    if pack_count(hints, bottom_budget) == hints.len() {
+        return 1;
+    }
+    // Try 2 rows: a full-width top row, then bottom with global.
+    let after_top = pack_count(hints, total);
+    if after_top == hints.len() {
+        return 2;
+    }
+    let rest = &hints[after_top..];
+    if pack_count(rest, bottom_budget) == rest.len() {
+        return 2;
+    }
+    3
+}
+
+/// How many leading hints fit into `budget` columns (including the leading space).
+fn pack_count(hints: &[(&str, &str)], budget: usize) -> usize {
+    let mut used = 1usize;
+    let mut n = 0usize;
+    for (key, label) in hints {
+        let piece = hint_piece_cols(key, label);
+        if used + piece > budget {
+            break;
+        }
+        used += piece;
+        n += 1;
+    }
+    n
+}
+
+fn push_hint_piece<'a>(
+    spans: &mut Vec<Span<'a>>,
+    cols: &mut usize,
+    key: &'a str,
+    label: &'a str,
+    key_style: Style,
+    lbl_style: Style,
+) {
+    spans.push(Span::styled(key.to_string(), key_style));
+    spans.push(Span::raw(" "));
+    spans.push(Span::styled(label.to_string(), lbl_style));
+    spans.push(Span::raw("   "));
+    *cols += hint_piece_cols(key, label);
+}
+
 /// Render the footer hint bar: each `(key, label)` then the always-present
-/// right-aligned global cluster. When the row is too narrow, screen-specific
-/// hints are dropped before the global cluster — the contract every screen
-/// relies on.
+/// right-aligned global cluster. When a single row is too narrow the bar grows
+/// (see [`footer_height`]); only after the max wrap are screen-specific hints
+/// dropped before the global cluster.
 pub fn render_footer(
     f: &mut Frame,
     area: Rect,
@@ -238,7 +315,7 @@ pub fn render_footer(
     installed: Option<&str>,
     theme: &Theme,
 ) {
-    if area.width == 0 {
+    if area.width == 0 || area.height == 0 {
         return;
     }
     f.render_widget(
@@ -247,6 +324,7 @@ pub fn render_footer(
     );
 
     let total_cols = area.width as usize;
+    let rows = area.height.min(3) as usize;
 
     let key_style = Style::default()
         .fg(theme.ink_soft)
@@ -285,40 +363,61 @@ pub fn render_footer(
     ]);
     let global_cols: usize = global.iter().map(|s| col_width(s.content.as_ref())).sum();
 
-    // Screen-specific hints, dropped first when the row is cramped.
+    let mut lines: Vec<Line> = Vec::with_capacity(rows);
+    let mut hint_idx = 0usize;
+
+    // Full-width continuation rows above the bottom (global) row.
+    let full_rows = rows.saturating_sub(1);
+    for _ in 0..full_rows {
+        let mut left: Vec<Span> = Vec::new();
+        let mut left_cols = 0usize;
+        left.push(Span::raw(" "));
+        left_cols += 1;
+        while hint_idx < hints.len() {
+            let (key, label) = hints[hint_idx];
+            let piece = hint_piece_cols(key, label);
+            if left_cols + piece > total_cols {
+                break;
+            }
+            push_hint_piece(&mut left, &mut left_cols, key, label, key_style, lbl_style);
+            hint_idx += 1;
+        }
+        if left_cols < total_cols {
+            left.push(Span::raw(" ".repeat(total_cols - left_cols)));
+        }
+        lines.push(Line::from(left));
+    }
+
+    // Bottom (or only) row: remaining hints + gap + global cluster.
     let left_budget = total_cols.saturating_sub(global_cols + 2);
     let mut left: Vec<Span> = Vec::new();
     let mut left_cols = 0usize;
     left.push(Span::raw(" "));
     left_cols += 1;
-    for (key, label) in hints {
-        // Measure the "<key> <label>   " piece before committing so it never
-        // overflows into the global cluster.
-        let piece_cols = col_width(key) + 1 + col_width(label) + 3;
-        if left_cols + piece_cols > left_budget {
+    while hint_idx < hints.len() {
+        let (key, label) = hints[hint_idx];
+        let piece = hint_piece_cols(key, label);
+        if left_cols + piece > left_budget {
             if left_cols + 4 <= left_budget {
                 left.push(Span::styled("…", lbl_style));
                 left.push(Span::raw("   "));
+                left_cols += 4;
             }
             break;
         }
-        left.push(Span::styled((*key).to_string(), key_style));
-        left.push(Span::raw(" "));
-        left.push(Span::styled((*label).to_string(), lbl_style));
-        left.push(Span::raw("   "));
-        left_cols += piece_cols;
+        push_hint_piece(&mut left, &mut left_cols, key, label, key_style, lbl_style);
+        hint_idx += 1;
     }
 
-    // Filler gap pins the global cluster to the right edge.
     let gap = total_cols.saturating_sub(left_cols + global_cols);
-    let mut spans = left;
     if gap > 0 {
-        spans.push(Span::raw(" ".repeat(gap)));
+        left.push(Span::raw(" ".repeat(gap)));
     }
-    spans.append(&mut global);
+    left.append(&mut global);
+    lines.push(Line::from(left));
 
     f.render_widget(
-        Paragraph::new(Line::from(spans)).style(Style::default().bg(theme.bg)),
+        Paragraph::new(lines).style(Style::default().bg(theme.bg)),
         area,
     );
 }
@@ -403,5 +502,55 @@ mod tests {
             .collect();
         assert!(line.contains('…'), "cramped footer should hint at more: {line:?}");
         assert!(line.contains("?help"), "global cluster should survive: {line:?}");
+    }
+
+    #[test]
+    fn footer_wraps_so_project_hints_stay_visible() {
+        let theme = crate::model::ThemeId::default().build();
+        let hints = &[
+            ("↵", "read"),
+            ("Space", "mark"),
+            ("t/a", "queue"),
+            ("T", "vol"),
+            ("A", "all"),
+            ("V", "add vol"),
+            ("i", "add ch"),
+            ("M", "images"),
+            ("x", "export"),
+            ("e", "title"),
+            ("y", "synopsis"),
+            ("d", "del"),
+            ("h/l", "nav"),
+            ("z/Z", "fold"),
+            ("Q", "QA"),
+        ];
+        let h = footer_height(hints, 80, None, None);
+        assert!(
+            h >= 2,
+            "project-sized hint set should wrap at 80 cols, got {h}"
+        );
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: h,
+        };
+        let mut term = Terminal::new(TestBackend::new(80, h)).unwrap();
+        term.draw(|f| render_footer(f, area, hints, None, None, &theme))
+            .unwrap();
+        let mut all = String::new();
+        for y in 0..h {
+            for x in 0..area.width {
+                all.push_str(term.backend().buffer()[(x, y)].symbol());
+            }
+            all.push('\n');
+        }
+        for needle in ["read", "export", "synopsis", "add vol", "?help"] {
+            assert!(
+                all.contains(needle),
+                "wrapped footer missing {needle:?}:\n{all}"
+            );
+        }
+        assert!(!all.contains('…'), "wrapped footer should not ellipsis:\n{all}");
     }
 }

@@ -9,7 +9,7 @@ use ratatui::backend::TestBackend;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::app::overlay::Overlay;
-use crate::app::{ActiveProject, App, Screen, Toast};
+use crate::app::{Action, ActiveProject, App, Screen, Toast};
 use crate::model::{AppConfig, EventTx, LogLevel, ModelSet, TargetLanguage};
 
 fn fresh_app() -> App {
@@ -818,14 +818,15 @@ fn recovery_prompt_appears_and_discards() {
     let tmp = std::env::temp_dir().join(format!("honya_recover_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).unwrap();
-    let session_file = tmp.join("session.json");
+    let sessions_dir = tmp.join("sessions");
     unsafe {
-        std::env::set_var("HONYA_SESSION_FILE", &session_file);
+        std::env::set_var("HONYA_SESSION_DIR", &sessions_dir);
+        std::env::remove_var("HONYA_SESSION_FILE");
     }
     assert_eq!(
-        session::path(),
-        session_file,
-        "recovery path must be redirected into the throwaway dir"
+        session::dir(),
+        sessions_dir,
+        "recovery dir must be redirected into the throwaway dir"
     );
 
     let project_dir = tmp.join("re-zero");
@@ -862,11 +863,12 @@ fn recovery_prompt_appears_and_discards() {
         "discard drops the pending checkpoint"
     );
     assert!(
-        session::load().is_none(),
+        session::load_all().is_empty(),
         "discard removes the checkpoint file"
     );
 
     unsafe {
+        std::env::remove_var("HONYA_SESSION_DIR");
         std::env::remove_var("HONYA_SESSION_FILE");
     }
     let _ = std::fs::remove_dir_all(&tmp);
@@ -884,14 +886,16 @@ fn pipeline_finished_clears_checkpoint() {
     let tmp = std::env::temp_dir().join(format!("honya_recover_fin_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).unwrap();
-    let session_file = tmp.join("session.json");
+    let sessions_dir = tmp.join("sessions");
     unsafe {
-        std::env::set_var("HONYA_SESSION_FILE", &session_file);
+        std::env::set_var("HONYA_SESSION_DIR", &sessions_dir);
+        std::env::remove_var("HONYA_SESSION_FILE");
     }
-    assert_eq!(session::path(), session_file, "recovery path redirected");
+    assert_eq!(session::dir(), sessions_dir, "recovery dir redirected");
 
+    let project_dir = tmp.join("proj");
     let cp = SessionCheckpoint::new(
-        tmp.join("proj"),
+        project_dir.clone(),
         "proj".to_string(),
         "Proj".to_string(),
         1,
@@ -899,11 +903,12 @@ fn pipeline_finished_clears_checkpoint() {
     );
     session::save(&cp).expect("write checkpoint");
     assert!(
-        session::load().is_some(),
+        session::load_for(&project_dir).is_some(),
         "checkpoint present before finish"
     );
 
     let mut app = fresh_app();
+    app.active_run = Some(cp.clone());
     app.pending_recovery = Some(cp);
     app.on_app_event(AppEvent::PipelineFinished {
         chapters_done: 1,
@@ -914,7 +919,7 @@ fn pipeline_finished_clears_checkpoint() {
     });
 
     assert!(
-        session::load().is_none(),
+        session::load_for(&project_dir).is_none(),
         "a finished run clears the checkpoint file"
     );
     assert!(
@@ -923,6 +928,7 @@ fn pipeline_finished_clears_checkpoint() {
     );
 
     unsafe {
+        std::env::remove_var("HONYA_SESSION_DIR");
         std::env::remove_var("HONYA_SESSION_FILE");
     }
     let _ = std::fs::remove_dir_all(&tmp);
@@ -940,7 +946,8 @@ fn stale_checkpoint_is_cleared_without_prompting() {
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).unwrap();
     unsafe {
-        std::env::set_var("HONYA_SESSION_FILE", tmp.join("session.json"));
+        std::env::set_var("HONYA_SESSION_DIR", tmp.join("sessions"));
+        std::env::remove_var("HONYA_SESSION_FILE");
     }
 
     // Points at a directory with no PROJECT.md → not resumable.
@@ -961,11 +968,12 @@ fn stale_checkpoint_is_cleared_without_prompting() {
     );
     assert!(app.pending_recovery.is_none());
     assert!(
-        session::load().is_none(),
+        session::load_all().is_empty(),
         "a stale checkpoint is cleared from disk"
     );
 
     unsafe {
+        std::env::remove_var("HONYA_SESSION_DIR");
         std::env::remove_var("HONYA_SESSION_FILE");
     }
     let _ = std::fs::remove_dir_all(&tmp);
@@ -988,7 +996,8 @@ fn all_done_checkpoint_is_cleared_without_prompting() {
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).unwrap();
     unsafe {
-        std::env::set_var("HONYA_SESSION_FILE", tmp.join("session.json"));
+        std::env::set_var("HONYA_SESSION_DIR", tmp.join("sessions"));
+        std::env::remove_var("HONYA_SESSION_FILE");
     }
 
     // A real project on disk so the checkpoint is "resumable" (PROJECT.md exists).
@@ -1055,7 +1064,7 @@ fn all_done_checkpoint_is_cleared_without_prompting() {
     );
     assert!(app.pending_recovery.is_none());
     assert!(
-        session::load().is_none(),
+        session::load_all().is_empty(),
         "an already-finished run's checkpoint is cleared"
     );
     let history = crate::workspace::volume::load(&ws).run_history;
@@ -1066,6 +1075,7 @@ fn all_done_checkpoint_is_cleared_without_prompting() {
     );
 
     unsafe {
+        std::env::remove_var("HONYA_SESSION_DIR");
         std::env::remove_var("HONYA_SESSION_FILE");
     }
     let _ = std::fs::remove_dir_all(&tmp);
@@ -1083,7 +1093,8 @@ fn resume_uses_the_projects_language_not_the_current_preference() {
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).unwrap();
     unsafe {
-        std::env::set_var("HONYA_SESSION_FILE", tmp.join("session.json"));
+        std::env::set_var("HONYA_SESSION_DIR", tmp.join("sessions"));
+        std::env::remove_var("HONYA_SESSION_FILE");
     }
 
     let english_dir = tmp.join("english-project");
@@ -1157,13 +1168,14 @@ fn resume_uses_the_projects_language_not_the_current_preference() {
     );
 
     unsafe {
+        std::env::remove_var("HONYA_SESSION_DIR");
         std::env::remove_var("HONYA_SESSION_FILE");
     }
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
 /// A checkpoint whose owner PID is still alive (another honya window) must not
-/// raise the resume modal — it is recorded as `foreign_run` and opening that
+/// raise the resume modal — it is recorded in `foreign_runs` and opening that
 /// project is refused.
 #[test]
 fn live_foreign_run_suppresses_resume_and_blocks_open() {
@@ -1174,9 +1186,9 @@ fn live_foreign_run_suppresses_resume_and_blocks_open() {
     let tmp = std::env::temp_dir().join(format!("honya_recover_live_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).unwrap();
-    let session_file = tmp.join("session.json");
     unsafe {
-        std::env::set_var("HONYA_SESSION_FILE", &session_file);
+        std::env::set_var("HONYA_SESSION_DIR", tmp.join("sessions"));
+        std::env::remove_var("HONYA_SESSION_FILE");
     }
 
     let project_dir = tmp.join("re-zero");
@@ -1221,11 +1233,11 @@ fn live_foreign_run_suppresses_resume_and_blocks_open() {
             "pending_recovery stays empty for a live foreign run"
         );
         assert!(
-            app.foreign_run.is_some(),
-            "foreign_run holds the live checkpoint"
+            !app.foreign_runs.is_empty(),
+            "foreign_runs holds the live checkpoint"
         );
         assert!(
-            session::load().is_some(),
+            !session::load_all().is_empty(),
             "live foreign checkpoint file is left intact"
         );
 
@@ -1249,6 +1261,7 @@ fn live_foreign_run_suppresses_resume_and_blocks_open() {
         let _ = std::env::set_current_dir(cwd);
     }
     unsafe {
+        std::env::remove_var("HONYA_SESSION_DIR");
         std::env::remove_var("HONYA_SESSION_FILE");
     }
     let _ = std::fs::remove_dir_all(&tmp);
@@ -1264,9 +1277,9 @@ fn dead_foreign_pid_still_prompts_resume() {
     let tmp = std::env::temp_dir().join(format!("honya_recover_dead_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).unwrap();
-    let session_file = tmp.join("session.json");
     unsafe {
-        std::env::set_var("HONYA_SESSION_FILE", &session_file);
+        std::env::set_var("HONYA_SESSION_DIR", tmp.join("sessions"));
+        std::env::remove_var("HONYA_SESSION_FILE");
     }
 
     let project_dir = tmp.join("re-zero");
@@ -1291,10 +1304,95 @@ fn dead_foreign_pid_still_prompts_resume() {
             "dead/stale foreign owner still raises resume"
         );
         assert!(app.pending_recovery.is_some());
-        assert!(app.foreign_run.is_none());
+        assert!(app.foreign_runs.is_empty());
     });
 
     unsafe {
+        std::env::remove_var("HONYA_SESSION_DIR");
+        std::env::remove_var("HONYA_SESSION_FILE");
+    }
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// A live foreign run on project A must not block opening or starting work on
+/// project B — parallel PIDs on different projects are allowed.
+#[test]
+fn live_foreign_run_allows_other_projects() {
+    use crate::workspace::session::{self, SessionCheckpoint, with_live_elsewhere_override};
+
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    let tmp = std::env::temp_dir().join(format!("honya_recover_parallel_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    unsafe {
+        std::env::set_var("HONYA_SESSION_DIR", tmp.join("sessions"));
+        std::env::remove_var("HONYA_SESSION_FILE");
+    }
+
+    let busy_dir = tmp.join("busy-novel");
+    let free_dir = tmp.join("free-novel");
+    crate::workspace::scaffold::create_project(&busy_dir, "Busy", &ModelSet::default(), 1)
+        .expect("scaffold busy");
+    crate::workspace::scaffold::create_project(&free_dir, "Free", &ModelSet::default(), 1)
+        .expect("scaffold free");
+
+    let mut cp = SessionCheckpoint::new(
+        busy_dir.clone(),
+        "busy-novel".to_string(),
+        "Busy".to_string(),
+        1,
+        vec![1],
+    );
+    cp.pid = std::process::id().wrapping_add(111_111).max(1);
+    session::save(&cp).expect("write busy checkpoint");
+
+    let prev_cwd = std::env::current_dir().ok();
+    std::env::set_current_dir(&tmp).expect("chdir into shelf root");
+
+    with_live_elsewhere_override(Some(true), || {
+        let mut app = fresh_app();
+        app.init_recovery_prompt();
+        assert_eq!(app.foreign_runs.len(), 1);
+        assert!(
+            app.foreign_runs
+                .iter()
+                .any(|c| session::same_project_dir(&c.project_dir, &busy_dir)),
+            "busy project is tracked as foreign"
+        );
+
+        app.apply(Action::OpenProject("free-novel".into()));
+        assert!(
+            app.active
+                .as_ref()
+                .is_some_and(|a| session::same_project_dir(&a.project.dir, &free_dir)),
+            "other project opens while a foreign run is live elsewhere"
+        );
+
+        // Starting a translation on the free project must not be blocked by A's run.
+        assert!(
+            !app.foreign_run_blocks_start_for_test(&free_dir),
+            "start on a different project must be allowed"
+        );
+        assert!(
+            app.foreign_run_blocks_start_for_test(&busy_dir),
+            "start on the busy project must still be refused"
+        );
+
+        app.apply(Action::OpenProject("busy-novel".into()));
+        assert!(
+            app.active
+                .as_ref()
+                .is_some_and(|a| session::same_project_dir(&a.project.dir, &free_dir)),
+            "busy project stays closed; previously opened free project remains active"
+        );
+    });
+
+    if let Some(cwd) = prev_cwd {
+        let _ = std::env::set_current_dir(cwd);
+    }
+    unsafe {
+        std::env::remove_var("HONYA_SESSION_DIR");
         std::env::remove_var("HONYA_SESSION_FILE");
     }
     let _ = std::fs::remove_dir_all(&tmp);
@@ -1313,7 +1411,8 @@ fn resume_with_missing_project_clears_and_reports() {
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).unwrap();
     unsafe {
-        std::env::set_var("HONYA_SESSION_FILE", tmp.join("session.json"));
+        std::env::set_var("HONYA_SESSION_DIR", tmp.join("sessions"));
+        std::env::remove_var("HONYA_SESSION_FILE");
     }
 
     // Scaffold a real project so the prompt appears, then delete it to simulate the
@@ -1347,7 +1446,7 @@ fn resume_with_missing_project_clears_and_reports() {
         "a failed resume drops the pending checkpoint"
     );
     assert!(
-        session::load().is_none(),
+        session::load_all().is_empty(),
         "a failed resume clears the unusable checkpoint"
     );
     let toast = app.toast.as_ref().expect("an error toast is shown");
@@ -1357,6 +1456,7 @@ fn resume_with_missing_project_clears_and_reports() {
     );
 
     unsafe {
+        std::env::remove_var("HONYA_SESSION_DIR");
         std::env::remove_var("HONYA_SESSION_FILE");
     }
     let _ = std::fs::remove_dir_all(&tmp);

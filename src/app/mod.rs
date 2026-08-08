@@ -445,14 +445,15 @@ pub struct App {
     /// An interrupted run found at startup, awaiting the user's resume/discard
     /// choice in the recovery overlay (see `init_recovery_prompt`).
     pub pending_recovery: Option<crate::workspace::session::SessionCheckpoint>,
-    /// A run still owned by another live honya process (fresh heartbeat + alive
-    /// PID). Suppresses the false resume prompt; shelf badges + open/start guards
-    /// consult this (refreshed on tick).
-    pub foreign_run: Option<crate::workspace::session::SessionCheckpoint>,
+    /// Runs still owned by other live honya processes (fresh heartbeat + alive
+    /// PID). Suppresses false resume prompts; shelf badges + open/start guards
+    /// consult this (refreshed on tick). Multiple entries are allowed — one per
+    /// project — so parallel PIDs on different projects do not block each other.
+    pub foreign_runs: Vec<crate::workspace::session::SessionCheckpoint>,
     /// Checkpoint for the currently running pipeline. Kept in memory so the final
     /// `PipelineFinished` event can close the matching VOLUME.md run-history row.
     pub active_run: Option<crate::workspace::session::SessionCheckpoint>,
-    /// `app.frame` value when we last rewrote `session.json` heartbeat (coarse cadence).
+    /// `app.frame` value when we last rewrote this run's checkpoint heartbeat.
     last_heartbeat_frame: u64,
     /// The volume the running pipeline is *currently* on, for an auto project run
     /// that walks volumes (`VolumeStarted`). Decoupled from `active_run.vol` (which
@@ -553,7 +554,7 @@ impl App {
             update_available: None,
             update_installed: None,
             pending_recovery: None,
-            foreign_run: None,
+            foreign_runs: Vec::new(),
             active_run: None,
             last_heartbeat_frame: 0,
             running_vol: None,
@@ -591,28 +592,31 @@ impl App {
     /// Raise the recovery overlay for a resumable checkpoint. Kept out of
     /// `App::new` so tests never touch the real recovery file.
     pub fn init_recovery_prompt(&mut self) {
-        let Some(mut cp) = crate::workspace::session::load() else {
+        self.foreign_runs = crate::workspace::session::load_live_foreign();
+        if let Some(cp) = self.foreign_runs.first() {
+            let title = cp.project_title.clone();
+            let pid = cp.pid;
+            let extra = self.foreign_runs.len().saturating_sub(1);
+            let more = if extra > 0 {
+                format!(" · +{extra} other project(s)")
+            } else {
+                String::new()
+            };
+            self.toast = Some(Toast::info(format!(
+                "「{title}」 is translating in another honya (pid {pid}){more}"
+            )));
+        }
+
+        let resumable = crate::workspace::session::load_resumable();
+        let Some(mut cp) = resumable.into_iter().next() else {
             return;
         };
         cp.ensure_run_id();
-        if !cp.is_resumable() {
-            crate::workspace::session::clear();
-            return;
-        }
-        if cp.is_live_elsewhere() {
-            let title = cp.project_title.clone();
-            let pid = cp.pid;
-            self.foreign_run = Some(cp);
-            self.toast = Some(Toast::info(format!(
-                "「{title}」 is translating in another honya (pid {pid})"
-            )));
-            return;
-        }
         let (done, total) = self.recovery_progress(&cp);
         if total > 0 && done >= total {
             // Crash after the last commit: clear the prompt and close the run row.
             self.finish_recovered_all_done(&cp, done as u32);
-            crate::workspace::session::clear();
+            crate::workspace::session::clear_for(&cp.project_dir);
             return;
         }
         let body = recovery_body(&cp, done, total);
@@ -659,46 +663,58 @@ impl App {
         }
     }
 
-    /// Reload `foreign_run` from disk: keep it only while the checkpoint is live elsewhere.
+    /// Reload `foreign_runs` from disk: keep only checkpoints still live elsewhere.
     fn refresh_foreign_run(&mut self) {
-        match crate::workspace::session::load() {
-            Some(cp) if cp.is_live_elsewhere() => {
-                self.foreign_run = Some(cp);
-            }
-            _ => {
-                self.foreign_run = None;
-            }
-        }
+        self.foreign_runs = crate::workspace::session::load_live_foreign();
     }
 
-    /// True when another live honya owns any in-flight run (would overwrite its checkpoint).
-    fn foreign_run_blocks_start(&mut self) -> bool {
+    fn foreign_owner(
+        &mut self,
+        project_dir: &std::path::Path,
+    ) -> Option<(String, u32)> {
         self.refresh_foreign_run();
-        if let Some(cp) = self.foreign_run.as_ref() {
-            self.toast = Some(Toast::warn(format!(
-                "「{}」 is translating in another honya (pid {}) — finish or stop that run first",
-                cp.project_title, cp.pid
-            )));
-            true
-        } else {
-            false
-        }
+        crate::workspace::session::load_for(project_dir)
+            .filter(|cp| cp.is_live_elsewhere())
+            .map(|cp| (cp.project_title, cp.pid))
     }
 
-    /// True when `project` is the one owned by a foreign live run.
-    fn foreign_run_blocks_project(&mut self, project_dir: &std::path::Path) -> bool {
-        self.refresh_foreign_run();
-        let Some(cp) = self.foreign_run.as_ref() else {
+    /// True when another live honya owns an in-flight run on `project_dir`.
+    /// Other projects may still be started in parallel.
+    fn foreign_run_blocks_start(&mut self, project_dir: &std::path::Path) -> bool {
+        let Some((title, pid)) = self.foreign_owner(project_dir) else {
             return false;
         };
-        if !crate::workspace::session::same_project_dir(&cp.project_dir, project_dir) {
-            return false;
-        }
         self.toast = Some(Toast::warn(format!(
-            "「{}」 is translating in another honya (pid {}) — cannot open it here",
-            cp.project_title, cp.pid
+            "「{title}」 is translating in another honya (pid {pid}) — finish or stop that run first"
         )));
         true
+    }
+
+    /// True when `project` is owned by a foreign live run.
+    fn foreign_run_blocks_project(&mut self, project_dir: &std::path::Path) -> bool {
+        let Some((title, pid)) = self.foreign_owner(project_dir) else {
+            return false;
+        };
+        self.toast = Some(Toast::warn(format!(
+            "「{title}」 is translating in another honya (pid {pid}) — cannot open it here"
+        )));
+        true
+    }
+
+    pub fn foreign_busy_dirs(&self) -> Vec<std::path::PathBuf> {
+        self.foreign_runs
+            .iter()
+            .map(|cp| cp.project_dir.clone())
+            .collect()
+    }
+
+    /// Test-only: expose the per-project start guard without spawning a pipeline.
+    #[cfg(test)]
+    pub(crate) fn foreign_run_blocks_start_for_test(
+        &mut self,
+        project_dir: &std::path::Path,
+    ) -> bool {
+        self.foreign_run_blocks_start(project_dir)
     }
 
     /// Count checkpoint progress from the shelf scan or checkpoint path fallback.
@@ -883,6 +899,7 @@ impl App {
                 // A chapter interrupted by Stop never reaches a terminal state event,
                 // so drop any half-built record rather than mis-recording it.
                 self.pending_chapter_run = None;
+                let clear_dir = self.active_run.as_ref().map(|cp| cp.project_dir.clone());
                 self.finish_active_run_history(
                     *chapters_done,
                     *chapters_failed,
@@ -895,7 +912,9 @@ impl App {
                 self.persist_project_status();
                 // The run reached its end (finished, stopped, or all-failed): the
                 // recovery checkpoint has served its purpose, so retire it.
-                crate::workspace::session::clear();
+                if let Some(dir) = clear_dir {
+                    crate::workspace::session::clear_for(&dir);
+                }
                 self.pending_recovery = None;
                 let review = if *chapters_need_review > 0 {
                     format!(" · {chapters_need_review} need review")
@@ -2807,8 +2826,8 @@ impl App {
             Action::DiscardSession => {
                 if let Some(cp) = self.pending_recovery.take() {
                     self.mark_recovery_discarded(&cp);
+                    crate::workspace::session::clear_for(&cp.project_dir);
                 }
-                crate::workspace::session::clear();
                 self.overlay = Overlay::None;
                 self.toast = Some(Toast::info("interrupted run discarded"));
             }
@@ -3376,7 +3395,7 @@ impl App {
             .cloned()
             .or_else(|| crate::workspace::scan::scan_one_project(&cp.project_dir));
         let Some(project) = project else {
-            crate::workspace::session::clear();
+            crate::workspace::session::clear_for(&cp.project_dir);
             self.toast = Some(Toast::error(format!(
                 "could not reopen {} to resume",
                 cp.project_id
@@ -3615,11 +3634,11 @@ impl App {
             ));
             return;
         }
-        if self.foreign_run_blocks_start() {
-            return;
-        }
-        if self.active.is_none() {
+        let Some(project_dir) = self.active.as_ref().map(|a| a.project.dir.clone()) else {
             self.toast = Some(Toast::warn("no project open"));
+            return;
+        };
+        if self.foreign_run_blocks_start(&project_dir) {
             return;
         }
         if chapters.is_empty() {
@@ -3658,11 +3677,11 @@ impl App {
             ));
             return;
         }
-        if self.foreign_run_blocks_start() {
-            return;
-        }
-        if self.active.is_none() {
+        let Some(project_dir) = self.active.as_ref().map(|a| a.project.dir.clone()) else {
             self.toast = Some(Toast::warn("no project open"));
+            return;
+        };
+        if self.foreign_run_blocks_start(&project_dir) {
             return;
         }
         if ids.is_empty() {
@@ -3717,9 +3736,6 @@ impl App {
             self.toast = Some(Toast::warn("a run is already in progress"));
             return;
         }
-        if checkpoint.is_none() && self.foreign_run_blocks_start() {
-            return;
-        }
         let Some((vol, project_dir, project_id, project_title, models, target_language)) =
             self.active.as_ref().map(|active| {
                 (
@@ -3735,6 +3751,9 @@ impl App {
             self.toast = Some(Toast::warn("no project open"));
             return;
         };
+        if checkpoint.is_none() && self.foreign_run_blocks_start(&project_dir) {
+            return;
+        }
         if chapters.is_empty() {
             self.toast = Some(Toast::warn("nothing selected"));
             return;
@@ -3821,7 +3840,7 @@ impl App {
         self.run_ctl = Some(ctl);
         self.run_queue = Some(queue);
         self.active_run = Some(checkpoint.clone());
-        self.foreign_run = None;
+        self.refresh_foreign_run();
         self.last_heartbeat_frame = self.frame;
         // Single-volume run: per-chapter events scope through active_run.vol.
         self.running_vol = None;
@@ -3936,11 +3955,11 @@ impl App {
             self.toast = Some(Toast::warn("a run is already in progress"));
             return;
         }
-        if self.foreign_run_blocks_start() {
-            return;
-        }
-        if self.active.is_none() {
+        let Some(project_dir) = self.active.as_ref().map(|a| a.project.dir.clone()) else {
             self.toast = Some(Toast::warn("no project open"));
+            return;
+        };
+        if self.foreign_run_blocks_start(&project_dir) {
             return;
         }
         let plan = self.project_translation_plan();
@@ -3971,9 +3990,6 @@ impl App {
     ) {
         if self.run_active {
             self.toast = Some(Toast::warn("a run is already in progress"));
-            return;
-        }
-        if checkpoint.is_none() && self.foreign_run_blocks_start() {
             return;
         }
         let plan = self.project_translation_plan();
@@ -4008,6 +4024,9 @@ impl App {
             self.toast = Some(Toast::warn("no project open"));
             return;
         };
+        if checkpoint.is_none() && self.foreign_run_blocks_start(&project_dir) {
+            return;
+        }
         let Some(clients) = self.ensure_active_clients() else {
             self.toast = Some(if !crate::config::any_provider_key(&self.cfg) {
                 Toast::warn("no API key — open Settings ( : → Settings ) to add one")
@@ -4078,7 +4097,7 @@ impl App {
         self.run_ctl = Some(ctl);
         self.run_queue = Some(queue);
         self.active_run = Some(checkpoint);
-        self.foreign_run = None;
+        self.refresh_foreign_run();
         self.last_heartbeat_frame = self.frame;
         self.running_vol = None;
         self.refresh_queue_panel();
@@ -4139,9 +4158,6 @@ impl App {
             self.toast = Some(Toast::warn("a run is already in progress"));
             return;
         }
-        if checkpoint.is_none() && self.foreign_run_blocks_start() {
-            return;
-        }
         let plan = self.volume_plan_from_ids(&ids);
         if plan.is_empty() {
             self.toast = Some(Toast::warn("nothing selected"));
@@ -4163,6 +4179,9 @@ impl App {
             self.toast = Some(Toast::warn("no project open"));
             return;
         };
+        if checkpoint.is_none() && self.foreign_run_blocks_start(&project_dir) {
+            return;
+        }
         let Some(clients) = self.ensure_active_clients() else {
             self.toast = Some(if !crate::config::any_provider_key(&self.cfg) {
                 Toast::warn("no API key — open Settings ( : → Settings ) to add one")
@@ -4244,7 +4263,7 @@ impl App {
         self.run_ctl = Some(ctl);
         self.run_queue = Some(queue);
         self.active_run = Some(checkpoint);
-        self.foreign_run = None;
+        self.refresh_foreign_run();
         self.last_heartbeat_frame = self.frame;
         self.running_vol = None;
         self.refresh_queue_panel();
@@ -4981,7 +5000,14 @@ impl App {
     pub fn render(&mut self, f: &mut Frame) {
         let area = f.area();
         let show_toast = self.toast.is_some() || self.quit_armed();
-        let sk: Skeleton = layout::skeleton(area, show_toast);
+        let hints = self.hints();
+        let footer_h = chrome::footer_height(
+            hints,
+            area.width,
+            self.update_available.as_deref(),
+            self.update_installed.as_deref(),
+        );
+        let sk: Skeleton = layout::skeleton(area, show_toast, footer_h);
         // Stash this frame's geometry so the next mouse event can hit-test it.
         self.last_area = area;
         self.last_skeleton = Some(sk);
@@ -5030,7 +5056,6 @@ impl App {
             }
         }
 
-        let hints = self.hints();
         chrome::render_footer(
             f,
             sk.footer,
@@ -5049,13 +5074,11 @@ impl App {
 
     fn render_body(&mut self, f: &mut Frame, body: Rect) {
         match self.screen {
-            Screen::Shelf => self.shelf.render(
-                f,
-                body,
-                &self.projects,
-                self.foreign_run.as_ref().map(|cp| cp.project_dir.as_path()),
-                &self.theme,
-            ),
+            Screen::Shelf => {
+                let foreign = self.foreign_busy_dirs();
+                self.shelf
+                    .render(f, body, &self.projects, &foreign, &self.theme)
+            }
             Screen::Project => self
                 .project
                 .render(f, body, self.active.as_ref(), &self.theme),

@@ -1825,7 +1825,7 @@ impl Overlay {
             // near the modal's top/bottom hit-test inside it (not as a dismiss).
             Overlay::Settings(_) => centered_modal(72, 26, area),
             Overlay::Theme(_) => centered_modal(60, 20, area),
-            Overlay::Palette(_) => centered_modal(60, 16, area),
+            Overlay::Palette(_) => centered_modal(60, 20, area),
             Overlay::Log(_) => centered_pct(80, 80, area),
             Overlay::Help(_) => centered_modal(72, 24, area),
             Overlay::About => centered_modal(64, 20, area),
@@ -4637,7 +4637,7 @@ impl Overlay {
     }
 
     fn render_palette(&self, f: &mut Frame, area: Rect, theme: &Theme, st: &PaletteState) {
-        let modal = centered_modal(60, 16, area);
+        let modal = centered_modal(60, 20, area);
         f.render_widget(Clear, modal);
         let block = self.modal_block("Command palette", theme);
         let inner = block.inner(modal);
@@ -4665,9 +4665,27 @@ impl Overlay {
         );
 
         let matches = st.matches();
-        let mut lines = Vec::new();
-        for (row, &idx) in matches.iter().enumerate() {
-            let selected = row == st.sel;
+        if matches.is_empty() {
+            f.render_widget(
+                Paragraph::new(Span::styled(
+                    "   no matches",
+                    Style::default().fg(theme.ink_faint),
+                ))
+                .style(Style::default().bg(theme.bg_panel)),
+                rows[1],
+            );
+            return;
+        }
+
+        // Window the rows so the selection stays visible (theme/jump pattern).
+        let cap = (rows[1].height as usize).max(1);
+        let sel = st.sel.min(matches.len() - 1);
+        let start = if sel >= cap { sel + 1 - cap } else { 0 };
+        let end = (start + cap).min(matches.len());
+
+        let mut lines = Vec::with_capacity(end - start);
+        for (row, &idx) in matches.iter().enumerate().take(end).skip(start) {
+            let selected = row == sel;
             let bar = if selected {
                 theme::SELECT_BAR.to_string()
             } else {
@@ -4683,16 +4701,11 @@ impl Overlay {
                 Span::styled(st.items[idx].label, style),
             ]));
         }
-        if lines.is_empty() {
-            lines.push(Line::from(Span::styled(
-                "   no matches",
-                Style::default().fg(theme.ink_faint),
-            )));
-        }
         f.render_widget(
             Paragraph::new(lines).style(Style::default().bg(theme.bg_panel)),
             rows[1],
         );
+        crate::ui::widgets::render_scrollbar(f, rows[1], matches.len(), start, theme);
     }
 
     fn render_log(
@@ -6579,6 +6592,33 @@ mod tests {
         assert!(
             status.contains("s skip"),
             "status lost the final action hint: {status}"
+        );
+    }
+
+    #[test]
+    fn palette_keeps_selection_visible_when_list_overflows() {
+        let theme = Theme::washi();
+        let mut ov = Overlay::palette();
+        let Overlay::Palette(st) = &mut ov else {
+            unreachable!()
+        };
+        // Force a selection past the first page of a short modal.
+        st.sel = st.items.len().saturating_sub(1);
+        let last_label = st.items[st.sel].label;
+
+        let mut term = Terminal::new(TestBackend::new(80, 16)).unwrap();
+        term.draw(|f| ov.render(f, f.area(), &theme, &AppConfig::default(), &[], 0))
+            .unwrap();
+        let glyphs: String = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(
+            glyphs.contains(last_label),
+            "selected palette row should stay in view: missing {last_label:?} in {glyphs:?}"
         );
     }
 }

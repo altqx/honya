@@ -252,7 +252,10 @@ fn print_help() {
         "    HONYA_GUI                            Launch the native GUI window (= --gui)"
     );
     println!(
-        "    HONYA_SESSION_FILE                   Override the crash-recovery checkpoint path"
+        "    HONYA_SESSION_DIR                    Override the crash-recovery checkpoint directory"
+    );
+    println!(
+        "    HONYA_SESSION_FILE                   Legacy: use the file's parent as HONYA_SESSION_DIR"
     );
 }
 
