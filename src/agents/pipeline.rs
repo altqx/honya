@@ -196,6 +196,8 @@ impl LoopReason {
 // these thresholds are high enough that ordinary prose (even with a refrain) does
 // not trip, while a model spinning on the same phrase does. Literary source
 // repetition (e.g. ごめん×17) is measured up front and allowed in the stream.
+// Single-char units are excluded from the phrase scanner (Thai shouts elongate
+// one glyph), so a separate mono-run cap catches ดดดด… / aaaa… spam.
 const REP_WINDOW: usize = 400; // chars of streamed tail examined
 const REP_MIN_UNIT: usize = 4; // shortest repeating unit considered in the stream
 const REP_SOURCE_MIN_UNIT: usize = 2; // JP literary beats are often 2–3 chars
@@ -205,6 +207,7 @@ const REP_MIN_LINE_LEN: usize = 3; // ignore repeated blank/tiny lines
 const REP_CHECK_EVERY: usize = 48; // re-run the (bounded) scan every N new chars
 const REP_SOURCE_SLACK: usize = 3; // allow a few extra target-language copies
 const REP_SOURCE_MAX_UNIT: usize = 40; // cap source unit scan
+const REP_MONO_MAX: usize = 96; // same base char beyond this is spam (shouts stay ≤80)
 const STALL_EXTERNAL_WAIT_GRACE: u32 = 2; // active model calls get one extra window
 
 /// Longest consecutive signaled-unit run anywhere in `text`. Used as the per-chunk
@@ -311,9 +314,43 @@ fn stream_tail_repetition_run(text: &str) -> usize {
     best
 }
 
+/// Trailing run of one base character (combining marks ignored). Catches mono
+/// spam the phrase scanner skips because single-glyph units have no "signal".
+fn trailing_mono_run(text: &str) -> usize {
+    let chars: Vec<char> = text.trim_end().chars().collect();
+    let mut i = chars.len();
+    while i > 0 && is_combining_mark(chars[i - 1]) {
+        i -= 1;
+    }
+    if i == 0 {
+        return 0;
+    }
+    let base = chars[i - 1];
+    if base.is_whitespace() {
+        return 0;
+    }
+    let mut run = 0usize;
+    while i > 0 {
+        let ch = chars[i - 1];
+        if is_combining_mark(ch) {
+            i -= 1;
+            continue;
+        }
+        if ch != base {
+            break;
+        }
+        run += 1;
+        i -= 1;
+    }
+    run
+}
+
 /// True when the streamed tail looks like a model loop — not a faithful echo of
 /// intentional SOURCE_JP repetition (budgeted via [`source_repetition_budget`]).
 fn looks_like_degenerate_repetition(text: &str, source_budget: usize) -> bool {
+    if trailing_mono_run(text) > REP_MONO_MAX {
+        return true;
+    }
     let run = stream_tail_repetition_run(text);
     run >= REP_MIN_REPEATS && run > source_budget.saturating_add(REP_SOURCE_SLACK)
 }
@@ -6434,6 +6471,35 @@ mod tests {
         assert!(
             !looks_like_degenerate_repetition(&shout, 0),
             "a stretched single-character tail should not trip before the next line arrives"
+        );
+    }
+
+    #[test]
+    fn repetition_detector_flags_mono_char_spam() {
+        let spam = "ด".repeat(200);
+        assert!(
+            looks_like_degenerate_repetition(&spam, 0),
+            "a mono-character stream past REP_MONO_MAX must read as a loop"
+        );
+        let with_prefix = format!("เอลด์ตะโกนว่า{}", "ด".repeat(200));
+        assert!(
+            looks_like_degenerate_repetition(&with_prefix, 0),
+            "mono spam after a short prefix must still trip"
+        );
+    }
+
+    #[test]
+    fn watchdog_feed_stream_trips_on_mono_char_spam() {
+        let wd = Watchdog::with_stall(Some(Duration::from_secs(30)));
+        wd.begin_chunk("これは短い文です。");
+        // Stream in chunks smaller than REP_CHECK_EVERY so the throttle must
+        // eventually scan — mirrors real token deltas of a stuck model.
+        for _ in 0..8 {
+            wd.feed_stream(&"ด".repeat(20));
+        }
+        assert!(
+            wd.repetition_triggered(),
+            "watchdog must abandon ดดดด… spam mid-stream instead of waiting for a stall"
         );
     }
 
