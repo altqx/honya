@@ -9,7 +9,9 @@ use egui::{Align, ComboBox, Context, Layout, RichText, ScrollArea, TextEdit};
 
 use crate::app::Action;
 use crate::app::overlay::{SettingsState, SettingsTab};
-use crate::model::{Effort, Provider, ServiceTier, TargetLanguage, ThemeId};
+use crate::model::{
+    DecisionsProvider, Effort, Provider, ReviewGateMode, ServiceTier, TargetLanguage, ThemeId,
+};
 use crate::remote::protocol::RemoteState;
 use crate::theme::ALL_THEMES;
 
@@ -34,6 +36,15 @@ const EFFORTS: [Option<Effort>; 6] = [
 ];
 
 const TIERS: [Option<ServiceTier>; 3] = [None, Some(ServiceTier::Flex), Some(ServiceTier::Priority)];
+
+const GATE_MODES: [ReviewGateMode; 3] = [
+    ReviewGateMode::Off,
+    ReviewGateMode::Gate,
+    ReviewGateMode::Standalone,
+];
+
+const GATE_PROVIDERS: [DecisionsProvider; 2] =
+    [DecisionsProvider::OpenRouter, DecisionsProvider::TypeSafe];
 
 /// Render the Settings window. `saved_theme` is the persisted `cfg.theme`;
 /// `codex_signed_in` mirrors `cfg.codex_auth`. Emits deferred actions.
@@ -290,6 +301,77 @@ fn pipeline_tab(ui: &mut egui::Ui, st: &mut SettingsState, pal: &GuiPalette) {
         pal,
         "Retries cap at 20 · continuity at 100 sentences · stall at 3600 s (0 disables) · re-translates at 10.",
     );
+
+    ui.add_space(12.0);
+    section(ui, pal, "Review gate (System One)");
+    hint(
+        ui,
+        pal,
+        "Jev answers typed questions instead of writing prose. In gate mode a confident clean pass skips the Reviewer call; in standalone mode it reviews alone and feedback is synthesized from the failing checks.",
+    );
+    ui.add_space(6.0);
+
+    egui::Grid::new("review_gate_grid")
+        .num_columns(2)
+        .spacing([16.0, 10.0])
+        .show(ui, |ui| {
+            ui.label(RichText::new("Mode").color(pal.ink));
+            ComboBox::from_id_salt("gate_mode")
+                .selected_text(st.review_gate_mode.label())
+                .width(140.0)
+                .show_ui(ui, |ui| {
+                    for m in GATE_MODES {
+                        ui.selectable_value(&mut st.review_gate_mode, m, m.label());
+                    }
+                });
+            ui.end_row();
+
+            ui.label(RichText::new("Transport").color(pal.ink));
+            let current = st.review_gate_provider;
+            let mut next = current;
+            ComboBox::from_id_salt("gate_provider")
+                .selected_text(current.label())
+                .width(140.0)
+                .show_ui(ui, |ui| {
+                    for p in GATE_PROVIDERS {
+                        ui.selectable_value(&mut next, p, p.label());
+                    }
+                });
+            if next != current {
+                // Route through ReviewGate so the model id follows the transport.
+                let mut gate = crate::model::ReviewGate {
+                    mode: st.review_gate_mode,
+                    provider: current,
+                    model: st.review_gate_model.clone(),
+                    min_confidence: 0.0,
+                };
+                gate.switch_provider(next);
+                st.review_gate_provider = gate.provider;
+                st.review_gate_model = gate.model;
+            }
+            ui.end_row();
+
+            ui.label(RichText::new("Model").color(pal.ink));
+            ui.add(TextEdit::singleline(&mut st.review_gate_model).desired_width(240.0));
+            ui.end_row();
+
+            ui.label(RichText::new("Min confidence (%)").color(pal.ink));
+            numeric_edit(ui, &mut st.review_gate_confidence, 80.0);
+            ui.end_row();
+        });
+
+    if st.review_gate_provider == DecisionsProvider::TypeSafe {
+        ui.add_space(8.0);
+        ui.label(RichText::new("TypeSafe API key").color(pal.ink).strong());
+        secret_edit(ui, pal, &mut st.typesafe_key, st.typesafe_key_env);
+        hint(ui, pal, "HONYA_TYPESAFE_API_KEY / TYPESAFE_API_KEY");
+    } else {
+        hint(
+            ui,
+            pal,
+            "Over OpenRouter the gate reuses your OpenRouter key — no extra credential.",
+        );
+    }
 }
 
 fn appearance_tab(

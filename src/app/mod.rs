@@ -296,6 +296,10 @@ pub enum Action {
         max_chapter_retranslates: u32,
         /// Validate and reuse one speculative next-chunk Translator draft.
         parallel_lookahead: bool,
+        /// System One review-gate settings (boxed: keeps `Action` small).
+        review_gate: Box<crate::model::ReviewGate>,
+        /// New TypeSafe key (same `Some`/`None` semantics as `openrouter_key`).
+        typesafe_key: Option<String>,
     },
     /// Create the bundled sample project (if absent) and open it.
     CreateSample,
@@ -2865,6 +2869,8 @@ impl App {
                 loop_stall_secs,
                 max_chapter_retranslates,
                 parallel_lookahead,
+                review_gate,
+                typesafe_key,
             } => {
                 self.save_settings(
                     *models,
@@ -2882,6 +2888,8 @@ impl App {
                     loop_stall_secs,
                     max_chapter_retranslates,
                     parallel_lookahead,
+                    *review_gate,
+                    typesafe_key,
                 );
             }
             Action::CreateSample => {
@@ -4590,6 +4598,8 @@ impl App {
         loop_stall_secs: u64,
         max_chapter_retranslates: u32,
         parallel_lookahead: bool,
+        review_gate: crate::model::ReviewGate,
+        typesafe_key: Option<String>,
     ) {
         let models_changed = self.cfg.models != models;
         self.cfg.models = models.clone();
@@ -4636,6 +4646,15 @@ impl App {
             keys_changed |= next != self.cfg.cloudflare_api_token;
             self.cfg.cloudflare_api_token = next;
         }
+        if let Some(k) = typesafe_key {
+            let k = k.trim();
+            let next = (!k.is_empty()).then(|| k.to_string());
+            keys_changed |= next != self.cfg.typesafe_api_key;
+            self.cfg.typesafe_api_key = next;
+        }
+        let gate_changed = self.cfg.review_gate != review_gate;
+        let gate_mode = review_gate.mode;
+        self.cfg.review_gate = review_gate;
         // Propagate the working model set to the active project so an in-flight
         // session's next chapter / refine turn uses the new selection.
         if let Some(active) = self.active.as_mut() {
@@ -4643,7 +4662,7 @@ impl App {
         }
         // Rebuild the active clients so changed keys, providers, or service tier
         // (snapshotted into ClientConfig) take hold without reopening.
-        if (keys_changed || tier_changed || models_changed)
+        if (keys_changed || tier_changed || models_changed || gate_changed)
             && let Some(active) = self.active.as_mut()
         {
             active.clients = crate::build_clients(&self.cfg).ok();
@@ -4669,6 +4688,12 @@ impl App {
                     "preferred language → {}",
                     self.cfg.preferred_language.label()
                 ),
+            );
+        }
+        if gate_changed {
+            self.push_log(
+                LogLevel::Info,
+                format!("review gate → {}", gate_mode.label()),
             );
         }
         // A channel switch should take effect now, not at the next launch: kick

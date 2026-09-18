@@ -176,6 +176,30 @@ Open **Settings** (`:` → *Settings*) to pick each agent's provider/model, add 
 set the **retry attempts** per chunk (1–20), pick an OpenRouter **service tier** (Off / Flex /
 Priority, `Ctrl-Y`), and choose a **release channel** (stable / dev, `Ctrl-G`).
 
+### Review gate (System One / Jev)
+
+Optional, off by default. [TypeSafe's Jev](https://docs.typesafe.ai/concepts/system-one) is a
+*System One* model: rather than generating text it evaluates a state and returns typed decisions
+(choice / score / yes-no) with calibrated probabilities, in well under a second and at a fraction
+of a chat model's cost. honya can put it in front of the Reviewer.
+
+Because Jev never writes prose, it can supply a verdict but not the feedback the Translator retries
+on — which is what the two modes are about:
+
+| Mode | Behaviour |
+|------|-----------|
+| `off` | Every chunk goes to the LLM Reviewer (default). |
+| `gate` | Jev screens each chunk. A confident clean pass skips the Reviewer call entirely; anything else falls through to it unchanged. |
+| `standalone` | Jev is the Reviewer. On a reject, feedback is synthesized from whichever checks failed. |
+
+Configure it under **Settings → Pipeline**. Two transports are supported: over **OpenRouter**
+(model `typesafe/jev-1.13`, reusing your existing OpenRouter key — no extra credential), or
+straight to **TypeSafe** (model `jev-latest`, needs `HONYA_TYPESAFE_API_KEY`).
+
+The gate can only ever save a Reviewer call: an error, a timeout, an unparseable answer, an
+oversized chunk, or a chunk the deterministic audit already rejected all fall through to the
+existing Reviewer path.
+
 <details>
 <summary>All environment variables</summary>
 
@@ -187,6 +211,7 @@ Priority, `Ctrl-Y`), and choose a **release channel** (stable / dev, `Ctrl-G`).
 | `HONYA_GOOGLE_API_KEY` / `GEMINI_API_KEY` / `GOOGLE_API_KEY` | Google Gemini API key. |
 | `HONYA_CLOUDFLARE_ACCOUNT_ID` / `CLOUDFLARE_ACCOUNT_ID` / `CF_ACCOUNT_ID` | Cloudflare account id for Workers AI. |
 | `HONYA_CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_API_KEY` / `CF_API_TOKEN` | Cloudflare Workers AI API token. |
+| `HONYA_TYPESAFE_API_KEY` / `TYPESAFE_API_KEY` | TypeSafe API key for the System One review gate. |
 | `XDG_CONFIG_HOME` | Override the config directory root (`$XDG_CONFIG_HOME/honya`). |
 | `HONYA_NO_UPDATE_CHECK` | Set to any value to skip the startup update check. |
 | `HONYA_SESSION_DIR` | Override the crash-recovery checkpoint directory (absolute). One file per in-flight project. |

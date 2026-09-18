@@ -115,6 +115,30 @@ pub fn tokenrouter_key_from_env() -> Option<String> {
     None
 }
 
+/// TypeSafe key for the System One review gate. Only the TypeSafe transport
+/// needs it; the OpenRouter transport reuses the OpenRouter key.
+pub fn resolve_typesafe_key(cfg: &AppConfig) -> Option<String> {
+    typesafe_key_from_env().or_else(|| {
+        cfg.typesafe_api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string)
+    })
+}
+
+pub fn typesafe_key_from_env() -> Option<String> {
+    for var in ["HONYA_TYPESAFE_API_KEY", "TYPESAFE_API_KEY"] {
+        if let Ok(v) = std::env::var(var) {
+            let v = v.trim();
+            if !v.is_empty() {
+                return Some(v.to_string());
+            }
+        }
+    }
+    None
+}
+
 pub fn resolve_google_key(cfg: &AppConfig) -> Option<String> {
     google_key_from_env().or_else(|| {
         cfg.google_api_key
@@ -198,6 +222,8 @@ pub fn resolve_cloudflare_credentials(cfg: &AppConfig) -> Option<(String, String
 
 /// Whether any provider has a usable key configured.
 /// Used to gate "no API key" prompts now that agents can route per-provider.
+/// The TypeSafe key is deliberately excluded: a System One model cannot
+/// translate, so it alone does not make the app usable.
 pub fn any_provider_key(cfg: &AppConfig) -> bool {
     resolve_api_key(cfg).is_some()
         || resolve_tokenrouter_key(cfg).is_some()

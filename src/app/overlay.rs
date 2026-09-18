@@ -486,11 +486,16 @@ enum SField {
     Retranslates,
     ServiceTierField,
     ParallelLookahead,
+    GateMode,
+    GateProvider,
+    GateModel,
+    GateKey,
+    GateConfidence,
     UpdateModeField,
     ReleaseChannelField,
 }
 
-const SETTINGS_ORDER: [SField; 26] = [
+const SETTINGS_ORDER: [SField; 31] = [
     SField::OrchProvider,
     SField::OrchModel,
     SField::OrchEffort,
@@ -515,6 +520,11 @@ const SETTINGS_ORDER: [SField; 26] = [
     SField::Retranslates,
     SField::ServiceTierField,
     SField::ParallelLookahead,
+    SField::GateMode,
+    SField::GateProvider,
+    SField::GateModel,
+    SField::GateKey,
+    SField::GateConfidence,
     SField::UpdateModeField,
     SField::ReleaseChannelField,
 ];
@@ -591,8 +601,8 @@ impl SettingsTab {
         Some(match self {
             SettingsTab::Agents => (0, 12),
             SettingsTab::Providers => (12, 17),
-            SettingsTab::Pipeline => (17, 24),
-            SettingsTab::Appearance => (24, 26),
+            SettingsTab::Pipeline => (17, 29),
+            SettingsTab::Appearance => (29, 31),
             SettingsTab::Account => return None,
         })
     }
@@ -634,6 +644,9 @@ impl SField {
                 | SField::ContinuitySentences
                 | SField::LoopStall
                 | SField::Retranslates
+                | SField::GateModel
+                | SField::GateKey
+                | SField::GateConfidence
         )
     }
 
@@ -645,6 +658,7 @@ impl SField {
                 | SField::ContinuitySentences
                 | SField::LoopStall
                 | SField::Retranslates
+                | SField::GateConfidence
         )
     }
 
@@ -656,6 +670,7 @@ impl SField {
                 | SField::TokenrouterKey
                 | SField::GoogleKey
                 | SField::CloudflareToken
+                | SField::GateKey
         )
     }
 }
@@ -714,6 +729,18 @@ pub struct SettingsState {
     pub loop_stall_secs: String,
     /// Whole-chapter re-translations allowed on a detected loop, as typed (digits).
     pub max_chapter_retranslates: String,
+    /// System One review gate: off / gate / standalone.
+    pub review_gate_mode: crate::model::ReviewGateMode,
+    /// Which transport serves the gate.
+    pub review_gate_provider: crate::model::DecisionsProvider,
+    /// Gate model id (transport-specific).
+    pub review_gate_model: String,
+    /// Minimum approval confidence, typed as a whole percent (digits only).
+    pub review_gate_confidence: String,
+    /// TypeSafe key, editable here (masked). Only the TypeSafe transport needs it.
+    pub typesafe_key: String,
+    /// True when an env var supplies the TypeSafe key (shown read-only).
+    pub typesafe_key_env: bool,
     pub tab: SettingsTab,
     /// Which field is focused (index into [`SETTINGS_ORDER`]).
     pub field: u8,
@@ -753,6 +780,14 @@ impl SettingsState {
             continuity_sentences: cfg.continuity_sentences.to_string(),
             loop_stall_secs: cfg.loop_stall_secs.to_string(),
             max_chapter_retranslates: cfg.max_chapter_retranslates.to_string(),
+            review_gate_mode: cfg.review_gate.mode,
+            review_gate_provider: cfg.review_gate.provider,
+            review_gate_model: cfg.review_gate.model.clone(),
+            review_gate_confidence: ((cfg.review_gate.confidence_threshold() * 100.0).round()
+                as u32)
+                .to_string(),
+            typesafe_key: cfg.typesafe_api_key.clone().unwrap_or_default(),
+            typesafe_key_env: crate::config::typesafe_key_from_env().is_some(),
             tab: SettingsTab::Agents,
             field: 0,
             cursor: 0,
@@ -797,6 +832,9 @@ impl SettingsState {
             SField::ContinuitySentences => &mut self.continuity_sentences,
             SField::LoopStall => &mut self.loop_stall_secs,
             SField::Retranslates => &mut self.max_chapter_retranslates,
+            SField::GateModel => &mut self.review_gate_model,
+            SField::GateKey => &mut self.typesafe_key,
+            SField::GateConfidence => &mut self.review_gate_confidence,
             _ => return None,
         })
     }
@@ -908,6 +946,15 @@ impl SettingsState {
                 self.preferred_language = self.preferred_language.cycled();
             }
             SField::ParallelLookahead => self.parallel_lookahead = !self.parallel_lookahead,
+            SField::GateMode => self.review_gate_mode = self.review_gate_mode.cycled(forward),
+            SField::GateProvider => {
+                let next = self.review_gate_provider.cycled(forward);
+                // Reuse ReviewGate's rule so the model id follows the transport.
+                let mut gate = self.review_gate();
+                gate.switch_provider(next);
+                self.review_gate_provider = gate.provider;
+                self.review_gate_model = gate.model;
+            }
             SField::UpdateModeField => self.update_mode = self.update_mode.toggled(),
             SField::ReleaseChannelField => self.release_channel = self.release_channel.toggled(),
             _ => {}
@@ -1023,6 +1070,24 @@ impl SettingsState {
             loop_stall_secs: self.loop_stall_secs_value(),
             max_chapter_retranslates: self.max_chapter_retranslates_value(),
             parallel_lookahead: self.parallel_lookahead,
+            review_gate: Box::new(self.review_gate()),
+            typesafe_key: (!self.typesafe_key_env).then(|| self.typesafe_key.clone()),
+        }
+    }
+
+    /// The working review-gate config assembled from the edited fields.
+    fn review_gate(&self) -> crate::model::ReviewGate {
+        crate::model::ReviewGate {
+            mode: self.review_gate_mode,
+            provider: self.review_gate_provider,
+            model: self.review_gate_model.clone(),
+            min_confidence: f64::from(
+                self.review_gate_confidence
+                    .trim()
+                    .parse::<u32>()
+                    .unwrap_or(80)
+                    .min(100),
+            ) / 100.0,
         }
     }
 
@@ -1619,6 +1684,12 @@ impl Overlay {
             cloudflare_account_id_env: false,
             cloudflare_api_token: String::new(),
             cloudflare_api_token_env: false,
+            typesafe_key: String::new(),
+            typesafe_key_env: false,
+            review_gate_mode: crate::model::ReviewGateMode::default(),
+            review_gate_provider: crate::model::DecisionsProvider::default(),
+            review_gate_model: crate::model::ReviewGate::default().model,
+            review_gate_confidence: "80".to_string(),
             update_mode: UpdateMode::default(),
             release_channel: ReleaseChannel::default(),
             service_tier: None,
@@ -4434,24 +4505,86 @@ impl Overlay {
                 "      ↳ Faster between chunks; invalidated drafts may increase API cost",
                 Style::default().fg(theme.ink_faint),
             )));
-        }
-        if st.tab == SettingsTab::Appearance {
             push(
                 &mut lines,
                 &mut focus_line,
-                row(24, "Auto-update", st.update_mode.label().to_string(), false),
+                row(
+                    24,
+                    "Review gate",
+                    st.review_gate_mode.label().to_string(),
+                    false,
+                ),
                 st.field == 24,
             );
+            lines.push(Line::from(Span::styled(
+                "      ↳ System One (Jev) screens each chunk: gate = skip a clean                  chunk's Reviewer call; standalone = it reviews alone",
+                Style::default().fg(theme.ink_faint),
+            )));
             push(
                 &mut lines,
                 &mut focus_line,
                 row(
                     25,
+                    "  transport",
+                    st.review_gate_provider.label().to_string(),
+                    false,
+                ),
+                st.field == 25,
+            );
+            push(
+                &mut lines,
+                &mut focus_line,
+                row(26, "  model", st.review_gate_model.clone(), true),
+                st.field == 26,
+            );
+            push(
+                &mut lines,
+                &mut focus_line,
+                row(
+                    27,
+                    "  TypeSafe key",
+                    mask(&st.typesafe_key, st.typesafe_key_env),
+                    false,
+                ),
+                st.field == 27,
+            );
+            lines.push(Line::from(Span::styled(
+                "      ↳ Only for the TypeSafe transport; over OpenRouter the gate reuses                  your OpenRouter key",
+                Style::default().fg(theme.ink_faint),
+            )));
+            push(
+                &mut lines,
+                &mut focus_line,
+                row(
+                    28,
+                    "  min confidence",
+                    format!("{}%", st.review_gate_confidence),
+                    true,
+                ),
+                st.field == 28,
+            );
+            lines.push(Line::from(Span::styled(
+                "      ↳ Below this an approval is not trusted and falls through to the Reviewer",
+                Style::default().fg(theme.ink_faint),
+            )));
+        }
+        if st.tab == SettingsTab::Appearance {
+            push(
+                &mut lines,
+                &mut focus_line,
+                row(29, "Auto-update", st.update_mode.label().to_string(), false),
+                st.field == 29,
+            );
+            push(
+                &mut lines,
+                &mut focus_line,
+                row(
+                    30,
                     "Update channel",
                     st.release_channel.label().to_string(),
                     false,
                 ),
-                st.field == 25,
+                st.field == 30,
             );
             lines.push(Line::from(vec![
                 Span::styled(
@@ -6413,16 +6546,70 @@ mod tests {
         let st = SettingsState::for_test(17); // Translation language
         assert_eq!(st.tab, SettingsTab::Pipeline);
         let mut st = st;
-        for expected in 18..=23 {
+        // 24..=28 are the review-gate block appended to this tab.
+        for expected in 18..=28 {
             st.next_field();
             assert_eq!(st.field, expected);
         }
         st.next_field();
         assert_eq!(st.field, 17, "pipeline field nav wraps within the tab");
 
+        let mut st = SettingsState::for_test(29);
+        assert_eq!(st.tab, SettingsTab::Appearance);
+        st.next_field();
+        assert_eq!(st.field, 30);
+        st.next_field();
+        assert_eq!(st.field, 29, "appearance field nav wraps within the tab");
+
         let mut st = SettingsState::for_test(0);
         st.tab = SettingsTab::Account;
         assert!(!st.tab_has_fields());
+    }
+
+    #[test]
+    fn review_gate_mode_cycles_and_reaches_save_action() {
+        use crate::model::{DecisionsProvider, ReviewGateMode};
+
+        let mut st = SettingsState::for_test(24); // Review gate · mode
+        assert_eq!(st.review_gate_mode, ReviewGateMode::Off);
+        st.cycle(true);
+        assert_eq!(st.review_gate_mode, ReviewGateMode::Gate);
+        st.cycle(true);
+        assert_eq!(st.review_gate_mode, ReviewGateMode::Standalone);
+        st.cycle(true);
+        assert_eq!(st.review_gate_mode, ReviewGateMode::Off, "mode wraps");
+        st.cycle(false);
+        assert_eq!(st.review_gate_mode, ReviewGateMode::Standalone);
+
+        st.review_gate_confidence = "65".to_string();
+        let Action::SaveSettings { review_gate, .. } = st.save_action() else {
+            panic!("expected SaveSettings");
+        };
+        assert_eq!(review_gate.mode, ReviewGateMode::Standalone);
+        assert_eq!(review_gate.provider, DecisionsProvider::OpenRouter);
+        assert!((review_gate.min_confidence - 0.65).abs() < 1e-9);
+    }
+
+    #[test]
+    fn gate_transport_cycle_swaps_the_default_model_id() {
+        use crate::model::DecisionsProvider;
+
+        let mut st = SettingsState::for_test(25); // Review gate · transport
+        assert_eq!(st.review_gate_provider, DecisionsProvider::OpenRouter);
+        assert_eq!(st.review_gate_model, "typesafe/jev-1.13");
+
+        st.cycle(true);
+        assert_eq!(st.review_gate_provider, DecisionsProvider::TypeSafe);
+        assert_eq!(
+            st.review_gate_model, "jev-latest",
+            "a model left at the old transport's default follows the transport"
+        );
+
+        // A hand-typed model id must survive a transport switch.
+        st.review_gate_model = "jev-pinned".to_string();
+        st.cycle(true);
+        assert_eq!(st.review_gate_provider, DecisionsProvider::OpenRouter);
+        assert_eq!(st.review_gate_model, "jev-pinned");
     }
 
     /// Codex model fields are pickers, not free text.

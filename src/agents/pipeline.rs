@@ -19,6 +19,7 @@ use crate::agents::coherence;
 use crate::agents::continuity;
 use crate::agents::prepass;
 use crate::agents::prompts::{build_orchestrator_metadata_msg, orchestrator_system};
+use crate::agents::review_gate;
 use crate::agents::reviewer::review_chunk;
 use crate::agents::tools::{WorkspaceTools, orchestrator_tools};
 use crate::agents::translator::{
@@ -2765,8 +2766,44 @@ async fn process_chunk_with_lookahead(
             chapter,
             state: ChapterStatus::Reviewing,
         });
+        // The System One gate screens the chunk first when it is on. `None`
+        // means defer, which is also where every gate failure lands — so the
+        // gate can only save a reviewer call, never block or fail the chunk.
+        let gate_outcome = match ctx.clients.decisions() {
+            Some(backend) => {
+                wd.ping();
+                ctx.tx.send(AppEvent::ReviewerRequested {
+                    chapter,
+                    chunk: chunk.index,
+                    attempt,
+                });
+                let _wait = wd.external_wait();
+                review_gate::try_review(
+                    backend.as_ref(),
+                    &ctx.cfg.review_gate,
+                    ctx.target_language,
+                    &chunk.text,
+                    &translated,
+                    &reference_ctx,
+                    &previous_translation,
+                    &audit_findings,
+                )
+                .await
+            }
+            None => None,
+        };
+
         // Missing Reviewer verdicts retry in place; the Thai already passed audit.
-        let (review, r_usage) = {
+        let (review, r_usage) = match gate_outcome {
+            Some(out) => {
+                wd.ping();
+                ctx.tx.send(AppEvent::Log {
+                    level: LogLevel::Info,
+                    msg: format!("ch{chapter} chunk{} {}", chunk.index, out.summary),
+                });
+                (out.review, out.usage)
+            }
+            None => {
             let mut review_attempt = 1u32;
             loop {
                 wd.ping();
@@ -2906,6 +2943,7 @@ async fn process_chunk_with_lookahead(
                         .await;
                     }
                 }
+            }
             }
         };
         wd.ping();
@@ -5694,6 +5732,179 @@ mod tests {
 
         let translated = translation::read_translated(&ws, 1).await;
         assert!(translated.contains("คุณอากุริยิ้ม"));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Canned System One backend. Answers every key the gate can ask for, so it
+    /// works whether or not a reference bundle made the glossary axis appear.
+    struct FakeGate {
+        approve: bool,
+        confidence: f64,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl FakeGate {
+        fn new(approve: bool, confidence: f64) -> Self {
+            Self {
+                approve,
+                confidence,
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+        fn calls(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::Relaxed)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::llm::decisions::DecisionsBackend for FakeGate {
+        async fn decide(
+            &self,
+            _req: &crate::llm::decisions::DecisionsRequest,
+        ) -> crate::llm::client::Result<crate::llm::decisions::DecisionsResponse> {
+            use crate::llm::decisions::{Answer, DecisionsResponse, DecisionsUsage};
+            self.calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let mut answers = std::collections::BTreeMap::new();
+            answers.insert(
+                "verdict".to_string(),
+                Answer::Choice {
+                    choice: if self.approve { "approve" } else { "revise" }.to_string(),
+                    confidence: Some(self.confidence),
+                },
+            );
+            answers.insert("completeness".to_string(), Answer::Noul { noul: 0.99 });
+            answers.insert("glossary".to_string(), Answer::Noul { noul: 0.99 });
+            answers.insert("residue".to_string(), Answer::Noul { noul: 0.01 });
+            for k in ["accuracy", "fluency"] {
+                answers.insert(
+                    k.to_string(),
+                    Answer::Score {
+                        score: 1.95,
+                        confidence: Some(0.95),
+                    },
+                );
+            }
+            Ok(DecisionsResponse {
+                model: "typesafe/jev-1.13".to_string(),
+                answers,
+                usage: DecisionsUsage {
+                    input_tokens: 400,
+                    output_tokens: 60,
+                    cost: Some(0.000018),
+                },
+            })
+        }
+    }
+
+    fn gate_cfg(mode: crate::model::ReviewGateMode) -> crate::model::AppConfig {
+        crate::model::AppConfig {
+            max_attempts: 2,
+            review_gate: crate::model::ReviewGate {
+                mode,
+                ..crate::model::ReviewGate::default()
+            },
+            ..crate::model::AppConfig::default()
+        }
+    }
+
+    /// The whole point of the gate: a confident clean pass costs no reviewer call.
+    #[tokio::test]
+    async fn review_gate_approval_skips_the_reviewer_call() {
+        let (base, ws) = temp_ws("review_gate_approves");
+        // `None` is an approve in this mock; `Some(..)` would be a reject.
+        let client = std::sync::Arc::new(ReviewRetryContextClient::with_review_responses(
+            vec!["คุณอากุริยิ้ม"],
+            vec![None],
+        ));
+        let gate = std::sync::Arc::new(FakeGate::new(true, 0.97));
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = PipelineCtx {
+            clients: ClientSet::single(
+                client.clone() as std::sync::Arc<dyn crate::llm::client::LlmClient>
+            )
+            .with_decisions(
+                gate.clone() as std::sync::Arc<dyn crate::llm::decisions::DecisionsBackend>
+            ),
+            ws: ws.clone(),
+            models: crate::model::ModelSet::default(),
+            cfg: gate_cfg(crate::model::ReviewGateMode::Gate),
+            target_language: TargetLanguage::Thai,
+            tx: crate::model::EventTx(tx),
+            ctl: RunControl::new(),
+            queue: ChapterQueue::new(vec![]),
+        };
+        let chunk = Chunk {
+            index: 0,
+            text: "亜玖璃さんは笑った。".to_string(),
+            est_tokens: 1,
+        };
+        let wd = Watchdog::new(&ctx.cfg);
+        let mut acc = Acc::default();
+
+        let outcome = process_chunk(&ctx, 1, &chunk, &mut acc, &wd, &mut None, None)
+            .await
+            .expect("process_chunk");
+        assert!(matches!(outcome, ChunkOutcome::Committed));
+
+        assert_eq!(gate.calls(), 1, "the gate should screen the chunk once");
+        assert_eq!(
+            client.schema_calls("review_result"),
+            0,
+            "a confident clean gate pass must skip the LLM reviewer entirely"
+        );
+        assert_eq!(client.schema_calls("translation_result"), 1);
+        assert!(translation::read_translated(&ws, 1).await.contains("คุณอากุริยิ้ม"));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A gate that is not confident must change nothing about today's behaviour.
+    #[tokio::test]
+    async fn review_gate_deferral_falls_through_to_the_reviewer() {
+        let (base, ws) = temp_ws("review_gate_defers");
+        // `None` is an approve in this mock; `Some(..)` would be a reject.
+        let client = std::sync::Arc::new(ReviewRetryContextClient::with_review_responses(
+            vec!["คุณอากุริยิ้ม"],
+            vec![None],
+        ));
+        let gate = std::sync::Arc::new(FakeGate::new(true, 0.20));
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = PipelineCtx {
+            clients: ClientSet::single(
+                client.clone() as std::sync::Arc<dyn crate::llm::client::LlmClient>
+            )
+            .with_decisions(
+                gate.clone() as std::sync::Arc<dyn crate::llm::decisions::DecisionsBackend>
+            ),
+            ws: ws.clone(),
+            models: crate::model::ModelSet::default(),
+            cfg: gate_cfg(crate::model::ReviewGateMode::Gate),
+            target_language: TargetLanguage::Thai,
+            tx: crate::model::EventTx(tx),
+            ctl: RunControl::new(),
+            queue: ChapterQueue::new(vec![]),
+        };
+        let chunk = Chunk {
+            index: 0,
+            text: "亜玖璃さんは笑った。".to_string(),
+            est_tokens: 1,
+        };
+        let wd = Watchdog::new(&ctx.cfg);
+        let mut acc = Acc::default();
+
+        let outcome = process_chunk(&ctx, 1, &chunk, &mut acc, &wd, &mut None, None)
+            .await
+            .expect("process_chunk");
+        assert!(matches!(outcome, ChunkOutcome::Committed));
+
+        assert_eq!(gate.calls(), 1);
+        assert_eq!(
+            client.schema_calls("review_result"),
+            1,
+            "a low-confidence gate result must still get a real review"
+        );
 
         let _ = std::fs::remove_dir_all(&base);
     }

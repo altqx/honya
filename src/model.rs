@@ -502,6 +502,135 @@ impl Default for ModelSet {
     }
 }
 
+/// Transport for the System One review gate. Both speak the same
+/// request/response shape, differing only in URL, key and model id — so one
+/// client serves both. Deliberately **not** a [`Provider`]: a System One model
+/// returns typed decisions, never text, so it can never drive an agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DecisionsProvider {
+    /// Jev over the caller's existing OpenRouter key — no extra credential.
+    #[default]
+    OpenRouter,
+    /// Jev straight from TypeSafe, on its own key.
+    TypeSafe,
+}
+
+impl DecisionsProvider {
+    pub fn label(self) -> &'static str {
+        match self {
+            DecisionsProvider::OpenRouter => "OpenRouter",
+            DecisionsProvider::TypeSafe => "TypeSafe",
+        }
+    }
+
+    pub fn default_model(self) -> &'static str {
+        match self {
+            DecisionsProvider::OpenRouter => "typesafe/jev-1.13",
+            DecisionsProvider::TypeSafe => "jev-latest",
+        }
+    }
+
+    /// Only two variants, so direction is immaterial; the parameter keeps the
+    /// call shape uniform with [`Provider::cycled`].
+    pub fn cycled(self, _forward: bool) -> Self {
+        match self {
+            DecisionsProvider::OpenRouter => DecisionsProvider::TypeSafe,
+            DecisionsProvider::TypeSafe => DecisionsProvider::OpenRouter,
+        }
+    }
+}
+
+/// How the System One review gate takes part in the review step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReviewGateMode {
+    /// No gate — every chunk goes to the LLM reviewer.
+    #[default]
+    Off,
+    /// Screen every chunk first; only a deferred chunk reaches the LLM reviewer.
+    Gate,
+    /// The gate *is* the reviewer; feedback is synthesized from the failing axes.
+    Standalone,
+}
+
+impl ReviewGateMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            ReviewGateMode::Off => "off",
+            ReviewGateMode::Gate => "gate",
+            ReviewGateMode::Standalone => "standalone",
+        }
+    }
+
+    pub fn cycled(self, forward: bool) -> Self {
+        match (self, forward) {
+            (ReviewGateMode::Off, true) => ReviewGateMode::Gate,
+            (ReviewGateMode::Gate, true) => ReviewGateMode::Standalone,
+            (ReviewGateMode::Standalone, true) => ReviewGateMode::Off,
+            (ReviewGateMode::Off, false) => ReviewGateMode::Standalone,
+            (ReviewGateMode::Gate, false) => ReviewGateMode::Off,
+            (ReviewGateMode::Standalone, false) => ReviewGateMode::Gate,
+        }
+    }
+
+    pub fn is_on(self) -> bool {
+        !matches!(self, ReviewGateMode::Off)
+    }
+}
+
+fn default_review_gate_model() -> String {
+    DecisionsProvider::OpenRouter.default_model().to_string()
+}
+
+fn default_review_gate_confidence() -> f64 {
+    0.8
+}
+
+/// System One (Jev) review-gate settings. Every field defaults, and `AppConfig`
+/// marks the whole struct `#[serde(default)]`, so configs written before the
+/// gate existed keep loading.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReviewGate {
+    #[serde(default)]
+    pub mode: ReviewGateMode,
+    #[serde(default)]
+    pub provider: DecisionsProvider,
+    #[serde(default = "default_review_gate_model")]
+    pub model: String,
+    /// Confidence an approval must clear to skip the LLM reviewer.
+    #[serde(default = "default_review_gate_confidence")]
+    pub min_confidence: f64,
+}
+
+impl Default for ReviewGate {
+    fn default() -> Self {
+        Self {
+            mode: ReviewGateMode::default(),
+            provider: DecisionsProvider::default(),
+            model: default_review_gate_model(),
+            min_confidence: default_review_gate_confidence(),
+        }
+    }
+}
+
+impl ReviewGate {
+    /// Switch transport, replacing the model id only when it was left at the old
+    /// transport's default — the two id namespaces are not interchangeable.
+    pub fn switch_provider(&mut self, next: DecisionsProvider) {
+        if self.model.trim().is_empty() || self.model == self.provider.default_model() {
+            self.model = next.default_model().to_string();
+        }
+        self.provider = next;
+    }
+
+    /// Clamped to a sane probability; a malformed config must not wedge the gate
+    /// permanently open (0.0) or permanently shut (>1.0).
+    pub fn confidence_threshold(&self) -> f64 {
+        self.min_confidence.clamp(0.0, 1.0)
+    }
+}
+
 /// Selectable color theme. Pure data (keeps `model.rs` dependency-free); the
 /// palettes and labels live in `theme.rs`, keyed by `ThemeId::build`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -713,6 +842,15 @@ pub struct AppConfig {
     /// CF_API_TOKEN override this when set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cloudflare_api_token: Option<String>,
+    /// Persisted TypeSafe API key for the System One review gate. Env
+    /// HONYA_TYPESAFE_API_KEY / TYPESAFE_API_KEY override this when set. Only
+    /// needed for the TypeSafe transport; the OpenRouter one reuses `api_key`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub typesafe_api_key: Option<String>,
+    /// System One (Jev) review gate. Defaults to off, so an existing config
+    /// loads with today's behaviour unchanged.
+    #[serde(default)]
+    pub review_gate: ReviewGate,
     /// Active color theme (serde default keeps pre-theme configs loading).
     #[serde(default)]
     pub theme: ThemeId,
@@ -804,6 +942,8 @@ impl Default for AppConfig {
             google_api_key: None,
             cloudflare_account_id: None,
             cloudflare_api_token: None,
+            typesafe_api_key: None,
+            review_gate: ReviewGate::default(),
             theme: ThemeId::default(),
             onboarded: false,
             update_mode: UpdateMode::default(),
@@ -1842,6 +1982,60 @@ mod provider_model_tests {
         assert_eq!(back.provider, Provider::Cloudflare);
         assert_eq!(back.model, "@cf/meta/llama-3.1-8b-instruct");
         assert!(json.contains("\"cloudflare\""));
+    }
+
+    #[test]
+    fn review_gate_round_trips_and_defaults_to_off() {
+        let g = ReviewGate::default();
+        assert_eq!(g.mode, ReviewGateMode::Off, "the gate must be opt-in");
+        assert_eq!(g.provider, DecisionsProvider::OpenRouter);
+        assert_eq!(g.model, "typesafe/jev-1.13");
+
+        let json = serde_json::to_string(&g).unwrap();
+        let back: ReviewGate = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, g);
+        assert!(json.contains("\"open-router\""));
+
+        let standalone = ReviewGate {
+            mode: ReviewGateMode::Standalone,
+            provider: DecisionsProvider::TypeSafe,
+            model: "jev-latest".to_string(),
+            min_confidence: 0.65,
+        };
+        let json = serde_json::to_string(&standalone).unwrap();
+        assert!(json.contains("\"standalone\""));
+        assert!(json.contains("\"type-safe\""));
+        assert_eq!(
+            serde_json::from_str::<ReviewGate>(&json).unwrap(),
+            standalone
+        );
+    }
+
+    /// A config written before the gate existed must still load, with the gate off.
+    #[test]
+    fn config_without_review_gate_still_loads() {
+        let cfg: AppConfig = serde_json::from_str(
+            r#"{"models":{"orchestrator":"a","translator":"b","reviewer":"c"},
+                "max_attempts":3,"chunk_target_tokens":1000,"chunk_hard_cap_tokens":1200,
+                "continuity_sentences":10,"parallel_lookahead":true,
+                "referer":null,"title":null}"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.review_gate.mode, ReviewGateMode::Off);
+        assert_eq!(cfg.review_gate.model, "typesafe/jev-1.13");
+        assert!(cfg.typesafe_api_key.is_none());
+    }
+
+    /// A malformed threshold must not wedge the gate permanently open or shut.
+    #[test]
+    fn confidence_threshold_is_clamped() {
+        let mut g = ReviewGate {
+            min_confidence: 4.2,
+            ..ReviewGate::default()
+        };
+        assert_eq!(g.confidence_threshold(), 1.0);
+        g.min_confidence = -1.0;
+        assert_eq!(g.confidence_threshold(), 0.0);
     }
 
     #[test]

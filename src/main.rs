@@ -243,6 +243,9 @@ fn print_help() {
         "    HONYA_CLOUDFLARE_API_TOKEN / CLOUDFLARE_API_TOKEN       Cloudflare Workers AI token"
     );
     println!(
+        "    HONYA_TYPESAFE_API_KEY / TYPESAFE_API_KEY               TypeSafe key (System One review gate)"
+    );
+    println!(
         "    HONYA_NO_UPDATE_CHECK                Disable the startup update check / auto-update"
     );
     println!(

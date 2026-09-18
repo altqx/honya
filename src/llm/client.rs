@@ -11,7 +11,7 @@ use futures::StreamExt;
 use reqwest::StatusCode;
 use serde::Deserialize;
 
-use crate::model::{AgentModel, AppConfig, Provider, ServiceTier};
+use crate::model::{AgentModel, AppConfig, DecisionsProvider, Provider, ServiceTier};
 
 pub const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
 pub const TOKENROUTER_BASE_URL: &str = "https://api.tokenrouter.com/v1";
@@ -240,6 +240,10 @@ pub struct ClientSet {
     google: Option<Arc<dyn LlmClient>>,
     cloudflare: Option<Arc<dyn LlmClient>>,
     codex: Option<Arc<dyn LlmClient>>,
+    /// System One review-gate backend. Not an `LlmClient` — a decisions model
+    /// answers typed questions and cannot serve an agent — so it sits beside the
+    /// provider slots rather than in them.
+    decisions: Option<Arc<dyn super::decisions::DecisionsBackend>>,
 }
 
 impl ClientSet {
@@ -284,6 +288,7 @@ impl ClientSet {
             google,
             cloudflare,
             codex,
+            decisions: build_decisions(cfg)?,
         })
     }
 
@@ -304,7 +309,15 @@ impl ClientSet {
         self.for_provider(agent.provider)
     }
 
+    /// The System One review-gate backend, when the gate is on and its
+    /// transport has a key.
+    pub fn decisions(&self) -> Option<Arc<dyn super::decisions::DecisionsBackend>> {
+        self.decisions.clone()
+    }
+
     /// True when no provider has a key configured (fully unconfigured).
+    /// The gate backend is excluded on purpose: it cannot translate, so a set
+    /// holding only it is still unusable.
     pub fn is_empty(&self) -> bool {
         self.openrouter.is_none()
             && self.tokenrouter.is_none()
@@ -322,7 +335,19 @@ impl ClientSet {
             google: None,
             cloudflare: None,
             codex: None,
+            decisions: None,
         }
+    }
+
+    /// Inject a review-gate backend (used by tests, and by the settings save
+    /// path when only the gate configuration changed).
+    #[cfg(test)]
+    pub fn with_decisions(
+        mut self,
+        backend: Arc<dyn super::decisions::DecisionsBackend>,
+    ) -> Self {
+        self.decisions = Some(backend);
+        self
     }
 
     /// Override a single provider's client (used by tests to inject a mock).
@@ -337,6 +362,34 @@ impl ClientSet {
         }
         self
     }
+}
+
+/// Build the review-gate backend for the configured transport, or `None` when
+/// the gate is off or its transport has no key. A missing key is not an error:
+/// the gate is optional and the pipeline simply falls through to the reviewer.
+fn build_decisions(cfg: &AppConfig) -> Result<Option<Arc<dyn super::decisions::DecisionsBackend>>> {
+    use super::decisions::{
+        DECISIONS_TIMEOUT, DecisionsClient, OPENROUTER_DECISIONS_URL, TYPESAFE_SYSTEMONE_URL,
+    };
+
+    if !cfg.review_gate.mode.is_on() {
+        return Ok(None);
+    }
+    let (url, key) = match cfg.review_gate.provider {
+        DecisionsProvider::OpenRouter => (
+            OPENROUTER_DECISIONS_URL,
+            crate::config::resolve_api_key(cfg),
+        ),
+        DecisionsProvider::TypeSafe => (
+            TYPESAFE_SYSTEMONE_URL,
+            crate::config::resolve_typesafe_key(cfg),
+        ),
+    };
+    let Some(key) = key else {
+        return Ok(None);
+    };
+    let client = DecisionsClient::new(url, key, DECISIONS_TIMEOUT)?;
+    Ok(Some(Arc::new(client) as Arc<dyn super::decisions::DecisionsBackend>))
 }
 
 /// A streamed fragment: visible answer text or provider-surfaced reasoning.
@@ -795,7 +848,7 @@ fn handle_sse_line(
 /// (no top-level `error`), so a valid response never false-positives. The `code`
 /// becomes the `Api` status when it's a plausible HTTP code, else `0` (treated as
 /// a transient stream-style fault, matching the SSE path).
-fn parse_error_envelope(raw: &str) -> Option<LlmError> {
+pub(super) fn parse_error_envelope(raw: &str) -> Option<LlmError> {
     #[derive(Deserialize)]
     struct Envelope {
         error: ErrBody,
