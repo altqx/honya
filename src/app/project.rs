@@ -16,7 +16,7 @@ use crate::ui::text::{col_width, pad_to_cols, thai_display_safe, truncate_cols};
 use crate::ui::widgets::{render_line_gauge, status_cell};
 
 use super::overlay::Overlay;
-use super::action_table::Act;
+use super::action_table::{self, Act};
 use super::{Action, ActiveProject};
 
 /// A flattened tree row: either a volume header or a chapter.
@@ -45,6 +45,22 @@ pub struct ProjectScreen {
     tree_area: Rect,
     side_area: Rect,
 }
+
+/// Action ids for this screen's table. Stable within the screen: they are also
+/// the zone index every one of its controls registers under.
+const P_TRANSLATE_VOL: u16 = 0;
+const P_EXPORT: u16 = 1;
+const P_ADD_VOLUME: u16 = 2;
+const P_READ: u16 = 3;
+const P_QUEUE: u16 = 4;
+const P_MARK: u16 = 5;
+const P_DELETE: u16 = 6;
+const P_TRANSLATE_ALL: u16 = 7;
+const P_ADD_CHAPTERS: u16 = 8;
+const P_IMAGES: u16 = 9;
+const P_TITLE: u16 = 10;
+const P_SYNOPSIS: u16 = 11;
+const P_QA: u16 = 12;
 
 impl ProjectScreen {
     pub fn new() -> Self {
@@ -164,61 +180,155 @@ impl ProjectScreen {
         let rows = self.rows(active);
         let n = rows.len();
         let sel = self.tree.selected().unwrap_or(0).min(n.saturating_sub(1));
+        drop(rows);
 
-        let action = match key.code {
-            KeyCode::Up | KeyCode::Char('k') => {
-                let next = if sel == 0 {
-                    n.saturating_sub(1)
-                } else {
-                    sel - 1
-                };
-                self.tree.select(Some(next));
-                Action::None
+        // Commands come from the table; what is left here is navigation —
+        // moving the cursor, stepping between the panels, folding volumes.
+        let acts = self.actions(Some(active));
+        let action = match action_table::hit(&acts, &key) {
+            action_table::KeyHit::Run(id) => {
+                self.run(id, Some(active)).unwrap_or(Action::None)
             }
-            KeyCode::Down | KeyCode::Char('j') => {
-                let next = if n == 0 { 0 } else { (sel + 1) % n };
-                self.tree.select(Some(next));
-                Action::None
-            }
-            KeyCode::Char('h') | KeyCode::Left => {
-                if self.focus_panel == 1 {
-                    self.focus_panel = 0;
-                } else if let Some(vol) = self.selected_volume(active) {
-                    self.collapsed.insert(vol);
+            action_table::KeyHit::Blocked => Action::None,
+            action_table::KeyHit::Miss => match key.code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    let next = if sel == 0 {
+                        n.saturating_sub(1)
+                    } else {
+                        sel - 1
+                    };
+                    self.tree.select(Some(next));
+                    Action::None
                 }
-                Action::None
-            }
-            KeyCode::Char('l') | KeyCode::Right => {
-                if let Some(Row::Volume(v)) = rows.get(sel) {
-                    self.collapsed.remove(&v.number);
-                } else {
-                    self.focus_panel = 1;
+                KeyCode::Down | KeyCode::Char('j') => {
+                    let next = if n == 0 { 0 } else { (sel + 1) % n };
+                    self.tree.select(Some(next));
+                    Action::None
                 }
-                Action::None
-            }
-            KeyCode::Enter => {
+                KeyCode::Char('h') | KeyCode::Left => {
+                    if self.focus_panel == 1 {
+                        self.focus_panel = 0;
+                    } else if let Some(vol) = self.selected_volume(active) {
+                        self.collapsed.insert(vol);
+                    }
+                    Action::None
+                }
+                KeyCode::Char('l') | KeyCode::Right => {
+                    if let Some(vol) = self.selected_volume_row(active) {
+                        self.collapsed.remove(&vol);
+                    } else {
+                        self.focus_panel = 1;
+                    }
+                    Action::None
+                }
+                KeyCode::Char('z') => {
+                    self.collapse_all_volumes(active);
+                    Action::None
+                }
+                KeyCode::Char('Z') => {
+                    self.expand_all_volumes();
+                    Action::None
+                }
+                _ => Action::None,
+            },
+        };
+
+        // Auto-follow volume changes when navigation lands without another action.
+        if matches!(action, Action::None)
+            && let Some(v) = self.selected_volume(active)
+            && v != active.vol
+        {
+            return Action::SetActiveVolume { vol: v };
+        }
+        action
+    }
+
+    /// The volume number when the cursor is on a volume *header* row, as
+    /// opposed to on a chapter inside one.
+    fn selected_volume_row(&self, active: &ActiveProject) -> Option<u32> {
+        let rows = self.rows(active);
+        let sel = self.tree.selected().unwrap_or(0);
+        match rows.get(sel) {
+            Some(Row::Volume(v)) => Some(v.number),
+            _ => None,
+        }
+    }
+
+    /// This screen's commands, availability resolved for this frame.
+    ///
+    /// The one declaration everything else reads: `handle_key` dispatches from
+    /// it, the band under the dashboard draws it as a toolbar, the selected
+    /// tree row draws its own verbs, and help prints it. See
+    /// [`super::action_table`].
+    pub fn actions(&self, active: Option<&ActiveProject>) -> Vec<Act> {
+        use action_table::Accel;
+
+        let Some(active) = active else {
+            return Vec::new();
+        };
+        let on_volume_row = self.selected_volume_row(active).is_some();
+        let on_chapter = self.selected_chapter_id(active).is_some();
+        let marked = self.marked_ids(active).len();
+        let vol = self.selected_volume(active).unwrap_or(active.vol);
+        let deletable = on_chapter || !self.marked_chapters_in_vol(vol).is_empty();
+
+        vec![
+            Act::toolbar(P_TRANSLATE_VOL, "translate vol", Accel::key('T')),
+            Act::toolbar(P_EXPORT, "export", Accel::key('x')),
+            Act::toolbar(P_ADD_VOLUME, "add volume", Accel::key('V')),
+            Act::row(P_READ, "read", Accel::code(KeyCode::Enter))
+                .when(on_chapter || on_volume_row),
+            Act::row(
+                P_QUEUE,
+                "queue",
+                Accel::key('t').or(KeyCode::Char('a')),
+            )
+            .when(on_chapter || marked > 0),
+            Act::row(P_MARK, "mark", Accel::key(' ')).when(on_chapter),
+            Act::row(P_DELETE, "delete", Accel::key('d')).when(deletable),
+            Act::menu(P_TRANSLATE_ALL, "translate whole project", Accel::key('A')),
+            Act::menu(P_ADD_CHAPTERS, "add chapters", Accel::key('i')),
+            Act::menu(P_IMAGES, "refresh images", Accel::key('M')),
+            Act::menu(P_TITLE, "edit title", Accel::key('e')),
+            Act::menu(P_SYNOPSIS, "edit synopsis", Accel::key('y')),
+            Act::menu(P_QA, "QA report", Accel::key('Q')),
+        ]
+    }
+
+    /// Run the action `id` stands for, whether it was reached by key, by a
+    /// toolbar button, by a row button or from the context menu.
+    ///
+    /// `None` means "no such action here" — the sentinel that makes an
+    /// advertised binding with no handler impossible to write. `Q` was
+    /// advertised in the footer and in the help for a handler that did not
+    /// exist; it cannot be now.
+    pub fn run(&mut self, id: u16, active: Option<&ActiveProject>) -> Option<Action> {
+        let active = active?;
+        let vol = self.selected_volume(active).unwrap_or(active.vol);
+        Some(match id {
+            // Chapter selection (incl. the disk-completeness check that catches
+            // partial files scanning as Done) happens in apply, which has cfg.
+            P_TRANSLATE_VOL => match self.selected_volume(active) {
+                Some(vol) => Action::StartVolumeTranslation { vol },
+                None => Action::None,
+            },
+            P_EXPORT => Action::show_overlay(Overlay::export(vol)),
+            P_ADD_VOLUME => Action::AddVolume,
+            P_READ => {
                 if let Some(ch) = self.selected_chapter(active) {
                     Action::OpenChapter { chapter: ch }
-                } else if let Some(Row::Volume(v)) = rows.get(sel) {
-                    if self.collapsed.contains(&v.number) {
-                        self.collapsed.remove(&v.number);
+                } else if let Some(v) = self.selected_volume_row(active) {
+                    if self.collapsed.contains(&v) {
+                        self.collapsed.remove(&v);
                     } else {
-                        self.collapsed.insert(v.number);
+                        self.collapsed.insert(v);
                     }
                     Action::None
                 } else {
                     Action::None
                 }
             }
-            KeyCode::Char(' ') => {
-                if let Some(id) = self.selected_chapter_id(active)
-                    && !self.selected.insert(id)
-                {
-                    self.selected.remove(&id);
-                }
-                Action::None
-            }
-            KeyCode::Char('t') | KeyCode::Char('a') => {
+            P_QUEUE => {
                 let marked = self.marked_ids(active);
                 if !marked.is_empty() {
                     self.selected.clear();
@@ -229,48 +339,15 @@ impl ProjectScreen {
                     Action::None
                 }
             }
-            KeyCode::Char('T') => {
-                // Chapter selection (incl. the disk-completeness check that catches
-                // partial files scanning as Done) happens in apply, which has cfg.
-                match self.selected_volume(active) {
-                    Some(vol) => Action::StartVolumeTranslation { vol },
-                    None => Action::None,
+            P_MARK => {
+                if let Some(id) = self.selected_chapter_id(active)
+                    && !self.selected.insert(id)
+                {
+                    self.selected.remove(&id);
                 }
+                Action::None
             }
-            KeyCode::Char('A') => Action::StartProjectTranslation,
-            KeyCode::Char('y') => {
-                let data = crate::workspace::volume::load(&active.workspace);
-                Action::show_overlay(Overlay::synopsis_edit(
-                    data.synopsis_raw,
-                    data.translated_synopsis,
-                    active.vol,
-                    active.project.title.clone(),
-                    active.project.target_language,
-                ))
-            }
-            KeyCode::Char('e') => Action::show_overlay(Overlay::project_title_edit(
-                active.project.id.clone(),
-                active.project.title.clone(),
-                active.project.translated_title.clone(),
-                active.project.target_language,
-            )),
-            KeyCode::Char('V') => Action::AddVolume,
-            KeyCode::Char('i') => {
-                let vol = self.selected_volume(active).unwrap_or(active.vol);
-                Action::AddChapters { vol }
-            }
-            KeyCode::Char('M') => {
-                let vol = self.selected_volume(active).unwrap_or(active.vol);
-                Action::show_overlay(Overlay::confirm(
-                    "Update volume images",
-                    format!(
-                        "Re-import the source EPUB for Vol.{vol:02}, copy images as vol{vol}_*, and rewrite image links in raw/ and translated/ Markdown. Translation prose stays unchanged."
-                    ),
-                    Action::RefreshVolumeImages { vol },
-                ))
-            }
-            KeyCode::Char('d') => {
-                let vol = self.selected_volume(active).unwrap_or(active.vol);
+            P_DELETE => {
                 let marked = self.marked_chapters_in_vol(vol);
                 let chapters = if !marked.is_empty() {
                     marked
@@ -297,29 +374,35 @@ impl ProjectScreen {
                     ))
                 }
             }
-            KeyCode::Char('x') => {
-                let vol = self.selected_volume(active).unwrap_or(active.vol);
-                Action::show_overlay(Overlay::export(vol))
+            P_TRANSLATE_ALL => Action::StartProjectTranslation,
+            P_ADD_CHAPTERS => Action::AddChapters { vol },
+            P_IMAGES => Action::show_overlay(Overlay::confirm(
+                "Update volume images",
+                format!(
+                    "Re-import the source EPUB for Vol.{vol:02}, copy images as vol{vol}_*, and rewrite image links in raw/ and translated/ Markdown. Translation prose stays unchanged."
+                ),
+                Action::RefreshVolumeImages { vol },
+            )),
+            P_TITLE => Action::show_overlay(Overlay::project_title_edit(
+                active.project.id.clone(),
+                active.project.title.clone(),
+                active.project.translated_title.clone(),
+                active.project.target_language,
+            )),
+            P_SYNOPSIS => {
+                let data = crate::workspace::volume::load(&active.workspace);
+                Action::show_overlay(Overlay::synopsis_edit(
+                    data.synopsis_raw,
+                    data.translated_synopsis,
+                    active.vol,
+                    active.project.title.clone(),
+                    active.project.target_language,
+                ))
             }
-            KeyCode::Char('z') => {
-                self.collapse_all_volumes(active);
-                Action::None
-            }
-            KeyCode::Char('Z') => {
-                self.expand_all_volumes();
-                Action::None
-            }
-            _ => Action::None,
-        };
-
-        // Auto-follow volume changes when navigation lands without another action.
-        if matches!(action, Action::None)
-            && let Some(v) = self.selected_volume(active)
-            && v != active.vol
-        {
-            return Action::SetActiveVolume { vol: v };
-        }
-        action
+            // The App rebuilds the report from the live project on show.
+            P_QA => Action::show_overlay(Overlay::qa_placeholder()),
+            _ => return None,
+        })
     }
 
     /// Mouse: the wheel walks the tree (auto-following the volume under the
@@ -399,7 +482,18 @@ impl ProjectScreen {
                     }
                 }
             }
-            MouseGesture::RightClick => Action::None,
+            // The router opens this row's menu straight after, so the
+            // selection has to be on the row the menu is about.
+            MouseGesture::RightClick => {
+                if let Some(idx) = zone
+                    .and_then(|z| z.row_index())
+                    .filter(|i| *i < self.rows(active).len())
+                {
+                    self.focus_panel = 0;
+                    self.tree.select(Some(idx));
+                }
+                Action::None
+            }
         }
     }
 
@@ -449,22 +543,46 @@ impl ProjectScreen {
             return;
         };
 
-        // Project dashboard band on top (title · active volume · overall progress),
-        // then the chapter tree + context/detail panels below it.
+        // Project dashboard band on top (title · active volume · overall
+        // progress), then the toolbar, then the chapter tree + context/detail
+        // panels. This is the one screen whose toolbar genuinely costs a row.
         let panes = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(2), Constraint::Min(0)])
+            .constraints([
+                Constraint::Length(2),
+                Constraint::Length(1),
+                Constraint::Min(0),
+            ])
             .split(area);
         let cols = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
-            .split(panes[1]);
+            .split(panes[2]);
         self.side_area = cols[1];
+
+        let acts = self.actions(Some(active));
+        crate::ui::kit::toolbar::Toolbar::new(&acts).has_menu(true).render(
+            ui,
+            Rect {
+                x: panes[1].x + 1,
+                width: panes[1].width.saturating_sub(2),
+                height: 1,
+                ..panes[1]
+            },
+        );
 
         // The tree draws through the kit; the dashboard and side panel are
         // still on the old path and take the frame back out afterwards. The
         // three regions do not overlap, so the order is free.
         self.render_tree(ui, cols[0], active);
+
+        // The selected row's own verbs, over the right end of the row the tree
+        // registered while drawing it.
+        if let Some(sel) = self.tree.selected()
+            && let Some(rect) = ui.zones.rect_of(crate::ui::kit::ZoneId::row(sel))
+        {
+            crate::ui::kit::toolbar::RowActions::new(&acts).render(ui, rect);
+        }
 
         let theme: &Theme = ui.theme;
         let f: &mut Frame = ui.frame;
@@ -899,30 +1017,6 @@ impl ProjectScreen {
             Paragraph::new(lines).style(Style::default().bg(theme.bg_panel)),
             inner,
         );
-    }
-
-    /// This screen's commands, availability resolved for this frame.
-    ///
-    /// The one declaration everything else reads: `handle_key` dispatches from
-    /// it, the toolbar and the context menu draw from it, and help lists it.
-    /// See [`super::action_table`].
-    pub fn actions(&self, active: Option<&ActiveProject>) -> Vec<Act> {
-        let _ = active;
-        Vec::new()
-    }
-
-    /// Run the action `id` stands for, whether it was reached by key, by a
-    /// toolbar control, by a row button or from the menu.
-    ///
-    /// `None` means "no such action here" — the sentinel that makes an
-    /// advertised binding with no handler impossible to write.
-    pub fn run(
-        &mut self,
-        id: u16,
-        active: Option<&ActiveProject>,
-    ) -> Option<Action> {
-        let _ = (id, active);
-        None
     }
 
     pub fn hints(&self) -> &'static [(&'static str, &'static str)] {
