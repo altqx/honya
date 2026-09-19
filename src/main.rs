@@ -144,8 +144,15 @@ async fn run(
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     let mut full = true;
+    // Whether anything changed since the last frame. Mouse motion arrives far
+    // faster than the frame budget and usually changes nothing, so a frame that
+    // would be identical is skipped outright rather than re-diffed.
+    let mut dirty = true;
     while app.running {
-        present(terminal, app, full)?;
+        if dirty {
+            present(terminal, app, full)?;
+        }
+        dirty = true;
 
         tokio::select! {
             _ = ticker.tick() => {
@@ -155,11 +162,13 @@ async fn run(
             maybe_event = events.next() => {
                 match maybe_event {
                     Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => app.on_key(key),
-                    Some(Ok(Event::Mouse(me))) => app.on_mouse(me),
+                    Some(Ok(Event::Mouse(me))) => dirty = app.on_mouse(me),
                     Some(Ok(_)) => {}
                     Some(Err(_)) | None => {}
                 }
-                full = true;
+                if dirty {
+                    full = true;
+                }
             }
             maybe_app = rx.recv() => {
                 if let Some(ev) = maybe_app {

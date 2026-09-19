@@ -2,9 +2,17 @@
 //! for focus/nav, `status_failed` the ONLY red, `status_done`/`status_warn` read
 //! success/caution, `status_working` is the live pulse. [`ThemeId`] (model.rs)
 //! picks the palette; `ThemeId::build` maps it to a concrete [`Theme`].
+pub mod color;
+pub mod quantize;
+
 use crate::model::{AgentRole, ChapterKind, ChapterStatus, ThemeId};
 use ratatui::style::Color;
 use ratatui::symbols;
+
+/// Pure extremes, used only as a legibility fallback when a palette's own
+/// colors cannot carry text on its accent.
+const WHITE: Color = Color::Rgb(255, 255, 255);
+const BLACK: Color = Color::Rgb(0, 0, 0);
 
 /// Shorthand for an opaque RGB color.
 const fn rgb(r: u8, g: u8, b: u8) -> Color {
@@ -31,11 +39,119 @@ pub struct Theme {
     pub ja_text: Color,
     pub translated_text: Color,
     pub stream_cursor: Color,
+
+    // --- derived interaction slots (see `Base::into_theme`) ---
+    /// A surface one step above `bg_panel`: modals, popovers, raised cards.
+    pub bg_elevated: Color,
+    /// The row under the pointer. Weaker than a selection on purpose.
+    pub bg_hover: Color,
+    /// A pressed or currently-activated control.
+    pub bg_active: Color,
+    /// The keyboard focus ring — distinct from `accent`, which also marks the
+    /// active tab and other non-focused chrome.
+    pub border_focus: Color,
+    /// Text drawn *on* an `accent` fill (buttons, the active tab pill).
+    pub accent_fg: Color,
+    /// The wash behind a modal, so the backdrop recedes.
+    pub scrim: Color,
+    /// Text on any `ink`-filled surface.
+    pub ink_inverse: Color,
+}
+
+/// A palette's authored colors: the decisions that are genuinely aesthetic.
+/// The interaction states are derived from these by [`Base::into_theme`], so
+/// adding a palette means picking these and nothing else.
+struct Base {
+    pub bg: Color,        // washi paper
+    pub bg_panel: Color,  // recessed list panels
+    pub bg_inset: Color,  // gutters, modal backing, gauge track
+    pub ink: Color,       // primary
+    pub ink_soft: Color,  // secondary / labels
+    pub ink_faint: Color, // hints / inactive / hairline text
+    pub rule: Color,      // all hairlines & borders
+    pub accent: Color,
+    pub accent_soft: Color,
+    pub accent_bg: Color, // selection wash
+    pub status_pending: Color,
+    pub status_working: Color, // the live color
+    pub status_done: Color,
+    pub status_failed: Color, // the ONLY red anywhere
+    pub status_warn: Color,
+    pub status_image: Color,
+    pub ja_text: Color,
+    pub translated_text: Color,
+    pub stream_cursor: Color,
+}
+
+impl Base {
+    /// Derive the interaction slots and produce the full [`Theme`].
+    ///
+    /// Every derivation degrades correctly for the adaptive `terminal` palette,
+    /// whose colors are `Reset`/`Indexed` and carry no channels: the blends pass
+    /// their input straight through, which is exactly right there — that palette
+    /// paints no fills at all, and signals hover with a reverse-video modifier
+    /// instead.
+    fn into_theme(self) -> Theme {
+        let bg = self.bg;
+        let accent = self.accent;
+        let ink = self.ink;
+
+        Theme {
+            // One step further from the ground than `bg_panel` already sits,
+            // in whichever direction "away from the background" means here.
+            bg_elevated: color::elevate(self.bg_panel, bg, 0.06),
+            // Hover is a hint, not a selection: a tenth of the way to accent.
+            bg_hover: color::mix(bg, accent, 0.10),
+            // Active is the same gesture at selection weight.
+            bg_active: color::mix(bg, accent, 0.20),
+            // The ring must read against accent-colored chrome beside it, so it
+            // is the accent lifted away from the ground rather than the accent.
+            border_focus: color::elevate(accent, bg, 0.18),
+            // Text on an accent fill, measured rather than assumed: accents
+            // span very light (Catppuccin lavender) to mid (Solarized blue).
+            // The palette's own extremes are preferred so a button stays on
+            // -palette, but a label has to be readable first — Solarized's mid
+            // blue reaches only 3.4:1 against both its own extremes, so when
+            // neither clears AA we widen the search to pure white/black.
+            accent_fg: {
+                let own = color::best_contrast(accent, &[bg, ink]);
+                match color::contrast_ratio(accent, own) {
+                    Some(r) if r < color::AA_CONTRAST => {
+                        color::best_contrast(accent, &[bg, ink, WHITE, BLACK])
+                    }
+                    _ => own,
+                }
+            },
+            // A scrim always darkens, on light grounds as much as dark ones.
+            scrim: color::darken(bg, 0.35),
+            ink_inverse: color::best_contrast(ink, &[bg, ink]),
+
+            bg: self.bg,
+            bg_panel: self.bg_panel,
+            bg_inset: self.bg_inset,
+            ink: self.ink,
+            ink_soft: self.ink_soft,
+            ink_faint: self.ink_faint,
+            rule: self.rule,
+            accent: self.accent,
+            accent_soft: self.accent_soft,
+            accent_bg: self.accent_bg,
+            status_pending: self.status_pending,
+            status_working: self.status_working,
+            status_done: self.status_done,
+            status_failed: self.status_failed,
+            status_warn: self.status_warn,
+            status_image: self.status_image,
+            ja_text: self.ja_text,
+            translated_text: self.translated_text,
+            stream_cursor: self.stream_cursor,
+        }
+    }
 }
 
 impl Theme {
     pub fn washi() -> Self {
-        Self {
+        Base {
             bg: Color::Rgb(243, 239, 230),
             bg_panel: Color::Rgb(236, 231, 220),
             bg_inset: Color::Rgb(218, 211, 195), // deepened so the gauge track reads on paper
@@ -56,11 +172,12 @@ impl Theme {
             translated_text: Color::Rgb(38, 46, 58), // a hair cooler than ink
             stream_cursor: Color::Rgb(58, 80, 120),  // = accent
         }
+        .into_theme()
     }
 
     /// Sumi (墨) — honya-native dark: warm ink ground, the 藍 accent lifted for dark.
     pub fn sumi() -> Self {
-        Self {
+        Base {
             bg: rgb(24, 23, 28),
             bg_panel: rgb(31, 30, 37),
             bg_inset: rgb(40, 38, 47),
@@ -81,6 +198,7 @@ impl Theme {
             translated_text: rgb(214, 224, 236),
             stream_cursor: rgb(132, 156, 204),
         }
+        .into_theme()
     }
 
     /// Terminal — adaptive: `Reset` fg/bg inherit the host scheme and accents use
@@ -92,7 +210,7 @@ impl Theme {
     /// behind `Reset`/gray text — selection is the `▌` bar + bold every list draws,
     /// not a colored band that would bury the gray columns sitting on it.
     pub fn terminal() -> Self {
-        Self {
+        Base {
             bg: Color::Reset,
             bg_panel: Color::Reset,
             bg_inset: Color::Reset, // no fill: gauge fill + code text carry on their fg
@@ -113,10 +231,11 @@ impl Theme {
             translated_text: Color::Reset,
             stream_cursor: Color::Indexed(6),
         }
+        .into_theme()
     }
 
     pub fn gruvbox() -> Self {
-        Self {
+        Base {
             bg: rgb(40, 40, 40),
             bg_panel: rgb(50, 48, 47),
             bg_inset: rgb(60, 56, 54),
@@ -137,10 +256,11 @@ impl Theme {
             translated_text: rgb(235, 219, 178),
             stream_cursor: rgb(131, 165, 152),
         }
+        .into_theme()
     }
 
     pub fn nord() -> Self {
-        Self {
+        Base {
             bg: rgb(46, 52, 64), // nord0
             bg_panel: rgb(53, 60, 74),
             bg_inset: rgb(67, 76, 94), // nord2 (distinct from accent_bg, visible track)
@@ -161,10 +281,11 @@ impl Theme {
             translated_text: rgb(229, 233, 240), // nord5
             stream_cursor: rgb(136, 192, 208),
         }
+        .into_theme()
     }
 
     pub fn tokyo_night() -> Self {
-        Self {
+        Base {
             bg: rgb(26, 27, 38),
             bg_panel: rgb(31, 35, 53),
             bg_inset: rgb(41, 46, 66),
@@ -185,10 +306,11 @@ impl Theme {
             translated_text: rgb(192, 202, 245),
             stream_cursor: rgb(122, 162, 247),
         }
+        .into_theme()
     }
 
     pub fn dracula() -> Self {
-        Self {
+        Base {
             bg: rgb(40, 42, 54),
             bg_panel: rgb(45, 47, 61),
             bg_inset: rgb(68, 72, 92), // lifted so the gauge track is visible
@@ -209,10 +331,11 @@ impl Theme {
             translated_text: rgb(248, 248, 242),
             stream_cursor: rgb(189, 147, 249),
         }
+        .into_theme()
     }
 
     pub fn catppuccin() -> Self {
-        Self {
+        Base {
             bg: rgb(30, 30, 46), // base
             bg_panel: rgb(37, 37, 57),
             bg_inset: rgb(49, 50, 68),     // surface0
@@ -233,10 +356,11 @@ impl Theme {
             translated_text: rgb(205, 214, 244),
             stream_cursor: rgb(137, 180, 250),
         }
+        .into_theme()
     }
 
     pub fn solarized_dark() -> Self {
-        Self {
+        Base {
             bg: rgb(0, 43, 54), // base03
             bg_panel: rgb(3, 48, 59),
             bg_inset: rgb(12, 62, 75), // lifted above base02 so the gauge track reads
@@ -257,10 +381,11 @@ impl Theme {
             translated_text: rgb(147, 161, 161),
             stream_cursor: rgb(38, 139, 210),
         }
+        .into_theme()
     }
 
     pub fn solarized_light() -> Self {
-        Self {
+        Base {
             bg: rgb(253, 246, 227),       // base3
             bg_panel: rgb(238, 232, 213), // base2
             bg_inset: rgb(227, 220, 196),
@@ -281,10 +406,11 @@ impl Theme {
             translated_text: rgb(71, 91, 98),
             stream_cursor: rgb(38, 139, 210),
         }
+        .into_theme()
     }
 
     pub fn everforest() -> Self {
-        Self {
+        Base {
             bg: rgb(45, 53, 59),           // bg0
             bg_panel: rgb(52, 63, 68),     // bg1
             bg_inset: rgb(61, 72, 77),     // bg2
@@ -305,11 +431,12 @@ impl Theme {
             translated_text: rgb(211, 198, 170),
             stream_cursor: rgb(127, 187, 179),
         }
+        .into_theme()
     }
 
     /// Rosé Pine. No true green in the scheme, so success reads as `foam` cyan.
     pub fn rose_pine() -> Self {
-        Self {
+        Base {
             bg: rgb(25, 23, 36),           // base
             bg_panel: rgb(31, 29, 46),     // surface
             bg_inset: rgb(50, 47, 72),     // lifted above overlay so the gauge track reads
@@ -330,6 +457,7 @@ impl Theme {
             translated_text: rgb(224, 222, 244),
             stream_cursor: rgb(196, 167, 231),
         }
+        .into_theme()
     }
 }
 
@@ -463,3 +591,136 @@ pub fn hairline_set() -> symbols::border::Set<'static> {
 pub const GAUGE_FILLED: &str = "▰";
 pub const GAUGE_TRACK: &str = "▱";
 pub const SELECT_BAR: char = '▌';
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::theme::quantize::{ColorDepth, quantize};
+
+    /// Squared RGB distance, for "is this shift bigger than that one".
+    fn dist2(a: Color, b: Color) -> u32 {
+        let (Some((ar, ag, ab)), Some((br, bg, bb))) = (color::channels(a), color::channels(b))
+        else {
+            return 0;
+        };
+        let d = |x: u8, y: u8| {
+            let d = x as i32 - y as i32;
+            (d * d) as u32
+        };
+        d(ar, br) + d(ag, bg) + d(ab, bb)
+    }
+
+    /// Every palette except the adaptive one, which has no channels to measure.
+    fn rgb_palettes() -> impl Iterator<Item = (ThemeId, Theme)> {
+        ALL_THEMES
+            .iter()
+            .copied()
+            .filter(|id| !matches!(id, ThemeId::Terminal))
+            .map(|id| (id, id.build()))
+    }
+
+    #[test]
+    fn a_label_on_an_accent_fill_is_legible_in_every_palette() {
+        for (id, t) in rgb_palettes() {
+            let r = color::contrast_ratio(t.accent, t.accent_fg).unwrap();
+            assert!(
+                r >= color::AA_CONTRAST,
+                "{}: accent_fg reaches only {r:.2}:1 on accent",
+                id.label()
+            );
+        }
+    }
+
+    #[test]
+    fn hover_is_perceptible_and_active_is_stronger_still() {
+        for (id, t) in rgb_palettes() {
+            let hover = dist2(t.bg, t.bg_hover);
+            let active = dist2(t.bg, t.bg_active);
+            assert!(hover > 0, "{}: hover is invisible against bg", id.label());
+            assert!(
+                active > hover,
+                "{}: active ({active}) must read stronger than hover ({hover})",
+                id.label()
+            );
+        }
+    }
+
+    #[test]
+    fn an_elevated_surface_separates_from_the_panel_beneath_it() {
+        for (id, t) in rgb_palettes() {
+            assert!(
+                dist2(t.bg_panel, t.bg_elevated) > 0,
+                "{}: bg_elevated is indistinguishable from bg_panel",
+                id.label()
+            );
+        }
+    }
+
+    #[test]
+    fn the_semantic_contract_survives_in_every_palette() {
+        // The module contract: status_failed is the only red, and success and
+        // failure must never be confusable.
+        for (id, t) in rgb_palettes() {
+            assert!(
+                dist2(t.status_done, t.status_failed) > 900,
+                "{}: done and failed are too close to tell apart",
+                id.label()
+            );
+            assert!(
+                dist2(t.bg, t.ink) > 900,
+                "{}: primary text does not separate from the ground",
+                id.label()
+            );
+        }
+    }
+
+    #[test]
+    fn success_and_failure_stay_distinct_after_quantization() {
+        // A 256-color terminal is the realistic fallback; the palette must not
+        // collapse into ambiguity there.
+        for (id, t) in rgb_palettes() {
+            for depth in [ColorDepth::Indexed256, ColorDepth::Ansi16] {
+                let done = quantize(t.status_done, depth);
+                let failed = quantize(t.status_failed, depth);
+                assert_ne!(
+                    done,
+                    failed,
+                    "{} at {depth:?}: done and failed quantize to the same slot",
+                    id.label()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_adaptive_palette_keeps_its_derived_slots_channelless() {
+        // It paints no fills on purpose, so nothing may invent RGB for it.
+        let t = ThemeId::Terminal.build();
+        for (name, c) in [
+            ("bg_elevated", t.bg_elevated),
+            ("bg_hover", t.bg_hover),
+            ("bg_active", t.bg_active),
+            ("scrim", t.scrim),
+            ("accent_fg", t.accent_fg),
+            ("ink_inverse", t.ink_inverse),
+            ("border_focus", t.border_focus),
+        ] {
+            assert!(
+                color::channels(c).is_none(),
+                "{name} gained invented channels: {c:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_theme_id_builds_and_is_listed_once() {
+        for &id in ALL_THEMES {
+            let _ = id.build();
+            assert_eq!(ALL_THEMES[id.index()], id, "index() disagrees with the list");
+        }
+        let mut seen = ALL_THEMES.to_vec();
+        seen.sort_by_key(|t| format!("{t:?}"));
+        seen.dedup();
+        assert_eq!(seen.len(), ALL_THEMES.len(), "a palette is listed twice");
+    }
+}

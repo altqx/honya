@@ -481,6 +481,15 @@ pub struct App {
     tab_zones: Vec<(Rect, Screen)>,
     last_click: Option<(std::time::Instant, u16, u16)>,
     quit_armed_at: Option<std::time::Instant>,
+    /// Every interactive rectangle drawn last frame. Rebuilt from scratch in
+    /// `render`, so clicks, hover and the focus ring all resolve against the
+    /// geometry actually on screen rather than a second, hand-kept copy of it.
+    zones: crate::ui::kit::Zones,
+    /// The zone under the pointer. Separate from `focus` on purpose: moving the
+    /// mouse must never move the keyboard's place in a form.
+    hover: crate::ui::kit::Hover,
+    /// Where the keyboard is within the current surface.
+    focus: crate::ui::kit::Focus,
 
     /// Outbound feed to the relay task while remote is connected.
     remote_out: Option<tokio::sync::mpsc::UnboundedSender<crate::remote::protocol::RemoteOutbound>>,
@@ -569,6 +578,9 @@ impl App {
             tab_zones: Vec::new(),
             last_click: None,
             quit_armed_at: None,
+            zones: crate::ui::kit::Zones::new(),
+            hover: crate::ui::kit::Hover::default(),
+            focus: crate::ui::kit::Focus::new(),
             remote_out: None,
             remote_kill: None,
             remote_state: crate::remote::protocol::RemoteState::Disconnected,
@@ -2248,7 +2260,17 @@ impl App {
     /// dropped in [`MouseInput::from_event`]; the rest become an `Action` through
     /// the same `apply` funnel keys use. Left-press double-click is detected here
     /// (the App owns the clock) before the gesture is normalized.
-    pub fn on_mouse(&mut self, me: MouseEvent) {
+    /// Fold a raw mouse event into state. Returns whether the frame needs
+    /// repainting: motion fires far faster than the frame budget, and a pointer
+    /// travelling within one zone changes nothing worth redrawing.
+    pub fn on_mouse(&mut self, me: MouseEvent) -> bool {
+        // Motion is hover, and hover is resolved globally against the zone
+        // registry — no screen or overlay ever handles it, so it is answered
+        // here rather than being normalized into a gesture they would all have
+        // to match on.
+        if matches!(me.kind, MouseEventKind::Moved) {
+            return self.hover.moved_to(&self.zones, me.column, me.row);
+        }
         let double = if matches!(me.kind, MouseEventKind::Down(MouseButton::Left)) {
             let now = std::time::Instant::now();
             let is_double = self.last_click.is_some_and(|(t, c, r)| {
@@ -2267,10 +2289,13 @@ impl App {
             false
         };
         let Some(input) = MouseInput::from_event(&me, double) else {
-            return;
+            return false;
         };
+        // A click lands where the pointer is, so keep hover in step with it.
+        self.hover.moved_to(&self.zones, me.column, me.row);
         let action = self.route_mouse(input);
         self.apply(action);
+        true
     }
 
     /// Decide what a mouse gesture means given the current overlay / chrome /
@@ -5040,6 +5065,9 @@ impl App {
         // Stash this frame's geometry so the next mouse event can hit-test it.
         self.last_area = area;
         self.last_skeleton = Some(sk);
+        // The registry is rebuilt from scratch every frame: a zone exists only
+        // for as long as the thing it addresses is actually drawn.
+        self.zones.clear();
 
         f.render_widget(
             Paragraph::new("").style(Style::default().bg(self.theme.bg)),
@@ -5066,6 +5094,9 @@ impl App {
             self.frame,
             &self.theme,
         );
+        for (rect, screen) in self.tab_zones.iter().copied() {
+            self.zones.push(rect, crate::ui::kit::ZoneId::tab(screen));
+        }
 
         self.render_rule(f, sk.rule);
 
@@ -5098,6 +5129,14 @@ impl App {
         if !matches!(self.overlay, Overlay::None) {
             self.overlay
                 .render(f, area, &self.theme, &self.cfg, &self.log, self.frame);
+        }
+
+        // Settle focus and hover against what was actually drawn. A list can
+        // shrink or a modal close between frames, leaving either pointing at a
+        // zone that no longer exists.
+        self.focus.reconcile(&self.zones);
+        if self.hover.get().is_some_and(|h| !self.zones.contains(h)) {
+            self.hover.clear();
         }
     }
 
@@ -6369,6 +6408,96 @@ mod mouse_tests {
 
     fn click(app: &mut App, col: u16, row: u16) {
         app.on_mouse(ev(MouseEventKind::Down(MouseButton::Left), col, row));
+    }
+
+    fn motion(app: &mut App, col: u16, row: u16) -> bool {
+        app.on_mouse(ev(MouseEventKind::Moved, col, row))
+    }
+
+    /// Hover resolves against the zone registry, and only a real change asks
+    /// for a repaint — the event loop skips the frame otherwise, so this is
+    /// what keeps pointer motion from repainting continuously.
+    #[test]
+    fn hover_tracks_zones_and_reports_only_real_changes() {
+        let mut app = app();
+        render(&mut app, 120, 40);
+
+        let (shelf_rect, _) = app
+            .tab_zones
+            .iter()
+            .copied()
+            .find(|(_, s)| *s == Screen::Shelf)
+            .expect("shelf tab zone");
+        let (lex_rect, _) = app
+            .tab_zones
+            .iter()
+            .copied()
+            .find(|(_, s)| *s == Screen::Lexicon)
+            .expect("lexicon tab zone");
+
+        assert!(
+            motion(&mut app, shelf_rect.x + 1, shelf_rect.y),
+            "entering a zone is a change"
+        );
+        assert_eq!(app.hover.get(), Some(crate::ui::kit::ZoneId::tab(Screen::Shelf)));
+
+        assert!(
+            !motion(&mut app, shelf_rect.x + 2, shelf_rect.y),
+            "moving within the same zone must not ask for a repaint"
+        );
+
+        assert!(
+            motion(&mut app, lex_rect.x + 1, lex_rect.y),
+            "crossing into another zone is a change"
+        );
+        assert_eq!(
+            app.hover.get(),
+            Some(crate::ui::kit::ZoneId::tab(Screen::Lexicon))
+        );
+    }
+
+    /// The invariant the whole kit exists to guarantee: every rectangle the UI
+    /// registered is one it actually drew inside the frame, and a click at the
+    /// middle of any of them lands on a zone rather than falling through. This
+    /// is the shape of test that would have caught the Settings modal drawing
+    /// at 76x24 while its click handler hit-tested 72x26.
+    #[test]
+    fn every_registered_zone_is_inside_the_frame_and_hittable() {
+        for (w, h) in [(60u16, 20u16), (80, 24), (120, 40)] {
+            for screen in [
+                Screen::Shelf,
+                Screen::Project,
+                Screen::Translate,
+                Screen::Reader,
+                Screen::Lexicon,
+                Screen::Refine,
+            ] {
+                let mut app = app();
+                app.screen = screen;
+                render(&mut app, w, h);
+
+                let frame = Rect {
+                    x: 0,
+                    y: 0,
+                    width: w,
+                    height: h,
+                };
+                for (rect, id) in app.zones.all().collect::<Vec<_>>() {
+                    assert!(
+                        rect.x >= frame.x
+                            && rect.y >= frame.y
+                            && rect.x + rect.width <= frame.x + frame.width
+                            && rect.y + rect.height <= frame.y + frame.height,
+                        "{screen:?} at {w}x{h}: {id:?} at {rect:?} escapes the frame"
+                    );
+                    let (cx, cy) = (rect.x + rect.width / 2, rect.y + rect.height / 2);
+                    assert!(
+                        app.zones.at(cx, cy).is_some(),
+                        "{screen:?} at {w}x{h}: nothing hit-tests at the middle of {id:?}"
+                    );
+                }
+            }
+        }
     }
 
     /// Clicking a tab in the bar switches to that screen; the zones the bar
