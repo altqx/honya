@@ -25,6 +25,7 @@ use crate::ui::kit::{ZoneId, ZoneKind};
 use crate::ui::widgets::render_gauge;
 
 use super::qa;
+use super::settings_defs::{self, Group, SField};
 use super::{Action, Screen, slugify};
 
 /// Zone indices for the choices every confirm dialog offers. Distinct from a
@@ -618,108 +619,6 @@ impl ImageSourceState {
     }
 }
 
-/// One focusable Settings field. The order of [`SETTINGS_ORDER`] is the on-screen
-/// order and the index space `SettingsState::field` walks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SField {
-    OrchProvider,
-    OrchModel,
-    OrchEffort,
-    TransProvider,
-    TransModel,
-    TransEffort,
-    ReviewProvider,
-    ReviewModel,
-    ReviewEffort,
-    RefineProvider,
-    RefineModel,
-    RefineEffort,
-    OpenRouterKey,
-    TokenrouterKey,
-    GoogleKey,
-    CloudflareAccount,
-    CloudflareToken,
-    PreferredLanguageField,
-    MaxAttempts,
-    ContinuitySentences,
-    LoopStall,
-    Retranslates,
-    ServiceTierField,
-    ParallelLookahead,
-    SystemOneEnabled,
-    GateMode,
-    GateProvider,
-    GateModel,
-    GateKey,
-    GateConfidence,
-    FeatAudit,
-    FeatContinuity,
-    FeatEntityAlignment,
-    FeatSegmentation,
-    FeatReferenceScope,
-    UpdateModeField,
-    ReleaseChannelField,
-}
-
-/// The per-feature toggle rows, in render order. `None` for the rows that are
-/// not feature toggles keeps [`SETTINGS_ORDER`] the single source of ordering.
-fn field_feature(field: SField) -> Option<crate::model::SystemOneFeature> {
-    use crate::model::SystemOneFeature as F;
-    Some(match field {
-        SField::FeatAudit => F::Audit,
-        SField::FeatContinuity => F::Continuity,
-        SField::FeatEntityAlignment => F::EntityAlignment,
-        SField::FeatSegmentation => F::Segmentation,
-        SField::FeatReferenceScope => F::ReferenceScope,
-        _ => return None,
-    })
-}
-
-const SETTINGS_ORDER: [SField; 37] = [
-    SField::OrchProvider,
-    SField::OrchModel,
-    SField::OrchEffort,
-    SField::TransProvider,
-    SField::TransModel,
-    SField::TransEffort,
-    SField::ReviewProvider,
-    SField::ReviewModel,
-    SField::ReviewEffort,
-    SField::RefineProvider,
-    SField::RefineModel,
-    SField::RefineEffort,
-    SField::OpenRouterKey,
-    SField::TokenrouterKey,
-    SField::GoogleKey,
-    SField::CloudflareAccount,
-    SField::CloudflareToken,
-    SField::PreferredLanguageField,
-    SField::MaxAttempts,
-    SField::ContinuitySentences,
-    SField::LoopStall,
-    SField::Retranslates,
-    SField::ServiceTierField,
-    SField::ParallelLookahead,
-    SField::SystemOneEnabled,
-    SField::GateMode,
-    SField::GateProvider,
-    SField::GateModel,
-    SField::GateKey,
-    SField::GateConfidence,
-    SField::FeatAudit,
-    SField::FeatContinuity,
-    SField::FeatEntityAlignment,
-    SField::FeatSegmentation,
-    SField::FeatReferenceScope,
-    SField::UpdateModeField,
-    SField::ReleaseChannelField,
-];
-
-/// Number of focusable Settings fields.
-const SETTINGS_FIELDS: u8 = SETTINGS_ORDER.len() as u8;
-/// Index of the first per-feature System One toggle, which the renderer walks
-/// alongside `SystemOneFeature::ALL`. Asserted against `SETTINGS_ORDER` in tests.
-const FIRST_FEATURE_FIELD: u8 = 30;
 /// Fallback Codex model ids until the live list arrives.
 const CODEX_MODELS: [&str; 3] = ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini"];
 
@@ -753,8 +652,18 @@ fn provider_model_fallback(
     }
     next.default_model().to_string()
 }
+
 /// Index of the OpenRouter API-key field (callers open Settings focused here).
+///
+/// A constant because the GUI needs one; a test pins it to
+/// [`settings_defs::key_field`] so inserting a row above it cannot quietly
+/// point this somewhere else.
 pub const SETTINGS_KEY_FIELD: u8 = 12;
+
+/// Number of focusable settings rows.
+fn settings_fields() -> u8 {
+    settings_defs::count()
+}
 
 /// Settings tabs group contiguous field ranges; Account has only actions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -785,84 +694,49 @@ impl SettingsTab {
         }
     }
 
+    /// The registry group this tab shows.
+    fn group(self) -> Group {
+        match self {
+            SettingsTab::Agents => Group::Agents,
+            SettingsTab::Providers => Group::Providers,
+            SettingsTab::Pipeline => Group::Pipeline,
+            SettingsTab::Appearance => Group::Appearance,
+            SettingsTab::Account => Group::Account,
+        }
+    }
+
+    fn of_group(group: Group) -> SettingsTab {
+        match group {
+            Group::Agents => SettingsTab::Agents,
+            Group::Providers => SettingsTab::Providers,
+            Group::Pipeline => SettingsTab::Pipeline,
+            Group::Appearance => SettingsTab::Appearance,
+            Group::Account => SettingsTab::Account,
+        }
+    }
+
     /// Focusable field range; Account has none.
+    ///
+    /// Derived from the registry rather than written down. The ranges used to
+    /// be literals here, which made them a second copy of the declaration
+    /// order — inserting a setting shifted every row past it and left this
+    /// pointing at the wrong tab.
     fn field_range(self) -> Option<(u8, u8)> {
-        Some(match self {
-            SettingsTab::Agents => (0, 12),
-            SettingsTab::Providers => (12, 17),
-            SettingsTab::Pipeline => (17, 35),
-            SettingsTab::Appearance => (35, 37),
-            SettingsTab::Account => return None,
-        })
+        let fields = self.group().fields();
+        let first = *fields.first()?;
+        let last = *fields.last()?;
+        Some((first, last + 1))
     }
 
     fn for_field(field: u8) -> SettingsTab {
-        SettingsTab::ALL
-            .into_iter()
-            .find(|t| {
-                t.field_range()
-                    .is_some_and(|(s, e)| field >= s && field < e)
-            })
-            .unwrap_or(SettingsTab::Agents)
+        SettingsTab::of_group(Group::of_field(field))
     }
 
     fn cycled(self, forward: bool) -> SettingsTab {
-        let i = SettingsTab::ALL
-            .iter()
-            .position(|t| *t == self)
-            .unwrap_or(0);
-        SettingsTab::ALL[step(i, SettingsTab::ALL.len(), forward)]
+        SettingsTab::of_group(self.group().cycled(forward))
     }
 }
 
-impl SField {
-    /// A free-text editable field (vs. a Left/Right cycle field).
-    fn is_text(self) -> bool {
-        matches!(
-            self,
-            SField::OrchModel
-                | SField::TransModel
-                | SField::ReviewModel
-                | SField::RefineModel
-                | SField::OpenRouterKey
-                | SField::TokenrouterKey
-                | SField::GoogleKey
-                | SField::CloudflareAccount
-                | SField::CloudflareToken
-                | SField::MaxAttempts
-                | SField::ContinuitySentences
-                | SField::LoopStall
-                | SField::Retranslates
-                | SField::GateModel
-                | SField::GateKey
-                | SField::GateConfidence
-        )
-    }
-
-    /// A digits-only numeric field.
-    fn is_numeric(self) -> bool {
-        matches!(
-            self,
-            SField::MaxAttempts
-                | SField::ContinuitySentences
-                | SField::LoopStall
-                | SField::Retranslates
-                | SField::GateConfidence
-        )
-    }
-
-    /// A masked secret (API key) field.
-    fn is_secret(self) -> bool {
-        matches!(
-            self,
-            SField::OpenRouterKey
-                | SField::TokenrouterKey
-                | SField::GoogleKey
-                | SField::CloudflareToken
-                | SField::GateKey
-        )
-    }
-}
 
 /// Step an index forward/backward through a wrapped cycle of `len` items.
 fn step(i: usize, len: usize, forward: bool) -> usize {
@@ -929,8 +803,15 @@ pub struct SettingsState {
     pub typesafe_key: String,
     /// True when an env var supplies the TypeSafe key (shown read-only).
     pub typesafe_key_env: bool,
+    /// Chunk sizing, edited as text like the other numeric rows.
+    pub chunk_target_tokens: String,
+    pub chunk_hard_cap_tokens: String,
+    /// Seed characters and terms from the raw text before translating.
+    pub prepass_extract: bool,
+    /// Re-read each finished chapter end to end and flag drift.
+    pub coherence_check: bool,
     pub tab: SettingsTab,
-    /// Which field is focused (index into [`SETTINGS_ORDER`]).
+    /// Which field is focused (index into [`settings_defs::ORDER`]).
     pub field: u8,
     /// Caret byte-offset into the focused text field. Secret fields edit at the end.
     pub cursor: usize,
@@ -963,6 +844,10 @@ impl SettingsState {
             release_channel: cfg.release_channel,
             service_tier: cfg.service_tier,
             parallel_lookahead: cfg.parallel_lookahead,
+            chunk_target_tokens: cfg.chunk_target_tokens.to_string(),
+            chunk_hard_cap_tokens: cfg.chunk_hard_cap_tokens.to_string(),
+            prepass_extract: cfg.prepass_extract,
+            coherence_check: cfg.coherence_check,
             preferred_language: cfg.preferred_language,
             max_attempts: cfg.max_attempts.to_string(),
             continuity_sentences: cfg.continuity_sentences.to_string(),
@@ -986,7 +871,7 @@ impl SettingsState {
             remote_auth_code: None,
             session_label: None,
         };
-        st.focus(field.min(SETTINGS_FIELDS - 1));
+        st.focus(field.min(settings_fields() - 1));
         st.tab = SettingsTab::for_field(st.field);
         st
     }
@@ -999,7 +884,7 @@ impl SettingsState {
 
     /// The currently focused field.
     fn current(&self) -> SField {
-        SETTINGS_ORDER[self.field as usize]
+        settings_defs::ORDER[self.field as usize].field
     }
 
     /// Mutable handle to the focused text buffer (None for cycle fields).
@@ -1018,6 +903,8 @@ impl SettingsState {
             SField::ContinuitySentences => &mut self.continuity_sentences,
             SField::LoopStall => &mut self.loop_stall_secs,
             SField::Retranslates => &mut self.max_chapter_retranslates,
+            SField::ChunkTargetTokens => &mut self.chunk_target_tokens,
+            SField::ChunkHardCapTokens => &mut self.chunk_hard_cap_tokens,
             SField::GateModel => &mut self.system_one.model,
             SField::GateKey => &mut self.typesafe_key,
             SField::GateConfidence => &mut self.system_one_confidence,
@@ -1132,6 +1019,8 @@ impl SettingsState {
                 self.preferred_language = self.preferred_language.cycled();
             }
             SField::ParallelLookahead => self.parallel_lookahead = !self.parallel_lookahead,
+            SField::PrepassExtract => self.prepass_extract = !self.prepass_extract,
+            SField::CoherenceCheck => self.coherence_check = !self.coherence_check,
             SField::SystemOneEnabled => self.system_one.enabled = !self.system_one.enabled,
             SField::GateMode => {
                 self.system_one.review_gate = self.system_one.review_gate.cycled(forward)
@@ -1140,8 +1029,8 @@ impl SettingsState {
                 let next = self.system_one.provider.cycled(forward);
                 self.system_one.switch_provider(next);
             }
-            f if field_feature(f).is_some() => {
-                let feature = field_feature(f).expect("guarded by the match arm");
+            f if settings_defs::feature_of(f).is_some() => {
+                let feature = settings_defs::feature_of(f).expect("guarded by the match arm");
                 let slot = self.system_one.feature_mut(feature);
                 *slot = !*slot;
             }
@@ -1153,7 +1042,7 @@ impl SettingsState {
 
     /// Focus a field and drop the caret at its end.
     fn focus(&mut self, field: u8) {
-        self.field = field % SETTINGS_FIELDS;
+        self.field = field % settings_fields();
         self.cursor = self.text_field_mut().map(|s| s.len()).unwrap_or(0);
     }
 
@@ -1198,6 +1087,27 @@ impl SettingsState {
             .parse::<u32>()
             .unwrap_or(0)
             .clamp(1, 20)
+    }
+
+    /// Target chunk size. Clamped to the range the registry advertises, so a
+    /// typo cannot produce a chunk no provider will accept.
+    fn chunk_target_tokens_value(&self) -> usize {
+        self.chunk_target_tokens
+            .trim()
+            .parse::<usize>()
+            .unwrap_or(1000)
+            .clamp(200, 8000)
+    }
+
+    /// Hard cap. Never below the target, whatever was typed — a cap under the
+    /// target would silently make the target unreachable.
+    fn chunk_hard_cap_tokens_value(&self) -> usize {
+        self.chunk_hard_cap_tokens
+            .trim()
+            .parse::<usize>()
+            .unwrap_or(1200)
+            .clamp(200, 16000)
+            .max(self.chunk_target_tokens_value())
     }
 
     /// Prior translated sentences included with each chunk (0 disables it).
@@ -1260,6 +1170,10 @@ impl SettingsState {
             loop_stall_secs: self.loop_stall_secs_value(),
             max_chapter_retranslates: self.max_chapter_retranslates_value(),
             parallel_lookahead: self.parallel_lookahead,
+            chunk_target_tokens: self.chunk_target_tokens_value(),
+            chunk_hard_cap_tokens: self.chunk_hard_cap_tokens_value(),
+            prepass_extract: self.prepass_extract,
+            coherence_check: self.coherence_check,
             system_one: Box::new(self.system_one()),
             typesafe_key: (!self.typesafe_key_env).then(|| self.typesafe_key.clone()),
         }
@@ -1872,13 +1786,17 @@ impl Overlay {
             release_channel: ReleaseChannel::default(),
             service_tier: None,
             parallel_lookahead: true,
+            chunk_target_tokens: String::new(),
+            chunk_hard_cap_tokens: String::new(),
+            prepass_extract: true,
+            coherence_check: true,
             preferred_language: TargetLanguage::default(),
             max_attempts: String::new(),
             continuity_sentences: String::new(),
             loop_stall_secs: String::new(),
             max_chapter_retranslates: String::new(),
-            tab: SettingsTab::for_field(field.min(SETTINGS_FIELDS - 1)),
-            field: field.min(SETTINGS_FIELDS - 1),
+            tab: SettingsTab::for_field(field.min(settings_fields() - 1)),
+            field: field.min(settings_fields() - 1),
             cursor: 0,
             codex_models: default_codex_models(),
             account_login: None,
@@ -2416,7 +2334,7 @@ impl Overlay {
             KeyCode::Enter => match st.sel {
                 0 => Action::CreateSample,
                 1 => Action::OpenImport,
-                2 => Action::show_overlay(Overlay::settings_at(SETTINGS_KEY_FIELD)),
+                2 => Action::show_overlay(Overlay::settings_at(settings_defs::key_field())),
                 _ => Action::DismissWelcome,
             },
             _ => Action::None,
@@ -3322,6 +3240,7 @@ impl Overlay {
                 | Overlay::Qa(_)
                 | Overlay::ReaderInspect(_)
                 | Overlay::ReaderEdit(_)
+                | Overlay::Settings(_)
         )
     }
 
@@ -3349,10 +3268,7 @@ impl Overlay {
                 self.render_import(ui.frame, area, theme, st)
             }
             Overlay::ImageSource(st) => self.render_image_source_kit(ui, area, st),
-            Overlay::Settings(st) => {
-                let theme = ui.theme;
-                self.render_settings(ui.frame, area, theme, cfg, st)
-            }
+            Overlay::Settings(st) => self.render_settings_kit(ui, area, cfg, st),
             Overlay::Palette(st) => self.render_palette_kit(ui, area, st),
             Overlay::Synopsis(st) => self.render_synopsis_kit(ui, area, st),
             Overlay::ProjectTitle(st) => self.render_project_title_kit(ui, area, st),
@@ -4281,6 +4197,370 @@ impl Overlay {
         );
     }
 
+    /// Settings: a category rail beside a form generated from the registry.
+    ///
+    /// Nothing here knows what any individual setting *is* — the rows come from
+    /// [`settings_defs::ORDER`] and their live values from `field_kind`, which
+    /// is the whole point of declaring them once.
+    fn render_settings_kit(
+        &self,
+        ui: &mut crate::ui::kit::Ui,
+        area: Rect,
+        cfg: &AppConfig,
+        st: &SettingsState,
+    ) {
+        use crate::ui::kit::form;
+        use crate::ui::kit::list::ListState;
+        use crate::ui::kit::modal::{self, Modal, Sizing};
+
+        let frame = Modal::new("Settings")
+            .sizing(Sizing::large())
+            .footer(2)
+            .render(ui, area);
+
+        // Rail on the left, form on the right. At narrow widths the rail
+        // collapses to a single strip of initials rather than stealing the
+        // columns the values need.
+        let rail_w = if ui.metrics.is_narrow() { 3 } else { 16 };
+        let rail = Rect {
+            width: rail_w.min(frame.body.width / 3),
+            ..frame.body
+        };
+        let form_area = Rect {
+            x: frame.body.x + rail.width + 1,
+            width: frame.body.width.saturating_sub(rail.width + 1),
+            ..frame.body
+        };
+        self.render_settings_rail(ui, rail, st);
+
+        if st.tab == SettingsTab::Account {
+            self.render_settings_account(ui, form_area, st);
+            modal::footer_hint(ui, frame.footer, "  tab switch section · Esc close");
+            return;
+        }
+
+        let fields: Vec<form::Field> = st
+            .tab
+            .group()
+            .fields()
+            .into_iter()
+            .filter_map(|i| settings_defs::at(i).map(|d| self.settings_field(cfg, st, d)))
+            .collect();
+        let group_start = st.tab.group().first_field().unwrap_or(0);
+        let mut ls = ListState::new();
+        ls.select(Some(st.field.saturating_sub(group_start) as usize));
+
+        form::render(
+            ui,
+            form_area,
+            &mut ls,
+            &fields,
+            form::Opts {
+                label_cols: 26,
+                id_base: group_start as u32,
+            },
+        );
+
+        // The focused row's help, rather than a help line on every row.
+        let focused = (st.field.saturating_sub(group_start)) as usize;
+        form::render_help(
+            ui,
+            Rect {
+                height: 1,
+                ..frame.footer
+            },
+            fields.get(focused),
+        );
+        modal::footer_hint(
+            ui,
+            Rect {
+                y: frame.footer.y + 1,
+                height: 1,
+                ..frame.footer
+            },
+            "  ↵ save · tab section · ←→ change · Esc close",
+        );
+    }
+
+    /// The category rail. Each entry is a zone, so a section is one click away.
+    fn render_settings_rail(
+        &self,
+        ui: &mut crate::ui::kit::Ui,
+        area: Rect,
+        st: &SettingsState,
+    ) {
+        use crate::ui::kit::style;
+
+        let narrow = area.width < 6;
+        for (n, group) in Group::ALL.into_iter().enumerate() {
+            let row = crate::ui::kit::ctx::row_at(area, n as u16);
+            if row.height == 0 {
+                break;
+            }
+            let active = st.tab.group() == group;
+            let state = ui.interactive(row, ZoneId::segment(n), active);
+            let base = style::row(state, ui.theme);
+            ui.fill(row, base);
+            let (glyph, rail_style) = match style::rail(state, ui.theme) {
+                Some((g, s)) => (g.as_str().to_string(), s),
+                None => (" ".to_string(), base),
+            };
+            let label = if narrow {
+                group.title().chars().next().unwrap_or(' ').to_string()
+            } else {
+                group.title().to_string()
+            };
+            ui.line(
+                row,
+                Line::from(vec![
+                    Span::styled(glyph, rail_style),
+                    Span::styled(
+                        format!(" {label}"),
+                        if active {
+                            base.add_modifier(Modifier::BOLD)
+                        } else {
+                            base
+                        },
+                    ),
+                ]),
+                base,
+            );
+        }
+    }
+
+    /// The Account section: sign-in state and the remote link, which are
+    /// actions rather than settings and so have no registry rows.
+    fn render_settings_account(
+        &self,
+        ui: &mut crate::ui::kit::Ui,
+        area: Rect,
+        st: &SettingsState,
+    ) {
+        use crate::remote::protocol::RemoteState;
+        use crate::ui::kit::ctx::row_at;
+
+        let bg = ui.theme.bg_elevated;
+        let dim = Style::default().fg(ui.theme.ink_faint).bg(bg);
+        let mut row = 0u16;
+        let mut put = |ui: &mut crate::ui::kit::Ui, spans: Vec<Span<'static>>| {
+            let r = row_at(area, row);
+            if r.height > 0 {
+                ui.line(r, Line::from(spans), Style::default().bg(bg));
+            }
+            row += 1;
+        };
+
+        let (account, color) = match &st.account_login {
+            Some(login) => (format!("signed in as {login}"), ui.theme.status_done),
+            None => ("not signed in".to_string(), ui.theme.ink_soft),
+        };
+        put(
+            ui,
+            vec![
+                Span::styled("GitHub        ", dim),
+                Span::styled(account, Style::default().fg(color).bg(bg)),
+            ],
+        );
+        put(ui, vec![Span::styled("  Ctrl-A sign in · Ctrl-O sign out", dim)]);
+        put(ui, vec![]);
+
+        let (link, link_color) = match st.remote_state {
+            RemoteState::Connected => (
+                format!("connected · {} watching", st.remote_watchers),
+                ui.theme.status_done,
+            ),
+            RemoteState::Connecting => ("connecting…".into(), ui.theme.status_working),
+            RemoteState::Pairing => ("pairing…".into(), ui.theme.status_working),
+            RemoteState::Error => ("error".into(), ui.theme.status_failed),
+            RemoteState::Disconnected => (
+                if st.remote_enabled { "enabled".into() } else { "off".to_string() },
+                ui.theme.ink_soft,
+            ),
+        };
+        put(
+            ui,
+            vec![
+                Span::styled("Remote        ", dim),
+                Span::styled(link, Style::default().fg(link_color).bg(bg)),
+            ],
+        );
+        put(ui, vec![Span::styled("  Ctrl-R toggle the relay link", dim)]);
+
+        if let Some(prompt) = &st.remote_auth_code {
+            put(ui, vec![]);
+            put(
+                ui,
+                vec![
+                    Span::styled("Code          ", dim),
+                    Span::styled(
+                        prompt.code.clone(),
+                        Style::default()
+                            .fg(ui.theme.accent)
+                            .bg(bg)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ],
+            );
+            put(
+                ui,
+                vec![Span::styled(
+                    format!("  {}   Ctrl-B open · Ctrl-K copy", prompt.uri),
+                    dim,
+                )],
+            );
+        }
+    }
+
+    /// One registry row as a live form field.
+    fn settings_field(
+        &self,
+        cfg: &AppConfig,
+        st: &SettingsState,
+        d: &settings_defs::Def,
+    ) -> crate::ui::kit::form::Field {
+        use crate::ui::kit::form::{Field, Kind};
+        use settings_defs::Kind as DKind;
+
+        let cursor = if settings_defs::index_of(d.field) == st.field {
+            st.cursor
+        } else {
+            0
+        };
+        let kind = match d.kind {
+            DKind::Toggle => Kind::Toggle {
+                on: self.settings_toggle(st, d.field),
+            },
+            DKind::Select => Kind::Select {
+                // The current value only: the list is cycled through the
+                // arrows, which is how these have always been edited.
+                options: vec![self.settings_select_label(cfg, st, d.field)],
+                index: 0,
+            },
+            DKind::Secret => {
+                let (value, from_env) = self.settings_secret(st, d.field);
+                Kind::Secret {
+                    value,
+                    cursor,
+                    from_env,
+                }
+            }
+            DKind::Number { min, max } => Kind::Number {
+                value: self
+                    .settings_text(st, d.field)
+                    .trim()
+                    .parse::<i64>()
+                    .unwrap_or(min),
+                min,
+                max,
+            },
+            DKind::Text => Kind::Text {
+                value: self.settings_text(st, d.field),
+                cursor,
+                placeholder: "unset".into(),
+            },
+        };
+        Field::new(d.label, kind)
+            .help(d.help)
+            .disabled(self.settings_disabled(st, d.field))
+    }
+
+    /// The live value of a toggle row.
+    fn settings_toggle(&self, st: &SettingsState, f: SField) -> bool {
+        match f {
+            SField::ParallelLookahead => st.parallel_lookahead,
+            SField::PrepassExtract => st.prepass_extract,
+            SField::CoherenceCheck => st.coherence_check,
+            SField::SystemOneEnabled => st.system_one.enabled,
+            other => settings_defs::feature_of(other)
+                .map(|feat| st.system_one.armed(feat))
+                .unwrap_or(false),
+        }
+    }
+
+    /// The label a cycle row currently shows.
+    fn settings_select_label(
+        &self,
+        _cfg: &AppConfig,
+        st: &SettingsState,
+        f: SField,
+    ) -> String {
+        match f {
+            SField::OrchProvider => st.models.orchestrator.provider.label().to_string(),
+            SField::TransProvider => st.models.translator.provider.label().to_string(),
+            SField::ReviewProvider => st.models.reviewer.provider.label().to_string(),
+            SField::RefineProvider => st.models.refine.provider.label().to_string(),
+            SField::OrchEffort => crate::model::Effort::label(st.models.orchestrator.effort).to_string(),
+            SField::TransEffort => crate::model::Effort::label(st.models.translator.effort).to_string(),
+            SField::ReviewEffort => crate::model::Effort::label(st.models.reviewer.effort).to_string(),
+            SField::RefineEffort => crate::model::Effort::label(st.models.refine.effort).to_string(),
+            SField::PreferredLanguageField => st.preferred_language.label().to_string(),
+            SField::ServiceTierField => {
+                crate::model::ServiceTier::label(st.service_tier).to_string()
+            }
+            SField::GateMode => st.system_one.review_gate.label().to_string(),
+            SField::GateProvider => st.system_one.provider.label().to_string(),
+            SField::UpdateModeField => st.update_mode.label().to_string(),
+            SField::ReleaseChannelField => st.release_channel.label().to_string(),
+            _ => String::new(),
+        }
+    }
+
+    /// A secret row's value, and whether the environment already supplies it.
+    fn settings_secret(&self, st: &SettingsState, f: SField) -> (String, bool) {
+        match f {
+            SField::OpenRouterKey => (st.openrouter_key.clone(), st.api_key_env),
+            SField::TokenrouterKey => (st.tokenrouter_key.clone(), st.tokenrouter_key_env),
+            SField::GoogleKey => (st.google_key.clone(), st.google_key_env),
+            SField::CloudflareToken => (
+                st.cloudflare_api_token.clone(),
+                st.cloudflare_api_token_env,
+            ),
+            SField::GateKey => (st.typesafe_key.clone(), st.typesafe_key_env),
+            _ => (String::new(), false),
+        }
+    }
+
+    /// A text or numeric row's current contents.
+    fn settings_text(&self, st: &SettingsState, f: SField) -> String {
+        match f {
+            SField::OrchModel => st.models.orchestrator.model.clone(),
+            SField::TransModel => st.models.translator.model.clone(),
+            SField::ReviewModel => st.models.reviewer.model.clone(),
+            SField::RefineModel => st.models.refine.model.clone(),
+            SField::CloudflareAccount => st.cloudflare_account_id.clone(),
+            SField::MaxAttempts => st.max_attempts.clone(),
+            SField::ContinuitySentences => st.continuity_sentences.clone(),
+            SField::LoopStall => st.loop_stall_secs.clone(),
+            SField::Retranslates => st.max_chapter_retranslates.clone(),
+            SField::ChunkTargetTokens => st.chunk_target_tokens.clone(),
+            SField::ChunkHardCapTokens => st.chunk_hard_cap_tokens.clone(),
+            SField::GateModel => st.system_one.model.clone(),
+            SField::GateConfidence => st.system_one_confidence.clone(),
+            _ => String::new(),
+        }
+    }
+
+    /// Whether a row is currently inert.
+    ///
+    /// The System One block is the only case: with the master switch off, every
+    /// judgement row below it does nothing, and saying so is better than
+    /// letting someone set five toggles that have no effect.
+    fn settings_disabled(&self, st: &SettingsState, f: SField) -> bool {
+        if matches!(f, SField::SystemOneEnabled) {
+            return false;
+        }
+        let in_block = settings_defs::feature_of(f).is_some()
+            || matches!(
+                f,
+                SField::GateMode
+                    | SField::GateProvider
+                    | SField::GateModel
+                    | SField::GateKey
+                    | SField::GateConfidence
+            );
+        in_block && !st.system_one.enabled
+    }
+
     /// A confirm dialog, with its choices as real buttons.
     fn render_modal_kit(&self, ui: &mut crate::ui::kit::Ui, area: Rect, dlg: &Dialog) {
         use crate::ui::kit::button::{Button, ButtonRow};
@@ -4959,540 +5239,6 @@ impl Overlay {
         );
     }
 
-    fn render_settings(
-        &self,
-        f: &mut Frame,
-        area: Rect,
-        theme: &Theme,
-        cfg: &AppConfig,
-        st: &SettingsState,
-    ) {
-        let modal = centered_modal(76, 24, area);
-        f.render_widget(Clear, modal);
-        let block = self.modal_block("Settings", theme);
-        let inner = block.inner(modal);
-        f.render_widget(block, modal);
-
-        let val_w = area.width.saturating_sub(26) as usize;
-        // None renders the caret at the end for masked API-key fields.
-        let field_line =
-            |label: &str, value: String, focused: bool, caret: Option<usize>| -> Line<'static> {
-                let marker = if focused { theme::SELECT_BAR } else { ' ' };
-                let value_style = if focused {
-                    Style::default().fg(theme.ink).bg(theme.accent_bg)
-                } else {
-                    Style::default().fg(theme.ink_soft)
-                };
-                let mut spans = vec![
-                    Span::styled(format!(" {marker} "), Style::default().fg(theme.accent)),
-                    Span::styled(format!("{label:<20}"), Style::default().fg(theme.ink_faint)),
-                ];
-                match (focused, caret) {
-                    (true, Some(cursor)) => {
-                        let (before, after) = input::caret_halves(&value, cursor, val_w);
-                        spans.push(Span::styled(before, value_style));
-                        spans.push(Span::styled("▏", Style::default().fg(theme.stream_cursor)));
-                        spans.push(Span::styled(after, value_style));
-                    }
-                    (true, None) => {
-                        spans.push(Span::styled(truncate_cols(&value, val_w), value_style));
-                        spans.push(Span::styled("▏", Style::default().fg(theme.stream_cursor)));
-                    }
-                    (false, _) => {
-                        spans.push(Span::styled(truncate_cols(&value, val_w), value_style));
-                    }
-                }
-                Line::from(spans)
-            };
-
-        // Track the focused row for scroll positioning.
-        let row = |idx: u8, label: &str, value: String, text: bool| -> Line<'static> {
-            field_line(label, value, st.field == idx, text.then_some(st.cursor))
-        };
-        let mask = |val: &str, env: bool| -> String {
-            if env {
-                "● via environment (read-only)".to_string()
-            } else if val.trim().is_empty() {
-                "— not set —".to_string()
-            } else {
-                mask_secret(val)
-            }
-        };
-        let plain_setting = |val: &str, env: bool| -> String {
-            if env {
-                "via environment (read-only)".to_string()
-            } else if val.trim().is_empty() {
-                "— not set —".to_string()
-            } else {
-                val.to_string()
-            }
-        };
-
-        let mut lines: Vec<Line<'static>> = Vec::new();
-        let mut focus_line = 0usize;
-        let push = |lines: &mut Vec<Line<'static>>,
-                    focus_line: &mut usize,
-                    line: Line<'static>,
-                    focused: bool| {
-            if focused {
-                *focus_line = lines.len();
-            }
-            lines.push(line);
-        };
-
-        let mut tab_spans: Vec<Span<'static>> = vec![Span::raw("  ")];
-        for (i, t) in SettingsTab::ALL.iter().enumerate() {
-            if i > 0 {
-                tab_spans.push(Span::styled(" · ", Style::default().fg(theme.ink_faint)));
-            }
-            let style = if *t == st.tab {
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
-            } else {
-                Style::default().fg(theme.ink_soft)
-            };
-            tab_spans.push(Span::styled(t.title(), style));
-        }
-        lines.push(Line::from(tab_spans));
-        lines.push(Line::from(Span::styled(
-            "  Tab switch tab · ↑↓ field · ←→ change · type to edit · ↵ save",
-            Style::default().fg(theme.ink_faint),
-        )));
-        lines.push(Line::raw(""));
-
-        if st.tab == SettingsTab::Agents {
-            for (name, base, agent) in [
-                ("Orchestrator", 0u8, &st.models.orchestrator),
-                ("Translator", 3, &st.models.translator),
-                ("Reviewer", 6, &st.models.reviewer),
-                ("Refine", 9, &st.models.refine),
-            ] {
-                push(
-                    &mut lines,
-                    &mut focus_line,
-                    row(base, name, agent.provider.label().to_string(), false),
-                    st.field == base,
-                );
-                push(
-                    &mut lines,
-                    &mut focus_line,
-                    row(base + 1, "  model", agent.model.clone(), true),
-                    st.field == base + 1,
-                );
-                push(
-                    &mut lines,
-                    &mut focus_line,
-                    row(
-                        base + 2,
-                        "  effort",
-                        crate::model::Effort::label(agent.effort).to_string(),
-                        false,
-                    ),
-                    st.field == base + 2,
-                );
-            }
-        }
-        if st.tab == SettingsTab::Providers {
-            push(
-                &mut lines,
-                &mut focus_line,
-                row(
-                    12,
-                    "OpenRouter key",
-                    mask(&st.openrouter_key, st.api_key_env),
-                    false,
-                ),
-                st.field == 12,
-            );
-            push(
-                &mut lines,
-                &mut focus_line,
-                row(
-                    13,
-                    "Tokenrouter key",
-                    mask(&st.tokenrouter_key, st.tokenrouter_key_env),
-                    false,
-                ),
-                st.field == 13,
-            );
-            push(
-                &mut lines,
-                &mut focus_line,
-                row(
-                    14,
-                    "Google key",
-                    mask(&st.google_key, st.google_key_env),
-                    false,
-                ),
-                st.field == 14,
-            );
-            push(
-                &mut lines,
-                &mut focus_line,
-                row(
-                    15,
-                    "Cloudflare account",
-                    plain_setting(&st.cloudflare_account_id, st.cloudflare_account_id_env),
-                    !st.cloudflare_account_id_env,
-                ),
-                st.field == 15,
-            );
-            push(
-                &mut lines,
-                &mut focus_line,
-                row(
-                    16,
-                    "Cloudflare token",
-                    mask(&st.cloudflare_api_token, st.cloudflare_api_token_env),
-                    false,
-                ),
-                st.field == 16,
-            );
-            let (codex_status, codex_color, codex_hint) = match &cfg.codex_auth {
-                Some(_) => ("signed in", theme.status_done, "Ctrl-X sign out"),
-                None => ("not signed in", theme.ink_soft, "Ctrl-X sign in"),
-            };
-            lines.push(Line::from(vec![
-                Span::styled(
-                    "   Codex (ChatGPT)     ",
-                    Style::default().fg(theme.ink_faint),
-                ),
-                Span::styled(codex_status, Style::default().fg(codex_color)),
-                Span::styled(
-                    format!("   {codex_hint}"),
-                    Style::default().fg(theme.ink_faint),
-                ),
-            ]));
-        }
-        if st.tab == SettingsTab::Pipeline {
-            push(
-                &mut lines,
-                &mut focus_line,
-                row(
-                    17,
-                    "Preferred language",
-                    st.preferred_language.label().to_string(),
-                    false,
-                ),
-                st.field == 17,
-            );
-            lines.push(Line::from(Span::styled(
-                "      ↳ Default for new projects; existing projects keep their language",
-                Style::default().fg(theme.ink_faint),
-            )));
-            push(
-                &mut lines,
-                &mut focus_line,
-                row(18, "Retry attempts", st.max_attempts.clone(), true),
-                st.field == 18,
-            );
-            lines.push(Line::from(Span::styled(
-                "      ↳ Translator↔Reviewer loop per chunk (1–20)",
-                Style::default().fg(theme.ink_faint),
-            )));
-            push(
-                &mut lines,
-                &mut focus_line,
-                row(
-                    19,
-                    "Continuity sentences",
-                    st.continuity_sentences.clone(),
-                    true,
-                ),
-                st.field == 19,
-            );
-            lines.push(Line::from(Span::styled(
-                "      ↳ Prior translated sentences per chunk (0–100; 0 disables; 2,000-char cap)",
-                Style::default().fg(theme.ink_faint),
-            )));
-            push(
-                &mut lines,
-                &mut focus_line,
-                row(20, "Loop watchdog (s)", st.loop_stall_secs.clone(), true),
-                st.field == 20,
-            );
-            lines.push(Line::from(Span::styled(
-                "      ↳ quiet pipeline stalls after N s; active model calls retry chunk first",
-                Style::default().fg(theme.ink_faint),
-            )));
-            push(
-                &mut lines,
-                &mut focus_line,
-                row(
-                    21,
-                    "Loop re-translates",
-                    st.max_chapter_retranslates.clone(),
-                    true,
-                ),
-                st.field == 21,
-            );
-            lines.push(Line::from(Span::styled(
-                "      ↳ stalled-chapter re-translates before the run aborts (0–10)",
-                Style::default().fg(theme.ink_faint),
-            )));
-            push(
-                &mut lines,
-                &mut focus_line,
-                row(
-                    22,
-                    "Service tier",
-                    ServiceTier::label(st.service_tier).to_string(),
-                    false,
-                ),
-                st.field == 22,
-            );
-            lines.push(Line::from(Span::styled(
-                format!("      ↳ {}", ServiceTier::desc(st.service_tier)),
-                Style::default().fg(theme.ink_faint),
-            )));
-            push(
-                &mut lines,
-                &mut focus_line,
-                row(
-                    23,
-                    "Parallel lookahead",
-                    if st.parallel_lookahead { "On" } else { "Off" }.to_string(),
-                    false,
-                ),
-                st.field == 23,
-            );
-            lines.push(Line::from(Span::styled(
-                "      ↳ Faster between chunks; invalidated drafts may increase API cost",
-                Style::default().fg(theme.ink_faint),
-            )));
-            push(
-                &mut lines,
-                &mut focus_line,
-                row(
-                    24,
-                    "System One (Jev)",
-                    if st.system_one.enabled { "On" } else { "Off" }.to_string(),
-                    false,
-                ),
-                st.field == 24,
-            );
-            lines.push(Line::from(Span::styled(
-                "      ↳ Master switch. Off means no typed-judgement call is made,                  whatever the per-feature toggles below say",
-                Style::default().fg(theme.ink_faint),
-            )));
-            push(
-                &mut lines,
-                &mut focus_line,
-                row(
-                    25,
-                    "  review gate",
-                    st.system_one.review_gate.label().to_string(),
-                    false,
-                ),
-                st.field == 25,
-            );
-            lines.push(Line::from(Span::styled(
-                "      ↳ gate = skip a clean chunk's Reviewer call; standalone = it                  reviews alone",
-                Style::default().fg(theme.ink_faint),
-            )));
-            push(
-                &mut lines,
-                &mut focus_line,
-                row(
-                    26,
-                    "  transport",
-                    st.system_one.provider.label().to_string(),
-                    false,
-                ),
-                st.field == 26,
-            );
-            push(
-                &mut lines,
-                &mut focus_line,
-                row(27, "  model", st.system_one.model.clone(), true),
-                st.field == 27,
-            );
-            push(
-                &mut lines,
-                &mut focus_line,
-                row(
-                    28,
-                    "  TypeSafe key",
-                    mask(&st.typesafe_key, st.typesafe_key_env),
-                    false,
-                ),
-                st.field == 28,
-            );
-            lines.push(Line::from(Span::styled(
-                "      ↳ Only for the TypeSafe transport; over OpenRouter System One                  reuses your OpenRouter key",
-                Style::default().fg(theme.ink_faint),
-            )));
-            push(
-                &mut lines,
-                &mut focus_line,
-                row(
-                    29,
-                    "  min confidence",
-                    format!("{}%", st.system_one_confidence),
-                    true,
-                ),
-                st.field == 29,
-            );
-            lines.push(Line::from(Span::styled(
-                "      ↳ Below this a judgement is not trusted and the deterministic                  path runs instead",
-                Style::default().fg(theme.ink_faint),
-            )));
-            for (offset, feature) in crate::model::SystemOneFeature::ALL.into_iter().enumerate() {
-                let idx = FIRST_FEATURE_FIELD + offset as u8;
-                push(
-                    &mut lines,
-                    &mut focus_line,
-                    row(
-                        idx,
-                        &format!("  {}", feature.label()),
-                        if st.system_one.armed(feature) { "On" } else { "Off" }.to_string(),
-                        false,
-                    ),
-                    st.field == idx,
-                );
-                lines.push(Line::from(Span::styled(
-                    format!("      ↳ {}", feature.desc()),
-                    Style::default().fg(theme.ink_faint),
-                )));
-            }
-        }
-        if st.tab == SettingsTab::Appearance {
-            push(
-                &mut lines,
-                &mut focus_line,
-                row(35, "Auto-update", st.update_mode.label().to_string(), false),
-                st.field == 35,
-            );
-            push(
-                &mut lines,
-                &mut focus_line,
-                row(
-                    36,
-                    "Update channel",
-                    st.release_channel.label().to_string(),
-                    false,
-                ),
-                st.field == 36,
-            );
-            lines.push(Line::from(vec![
-                Span::styled(
-                    "   Theme               ",
-                    Style::default().fg(theme.ink_faint),
-                ),
-                Span::styled(cfg.theme.label(), Style::default().fg(theme.accent)),
-                Span::styled("   Ctrl-T to change", Style::default().fg(theme.ink_faint)),
-            ]));
-        }
-        if st.tab == SettingsTab::Account {
-            match (&st.account_login, &st.remote_auth_code) {
-                (_, Some(prompt)) => {
-                    lines.push(Line::from(vec![
-                        Span::styled(
-                            "   GitHub             ",
-                            Style::default().fg(theme.ink_faint),
-                        ),
-                        Span::styled(
-                            prompt.code.clone(),
-                            Style::default()
-                                .fg(theme.accent)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                    ]));
-                    lines.push(Line::from(Span::styled(
-                        format!("      ↳ enter it at {}", prompt.uri),
-                        Style::default().fg(theme.ink_faint),
-                    )));
-                    lines.push(Line::from(Span::styled(
-                        "      ↳ Ctrl-B open in browser · Ctrl-K copy code".to_string(),
-                        Style::default().fg(theme.ink_faint),
-                    )));
-                }
-                (None, None) => {
-                    lines.push(Line::from(vec![
-                        Span::styled(
-                            "   GitHub             ",
-                            Style::default().fg(theme.ink_faint),
-                        ),
-                        Span::styled("not signed in", Style::default().fg(theme.ink_soft)),
-                        Span::styled("   Ctrl-A to sign in", Style::default().fg(theme.ink_faint)),
-                    ]));
-                }
-                (Some(login), _) => {
-                    lines.push(Line::from(vec![
-                        Span::styled(
-                            "   GitHub             ",
-                            Style::default().fg(theme.ink_faint),
-                        ),
-                        Span::styled(format!("@{login}"), Style::default().fg(theme.status_done)),
-                        Span::styled("   Ctrl-O sign out", Style::default().fg(theme.ink_faint)),
-                    ]));
-                    let (state_label, state_color) = if st.remote_enabled {
-                        (
-                            st.remote_state.label(),
-                            match st.remote_state {
-                                crate::remote::protocol::RemoteState::Connected => {
-                                    theme.status_done
-                                }
-                                crate::remote::protocol::RemoteState::Error => theme.status_failed,
-                                _ => theme.status_working,
-                            },
-                        )
-                    } else {
-                        ("disabled", theme.ink_soft)
-                    };
-                    lines.push(Line::from(vec![
-                        Span::styled(
-                            "   Remote link        ",
-                            Style::default().fg(theme.ink_faint),
-                        ),
-                        Span::styled(state_label.to_string(), Style::default().fg(state_color)),
-                        Span::styled("   Ctrl-R to toggle", Style::default().fg(theme.ink_faint)),
-                    ]));
-                    if let Some(label) = st.session_label.as_ref().filter(|_| st.remote_enabled) {
-                        lines.push(Line::from(Span::styled(
-                            format!("      ↳ this session: {label}"),
-                            Style::default().fg(theme.ink_faint),
-                        )));
-                    }
-                    if st.remote_enabled
-                        && matches!(
-                            st.remote_state,
-                            crate::remote::protocol::RemoteState::Connected
-                        )
-                    {
-                        let watchers = st.remote_watchers;
-                        let note = if watchers == 0 {
-                            "      ↳ no dashboards watching · open honya.altqx.com/app".to_string()
-                        } else {
-                            format!("      ↳ {watchers} dashboard(s) watching this session")
-                        };
-                        lines.push(Line::from(Span::styled(
-                            note,
-                            Style::default().fg(theme.ink_faint),
-                        )));
-                    }
-                }
-            }
-        }
-
-        lines.push(Line::raw(""));
-        lines.push(Line::from(Span::styled(
-            "   Keys saved to config.json (0600) · env vars override · ↵ save · Esc close",
-            Style::default().fg(theme.ink_faint),
-        )));
-        // Keep the focused row visible (most tabs fit; scroll is a no-op then).
-        let content_h = inner.height.max(1) as usize;
-        let max_scroll = lines.len().saturating_sub(content_h);
-        let scroll_y = focus_line.saturating_sub(content_h / 2).min(max_scroll) as u16;
-        f.render_widget(
-            Paragraph::new(lines)
-                .style(Style::default().bg(theme.bg_panel))
-                .scroll((scroll_y, 0)),
-            inner,
-        );
-    }
-
 }
 
 /// What a resolved overlay click should do — a synthesized key (reusing the
@@ -6079,19 +5825,6 @@ fn indent(area: Rect, pad: u16) -> Rect {
     }
 }
 
-/// Mask a secret for display: a run of bullets with the last 4 characters revealed
-/// (e.g. `sk-or-v1-…1a2b` → `••••••••1a2b`), so the user can confirm which key is
-/// saved without exposing it. Short keys are fully bulleted.
-fn mask_secret(s: &str) -> String {
-    let chars: Vec<char> = s.trim().chars().collect();
-    if chars.len() <= 4 {
-        return "•".repeat(chars.len());
-    }
-    let tail: String = chars[chars.len() - 4..].iter().collect();
-    let dots = chars.len().saturating_sub(4).min(12);
-    format!("{}{}", "•".repeat(dots), tail)
-}
-
 /// Turn an epub file stem into a readable default title: `_`/`-` → spaces,
 /// trailing `_vNN` volume tags dropped, then word-cased lightly.
 pub fn prettify_stem(stem: &str) -> String {
@@ -6579,6 +6312,94 @@ mod tests {
     }
 
     #[test]
+    fn the_key_field_constant_tracks_the_registry() {
+        // The GUI needs a constant, so this pairing cannot be derived away —
+        // but it can be pinned, so inserting a row above the key row fails
+        // here rather than silently opening Settings on the wrong field.
+        assert_eq!(SETTINGS_KEY_FIELD, settings_defs::key_field());
+        assert_eq!(
+            settings_defs::ORDER[SETTINGS_KEY_FIELD as usize].field,
+            SField::OpenRouterKey
+        );
+    }
+
+    #[test]
+    fn the_four_newly_reachable_settings_round_trip_through_save() {
+        // They exist in AppConfig but had no row, so until now they could only
+        // be changed by editing config.json by hand.
+        let cfg = AppConfig {
+            chunk_target_tokens: 900,
+            chunk_hard_cap_tokens: 1500,
+            prepass_extract: false,
+            coherence_check: false,
+            ..AppConfig::default()
+        };
+
+        let Overlay::Settings(st) = Overlay::settings_with_field(&cfg, 0) else {
+            unreachable!()
+        };
+        assert_eq!(st.chunk_target_tokens, "900");
+        assert_eq!(st.chunk_hard_cap_tokens, "1500");
+        assert!(!st.prepass_extract);
+        assert!(!st.coherence_check);
+
+        let Action::SaveSettings {
+            chunk_target_tokens,
+            chunk_hard_cap_tokens,
+            prepass_extract,
+            coherence_check,
+            ..
+        } = st.save_action()
+        else {
+            panic!("expected a save action")
+        };
+        assert_eq!(chunk_target_tokens, 900);
+        assert_eq!(chunk_hard_cap_tokens, 1500);
+        assert!(!prepass_extract);
+        assert!(!coherence_check);
+    }
+
+    #[test]
+    fn a_hard_cap_below_the_target_is_lifted_rather_than_accepted() {
+        // A cap under the target would make the target unreachable, which is
+        // not a configuration anyone means to express.
+        let cfg = AppConfig::default();
+        let Overlay::Settings(mut st) = Overlay::settings_with_field(&cfg, 0) else {
+            unreachable!()
+        };
+        st.chunk_target_tokens = "2000".into();
+        st.chunk_hard_cap_tokens = "500".into();
+        let Action::SaveSettings {
+            chunk_target_tokens,
+            chunk_hard_cap_tokens,
+            ..
+        } = st.save_action()
+        else {
+            panic!("expected a save action")
+        };
+        assert_eq!(chunk_target_tokens, 2000);
+        assert_eq!(chunk_hard_cap_tokens, 2000, "the cap is raised to the target");
+    }
+
+    #[test]
+    fn the_new_toggles_respond_to_cycling() {
+        let cfg = AppConfig::default();
+        let Overlay::Settings(mut st) = Overlay::settings_with_field(&cfg, 0) else {
+            unreachable!()
+        };
+        for (field, read) in [
+            (SField::PrepassExtract, 0usize),
+            (SField::CoherenceCheck, 1),
+        ] {
+            st.focus(settings_defs::index_of(field));
+            let before = if read == 0 { st.prepass_extract } else { st.coherence_check };
+            st.cycle(true);
+            let after = if read == 0 { st.prepass_extract } else { st.coherence_check };
+            assert_ne!(before, after, "{field:?} did not toggle");
+        }
+    }
+
+    #[test]
     fn the_help_table_covers_every_screen() {
         let rows = help_rows();
         let sections: Vec<&str> = rows
@@ -7058,23 +6879,32 @@ mod tests {
         st.next_field();
         assert_eq!(st.field, 12, "field nav wraps within the tab");
 
-        let st = SettingsState::for_test(17); // Translation language
+        let st = SettingsState::for_test(settings_defs::index_of(SField::PreferredLanguageField));
         assert_eq!(st.tab, SettingsTab::Pipeline);
         let mut st = st;
-        // 24..=34 are the System One block appended to this tab.
-        for expected in 18..=34 {
+        // The System One block is appended to this tab, so walking it reaches
+        // every Pipeline row and then wraps rather than spilling into the next.
+        let pipeline = Group::Pipeline.fields();
+        for expected in pipeline.iter().skip(1) {
             st.next_field();
-            assert_eq!(st.field, expected);
+            assert_eq!(st.field, *expected);
         }
         st.next_field();
-        assert_eq!(st.field, 17, "pipeline field nav wraps within the tab");
+        assert_eq!(
+            st.field, pipeline[0],
+            "pipeline field nav wraps within the tab"
+        );
 
-        let mut st = SettingsState::for_test(35);
+        let appearance = Group::Appearance.fields();
+        let mut st = SettingsState::for_test(appearance[0]);
         assert_eq!(st.tab, SettingsTab::Appearance);
         st.next_field();
-        assert_eq!(st.field, 36);
+        assert_eq!(st.field, appearance[1]);
         st.next_field();
-        assert_eq!(st.field, 35, "appearance field nav wraps within the tab");
+        assert_eq!(
+            st.field, appearance[0],
+            "appearance field nav wraps within the tab"
+        );
 
         let mut st = SettingsState::for_test(0);
         st.tab = SettingsTab::Account;
@@ -7085,7 +6915,7 @@ mod tests {
     fn review_gate_mode_cycles_and_reaches_save_action() {
         use crate::model::{DecisionsProvider, ReviewGateMode};
 
-        let mut st = SettingsState::for_test(25); // System One · review gate
+        let mut st = SettingsState::for_test(settings_defs::index_of(SField::GateMode));
         assert_eq!(st.system_one.review_gate, ReviewGateMode::Off);
         st.cycle(true);
         assert_eq!(st.system_one.review_gate, ReviewGateMode::Gate);
@@ -7109,7 +6939,7 @@ mod tests {
     fn gate_transport_cycle_swaps_the_default_model_id() {
         use crate::model::DecisionsProvider;
 
-        let mut st = SettingsState::for_test(26); // System One · transport
+        let mut st = SettingsState::for_test(settings_defs::index_of(SField::GateProvider));
         assert_eq!(st.system_one.provider, DecisionsProvider::OpenRouter);
         assert_eq!(st.system_one.model, "typesafe/jev-1.13");
 
@@ -7134,16 +6964,16 @@ mod tests {
         use crate::model::SystemOneFeature;
 
         for (offset, feature) in SystemOneFeature::ALL.into_iter().enumerate() {
-            let field = SETTINGS_ORDER[FIRST_FEATURE_FIELD as usize + offset];
+            let field = settings_defs::ORDER[settings_defs::index_of(SField::FeatAudit) as usize + offset].field;
             assert_eq!(
-                field_feature(field),
+                settings_defs::feature_of(field),
                 Some(feature),
                 "settings row {} must be the {feature:?} toggle",
-                FIRST_FEATURE_FIELD as usize + offset
+                settings_defs::index_of(SField::FeatAudit) as usize + offset
             );
         }
         assert_eq!(
-            SETTINGS_ORDER[FIRST_FEATURE_FIELD as usize + SystemOneFeature::ALL.len()],
+            settings_defs::ORDER[settings_defs::index_of(SField::FeatAudit) as usize + SystemOneFeature::ALL.len()].field,
             SField::UpdateModeField,
             "the feature block must end where the Appearance tab begins"
         );
@@ -7153,7 +6983,7 @@ mod tests {
     fn master_switch_and_each_feature_toggle_independently() {
         use crate::model::SystemOneFeature;
 
-        let mut st = SettingsState::for_test(24); // System One · master switch
+        let mut st = SettingsState::for_test(settings_defs::index_of(SField::SystemOneEnabled));
         assert!(!st.system_one.enabled);
         st.cycle(true);
         assert!(st.system_one.enabled);
@@ -7161,7 +6991,7 @@ mod tests {
         // Every feature starts armed, so the suite follows the master switch.
         assert!(SystemOneFeature::ALL.iter().all(|f| st.system_one.feature(*f)));
 
-        st.focus(FIRST_FEATURE_FIELD); // Semantic audit
+        st.focus(settings_defs::index_of(SField::FeatAudit)); // Semantic audit
         st.cycle(true);
         assert!(!st.system_one.audit, "the row toggles only its own feature");
         assert!(st.system_one.continuity);
@@ -7177,7 +7007,7 @@ mod tests {
     /// Codex model fields are pickers, not free text.
     #[test]
     fn codex_provider_snaps_and_cycles_model() {
-        let mut st = SettingsState::for_test(0); // Orchestrator · provider
+        let mut st = SettingsState::for_test(settings_defs::index_of(SField::OrchProvider));
         st.cycle(true); // OpenRouter → Tokenrouter
         st.cycle(true); // Tokenrouter → Google
         st.cycle(true); // Google → Cloudflare
@@ -7188,7 +7018,7 @@ mod tests {
         );
         assert!(CODEX_MODELS.contains(&st.models.orchestrator.model.as_str()));
 
-        st.focus(1); // Orchestrator · model
+        st.focus(settings_defs::index_of(SField::OrchModel));
         assert!(st.is_codex_model());
         assert!(!st.current_is_editable_text(), "Codex model is a picker");
         let before = st.models.orchestrator.model.clone();
@@ -7199,7 +7029,7 @@ mod tests {
 
     #[test]
     fn provider_cycle_restores_remembered_model_for_each_provider() {
-        let mut st = SettingsState::for_test(0); // Orchestrator · provider
+        let mut st = SettingsState::for_test(settings_defs::index_of(SField::OrchProvider));
         st.models.orchestrator.set_model("openrouter/custom");
 
         st.cycle(true); // OpenRouter → Tokenrouter
@@ -7233,36 +7063,25 @@ mod tests {
     /// modal where the field list is taller than the visible area.
     #[test]
     fn settings_overlay_renders_at_every_focus() {
-        let theme = Theme::washi();
-        let cfg = AppConfig::default();
-        for field in 0..SETTINGS_FIELDS {
+        for field in 0..settings_fields() {
             let ov = Overlay::Settings(SettingsState::for_test(field));
-            let Overlay::Settings(st) = &ov else {
-                unreachable!()
-            };
-            let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
-            term.draw(|f| ov.render_settings(f, f.area(), &theme, &cfg, st))
-                .unwrap();
-            if field == 19 {
-                let glyphs: String = term
-                    .backend()
-                    .buffer()
-                    .content()
-                    .iter()
-                    .map(|cell| cell.symbol())
-                    .collect();
+            let (lines, _) = render_overlay(&ov, 80, 24);
+            let glyphs: String = lines.concat();
+            if field == settings_defs::index_of(SField::ContinuitySentences) {
                 assert!(glyphs.contains("Continuity sentences"));
             }
-            if field == 23 {
-                let glyphs: String = term
-                    .backend()
-                    .buffer()
-                    .content()
-                    .iter()
-                    .map(|cell| cell.symbol())
-                    .collect();
+            if field == settings_defs::index_of(SField::ParallelLookahead) {
                 assert!(glyphs.contains("Parallel lookahead"));
-                assert!(glyphs.contains("increase API cost"));
+                // The focused row's help is shown in the footer, and it comes
+                // from the registry rather than from the renderer. Only the
+                // opening is asserted: a full sentence does not fit at 80
+                // columns and is trimmed, which is correct.
+                let help = settings_defs::at(field).unwrap().help;
+                let opening: String = help.chars().take(24).collect();
+                assert!(
+                    glyphs.contains(&opening),
+                    "the focused row's help should be on screen: {opening:?}"
+                );
             }
         }
     }

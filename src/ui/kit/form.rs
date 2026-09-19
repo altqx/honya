@@ -284,7 +284,10 @@ pub fn render_field(
     );
     x += 1;
 
-    let label_cols = opts.label_cols.min(row.width / 3).max(6);
+    // Up to half the width, not a third: in a settings form the label column
+    // is the thing being scanned, and a third truncates ordinary two-word
+    // labels at 80 columns.
+    let label_cols = opts.label_cols.min(row.width / 2).max(6);
     let label_style = if st.disabled {
         Style::default().fg(ui.theme.ink_faint).bg(base.bg.unwrap_or(ui.theme.bg))
     } else if selected || st.focused {

@@ -9,6 +9,7 @@ pub mod project;
 pub mod qa;
 pub mod reader;
 pub mod refine;
+pub mod settings_defs;
 pub mod shelf;
 pub mod translate;
 
@@ -291,6 +292,13 @@ pub enum Action {
         loop_stall_secs: u64,
         /// Whole-chapter re-translates before a looping chapter aborts the run.
         max_chapter_retranslates: u32,
+        /// Size a chunk aims for, and the cap it is never allowed past.
+        chunk_target_tokens: usize,
+        chunk_hard_cap_tokens: usize,
+        /// Seed characters and terms from the raw text before translating.
+        prepass_extract: bool,
+        /// Re-read each finished chapter end to end and flag drift.
+        coherence_check: bool,
         /// Validate and reuse one speculative next-chunk Translator draft.
         parallel_lookahead: bool,
         /// System One settings: master switch, transport, per-feature toggles
@@ -2938,6 +2946,10 @@ impl App {
                 loop_stall_secs,
                 max_chapter_retranslates,
                 parallel_lookahead,
+                chunk_target_tokens,
+                chunk_hard_cap_tokens,
+                prepass_extract,
+                coherence_check,
                 system_one,
                 typesafe_key,
             } => {
@@ -2957,6 +2969,10 @@ impl App {
                     loop_stall_secs,
                     max_chapter_retranslates,
                     parallel_lookahead,
+                    chunk_target_tokens,
+                    chunk_hard_cap_tokens,
+                    prepass_extract,
+                    coherence_check,
                     *system_one,
                     typesafe_key,
                 );
@@ -4673,6 +4689,10 @@ impl App {
         loop_stall_secs: u64,
         max_chapter_retranslates: u32,
         parallel_lookahead: bool,
+        chunk_target_tokens: usize,
+        chunk_hard_cap_tokens: usize,
+        prepass_extract: bool,
+        coherence_check: bool,
         system_one: crate::model::SystemOne,
         typesafe_key: Option<String>,
     ) {
@@ -4690,6 +4710,10 @@ impl App {
         self.cfg.loop_stall_secs = loop_stall_secs;
         self.cfg.max_chapter_retranslates = max_chapter_retranslates;
         self.cfg.parallel_lookahead = parallel_lookahead;
+        self.cfg.chunk_target_tokens = chunk_target_tokens;
+        self.cfg.chunk_hard_cap_tokens = chunk_hard_cap_tokens;
+        self.cfg.prepass_extract = prepass_extract;
+        self.cfg.coherence_check = coherence_check;
         let mut keys_changed = false;
         if let Some(k) = openrouter_key {
             let k = k.trim();
