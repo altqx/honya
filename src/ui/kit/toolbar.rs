@@ -149,6 +149,78 @@ impl<'a> Toolbar<'a> {
     }
 }
 
+/// The actions that belong to one row, drawn at its right end.
+///
+/// The row rectangle comes from the registry the list wrote while drawing, so
+/// there is no second copy of the row layout here to fall out of step with it.
+pub struct RowActions<'a> {
+    acts: &'a [Act],
+    gap: u16,
+}
+
+impl<'a> RowActions<'a> {
+    pub fn new(acts: &'a [Act]) -> Self {
+        Self { acts, gap: 1 }
+    }
+
+    fn items(&self) -> Vec<&Act> {
+        self.acts
+            .iter()
+            .filter(|a| a.placement == Placement::Row)
+            .collect()
+    }
+
+    fn width(&self, items: &[&Act], narrow: bool) -> u16 {
+        if items.is_empty() {
+            return 0;
+        }
+        items
+            .iter()
+            .map(|a| control_width(a, narrow))
+            .sum::<u16>()
+            + self.gap * (items.len() as u16 - 1)
+    }
+
+    /// Draw right-aligned inside `row`, claiming at most half of it — past that
+    /// the buttons would be covering the thing they act on. Returns the columns
+    /// claimed, or 0 when there was no room and the context menu is the only
+    /// way to them.
+    pub fn render(&self, ui: &mut Ui, row: Rect) -> u16 {
+        let items = self.items();
+        if items.is_empty() || row.width == 0 || row.height == 0 {
+            return 0;
+        }
+        let budget = row.width / 2;
+        let full = self.width(&items, false);
+        let narrow = self.width(&items, true);
+        let (want, iconified) = if full <= budget {
+            (full, false)
+        } else if narrow <= budget {
+            (narrow, true)
+        } else {
+            return 0;
+        };
+
+        let mut x = row.x + row.width - want;
+        for a in &items {
+            let w = control_width(a, iconified);
+            draw_control(
+                ui,
+                a,
+                Rect {
+                    x,
+                    y: row.y,
+                    width: w,
+                    height: 1,
+                },
+                iconified,
+            );
+            x += w + self.gap;
+        }
+        want
+    }
+}
+
 /// Columns one control wants. Chips and buttons measure themselves, so a
 /// toolbar never guesses a width the control then disagrees with.
 pub fn control_width(a: &Act, narrow: bool) -> u16 {
@@ -305,6 +377,41 @@ mod tests {
             Toolbar::new(&acts).render(ui, area);
         });
         assert!(zones.contains(ZoneId::action(0)));
+    }
+
+    #[test]
+    fn row_actions_sit_at_the_right_end_of_their_row() {
+        let acts = acts();
+        let row = Rect {
+            x: 0,
+            y: 0,
+            width: 60,
+            height: 1,
+        };
+        let (_, zones) = draw_test(60, 1, |ui, _| {
+            let used = RowActions::new(&acts).render(ui, row);
+            assert!(used > 0);
+        });
+        let rect = zones.rect_of(ZoneId::action(9)).expect("the row action");
+        assert_eq!(rect.x + rect.width, 60, "not flush right: {rect:?}");
+        assert!(
+            !zones.contains(ZoneId::action(0)),
+            "a toolbar action does not belong on a row"
+        );
+    }
+
+    #[test]
+    fn row_actions_give_up_rather_than_cover_the_row() {
+        // Past half the row the buttons would hide the thing they act on, and
+        // the context menu still reaches them.
+        let acts = vec![
+            Act::row(0, "rename", Accel::key('R')),
+            Act::row(1, "delete", Accel::key('d')),
+        ];
+        let (_, zones) = draw_test(12, 1, |ui, area| {
+            assert_eq!(RowActions::new(&acts).render(ui, area), 0);
+        });
+        assert!(zones.is_empty());
     }
 
     #[test]

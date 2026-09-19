@@ -13,7 +13,7 @@ use crate::theme::{Theme, status_glyph};
 use crate::ui::mouse::{MouseGesture, MouseInput};
 use crate::ui::text::{col_width, pad_to_cols, thai_display_safe, truncate_cols};
 
-use super::action_table::Act;
+use super::action_table::{self, Act};
 use super::Action;
 use super::overlay::Overlay;
 
@@ -34,6 +34,14 @@ pub(crate) enum ShelfRow {
     Import,
     File(usize),
 }
+
+/// Action ids for this screen's table. Stable within the screen: they are also
+/// the zone index every one of its controls registers under.
+const S_IMPORT: u16 = 0;
+const S_RESCAN: u16 = 1;
+const S_OPEN: u16 = 2;
+const S_RENAME: u16 = 3;
+const S_DELETE: u16 = 4;
 
 impl ShelfScreen {
     pub fn new() -> Self {
@@ -74,6 +82,18 @@ impl ShelfScreen {
         projects: &[Project],
         preferred_language: crate::model::TargetLanguage,
     ) -> Action {
+        // Commands come from the table; only navigation is left here.
+        let acts = self.actions(projects);
+        match action_table::hit(&acts, &key) {
+            action_table::KeyHit::Run(id) => {
+                return self
+                    .run(id, projects, preferred_language)
+                    .unwrap_or(Action::None);
+            }
+            action_table::KeyHit::Blocked => return Action::None,
+            action_table::KeyHit::Miss => {}
+        }
+
         let rows = self.row_count(projects);
         let sel = self
             .list
@@ -101,55 +121,6 @@ impl ShelfScreen {
             }
             KeyCode::End | KeyCode::Char('G') => {
                 self.list.select(Some(rows.saturating_sub(1)));
-                Action::None
-            }
-            KeyCode::Enter => {
-                if sel == self.import_row_index(projects) {
-                    Action::show_overlay(Overlay::import(
-                        self.import_files(),
-                        projects,
-                        preferred_language,
-                    ))
-                } else if let Some(p) = projects.get(sel) {
-                    Action::OpenProject(p.id.clone())
-                } else {
-                    Action::None
-                }
-            }
-            KeyCode::Char('i') => Action::show_overlay(Overlay::import(
-                self.import_files(),
-                projects,
-                preferred_language,
-            )),
-            KeyCode::Char('d') => {
-                if let Some(p) = projects.get(sel) {
-                    Action::show_overlay(Overlay::confirm(
-                        "Delete project?",
-                        format!(
-                            "Permanently delete “{}” and ALL its files (raw, translations, glossary, characters)? This cannot be undone.",
-                            p.title
-                        ),
-                        Action::DeleteProject { id: p.id.clone() },
-                    ))
-                } else {
-                    Action::None
-                }
-            }
-            KeyCode::Char('R') => {
-                if let Some(p) = projects.get(sel) {
-                    Action::show_overlay(Overlay::project_title_edit(
-                        p.id.clone(),
-                        p.title.clone(),
-                        p.translated_title.clone(),
-                        p.target_language,
-                    ))
-                } else {
-                    Action::None
-                }
-            }
-            KeyCode::Char('r') => {
-                // Project rescan is the App's job; here we only rescan local source files.
-                self.rescan(&working_root());
                 Action::None
             }
             _ => Action::None,
@@ -202,7 +173,17 @@ impl ShelfScreen {
                 }
                 Action::None
             }
-            MouseGesture::RightClick => Action::None,
+            // The router opens this row's menu straight after, so the
+            // selection has to be on the row the menu is about.
+            MouseGesture::RightClick => {
+                if let Some(target) = zone
+                    .and_then(|z| z.row_index())
+                    .and_then(|row| self.selection_at_row(projects, row))
+                {
+                    self.list.select(Some(target));
+                }
+                Action::None
+            }
         }
     }
 
@@ -250,7 +231,8 @@ impl ShelfScreen {
         foreign_busy: &[std::path::PathBuf],
     ) {
         use crate::ui::kit::list::{self, ListState, Row};
-        use crate::ui::kit::{ZoneKind, ctx::row_at};
+        use crate::ui::kit::toolbar::{RowActions, Toolbar};
+        use crate::ui::kit::{ZoneId, ZoneKind, ctx::row_at};
 
         let count = self.row_count(projects);
         if self.list.selected().is_none_or(|s| s >= count) {
@@ -294,6 +276,19 @@ impl ShelfScreen {
                 Style::default().fg(ui.theme.ink_faint).bg(ui.theme.bg),
             );
         }
+
+        // The row between the title and the list was already blank, so the
+        // toolbar costs this screen nothing.
+        let acts = self.actions(projects);
+        Toolbar::new(&acts).render(
+            ui,
+            Rect {
+                x: area.x + 2,
+                y: area.y + 1,
+                width: area.width.saturating_sub(3),
+                height: 1,
+            },
+        );
 
         let list_area = Rect {
             x: area.x,
@@ -387,20 +382,40 @@ impl ShelfScreen {
                 }
             },
         );
+
+        // The selected row's own verbs, drawn over the right end of the row the
+        // list just registered — so the buttons act on the same row the keys
+        // do, and their geometry comes from the registry rather than a second
+        // copy of the row layout.
+        if let Some(i) = selected_row
+            && matches!(rows.get(i), Some(ShelfRow::Project(_)))
+            && let Some(rect) = ui.zones.rect_of(ZoneId::row(i))
+        {
+            RowActions::new(&acts).render(ui, rect);
+        }
     }
 
     /// This screen's commands, availability resolved for this frame.
     ///
     /// The one declaration everything else reads: `handle_key` dispatches from
-    /// it, the toolbar and the context menu draw from it, and help lists it.
-    /// See [`super::action_table`].
+    /// it, the toolbar row and the selected row's buttons draw from it, and
+    /// help prints it. See [`super::action_table`].
     pub fn actions(&self, projects: &[Project]) -> Vec<Act> {
-        let _ = projects;
-        Vec::new()
+        use action_table::Accel;
+
+        let sel = self.list.selected().unwrap_or(0);
+        let on_project = projects.get(sel).is_some();
+        vec![
+            Act::toolbar(S_IMPORT, "import", Accel::key('i')),
+            Act::toolbar(S_RESCAN, "rescan", Accel::key('r')),
+            Act::row(S_OPEN, "open", Accel::code(KeyCode::Enter)),
+            Act::row(S_RENAME, "rename", Accel::key('R')).when(on_project),
+            Act::row(S_DELETE, "delete", Accel::key('d')).when(on_project),
+        ]
     }
 
     /// Run the action `id` stands for, whether it was reached by key, by a
-    /// toolbar control, by a row button or from the menu.
+    /// toolbar button, by a row button or from the context menu.
     ///
     /// `None` means "no such action here" — the sentinel that makes an
     /// advertised binding with no handler impossible to write.
@@ -410,8 +425,57 @@ impl ShelfScreen {
         projects: &[Project],
         preferred_language: crate::model::TargetLanguage,
     ) -> Option<Action> {
-        let _ = (id, projects, preferred_language);
-        None
+        let sel = self
+            .list
+            .selected()
+            .unwrap_or(0)
+            .min(self.row_count(projects).saturating_sub(1));
+        let import = |screen: &Self| {
+            Action::show_overlay(Overlay::import(
+                screen.import_files(),
+                projects,
+                preferred_language,
+            ))
+        };
+        Some(match id {
+            S_IMPORT => import(self),
+            S_RESCAN => {
+                // Project rescan is the App's job; here we only rescan local
+                // source files.
+                self.rescan(&working_root());
+                Action::None
+            }
+            S_OPEN => {
+                if sel == self.import_row_index(projects) {
+                    import(self)
+                } else if let Some(p) = projects.get(sel) {
+                    Action::OpenProject(p.id.clone())
+                } else {
+                    Action::None
+                }
+            }
+            S_RENAME => match projects.get(sel) {
+                Some(p) => Action::show_overlay(Overlay::project_title_edit(
+                    p.id.clone(),
+                    p.title.clone(),
+                    p.translated_title.clone(),
+                    p.target_language,
+                )),
+                None => Action::None,
+            },
+            S_DELETE => match projects.get(sel) {
+                Some(p) => Action::show_overlay(Overlay::confirm(
+                    "Delete project?",
+                    format!(
+                        "Permanently delete “{}” and ALL its files (raw, translations, glossary, characters)? This cannot be undone.",
+                        p.title
+                    ),
+                    Action::DeleteProject { id: p.id.clone() },
+                )),
+                None => Action::None,
+            },
+            _ => return None,
+        })
     }
 
     pub fn hints(&self) -> &'static [(&'static str, &'static str)] {
@@ -619,6 +683,77 @@ mod tests {
             gesture: MouseGesture::Click { double },
             col,
             row,
+        }
+    }
+
+    fn key(c: char) -> KeyEvent {
+        KeyEvent::new(
+            KeyCode::Char(c),
+            ratatui::crossterm::event::KeyModifiers::NONE,
+        )
+    }
+
+    /// Every id the table declares has a `run` arm. Without this a screen can
+    /// advertise a key that falls through to nothing, which is exactly how
+    /// Project ended up printing `Q QA` for an action that did not exist.
+    #[test]
+    fn every_declared_action_has_a_handler() {
+        let projects = vec![proj("alpha")];
+        let mut screen = ShelfScreen::new();
+        for act in screen.actions(&projects) {
+            assert!(
+                screen
+                    .run(act.id, &projects, crate::model::TargetLanguage::Thai)
+                    .is_some(),
+                "{} ({}) is advertised with no handler",
+                act.label,
+                act.accel.shown()
+            );
+        }
+    }
+
+    /// Pressing an action's accelerator and running it by id are the same
+    /// thing, because the key router looks the key up in this very table.
+    #[test]
+    fn a_key_and_its_control_reach_the_same_action() {
+        let projects = vec![proj("alpha")];
+        let lang = crate::model::TargetLanguage::Thai;
+        let mut a = ShelfScreen::new();
+        a.list.select(Some(0));
+        let mut b = ShelfScreen::new();
+        b.list.select(Some(0));
+
+        let by_key = a.handle_key(key('d'), &projects, lang);
+        let by_id = b.run(S_DELETE, &projects, lang).unwrap();
+        assert_eq!(
+            format!("{by_key:?}"),
+            format!("{by_id:?}"),
+            "the key and the control must produce the same action"
+        );
+    }
+
+    /// Everything the screen declares is reachable without the keyboard: drawn
+    /// as a control, or listed in the row's context menu.
+    #[test]
+    fn nothing_is_keyboard_only() {
+        let projects = vec![proj("alpha")];
+        let mut screen = ShelfScreen::new();
+        screen.list.select(Some(0));
+        let acts = screen.actions(&projects);
+        let (_, zones) = crate::ui::kit::ctx::draw_test(100, 24, |ui, area| {
+            screen.render(ui, area, &projects, &[]);
+        });
+        for act in &acts {
+            assert!(
+                act.placement != action_table::Placement::Menu,
+                "{} would be reachable only from the menu",
+                act.label
+            );
+            assert!(
+                zones.contains(act.zone()),
+                "{} is declared but nothing drew a control for it",
+                act.label
+            );
         }
     }
 
