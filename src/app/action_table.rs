@@ -63,6 +63,15 @@ impl Accel {
         }
     }
 
+    /// A chord on a non-character key, such as Ctrl-Tab.
+    pub const fn ctrl_code(code: KeyCode) -> Self {
+        Self {
+            code,
+            ctrl: true,
+            alt: None,
+        }
+    }
+
     /// Accept `code` as well, without printing it.
     pub const fn or(mut self, code: KeyCode) -> Self {
         self.alt = Some(code);

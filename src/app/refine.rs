@@ -18,7 +18,7 @@ use crate::ui::mouse::{MouseGesture, MouseInput};
 use crate::ui::text::truncate_cols;
 use crate::workspace::refine_session::SessionMeta;
 
-use super::action_table::Act;
+use super::action_table::{self, Act};
 use super::Action;
 use super::overlay::Overlay;
 
@@ -336,6 +336,15 @@ impl Default for RefineScreen {
     }
 }
 
+/// Action ids for this screen's table. Stable within the screen: they are also
+/// the zone index every one of its controls registers under.
+const R_NEW: u16 = 0;
+const R_SESSIONS: u16 = 1;
+const R_APPROVAL: u16 = 2;
+const R_COMPACT: u16 = 3;
+const R_EXPORT: u16 = 4;
+const R_UNDO: u16 = 5;
+
 impl RefineScreen {
     pub fn new() -> Self {
         Self {
@@ -602,13 +611,17 @@ impl RefineScreen {
                 return self.handle_pending_key(key);
             }
         }
+        // Commands come from the table, ahead of the input, so a chord the
+        // screen declares is never eaten by the field being typed into.
+        let acts = self.acts(project.is_some());
+        match action_table::hit(&acts, &key) {
+            action_table::KeyHit::Run(id) => return self.run_action(id).unwrap_or(Action::None),
+            action_table::KeyHit::Blocked => return Action::None,
+            action_table::KeyHit::Miss => {}
+        }
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('r') {
             self.expanded = !self.expanded;
             return Action::None;
-        }
-        // Ctrl+Tab cycles always-approve → ask → auto.
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Tab {
-            return Action::RefineCycleApprovalMode;
         }
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::End {
             self.jump_bottom();
@@ -1225,26 +1238,63 @@ impl RefineScreen {
 
     /// This screen's commands, availability resolved for this frame.
     ///
-    /// The one declaration everything else reads: `handle_key` dispatches from
-    /// it, the toolbar and the context menu draw from it, and help lists it.
-    /// See [`super::action_table`].
+    /// Every accelerator here is a chord: the input field owns the plain keys,
+    /// so a single-letter binding would be swallowed the moment the transcript
+    /// has focus. See [`super::action_table`].
     pub fn actions(&self, project: Option<&Project>) -> Vec<Act> {
-        let _ = project;
-        Vec::new()
+        self.acts(project.is_some())
     }
 
-    /// Run the action `id` stands for, whether it was reached by key, by a
-    /// toolbar control, by a row button or from the menu.
+    /// The table, from the one thing its availability turns on. `render` knows
+    /// only whether a project is open, not which one.
+    fn acts(&self, has_project: bool) -> Vec<Act> {
+        use action_table::Accel;
+        use crate::agents::refine::ApprovalMode;
+
+        // While the session picker or an approval prompt is up, the keyboard
+        // belongs to it. The controls grey out rather than vanishing.
+        let live = has_project && self.picker.is_none() && self.pending.is_none();
+        let mode = match self.approval_mode {
+            ApprovalMode::Auto => "auto",
+            ApprovalMode::Ask => "ask",
+            ApprovalMode::Always => "always",
+        };
+        vec![
+            Act::toolbar(R_NEW, "new", Accel::ctrl('n')).when(live),
+            Act::toolbar(R_SESSIONS, "sessions", Accel::ctrl('o'))
+                .count(self.sessions.len() as u32)
+                .when(live),
+            Act::toolbar(R_APPROVAL, "approve", Accel::ctrl_code(KeyCode::Tab))
+                .cycle()
+                .value(mode)
+                .when(live),
+            Act::menu(R_COMPACT, "compact conversation", Accel::ctrl('y')).when(live),
+            Act::menu(R_EXPORT, "export to markdown", Accel::ctrl('e')).when(live),
+            Act::menu(R_UNDO, "undo last chapter edit", Accel::ctrl('u')).when(live),
+        ]
+    }
+
+    /// Run the action `id` stands for, whether it was reached by chord, by a
+    /// control on the status band or from the context menu.
     ///
     /// `None` means "no such action here" — the sentinel that makes an
     /// advertised binding with no handler impossible to write.
-    pub fn run(
-        &mut self,
-        id: u16,
-        project: Option<&Project>,
-    ) -> Option<Action> {
-        let _ = (id, project);
-        None
+    pub fn run(&mut self, id: u16, project: Option<&Project>) -> Option<Action> {
+        let _ = project;
+        self.run_action(id)
+    }
+
+    fn run_action(&mut self, id: u16) -> Option<Action> {
+        Some(match id {
+            R_NEW => Action::RefineNewSession,
+            R_SESSIONS => Action::RefineOpenSessions,
+            // Cycles always-approve → ask → auto.
+            R_APPROVAL => Action::RefineCycleApprovalMode,
+            R_COMPACT => Action::RefineCompact,
+            R_EXPORT => Action::RefineExport,
+            R_UNDO => Action::RefineUndo,
+            _ => return None,
+        })
     }
 
     pub fn hints(&self) -> &'static [(&'static str, &'static str)] {
@@ -1290,11 +1340,8 @@ impl RefineScreen {
     ) {
         let theme: &Theme = ui.theme;
         let frame = ui.frame_count;
-        // Disjoint field borrows: the frame to draw into, the registry to
-        // record interactive rects in.
-        let zones: &mut crate::ui::kit::Zones = ui.zones;
-        let f: &mut Frame = ui.frame;
         if !has_project {
+            let f: &mut Frame = ui.frame;
             self.render_no_project(f, area, theme);
             return;
         }
@@ -1310,15 +1357,33 @@ impl RefineScreen {
             let subagent_h = (self.subagents.len() as u16 + 2).clamp(3, 7);
             constraints.push(Constraint::Length(subagent_h));
         }
-        if status.is_some() {
-            constraints.push(Constraint::Length(1));
-        }
+        // The status band is always there now: it is where this screen's
+        // controls live, and a row that comes and go with the status line
+        // would take them with it.
+        constraints.push(Constraint::Length(1));
         constraints.push(Constraint::Length(input_h));
 
         let rows = Layout::default()
             .direction(Direction::Vertical)
             .constraints(constraints)
             .split(area);
+        let band = rows[rows.len() - 2];
+
+        let acts = self.acts(has_project);
+        let toolbar = crate::ui::kit::toolbar::Toolbar::new(&acts).has_menu(true).render(
+            ui,
+            Rect {
+                x: band.x + 1,
+                width: band.width.saturating_sub(2),
+                height: 1,
+                ..band
+            },
+        );
+
+        // Disjoint field borrows: the frame to draw into, the registry to
+        // record interactive rects in.
+        let zones: &mut crate::ui::kit::Zones = ui.zones;
+        let f: &mut Frame = ui.frame;
 
         self.render_transcript(f, rows[0], frame, theme);
         let input_row = rows[rows.len() - 1];
@@ -1329,10 +1394,20 @@ impl RefineScreen {
         }
         if !self.subagents.is_empty() {
             self.render_subagents(f, rows[next], frame, theme);
-            next += 1;
         }
         if let Some(status) = status {
-            self.render_status(f, rows[next], status, theme);
+            // Whatever the toolbar left of the band, right of it.
+            let x = band.x + 1 + toolbar.cols.saturating_add(2);
+            self.render_status(
+                f,
+                Rect {
+                    x,
+                    width: (band.x + band.width).saturating_sub(x),
+                    ..band
+                },
+                status,
+                theme,
+            );
         }
         self.render_input(f, input_row, theme);
         if self.picker.is_some() {
