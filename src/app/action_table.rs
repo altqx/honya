@@ -15,9 +15,6 @@
 //! paging stay ordinary `handle_key` arms: the wheel and a click already do
 //! them, so they need no button, no menu entry and no footer hint.
 
-// Scaffolding note: the table lands before its consumers, and the screens are
-// ported onto it one at a time. This allow comes off with the last one.
-#![allow(dead_code)]
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -128,14 +125,6 @@ pub enum Placement {
     Row,
     /// Only in the context menu and in help — the long tail.
     Menu,
-}
-
-impl Placement {
-    /// Whether an action in this placement draws a control of its own. What
-    /// does not is what the footer is still allowed to advertise.
-    pub fn is_drawn(self) -> bool {
-        matches!(self, Placement::Toolbar | Placement::Row)
-    }
 }
 
 /// What running the action does.
@@ -292,13 +281,6 @@ pub fn from_zone(acts: &[Act], id: ZoneId) -> Option<&Act> {
     acts.iter().find(|a| a.id as u32 == id.index)
 }
 
-/// Whether any action in `acts` declares `k`, available or not. Used by the
-/// router to decide whether a screen has claimed a key the chrome would
-/// otherwise take.
-pub fn claims(acts: &[Act], k: &KeyEvent) -> bool {
-    !matches!(hit(acts, k), KeyHit::Miss)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -342,7 +324,6 @@ mod tests {
         // something the user did not ask for.
         let acts = [Act::toolbar(1, "export", Accel::key('x')).when(false)];
         assert_eq!(hit(&acts, &press(KeyCode::Char('x'))), KeyHit::Blocked);
-        assert!(claims(&acts, &press(KeyCode::Char('x'))));
         assert_eq!(hit(&acts, &press(KeyCode::Char('z'))), KeyHit::Miss);
     }
 
@@ -402,10 +383,6 @@ impl OpenMenu {
         items.sort_by_key(|a| u8::from(a.placement != Placement::Row));
         let sel = items.iter().position(|a| a.enabled).unwrap_or(0);
         Self { items, anchor, sel }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.items.is_empty()
     }
 
     /// Move the selection by `delta`, skipping unavailable entries and wrapping.

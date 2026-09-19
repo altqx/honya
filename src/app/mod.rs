@@ -7445,3 +7445,222 @@ mod remote_tests {
         assert!(app.log.iter().any(|(_, m)| m == "x"));
     }
 }
+
+/// The assertions that hold the action-table design together.
+///
+/// Each one is a way the old arrangement failed. Keys were written down in the
+/// `handle_key` match, the `hints()` array and `bindings.rs`, and nothing
+/// checked the three against each other: Project advertised a `Q` with no
+/// handler at all, and `bindings.rs` described three Reader keys that do
+/// something else. These walk every screen's table and hold it against what is
+/// actually drawn and actually dispatched.
+#[cfg(test)]
+mod action_table_tests {
+    use super::*;
+    use crate::app::action_table::{self, OVERFLOW_ID, Placement};
+    use crate::ui::kit::ZoneId;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    fn app() -> App {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        App::new(EventTx(tx), AppConfig::default())
+    }
+
+    fn on(screen: Screen) -> App {
+        let mut app = app();
+        app.screen = screen;
+        app
+    }
+
+    fn render(app: &mut App, w: u16, h: u16) {
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| app.render(f)).unwrap();
+    }
+
+    fn press(a: &action_table::Accel) -> KeyEvent {
+        let mods = if a.ctrl {
+            KeyModifiers::CONTROL
+        } else {
+            KeyModifiers::NONE
+        };
+        KeyEvent::new(a.code, mods)
+    }
+
+    /// The dead `Q`: advertised in the footer and in help for a handler that
+    /// was never written. An id in the table with no `run` arm logs a warning,
+    /// and there must not be one.
+    #[test]
+    fn every_declared_action_has_a_handler() {
+        for screen in chrome::TAB_SCREENS {
+            let mut app = on(screen);
+            for act in app.screen_actions() {
+                app.log.clear();
+                let _ = app.run_screen_action(act.id);
+                let unhandled: Vec<&String> = app
+                    .log
+                    .iter()
+                    .filter(|(_, m)| m.contains("no handler"))
+                    .map(|(_, m)| m)
+                    .collect();
+                assert!(
+                    unhandled.is_empty(),
+                    "{screen:?}: {} ({}) is advertised with no handler",
+                    act.label,
+                    act.accel.shown()
+                );
+            }
+        }
+    }
+
+    /// The key printed on a control is the key that runs it. Nothing declared
+    /// earlier in a screen's table may shadow a later accelerator, and no
+    /// reserved global may eat one.
+    #[test]
+    fn a_control_and_its_accelerator_resolve_to_the_same_action() {
+        for screen in chrome::TAB_SCREENS {
+            let app = on(screen);
+            let acts = app.screen_actions();
+            for act in acts.iter().filter(|a| a.enabled) {
+                assert_eq!(
+                    action_table::hit(&acts, &press(&act.accel)),
+                    action_table::KeyHit::Run(act.id),
+                    "{screen:?}: {} prints {} but that key runs something else",
+                    act.label,
+                    act.accel.shown()
+                );
+                assert_eq!(
+                    action_table::from_zone(&acts, act.zone()).map(|a| a.id),
+                    Some(act.id),
+                    "{screen:?}: {}'s zone addresses a different action",
+                    act.label
+                );
+            }
+        }
+    }
+
+    /// Nothing is reachable by keyboard alone: an action is drawn as a control,
+    /// or it is in the menu a right-click opens — on a row for a row action, on
+    /// the screen for everything else.
+    #[test]
+    fn nothing_is_keyboard_only() {
+        for screen in chrome::TAB_SCREENS {
+            let mut app = on(screen);
+            render(&mut app, 120, 40);
+            let ids = |app: &App, on_row: bool| match app.build_screen_menu((0, 0), on_row) {
+                Some(Action::OpenMenu(m)) => m.items.iter().map(|a| a.id).collect(),
+                _ => Vec::new(),
+            };
+            let on_row: Vec<u16> = ids(&app, true);
+            let on_screen: Vec<u16> = ids(&app, false);
+            for act in app.screen_actions() {
+                let menu = match act.placement {
+                    Placement::Row => &on_row,
+                    _ => &on_screen,
+                };
+                assert!(
+                    app.zones.contains(act.zone()) || menu.contains(&act.id),
+                    "{screen:?}: {} ({:?}) has no control and is not in the menu",
+                    act.label,
+                    act.placement
+                );
+            }
+        }
+    }
+
+    /// The footer may advertise only what has no control of its own, which is
+    /// what stops the fifteen-key legend creeping back.
+    #[test]
+    fn the_footer_advertises_only_what_has_no_control() {
+        for screen in chrome::TAB_SCREENS {
+            let app = on(screen);
+            let controls: Vec<String> = app
+                .screen_actions()
+                .iter()
+                .filter(|a| matches!(a.placement, Placement::Toolbar | Placement::Row))
+                .map(|a| a.accel.shown())
+                .collect();
+            for hint in app.footer_hints() {
+                assert!(
+                    !controls.contains(&hint.key),
+                    "{screen:?}: the footer restates {}, which is already a control",
+                    hint.key
+                );
+            }
+        }
+    }
+
+    /// At 60x20 the toolbars collapse rather than overflowing, and whatever
+    /// they dropped stays reachable behind the `⋯`.
+    #[test]
+    fn toolbars_collapse_without_overflowing() {
+        for screen in chrome::TAB_SCREENS {
+            let mut app = on(screen);
+            render(&mut app, 60, 20);
+            for (rect, id) in app.zones.all() {
+                assert!(
+                    rect.x + rect.width <= 60 && rect.y + rect.height <= 20,
+                    "{screen:?}: {id:?} at {rect:?} runs off a 60x20 frame"
+                );
+            }
+            let acts = app.screen_actions();
+            let drew_any = acts
+                .iter()
+                .any(|a| a.placement != Placement::Menu && app.zones.contains(a.zone()));
+            let dropped = acts.iter().any(|a| {
+                a.placement != Placement::Row && !app.zones.contains(a.zone())
+            });
+            // A screen that fits everything needs no `⋯`; one that dropped
+            // something must still offer the way to it. Screens showing an
+            // empty state legitimately draw nothing at all.
+            if drew_any && dropped {
+                assert!(
+                    app.zones.contains(ZoneId::action(OVERFLOW_ID)),
+                    "{screen:?}: controls were dropped with no ⋯ to reach them"
+                );
+            }
+        }
+    }
+
+    /// Opening a menu and picking an entry runs the same action its key does.
+    #[test]
+    fn a_menu_entry_runs_what_its_key_runs() {
+        let mut app = on(Screen::Reader);
+        render(&mut app, 120, 40);
+        let Some(Action::OpenMenu(menu)) = app.build_screen_menu((10, 10), false) else {
+            panic!("the Reader keeps actions behind its menu");
+        };
+        let entry = *menu
+            .items
+            .iter()
+            .find(|a| a.placement == Placement::Menu && a.enabled)
+            .expect("at least one available menu entry");
+        app.apply(Action::OpenMenu(menu));
+        assert!(app.menu.is_some());
+
+        // Picking it by its accelerator closes the menu and runs the action.
+        let by_menu = app.menu_key(press(&entry.accel));
+        assert!(app.menu.is_none(), "the menu stays open after a choice");
+        let by_key = on(Screen::Reader).run_screen_action(entry.id);
+        assert_eq!(
+            format!("{by_menu:?}"),
+            format!("{by_key:?}"),
+            "{} means something different from the menu",
+            entry.label
+        );
+    }
+
+    /// An overlay closes the menu, so the two are never both on screen and a
+    /// key never has two claimants.
+    #[test]
+    fn opening_an_overlay_closes_the_menu() {
+        let mut app = on(Screen::Reader);
+        render(&mut app, 120, 40);
+        if let Some(open) = app.build_screen_menu((10, 10), false) {
+            app.apply(open);
+        }
+        assert!(app.menu.is_some());
+        app.apply(Action::show_overlay(Overlay::Help(0)));
+        assert!(app.menu.is_none());
+    }
+}

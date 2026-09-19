@@ -308,7 +308,12 @@ impl ProjectScreen {
     /// advertised in the footer and in the help for a handler that did not
     /// exist; it cannot be now.
     pub fn run(&mut self, id: u16, active: Option<&ActiveProject>) -> Option<Action> {
-        let active = active?;
+        // Every id below is one this screen has; `None` is reserved for an id
+        // that is not, so an unhandled action stays distinguishable from one
+        // that simply has nothing to act on yet.
+        let Some(active) = active else {
+            return self.knows(id).then_some(Action::None);
+        };
         let vol = self.selected_volume(active).unwrap_or(active.vol);
         Some(match id {
             // Chapter selection (incl. the disk-completeness check that catches
@@ -408,6 +413,11 @@ impl ProjectScreen {
             P_QA => Action::show_overlay(Overlay::qa_placeholder()),
             _ => return None,
         })
+    }
+
+    /// Whether `id` is one of this screen's actions at all.
+    fn knows(&self, id: u16) -> bool {
+        self.actions(None).iter().any(|a| a.id == id)
     }
 
     /// Mouse: the wheel walks the tree (auto-following the volume under the
