@@ -342,3 +342,122 @@ mod tests {
         );
     }
 }
+
+/// An open context menu: what it lists, where it hangs from, and where the
+/// keyboard is inside it.
+///
+/// Lives on `App` rather than in `Overlay` because it is not one: it carries no
+/// state of its own beyond a selection, it is always about the screen it was
+/// opened on, and every entry is already declared in that screen's table.
+#[derive(Debug, Clone)]
+pub struct OpenMenu {
+    pub items: Vec<Act>,
+    /// The cell it hangs from — the pointer, or the control that opened it.
+    pub anchor: (u16, u16),
+    pub sel: usize,
+}
+
+impl OpenMenu {
+    /// Row actions first, then the rest, so the menu reads from the thing that
+    /// was clicked outward to the screen it sits on.
+    pub fn new(mut items: Vec<Act>, anchor: (u16, u16)) -> Self {
+        items.sort_by_key(|a| u8::from(a.placement != Placement::Row));
+        let sel = items.iter().position(|a| a.enabled).unwrap_or(0);
+        Self { items, anchor, sel }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+
+    /// Move the selection by `delta`, skipping unavailable entries and wrapping.
+    /// A menu of nothing but disabled entries leaves the selection alone rather
+    /// than looping forever looking for one.
+    pub fn step(&mut self, delta: isize) {
+        let n = self.items.len();
+        if n == 0 || !self.items.iter().any(|a| a.enabled) {
+            return;
+        }
+        let mut i = self.sel;
+        for _ in 0..n {
+            i = (i as isize + delta).rem_euclid(n as isize) as usize;
+            if self.items[i].enabled {
+                self.sel = i;
+                return;
+            }
+        }
+    }
+
+    pub fn selected(&self) -> Option<u16> {
+        self.items
+            .get(self.sel)
+            .filter(|a| a.enabled)
+            .map(|a| a.id)
+    }
+
+    /// The action `k` runs inside the menu, if any.
+    pub fn hit(&self, k: &KeyEvent) -> KeyHit {
+        hit(&self.items, k)
+    }
+}
+
+#[cfg(test)]
+mod menu_tests {
+    use super::*;
+
+    #[test]
+    fn row_actions_sort_above_screen_actions() {
+        let m = OpenMenu::new(
+            vec![
+                Act::menu(2, "export", Accel::key('x')),
+                Act::row(0, "read", Accel::code(KeyCode::Enter)),
+                Act::toolbar(1, "rescan", Accel::key('r')),
+                Act::row(3, "delete", Accel::key('d')),
+            ],
+            (0, 0),
+        );
+        let ids: Vec<u16> = m.items.iter().map(|a| a.id).collect();
+        assert_eq!(&ids[..2], &[0, 3], "row actions lead: {ids:?}");
+    }
+
+    #[test]
+    fn the_selection_opens_on_something_runnable() {
+        let m = OpenMenu::new(
+            vec![
+                Act::row(0, "read", Accel::key('o')).when(false),
+                Act::row(1, "delete", Accel::key('d')),
+            ],
+            (0, 0),
+        );
+        assert_eq!(m.selected(), Some(1));
+    }
+
+    #[test]
+    fn stepping_skips_what_cannot_be_run() {
+        let mut m = OpenMenu::new(
+            vec![
+                Act::row(0, "a", Accel::key('a')),
+                Act::row(1, "b", Accel::key('b')).when(false),
+                Act::row(2, "c", Accel::key('c')),
+            ],
+            (0, 0),
+        );
+        assert_eq!(m.selected(), Some(0));
+        m.step(1);
+        assert_eq!(m.selected(), Some(2));
+        m.step(1);
+        assert_eq!(m.selected(), Some(0), "wraps");
+        m.step(-1);
+        assert_eq!(m.selected(), Some(2));
+    }
+
+    #[test]
+    fn a_menu_of_nothing_available_does_not_spin() {
+        let mut m = OpenMenu::new(
+            vec![Act::row(0, "a", Accel::key('a')).when(false)],
+            (0, 0),
+        );
+        m.step(1);
+        assert_eq!(m.selected(), None);
+    }
+}

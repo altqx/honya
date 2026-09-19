@@ -37,6 +37,7 @@ use crate::ui::layout::{self, Skeleton};
 use crate::ui::mouse::{MouseGesture, MouseInput};
 use crate::workspace::Workspace;
 
+use self::action_table::Act;
 use self::lexicon::LexiconScreen;
 use self::overlay::{JumpKind, JumpTarget, Overlay};
 use self::project::ProjectScreen;
@@ -83,6 +84,10 @@ pub enum Action {
     ActivateFocused,
     /// Take the keyboard off the current control without closing anything.
     ClearFocus,
+    /// Open a context menu over the active screen, listing actions from its
+    /// table.
+    OpenMenu(Box<crate::app::action_table::OpenMenu>),
+    CloseMenu,
     ImportFile {
         source: PathBuf,
         title: String,
@@ -503,6 +508,10 @@ pub struct App {
     hover: crate::ui::kit::Hover,
     /// Where the keyboard is within the current surface.
     focus: crate::ui::kit::Focus,
+    /// An open context menu over the active screen. Not an `Overlay`: it holds
+    /// nothing but a selection, every entry is already declared in the screen's
+    /// action table, and it closes the moment a real overlay opens.
+    menu: Option<crate::app::action_table::OpenMenu>,
 
     /// Outbound feed to the relay task while remote is connected.
     remote_out: Option<tokio::sync::mpsc::UnboundedSender<crate::remote::protocol::RemoteOutbound>>,
@@ -593,6 +602,7 @@ impl App {
             zones: crate::ui::kit::Zones::new(),
             hover: crate::ui::kit::Hover::default(),
             focus: crate::ui::kit::Focus::new(),
+            menu: None,
             remote_out: None,
             remote_kill: None,
             remote_state: crate::remote::protocol::RemoteState::Disconnected,
@@ -2323,6 +2333,11 @@ impl App {
             self.zones = zones;
             return action;
         }
+        // 1b) A context menu is modal over the screen it was opened on, the
+        // same way an overlay is modal over everything.
+        if self.menu.is_some() {
+            return self.menu_mouse(m);
+        }
         let Some(sk) = self.last_skeleton else {
             return Action::None;
         };
@@ -2340,17 +2355,42 @@ impl App {
             return self.route_mouse_to_screen(m);
         }
 
-        // 3) Chrome is answered from the registry, so a click lands on whatever
+        // 3) Right-click keeps its "back · dismiss" meaning everywhere except
+        // on a screen row, where it opens that row's menu. The screen is told
+        // first so its selection moves to the row the menu is about.
+        if matches!(m.gesture, MouseGesture::RightClick) {
+            let on_row = self
+                .zones
+                .at(m.col, m.row)
+                .is_some_and(|z| z.kind == crate::ui::kit::ZoneKind::Row);
+            if on_row {
+                let select = self.route_mouse_to_screen(m);
+                if let Some(open) = self.build_screen_menu((m.col, m.row), true) {
+                    return open;
+                }
+                return select;
+            }
+            return self.route_mouse_to_screen(m);
+        }
+
+        // 4) Chrome is answered from the registry, so a click lands on whatever
         // was actually drawn there rather than on a region guessed from the
         // skeleton. Anything the chrome does not claim falls through to the
         // screen below.
-        if let Some(id) = self.zones.at(m.col, m.row)
-            && let Some(action) = self.chrome_action(id)
-        {
-            return action;
+        if let Some(id) = self.zones.at(m.col, m.row) {
+            if let Some(action) = self.chrome_action(id) {
+                return action;
+            }
+            // 5) A control from the active screen's action table — a toolbar
+            // button, a chip, an inline row button. Answered here rather than
+            // inside the screen so the click, the key and the menu entry all
+            // reach the same `run`.
+            if let Some(action) = self.focused_action(id) {
+                return action;
+            }
         }
 
-        // 4) Body → the active screen decides (select / activate / focus).
+        // 6) Body → the active screen decides (select / activate / focus).
         if m.in_rect(sk.body) {
             return self.route_mouse_to_screen(m);
         }
@@ -2481,6 +2521,12 @@ impl App {
             return self.overlay.handle_key(k);
         }
 
+        // 1b) A context menu is modal over the screen: it answers every key, and
+        // nothing falls through to what it is covering.
+        if self.menu.is_some() {
+            return self.menu_key(k);
+        }
+
         // 2) Ctrl-P or Ctrl-K opens the command bar even outside an overlay.
         // Two bindings because this is the escape hatch for every other
         // binding: it has to be findable by whichever one a user reaches for.
@@ -2500,7 +2546,8 @@ impl App {
             return self.route_to_screen(k);
         }
 
-        // 3) Global keys (only when nothing is capturing input).
+        // 3) Reserved globals — never shadowable, because they are the way out
+        // of wherever you are. Everything else a screen may claim.
         match k.code {
             KeyCode::Char(d @ '1'..='6') => {
                 if let Some(s) = Screen::from_digit(d) {
@@ -2516,8 +2563,6 @@ impl App {
             }
             KeyCode::Tab => return Action::FocusNext,
             KeyCode::BackTab => return Action::FocusPrev,
-            KeyCode::Char(']') => return Action::Goto(self.next_screen()),
-            KeyCode::Char('[') => return Action::Goto(self.prev_screen()),
             // Space and Enter act on the focused control, and only then — with
             // nothing focused they belong to the screen, which is what keeps
             // Project's Space-to-mark working.
@@ -2527,6 +2572,26 @@ impl App {
             // Esc steps back one rung: off the control first, then the toast.
             KeyCode::Esc if self.focus.get().is_some() => return Action::ClearFocus,
             KeyCode::Char('?') => return Action::show_overlay(Overlay::Help(0)),
+            _ => {}
+        }
+
+        // 4) The active screen's action table, ahead of the remaining globals
+        // so a screen can claim a key the chrome would otherwise eat — which is
+        // what lets `[`/`]` step chapters in the Reader while still cycling
+        // screens everywhere else.
+        let acts = self.screen_actions();
+        match action_table::hit(&acts, &k) {
+            action_table::KeyHit::Run(id) => return self.run_screen_action(id),
+            // Declared here but unavailable: the key is claimed, so it does
+            // nothing rather than falling through to a navigation arm.
+            action_table::KeyHit::Blocked => return Action::None,
+            action_table::KeyHit::Miss => {}
+        }
+
+        // 5) The remaining globals.
+        match k.code {
+            KeyCode::Char(']') => return Action::Goto(self.next_screen()),
+            KeyCode::Char('[') => return Action::Goto(self.prev_screen()),
             KeyCode::Char(':') => return Action::show_overlay(Overlay::palette()),
             KeyCode::Char('l')
                 if matches!(self.screen, Screen::Project) && self.active.is_some() =>
@@ -2543,7 +2608,7 @@ impl App {
             _ => {}
         }
 
-        // 4) Otherwise the active screen decides.
+        // 6) Otherwise the active screen's navigation arms decide.
         self.route_to_screen(k)
     }
 
@@ -2563,6 +2628,191 @@ impl App {
             || (matches!(self.screen, Screen::Refine)
                 && self.active.is_some()
                 && self.refine.is_capturing())
+    }
+
+    /// The active screen's action table, availability resolved for right now.
+    ///
+    /// One call site for all six screens: the key router, the toolbar, the
+    /// context menu, the footer and the help overlay all read this, which is
+    /// what stops any two of them disagreeing about what a key does.
+    pub(crate) fn screen_actions(&self) -> Vec<Act> {
+        match self.screen {
+            Screen::Shelf => self.shelf.actions(&self.projects),
+            Screen::Project => self.project.actions(self.active.as_ref()),
+            Screen::Translate => self.translate.actions(),
+            Screen::Reader => self.reader.actions(),
+            Screen::Lexicon => self
+                .lexicon
+                .actions(self.active.as_ref().map(|a| &a.workspace)),
+            // Refine is per-project: it offers nothing until one is open.
+            Screen::Refine if self.active.is_none() => Vec::new(),
+            Screen::Refine => self.refine.actions(self.active.as_ref().map(|a| &a.project)),
+        }
+    }
+
+    /// Run one of the active screen's actions, however it was reached.
+    fn run_screen_action(&mut self, id: u16) -> Action {
+        let ran = match self.screen {
+            Screen::Shelf => {
+                let projects = std::mem::take(&mut self.projects);
+                let out = self
+                    .shelf
+                    .run(id, &projects, self.cfg.preferred_language);
+                self.projects = projects;
+                out
+            }
+            Screen::Project => {
+                let active = self.active.take();
+                let out = self.project.run(id, active.as_ref());
+                self.active = active;
+                out
+            }
+            Screen::Translate => self.translate.run(id),
+            Screen::Reader => self.reader.run(id),
+            Screen::Lexicon => {
+                let active = self.active.take();
+                let out = self.lexicon.run(id, active.as_ref().map(|a| &a.workspace));
+                self.active = active;
+                out
+            }
+            Screen::Refine if self.active.is_none() => None,
+            Screen::Refine => {
+                let active = self.active.take();
+                let out = self.refine.run(id, active.as_ref().map(|a| &a.project));
+                self.active = active;
+                out
+            }
+        };
+        // A table entry with no `run` arm is a bug, not a silent no-op: it is
+        // exactly the dead `Q` this design exists to make impossible, so say so
+        // in the log rather than swallowing it.
+        ran.unwrap_or_else(|| {
+            self.push_log(
+                LogLevel::Warn,
+                format!("no handler for action {id} on {:?}", self.screen),
+            );
+            Action::None
+        })
+    }
+
+    /// Build the context menu for the active screen: the long tail, plus the
+    /// row actions when the pointer was on a row.
+    fn build_screen_menu(&self, anchor: (u16, u16), on_row: bool) -> Option<Action> {
+        let items: Vec<Act> = self
+            .screen_actions()
+            .into_iter()
+            .filter(|a| match a.placement {
+                self::action_table::Placement::Row => on_row,
+                action_table::Placement::Menu => true,
+                // A toolbar control is already on screen; it is repeated here
+                // only when the pointer is not on a row, so a right-click on
+                // empty space still reaches everything.
+                action_table::Placement::Toolbar => !on_row,
+            })
+            .collect();
+        if items.is_empty() {
+            return None;
+        }
+        Some(Action::OpenMenu(Box::new(action_table::OpenMenu::new(
+            items, anchor,
+        ))))
+    }
+
+    /// What activating a focused screen control means.
+    ///
+    /// `ActivateFocused` used to consult the chrome and nothing else, so Space
+    /// or Enter on a focused Reader chip did nothing and every toolbar control
+    /// would have been mouse-only.
+    fn focused_action(&mut self, id: crate::ui::kit::ZoneId) -> Option<Action> {
+        if id.kind != crate::ui::kit::ZoneKind::Action {
+            return None;
+        }
+        if id.index == action_table::OVERFLOW_ID as u32 {
+            let anchor = self.zones.rect_of(id).map(|r| (r.x, r.y)).unwrap_or((0, 0));
+            return Some(
+                self.build_screen_menu(anchor, false)
+                    .unwrap_or(Action::None),
+            );
+        }
+        let acts = self.screen_actions();
+        let (act_id, enabled) = {
+            let act = action_table::from_zone(&acts, id)?;
+            (act.id, act.enabled)
+        };
+        if !enabled {
+            return Some(Action::None);
+        }
+        Some(self.run_screen_action(act_id))
+    }
+
+    /// Keys while a context menu is open. The menu is modal: nothing falls
+    /// through to the screen behind it.
+    fn menu_key(&mut self, k: KeyEvent) -> Action {
+        let Some(menu) = self.menu.as_ref() else {
+            return Action::None;
+        };
+        // An entry's own accelerator is checked first, so the key printed
+        // beside it always runs it — even when it is `j` or `k`.
+        if let action_table::KeyHit::Run(id) = menu.hit(&k) {
+            self.menu = None;
+            return self.run_screen_action(id);
+        }
+        let selected = menu.selected();
+        match k.code {
+            KeyCode::Esc => Action::CloseMenu,
+            KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => {
+                if let Some(m) = self.menu.as_mut() {
+                    m.step(-1);
+                }
+                Action::None
+            }
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
+                if let Some(m) = self.menu.as_mut() {
+                    m.step(1);
+                }
+                Action::None
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => match selected {
+                Some(id) => {
+                    self.menu = None;
+                    self.run_screen_action(id)
+                }
+                None => Action::None,
+            },
+            _ => Action::None,
+        }
+    }
+
+    /// Mouse while a context menu is open.
+    fn menu_mouse(&mut self, m: MouseInput) -> Action {
+        use crate::ui::kit::ZoneKind;
+        if m.is_scroll() {
+            if let Some(menu) = self.menu.as_mut() {
+                menu.step(if matches!(m.gesture, MouseGesture::ScrollDown) {
+                    1
+                } else {
+                    -1
+                });
+            }
+            return Action::None;
+        }
+        match self.zones.at(m.col, m.row) {
+            Some(id) if id.kind == ZoneKind::Action => {
+                let enabled = self
+                    .menu
+                    .as_ref()
+                    .and_then(|mn| action_table::from_zone(&mn.items, id))
+                    .is_some_and(|a| a.enabled);
+                if !enabled {
+                    return Action::None;
+                }
+                self.menu = None;
+                self.run_screen_action(id.index as u16)
+            }
+            // Inside the menu but on no entry: inert, not a dismiss.
+            Some(id) if id.kind == ZoneKind::ModalFrame => Action::None,
+            _ => Action::CloseMenu,
+        }
     }
 
     fn route_to_screen(&mut self, k: KeyEvent) -> Action {
@@ -2627,17 +2877,31 @@ impl App {
                 // The focused control means the same thing however it is
                 // reached, so this routes through the click handler rather
                 // than restating what each zone does.
-                if let Some(id) = self.focus.get()
-                    && let Some(action) = self.chrome_action(id)
-                {
-                    self.apply(action);
+                if let Some(id) = self.focus.get() {
+                    if let Some(action) = self.chrome_action(id) {
+                        self.apply(action);
+                    } else if let Some(action) = self.focused_action(id) {
+                        self.apply(action);
+                    }
                 }
+            }
+            Action::OpenMenu(menu) => {
+                // The menu takes the keyboard; leaving focus on the control
+                // behind it would let Space fire that control instead.
+                self.focus.clear();
+                self.menu = Some(*menu);
+            }
+            Action::CloseMenu => {
+                self.menu = None;
             }
             Action::Goto(s) => {
                 self.screen = s;
                 self.toast = None;
+                // A menu belongs to the screen it was opened on.
+                self.menu = None;
             }
             Action::ShowOverlay(ov) => {
+                self.menu = None;
                 // Palette placeholders carry no config; rebuild from live config.
                 self.overlay = match *ov {
                     // Welcome placeholders carry no status; rebuild from live state.
@@ -5245,6 +5509,23 @@ impl App {
             }
             chrome::build_bar(&hints, update.as_deref(), installed.as_deref())
                 .render(&mut ui, sk.footer);
+        }
+
+        // A context menu sits over the screen but under an overlay — opening an
+        // overlay closes it, so the two are never both on screen.
+        if let Some(menu) = self.menu.clone() {
+            let mut ui = Ui::new(
+                f,
+                &mut self.zones,
+                &self.theme,
+                metrics,
+                &self.focus,
+                self.hover,
+                frame_count,
+            );
+            crate::ui::kit::menu::Menu::new(&menu.items, menu.anchor)
+                .sel(menu.sel)
+                .render(&mut ui, area);
         }
 
         // Overlay last, over a Clear, so it always wins.

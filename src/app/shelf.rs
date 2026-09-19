@@ -13,6 +13,7 @@ use crate::theme::{Theme, status_glyph};
 use crate::ui::mouse::{MouseGesture, MouseInput};
 use crate::ui::text::{col_width, pad_to_cols, thai_display_safe, truncate_cols};
 
+use super::action_table::Act;
 use super::Action;
 use super::overlay::Overlay;
 
@@ -386,6 +387,31 @@ impl ShelfScreen {
                 }
             },
         );
+    }
+
+    /// This screen's commands, availability resolved for this frame.
+    ///
+    /// The one declaration everything else reads: `handle_key` dispatches from
+    /// it, the toolbar and the context menu draw from it, and help lists it.
+    /// See [`super::action_table`].
+    pub fn actions(&self, projects: &[Project]) -> Vec<Act> {
+        let _ = projects;
+        Vec::new()
+    }
+
+    /// Run the action `id` stands for, whether it was reached by key, by a
+    /// toolbar control, by a row button or from the menu.
+    ///
+    /// `None` means "no such action here" — the sentinel that makes an
+    /// advertised binding with no handler impossible to write.
+    pub fn run(
+        &mut self,
+        id: u16,
+        projects: &[Project],
+        preferred_language: crate::model::TargetLanguage,
+    ) -> Option<Action> {
+        let _ = (id, projects, preferred_language);
+        None
     }
 
     pub fn hints(&self) -> &'static [(&'static str, &'static str)] {

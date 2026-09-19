@@ -16,6 +16,7 @@ use crate::ui::text::{col_width, pad_to_cols, thai_display_safe, truncate_cols};
 use crate::ui::widgets::{render_line_gauge, status_cell};
 
 use super::overlay::Overlay;
+use super::action_table::Act;
 use super::{Action, ActiveProject};
 
 /// A flattened tree row: either a volume header or a chapter.
@@ -898,6 +899,30 @@ impl ProjectScreen {
             Paragraph::new(lines).style(Style::default().bg(theme.bg_panel)),
             inner,
         );
+    }
+
+    /// This screen's commands, availability resolved for this frame.
+    ///
+    /// The one declaration everything else reads: `handle_key` dispatches from
+    /// it, the toolbar and the context menu draw from it, and help lists it.
+    /// See [`super::action_table`].
+    pub fn actions(&self, active: Option<&ActiveProject>) -> Vec<Act> {
+        let _ = active;
+        Vec::new()
+    }
+
+    /// Run the action `id` stands for, whether it was reached by key, by a
+    /// toolbar control, by a row button or from the menu.
+    ///
+    /// `None` means "no such action here" — the sentinel that makes an
+    /// advertised binding with no handler impossible to write.
+    pub fn run(
+        &mut self,
+        id: u16,
+        active: Option<&ActiveProject>,
+    ) -> Option<Action> {
+        let _ = (id, active);
+        None
     }
 
     pub fn hints(&self) -> &'static [(&'static str, &'static str)] {

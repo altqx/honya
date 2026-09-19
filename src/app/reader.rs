@@ -21,6 +21,7 @@ use crate::theme::{self, Theme};
 use crate::ui::mouse::{MouseGesture, MouseInput};
 use crate::workspace::Workspace;
 
+use super::action_table::Act;
 use super::Action;
 use super::overlay::Overlay;
 
@@ -1294,6 +1295,25 @@ impl ReaderScreen {
                 faint,
             );
         }
+    }
+
+    /// This screen's commands, availability resolved for this frame.
+    ///
+    /// The one declaration everything else reads: `handle_key` dispatches from
+    /// it, the toolbar and the context menu draw from it, and help lists it.
+    /// See [`super::action_table`].
+    pub fn actions(&self) -> Vec<Act> {
+        Vec::new()
+    }
+
+    /// Run the action `id` stands for, whether it was reached by key, by a
+    /// toolbar control, by a row button or from the menu.
+    ///
+    /// `None` means "no such action here" — the sentinel that makes an
+    /// advertised binding with no handler impossible to write.
+    pub fn run(&mut self, id: u16) -> Option<Action> {
+        let _ = id;
+        None
     }
 
     pub fn hints(&self) -> &'static [(&'static str, &'static str)] {
