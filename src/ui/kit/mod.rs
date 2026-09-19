@@ -22,6 +22,7 @@ pub mod editor;
 pub mod focus;
 pub mod form;
 pub mod list;
+pub mod menu;
 pub mod modal;
 pub mod picker;
 pub mod progress;
@@ -30,6 +31,7 @@ pub mod style;
 pub mod table;
 pub mod tabs;
 pub mod tokens;
+pub mod toolbar;
 pub mod zones;
 
 pub use ctx::Ui;

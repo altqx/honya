@@ -3,6 +3,7 @@
 //! Layout invariant (see ui::layout::skeleton): header / tabs / rule / body /
 //! toast / footer; the overlay is drawn LAST over a `Clear` so it always wins.
 
+pub mod action_table;
 pub mod bindings;
 pub mod lexicon;
 pub mod overlay;

@@ -40,6 +40,10 @@ pub enum ZoneKind {
     // --- generic controls ---
     /// A button; `index` is a caller-assigned `ButtonId`.
     Button,
+    /// A control declared in a screen's action table — a toolbar button or
+    /// chip, an inline row button, a context-menu entry. `index` is the
+    /// action's id, which is why it cannot collide with a `Button` index.
+    Action,
     /// A row in a list; `index` is the row's index in the full (unwindowed) data.
     Row,
     /// A column header in a table; `index` is the column.
@@ -122,6 +126,11 @@ impl ZoneId {
 
     pub const fn button(index: u32) -> Self {
         Self::new(ZoneKind::Button, index)
+    }
+
+    /// A control for the action with this id in the active screen's table.
+    pub const fn action(id: u16) -> Self {
+        Self::new(ZoneKind::Action, id as u32)
     }
 
     pub const fn segment(index: usize) -> Self {
