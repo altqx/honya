@@ -7687,6 +7687,50 @@ mod action_table_tests {
         assert_eq!(state(&app), before);
     }
 
+    /// The `⋯` is reachable both ways: activating it with the keyboard opens
+    /// the same menu a click on it does. Without this the long tail would be
+    /// mouse-only, which is the failure the focus ring exists to prevent.
+    #[test]
+    fn the_overflow_control_opens_the_menu_from_either_hand() {
+        let overflow = ZoneId::action(OVERFLOW_ID);
+        let mut app = on(Screen::Reader);
+        render(&mut app, 120, 40);
+        assert!(app.zones.contains(overflow), "the Reader draws a ⋯");
+
+        // Keyboard: park focus on it and activate.
+        app.focus.set(overflow);
+        app.apply(Action::ActivateFocused);
+        let by_key: Vec<u16> = app
+            .menu
+            .as_ref()
+            .expect("activating ⋯ opens the menu")
+            .items
+            .iter()
+            .map(|a| a.id)
+            .collect();
+
+        // Pointer: the same control, clicked.
+        let mut app = on(Screen::Reader);
+        render(&mut app, 120, 40);
+        let rect = app.zones.rect_of(overflow).unwrap();
+        let action = app.route_mouse(MouseInput {
+            gesture: MouseGesture::Click { double: false },
+            col: rect.x + rect.width / 2,
+            row: rect.y,
+        });
+        app.apply(action);
+        let by_click: Vec<u16> = app
+            .menu
+            .as_ref()
+            .expect("clicking ⋯ opens the menu")
+            .items
+            .iter()
+            .map(|a| a.id)
+            .collect();
+
+        assert_eq!(by_key, by_click);
+    }
+
     /// An overlay closes the menu, so the two are never both on screen and a
     /// key never has two claimants.
     #[test]
