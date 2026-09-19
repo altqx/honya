@@ -1252,12 +1252,13 @@ impl RefineScreen {
 
     pub fn render(
         &mut self,
-        f: &mut Frame,
+        ui: &mut crate::ui::kit::Ui,
         area: Rect,
-        frame: u64,
         has_project: bool,
-        theme: &Theme,
     ) {
+        let theme: &Theme = ui.theme;
+        let frame = ui.frame_count;
+        let f: &mut Frame = ui.frame;
         if !has_project {
             self.render_no_project(f, area, theme);
             return;

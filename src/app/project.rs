@@ -430,11 +430,12 @@ impl ProjectScreen {
 
     pub fn render(
         &mut self,
-        f: &mut Frame,
+        ui: &mut crate::ui::kit::Ui,
         area: Rect,
         active: Option<&ActiveProject>,
-        theme: &Theme,
     ) {
+        let theme: &Theme = ui.theme;
+        let f: &mut Frame = ui.frame;
         let Some(active) = active else {
             empty_state(f, area, theme);
             return;
@@ -1439,15 +1440,12 @@ mod tests {
     /// selected row) opens it in the Reader.
     #[test]
     fn clicking_a_chapter_selects_then_opens() {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
 
         let active = active_project(); // Vol.01 with chapters 1 & 2
         let mut screen = ProjectScreen::new();
-        let theme = crate::model::ThemeId::default().build();
-        let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
-        term.draw(|f| screen.render(f, f.area(), Some(&active), &theme))
-            .unwrap();
+        crate::ui::kit::ctx::draw_test(100, 30, |ui, area| {
+            screen.render(ui, area, Some(&active))
+        });
         let ta = screen.tree_area;
 
         // Rows: 0 = Vol header, 1 = ch 1, 2 = ch 2. Click ch 1.
@@ -1466,15 +1464,12 @@ mod tests {
     /// auto-follow the keyboard does), rather than opening across volumes.
     #[test]
     fn clicking_into_another_volume_follows_it() {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
 
         let active = two_vol_project(); // active.vol == 1
         let mut screen = ProjectScreen::new();
-        let theme = crate::model::ThemeId::default().build();
-        let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
-        term.draw(|f| screen.render(f, f.area(), Some(&active), &theme))
-            .unwrap();
+        crate::ui::kit::ctx::draw_test(100, 30, |ui, area| {
+            screen.render(ui, area, Some(&active))
+        });
         let ta = screen.tree_area;
 
         // Rows: 0 Vol.01, 1 ch1, 2 ch2, 3 Vol.02, 4 ch1, 5 ch2. Click into Vol.02.
@@ -1486,8 +1481,6 @@ mod tests {
 
     #[test]
     fn chapter_tree_draws_a_scrollbar_when_overflowing() {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
 
         let mut active = active_project();
         let vol = active.project.volumes.first_mut().unwrap();
@@ -1495,16 +1488,15 @@ mod tests {
             vol.chapters.push(chapter(i));
         }
         let mut screen = ProjectScreen::new();
-        let theme = crate::model::ThemeId::default().build();
-        let mut term = Terminal::new(TestBackend::new(100, 12)).unwrap();
-        term.draw(|f| screen.render(f, f.area(), Some(&active), &theme))
-            .unwrap();
+        let (lines, _) = crate::ui::kit::ctx::draw_test(100, 12, |ui, area| {
+            screen.render(ui, area, Some(&active))
+        });
 
-        let outer_right = screen.tree_area.x + screen.tree_area.width;
+        let outer_right = (screen.tree_area.x + screen.tree_area.width) as usize;
         let mut saw_bar = false;
         for row in screen.tree_area.y..screen.tree_area.y + screen.tree_area.height {
-            let cell = term.backend().buffer()[(outer_right, row)].symbol();
-            if cell == "┃" || cell == "│" {
+            let cell = lines[row as usize].chars().nth(outer_right);
+            if matches!(cell, Some('┃') | Some('│')) {
                 saw_bar = true;
                 break;
             }

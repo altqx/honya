@@ -2401,10 +2401,13 @@ impl App {
     }
 
     fn route_mouse_to_screen(&mut self, m: MouseInput) -> Action {
+        // Screens ported onto the kit answer from the registry; the rest still
+        // work out which row was hit from the pointer's coordinates.
+        let zone = self.zones.at(m.col, m.row);
         match self.screen {
             Screen::Shelf => {
                 self.shelf
-                    .handle_mouse(m, &self.projects, self.cfg.preferred_language)
+                    .handle_mouse(m, zone, &self.projects, self.cfg.preferred_language)
             }
             Screen::Project => self.project.handle_mouse(m, self.active.as_ref()),
             Screen::Translate => self.translate.handle_mouse(m),
@@ -5214,7 +5217,7 @@ impl App {
             chrome::render_rule(&mut ui, sk.rule);
         }
 
-        self.render_body(f, sk.body);
+        self.render_body(f, sk.body, metrics);
 
         {
             let mut ui = Ui::new(
@@ -5265,31 +5268,41 @@ impl App {
         }
     }
 
-    fn render_body(&mut self, f: &mut Frame, body: Rect) {
+    fn render_body(
+        &mut self,
+        f: &mut Frame,
+        body: Rect,
+        metrics: crate::ui::kit::Metrics,
+    ) {
+        use crate::ui::kit::Ui;
+
+        // Fields are borrowed disjointly: the registry mutably, the palette and
+        // focus immutably, and each screen's own state mutably. Screens are
+        // ported onto the kit one at a time; the rest still draw to `ui.frame`.
+        let foreign = matches!(self.screen, Screen::Shelf)
+            .then(|| self.foreign_busy_dirs())
+            .unwrap_or_default();
+        let mut ui = Ui::new(
+            f,
+            &mut self.zones,
+            &self.theme,
+            metrics,
+            &self.focus,
+            self.hover,
+            self.frame,
+        );
         match self.screen {
-            Screen::Shelf => {
-                let foreign = self.foreign_busy_dirs();
-                self.shelf
-                    .render(f, body, &self.projects, &foreign, &self.theme)
-            }
-            Screen::Project => self
-                .project
-                .render(f, body, self.active.as_ref(), &self.theme),
+            Screen::Shelf => self.shelf.render(&mut ui, body, &self.projects, &foreign),
+            Screen::Project => self.project.render(&mut ui, body, self.active.as_ref()),
             Screen::Translate => {
-                self.translate
-                    .render(f, body, self.frame, &self.theme, self.cfg.service_tier)
+                self.translate.render(&mut ui, body, self.cfg.service_tier)
             }
-            Screen::Reader => self.reader.render(f, body, &self.theme),
-            Screen::Lexicon => self.lexicon.render(
-                f,
-                body,
-                self.active.as_ref().map(|a| &a.workspace),
-                &self.theme,
-            ),
-            Screen::Refine => {
-                self.refine
-                    .render(f, body, self.frame, self.active.is_some(), &self.theme)
+            Screen::Reader => self.reader.render(&mut ui, body),
+            Screen::Lexicon => {
+                self.lexicon
+                    .render(&mut ui, body, self.active.as_ref().map(|a| &a.workspace))
             }
+            Screen::Refine => self.refine.render(&mut ui, body, self.active.is_some()),
         }
     }
 
@@ -5298,6 +5311,8 @@ impl App {
         (self.remote_state, self.remote_watchers)
     }
 
+    /// The breadcrumb as one string, for the GUI header. The TUI uses
+    /// `crumb_segments`, which keeps the parts separate so each can be clicked.
     pub(crate) fn crumb(&self) -> String {
         match (&self.active, self.screen) {
             (Some(active), Screen::Shelf) => format!("honya 本屋   {}", active.project.title),

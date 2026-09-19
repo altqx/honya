@@ -607,7 +607,14 @@ impl LexiconScreen {
         self.list.select(Some(next));
     }
 
-    pub fn render(&mut self, f: &mut Frame, area: Rect, ws: Option<&Workspace>, theme: &Theme) {
+    pub fn render(
+        &mut self,
+        ui: &mut crate::ui::kit::Ui,
+        area: Rect,
+        ws: Option<&Workspace>,
+    ) {
+        let theme: &Theme = ui.theme;
+        let f: &mut Frame = ui.frame;
         self.screen_area = area;
         let rows = Layout::default()
             .direction(Direction::Vertical)

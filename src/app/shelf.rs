@@ -2,15 +2,14 @@
 
 use std::path::PathBuf;
 
-use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::ListState;
 
 use crate::model::{ChapterKind, ChapterStatus, Project};
-use crate::theme::{self, Theme, status_glyph};
+use crate::theme::{Theme, status_glyph};
 use crate::ui::mouse::{MouseGesture, MouseInput};
 use crate::ui::text::{col_width, pad_to_cols, thai_display_safe, truncate_cols};
 
@@ -23,6 +22,16 @@ pub struct ShelfScreen {
     unimported: Vec<(PathBuf, u64)>,
     /// The list's drawn rectangle, captured each frame for mouse hit-testing.
     list_area: Rect,
+}
+
+/// One row of the shelf list. Only projects and the import row are selectable;
+/// the rule and the loose files below it are there to be read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ShelfRow {
+    Project(usize),
+    Rule,
+    Import,
+    File(usize),
 }
 
 impl ShelfScreen {
@@ -152,6 +161,7 @@ impl ShelfScreen {
     pub fn handle_mouse(
         &mut self,
         m: MouseInput,
+        zone: Option<crate::ui::kit::ZoneId>,
         projects: &[Project],
         preferred_language: crate::model::TargetLanguage,
     ) -> Action {
@@ -165,12 +175,16 @@ impl ShelfScreen {
                 Action::None
             }
             MouseGesture::Click { double } => {
-                let Some(item) = self.item_at(projects, m.row) else {
+                // The clicked row comes from the registry the list wrote while
+                // drawing, so there is no second copy of the row layout here to
+                // fall out of step with it.
+                let Some(row) = zone.and_then(|z| z.row_index()) else {
                     return Action::None;
                 };
-                // The import row and any unimported sub-rows collapse to one target.
+                let Some(target) = self.selection_at_row(projects, row) else {
+                    return Action::None;
+                };
                 let import_idx = self.import_row_index(projects);
-                let target = item.min(import_idx);
                 let already = self.list.selected() == Some(target);
                 self.list.select(Some(target));
                 if double || already {
@@ -202,170 +216,176 @@ impl ShelfScreen {
         self.list.select(Some(next));
     }
 
-    /// The list item index drawn at terminal `row`, walking item heights from the
-    /// widget's scroll offset (project rows are 1 line; the import item is 2).
-    fn item_at(&self, projects: &[Project], row: u16) -> Option<usize> {
-        if row < self.list_area.y || row >= self.list_area.y + self.list_area.height {
-            return None;
+    /// The rows this shelf shows, in screen order.
+    ///
+    /// Shared with the click handler: the list interleaves a rule and the
+    /// loose source files among the selectable rows, so a clicked row index is
+    /// not a selection index, and the mapping is only right while both sides
+    /// agree about where the extras went.
+    pub(crate) fn rows(&self, projects: &[Project]) -> Vec<ShelfRow> {
+        let mut rows: Vec<ShelfRow> = (0..projects.len()).map(ShelfRow::Project).collect();
+        rows.push(ShelfRow::Rule);
+        rows.push(ShelfRow::Import);
+        rows.extend((0..self.unimported.len()).map(ShelfRow::File));
+        rows
+    }
+
+    /// The selection index a clicked row stands for, if it is selectable.
+    pub(crate) fn selection_at_row(&self, projects: &[Project], row: usize) -> Option<usize> {
+        match self.rows(projects).get(row)? {
+            ShelfRow::Project(i) => Some(*i),
+            // A loose file is not its own destination — clicking one is a
+            // request to import it, which is the row above.
+            ShelfRow::Import | ShelfRow::File(_) => Some(self.import_row_index(projects)),
+            ShelfRow::Rule => None,
         }
-        let import_idx = self.import_row_index(projects);
-        let total = import_idx + 1 + self.unimported.len();
-        let mut line = self.list_area.y;
-        let mut idx = self.list.offset();
-        while idx < total {
-            let h: u16 = if idx == import_idx { 2 } else { 1 };
-            if row >= line && row < line + h {
-                return Some(idx);
-            }
-            line += h;
-            idx += 1;
-        }
-        None
     }
 
     pub fn render(
         &mut self,
-        f: &mut Frame,
+        ui: &mut crate::ui::kit::Ui,
         area: Rect,
         projects: &[Project],
         foreign_busy: &[std::path::PathBuf],
-        theme: &Theme,
     ) {
-        let rows = self.row_count(projects);
-        if self.list.selected().is_none_or(|s| s >= rows) {
-            self.list.select(Some(rows.saturating_sub(1)));
+        use crate::ui::kit::list::{self, ListState, Row};
+        use crate::ui::kit::{ZoneKind, ctx::row_at};
+
+        let count = self.row_count(projects);
+        if self.list.selected().is_none_or(|s| s >= count) {
+            self.list.select(Some(count.saturating_sub(1)));
         }
-
-        let block = Block::default()
-            .borders(Borders::NONE)
-            .style(Style::default().bg(theme.bg));
-        let inner = block.inner(area);
-        f.render_widget(block, area);
-
-        if inner.height < 2 {
+        ui.fill(area, Style::default().bg(ui.theme.bg));
+        if area.height < 2 {
             return;
         }
 
-        let title = Line::from(vec![
-            Span::styled(
-                "  書架 ",
-                Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("— your shelf", Style::default().fg(theme.ink_soft)),
-        ]);
-        let count = format!(
+        let summary = format!(
             "./  ({} project{} · {} source file{})",
             projects.len(),
             plural(projects.len()),
             self.unimported.len(),
             plural(self.unimported.len()),
         );
-        f.render_widget(
-            Paragraph::new(title).style(Style::default().bg(theme.bg)),
-            Rect {
-                x: inner.x,
-                y: inner.y,
-                width: inner.width,
-                height: 1,
-            },
+        ui.line(
+            row_at(area, 0),
+            Line::from(vec![
+                Span::styled(
+                    "  書架 ",
+                    Style::default()
+                        .fg(ui.theme.ink)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("— your shelf", Style::default().fg(ui.theme.ink_soft)),
+            ]),
+            Style::default().bg(ui.theme.bg),
         );
-        let cw = col_width(&count) as u16;
-        if inner.width > cw + 2 {
-            f.render_widget(
-                Paragraph::new(Span::styled(count, Style::default().fg(theme.ink_faint)))
-                    .style(Style::default().bg(theme.bg)),
+        let cw = col_width(&summary) as u16;
+        if area.width > cw + 2 {
+            ui.text(
                 Rect {
-                    x: inner.x + inner.width - cw - 1,
-                    y: inner.y,
+                    x: area.x + area.width - cw - 1,
+                    y: area.y,
                     width: cw,
                     height: 1,
                 },
+                summary,
+                Style::default().fg(ui.theme.ink_faint).bg(ui.theme.bg),
             );
         }
 
         let list_area = Rect {
-            x: inner.x,
-            y: inner.y + 2,
-            width: inner.width,
-            height: inner.height.saturating_sub(2),
+            x: area.x,
+            y: area.y + 2,
+            width: area.width,
+            height: area.height.saturating_sub(2),
         };
         self.list_area = list_area;
 
-        let selected = self.list.selected().unwrap_or(0);
-        let mut items: Vec<ListItem> = Vec::new();
+        let rows = self.rows(projects);
+        let import_idx = self.import_row_index(projects);
+        let selected_row = self.list.selected().and_then(|sel| {
+            rows.iter().position(|r| match r {
+                ShelfRow::Project(i) => *i == sel,
+                ShelfRow::Import => sel == import_idx,
+                _ => false,
+            })
+        });
+
+        // Built before the list borrows `ui`: the row closure only needs
+        // strings and colours, not the render context.
         let name_w = list_area.width.saturating_sub(48).max(20) as usize;
-
-        for (i, p) in projects.iter().enumerate() {
-            let busy = foreign_busy.iter().any(|d| {
-                crate::workspace::session::same_project_dir(d.as_path(), p.dir.as_path())
-            });
-            items.push(project_row(p, i == selected, name_w, busy, theme));
-        }
-
-        // Separator is folded into the import ListItem (not standalone) so the
-        // ListState index maps 1:1 to projects.len().
-        let separator_line = Line::from(Span::styled(
-            format!(
-                "     {}",
-                "┄".repeat(list_area.width.saturating_sub(6) as usize)
-            ),
-            Style::default().fg(theme.rule),
-        ));
-
-        let import_selected = selected == self.import_row_index(projects);
-        let import_bar = if import_selected {
-            theme::SELECT_BAR.to_string()
-        } else {
-            " ".to_string()
-        };
-        let import_style = if import_selected {
-            Style::default()
-                .fg(theme.accent)
-                .bg(theme.accent_bg)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(theme.accent)
-        };
-        let source_note = format!(
+        let rule_color = ui.theme.rule;
+        let accent = ui.theme.accent;
+        let dim = Style::default().fg(ui.theme.ink_faint);
+        let cells: Vec<ProjectCells> = projects
+            .iter()
+            .map(|p| {
+                let busy = foreign_busy.iter().any(|d| {
+                    crate::workspace::session::same_project_dir(d.as_path(), p.dir.as_path())
+                });
+                project_cells(p, name_w, busy, ui.theme)
+            })
+            .collect();
+        let files: Vec<(String, String)> = self
+            .unimported
+            .iter()
+            .map(|(path, size)| {
+                (
+                    thai_display_safe(path.file_name().and_then(|s| s.to_str()).unwrap_or("?")),
+                    human_size(*size),
+                )
+            })
+            .collect();
+        let import_note = format!(
             "{} importable file{} in this folder",
             self.unimported.len(),
             plural(self.unimported.len())
         );
-        let import_label = "＋ Import file …";
-        let mut import_line = vec![
-            Span::styled(format!(" {import_bar} "), Style::default().fg(theme.accent)),
-            Span::styled(import_label, import_style),
-        ];
-        let used = col_width(&format!("  {import_label}")) + 2;
-        let note_w = col_width(&source_note);
-        if (list_area.width as usize) > used + note_w + 4 {
-            let gap = list_area.width as usize - used - note_w - 2;
-            import_line.push(Span::raw(" ".repeat(gap)));
-            import_line.push(Span::styled(
-                source_note,
-                Style::default().fg(theme.ink_faint),
-            ));
-        }
-        items.push(ListItem::new(ratatui::text::Text::from(vec![
-            separator_line,
-            Line::from(import_line),
-        ])));
+        let list_w = list_area.width;
 
-        for (path, size) in &self.unimported {
-            let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("?");
-            let size_h = human_size(*size);
-            let label = format!("        · {}", pad_to_cols(&thai_display_safe(name), 28),);
-            items.push(ListItem::new(Line::from(vec![
-                Span::styled(label, Style::default().fg(theme.ink_soft)),
-                Span::styled(size_h, Style::default().fg(theme.ink_faint)),
-            ])));
-        }
-
-        let total_items = self.import_row_index(projects) + 1 + self.unimported.len();
-        let list = List::new(items).style(Style::default().bg(theme.bg));
-        // Selection visuals are baked into the rows; state is kept only for scrolling.
-        f.render_stateful_widget(list, list_area, &mut self.list);
-        crate::ui::widgets::render_scrollbar(f, list_area, total_items, self.list.offset(), theme);
+        let mut state = ListState::new();
+        state.select(selected_row);
+        list::render(
+            ui,
+            list_area,
+            &mut state,
+            rows.len(),
+            list::Opts {
+                rail: true,
+                scrollbar: true,
+                kind: ZoneKind::Row,
+                id_base: 0,
+            },
+            |i| match &rows[i] {
+                ShelfRow::Project(n) => Row::new(cells[*n].line()),
+                ShelfRow::Rule => Row::header(Line::from(Span::styled(
+                    format!("   {}", "┄".repeat(list_w.saturating_sub(5) as usize)),
+                    Style::default().fg(rule_color),
+                ))),
+                ShelfRow::Import => {
+                    let label = "＋ Import file …";
+                    let used = col_width(label) + 3;
+                    let note_w = col_width(&import_note);
+                    let mut spans = vec![Span::styled(
+                        label.to_string(),
+                        Style::default().fg(accent).add_modifier(Modifier::BOLD),
+                    )];
+                    if (list_w as usize) > used + note_w + 4 {
+                        spans.push(Span::raw(" ".repeat(list_w as usize - used - note_w - 2)));
+                        spans.push(Span::styled(import_note.clone(), dim));
+                    }
+                    Row::new(Line::from(spans))
+                }
+                ShelfRow::File(n) => {
+                    let (name, size) = &files[*n];
+                    Row::header(Line::from(vec![
+                        Span::styled(format!("   {name}"), dim),
+                        Span::styled(format!("   {size}"), dim),
+                    ]))
+                }
+            },
+        );
     }
 
     pub fn hints(&self) -> &'static [(&'static str, &'static str)] {
@@ -385,68 +405,60 @@ impl Default for ShelfScreen {
     }
 }
 
-fn project_row(
-    p: &Project,
-    selected: bool,
-    name_w: usize,
-    foreign_busy: bool,
-    theme: &Theme,
-) -> ListItem<'static> {
-    let (glyph, gcolor) = if foreign_busy {
+/// A project row's pieces. Selection styling is the list's job now, so nothing
+/// here knows whether the row is selected — which is what lets the cells be
+/// built outside the render closure, where borrowing the palette would clash
+/// with the list's own borrow.
+pub(crate) struct ProjectCells {
+    glyph: String,
+    glyph_color: ratatui::style::Color,
+    name: String,
+    vol: String,
+    tally: String,
+    touched: String,
+    soft: ratatui::style::Color,
+    faint: ratatui::style::Color,
+}
+
+impl ProjectCells {
+    fn line(&self) -> Line<'static> {
+        Line::from(vec![
+            Span::styled(self.glyph.clone(), Style::default().fg(self.glyph_color)),
+            Span::raw("  "),
+            Span::raw(self.name.clone()),
+            Span::styled(self.vol.clone(), Style::default().fg(self.soft)),
+            Span::styled(self.tally.clone(), Style::default().fg(self.soft)),
+            Span::styled(self.touched.clone(), Style::default().fg(self.faint)),
+        ])
+    }
+}
+
+fn project_cells(p: &Project, name_w: usize, foreign_busy: bool, theme: &Theme) -> ProjectCells {
+    let (glyph, glyph_color) = if foreign_busy {
         ('↻', theme.status_working)
     } else {
         overall_glyph(p, theme)
     };
     let tally = tally_of(p);
-    let touched = if foreign_busy {
-        "running elsewhere".to_string()
-    } else {
-        touched_label(p)
-    };
-    let vol = p.volumes.first().map(|v| v.number).unwrap_or(1);
-
-    let bar = if selected {
-        theme::SELECT_BAR.to_string()
-    } else {
-        " ".to_string()
-    };
-    let row_bg = if selected { theme.accent_bg } else { theme.bg };
-    let name_style = if selected {
-        Style::default()
-            .fg(theme.ink)
-            .bg(row_bg)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(theme.ink).bg(row_bg)
-    };
-
     let name_src = if p.translated_title.trim().is_empty() {
         p.title.clone()
     } else {
         format!("{} · {}", p.title, p.translated_title)
     };
-    let name = truncate_cols(&thai_display_safe(&name_src), name_w);
-    let name_padded = pad_to_cols(&name, name_w);
-
-    let spans = vec![
-        Span::styled(
-            format!(" {bar} "),
-            Style::default().fg(theme.accent).bg(row_bg),
-        ),
-        Span::styled(glyph.to_string(), Style::default().fg(gcolor).bg(row_bg)),
-        Span::styled("  ", Style::default().bg(row_bg)),
-        Span::styled(name_padded, name_style),
-        Span::styled(
-            format!("Vol.{vol}  "),
-            Style::default().fg(theme.ink_soft).bg(row_bg),
-        ),
-        Span::styled(
-            format!("●{} ◐{} ○{} ✗{}  ", tally.0, tally.1, tally.2, tally.3),
-            Style::default().fg(theme.ink_soft).bg(row_bg),
-        ),
-        Span::styled(touched, Style::default().fg(theme.ink_faint).bg(row_bg)),
-    ];
-    ListItem::new(Line::from(spans))
+    ProjectCells {
+        glyph: glyph.to_string(),
+        glyph_color,
+        name: pad_to_cols(&truncate_cols(&thai_display_safe(&name_src), name_w), name_w),
+        vol: format!("Vol.{}  ", p.volumes.first().map(|v| v.number).unwrap_or(1)),
+        tally: format!("●{} ◐{} ○{} ✗{}  ", tally.0, tally.1, tally.2, tally.3),
+        touched: if foreign_busy {
+            "running elsewhere".to_string()
+        } else {
+            touched_label(p)
+        },
+        soft: theme.ink_soft,
+        faint: theme.ink_faint,
+    }
 }
 
 /// Project glyph: the most urgent state wins.
@@ -560,10 +572,7 @@ fn working_root() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::ThemeId;
     use crate::ui::mouse::{MouseGesture, MouseInput};
-    use ratatui::Terminal;
-    use ratatui::backend::TestBackend;
 
     fn proj(id: &str) -> Project {
         Project {
@@ -593,15 +602,21 @@ mod tests {
     fn click_selects_then_opens() {
         let projects = vec![proj("alpha"), proj("beta")];
         let mut s = ShelfScreen::new();
-        let theme = ThemeId::default().build();
-        let mut term = Terminal::new(TestBackend::new(90, 20)).unwrap();
-        term.draw(|f| s.render(f, f.area(), &projects, &[], &theme))
-            .unwrap();
-        let la = s.list_area;
+        let (_, zones) = crate::ui::kit::ctx::draw_test(90, 20, |ui, area| {
+            s.render(ui, area, &projects, &[])
+        });
+        // Ask the registry where the second project row landed rather than
+        // working it out from the list area a second time.
+        let rect = zones
+            .rect_of(crate::ui::kit::ZoneId::row(1))
+            .expect("second project row");
+        let at = (rect.x + 4, rect.y);
+        let zone = zones.at(at.0, at.1);
 
-        // Row 0 starts selected; click the second project row → selects, no open.
+        // Row 0 starts selected; clicking another row selects it, no open.
         let a = s.handle_mouse(
-            click(false, la.x + 4, la.y + 1),
+            click(false, at.0, at.1),
+            zone,
             &projects,
             crate::model::TargetLanguage::Thai,
         );
@@ -610,7 +625,8 @@ mod tests {
 
         // Clicking the already-selected project opens it.
         match s.handle_mouse(
-            click(false, la.x + 4, la.y + 1),
+            click(false, at.0, at.1),
+            zone,
             &projects,
             crate::model::TargetLanguage::Thai,
         ) {
@@ -630,6 +646,7 @@ mod tests {
                 col: 0,
                 row: 0,
             },
+            None,
             &projects,
             crate::model::TargetLanguage::Thai,
         );
@@ -641,6 +658,7 @@ mod tests {
                     col: 0,
                     row: 0,
                 },
+                None,
                 &projects,
                 crate::model::TargetLanguage::Thai,
             );

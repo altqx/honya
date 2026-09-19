@@ -594,7 +594,9 @@ impl ReaderScreen {
         }
     }
 
-    pub fn render(&mut self, f: &mut Frame, area: Rect, theme: &Theme) {
+    pub fn render(&mut self, ui: &mut crate::ui::kit::Ui, area: Rect) {
+        let theme: &Theme = ui.theme;
+        let f: &mut Frame = ui.frame;
         if self.diff_mode {
             if self.compare.is_some() {
                 self.render_diff(f, area, theme);
@@ -1791,13 +1793,9 @@ mod tests {
     /// toggles flip, and the mode cell cycles the layout.
     #[test]
     fn clicking_status_bar_toggles_state() {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
 
         let mut r = screen_with("raw ja", "translated text");
-        let theme = crate::model::ThemeId::default().build();
-        let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
-        term.draw(|f| r.render(f, f.area(), &theme)).unwrap();
+        crate::ui::kit::ctx::draw_test(100, 24, |ui, area| r.render(ui, area));
 
         let zone_for = |r: &ReaderScreen, hit: StatusHit| {
             r.status_zones

@@ -681,12 +681,13 @@ impl TranslateScreen {
 
     pub fn render(
         &mut self,
-        f: &mut Frame,
+        ui: &mut crate::ui::kit::Ui,
         area: Rect,
-        frame: u64,
-        theme: &Theme,
         service_tier: Option<ServiceTier>,
     ) {
+        let theme: &Theme = ui.theme;
+        let frame = ui.frame_count;
+        let f: &mut Frame = ui.frame;
         // A configured tier gets a one-line speed/cost disclaimer between the
         // pipeline header and the body, so the trade-off is visible mid-run, not
         // only back in Settings.
@@ -1532,8 +1533,6 @@ fn preview_tail(s: &str) -> &str {
 #[cfg(test)]
 mod queue_panel_tests {
     use super::*;
-    use ratatui::Terminal;
-    use ratatui::backend::TestBackend;
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     fn key(c: char) -> KeyEvent {
@@ -1577,7 +1576,6 @@ mod queue_panel_tests {
 
     #[test]
     fn renders_panel_at_several_widths_without_panic() {
-        let theme = crate::model::ThemeId::default().build();
         let tiers = [None, Some(ServiceTier::Flex), Some(ServiceTier::Priority)];
         for (w, h) in [(90u16, 24u16), (60, 16), (120, 40)] {
             for tier in tiers {
@@ -1586,9 +1584,9 @@ mod queue_panel_tests {
                 screen.queue_focused = true;
                 screen.queue_sel = 1;
                 screen.set_queue(rows());
-                let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
-                term.draw(|f| screen.render(f, f.area(), 0, &theme, tier))
-                    .unwrap();
+                crate::ui::kit::ctx::draw_test(w, h, |ui, area| {
+                    screen.render(ui, area, tier)
+                });
             }
         }
     }
@@ -1638,7 +1636,6 @@ mod queue_panel_tests {
 
     #[test]
     fn thought_process_events_fill_panel_state() {
-        let theme = crate::model::ThemeId::default().build();
         let mut screen = TranslateScreen::new();
         screen.on_app_event(&AppEvent::ChapterStarted { chapter: 1 });
         screen.on_app_event(&AppEvent::ChunkStarted {
@@ -1695,9 +1692,7 @@ mod queue_panel_tests {
         assert_eq!(screen.thought_scene, "final tone");
         assert_eq!(screen.thought_glossary, "final term");
 
-        let mut term = Terminal::new(TestBackend::new(90, 24)).unwrap();
-        term.draw(|f| screen.render(f, f.area(), 0, &theme, None))
-            .unwrap();
+        crate::ui::kit::ctx::draw_test(90, 24, |ui, area| screen.render(ui, area, None));
     }
 
     #[test]

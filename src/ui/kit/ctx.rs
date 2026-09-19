@@ -135,6 +135,47 @@ pub fn row_at(area: Rect, n: u16) -> Rect {
     }
 }
 
+/// Render through a [`Ui`] in a test and hand back what was painted plus the
+/// zones registered.
+///
+/// Shared by every screen's tests: building a `Ui` needs a theme, a registry,
+/// focus and hover, and repeating that in six test modules is how they drift
+/// apart from what the app actually constructs.
+#[cfg(test)]
+pub fn draw_test(
+    w: u16,
+    h: u16,
+    draw: impl FnOnce(&mut Ui, Rect),
+) -> (Vec<String>, super::zones::Zones) {
+    use super::focus::{Focus, Hover};
+    use super::tokens::Metrics;
+    use super::zones::Zones;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let theme = crate::model::ThemeId::default().build();
+    let mut zones = Zones::new();
+    let focus = Focus::new();
+    let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+    let area = Rect {
+        x: 0,
+        y: 0,
+        width: w,
+        height: h,
+    };
+    term.draw(|f| {
+        let metrics = Metrics::new(area, false);
+        let mut ui = Ui::new(f, &mut zones, &theme, metrics, &focus, Hover::default(), 0);
+        draw(&mut ui, area);
+    })
+    .unwrap();
+    let buf = term.backend().buffer().clone();
+    let lines = (0..h)
+        .map(|y| (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect())
+        .collect();
+    (lines, zones)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
