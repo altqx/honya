@@ -18,7 +18,7 @@ use crate::model::{
 };
 use crate::theme::{self, ALL_THEMES, Theme};
 use crate::ui::input::{self, EditOpts, Edited};
-use crate::ui::layout::{centered_modal, centered_pct};
+use crate::ui::layout::centered_modal;
 use crate::ui::mouse::{MouseGesture, MouseInput, hit};
 use crate::ui::text::{col_width, pad_to_cols, thai_display_safe, truncate_cols};
 use crate::ui::kit::{ZoneId, ZoneKind};
@@ -48,6 +48,76 @@ fn fuzzy_rank(query: &str, labels: &[&str]) -> Vec<usize> {
         .collect();
     scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
     scored.into_iter().map(|(_, i)| i).collect()
+}
+
+/// The four ways into the app from the first-run menu, with a note on each.
+///
+/// Built from live state, so the sample row says whether one already exists and
+/// the key row says whether translation is actually available yet.
+fn welcome_items(st: &WelcomeState) -> [(&'static str, &'static str); WELCOME_ITEMS] {
+    [
+        (
+            if st.sample_exists {
+                "Open the sample project"
+            } else {
+                "Create a sample project"
+            },
+            "explore offline, no API key needed",
+        ),
+        ("Import a file", "EPUB · PDF · HTML · Markdown"),
+        (
+            "Set OpenRouter API key",
+            if st.api_key_present {
+                "already configured"
+            } else {
+                "needed to translate"
+            },
+        ),
+        ("Skip", "explore on my own"),
+    ]
+}
+
+/// A byte count at human scale, to one decimal above a kilobyte.
+fn human_size(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
+    let mut size = bytes as f64;
+    let mut unit = 0;
+    while size >= 1024.0 && unit + 1 < UNITS.len() {
+        size /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{size:.1} {}", UNITS[unit])
+    }
+}
+
+/// A row of the QA list: either a chapter heading or one finding.
+enum QaRow {
+    Heading(String),
+    Issue(usize),
+}
+
+/// Lay findings out with a heading wherever the chapter changes.
+///
+/// Shared by the renderer and the click handler on purpose: the mapping from a
+/// clicked row back to the finding it stands for is only correct while both
+/// agree about where the headings went.
+fn qa_rows(report: &qa::QaReport) -> Vec<QaRow> {
+    let mut rows = Vec::with_capacity(report.issues.len() + 4);
+    let mut last: Option<u32> = None;
+    for (i, issue) in report.issues.iter().enumerate() {
+        if issue.chapter != last || i == 0 {
+            last = issue.chapter;
+            rows.push(QaRow::Heading(match issue.chapter {
+                Some(c) => format!("ch.{c:03}  {}", thai_display_safe(&issue.title)),
+                None => "unanchored".to_string(),
+            }));
+        }
+        rows.push(QaRow::Issue(i));
+    }
+    rows
 }
 
 /// One line of the keybinding reference.
@@ -2114,7 +2184,66 @@ impl Overlay {
                 }
                 _ => Action::None,
             },
-            Overlay::ReaderNote(_) => match (id.kind, id.index) {
+            Overlay::Welcome(st) => match id.kind {
+                ZoneKind::Row if (id.index as usize) < WELCOME_ITEMS => {
+                    let already = st.sel == id.index as usize;
+                    st.sel = id.index as usize;
+                    if double || already {
+                        self.handle_key(synth(KeyCode::Enter))
+                    } else {
+                        Action::None
+                    }
+                }
+                _ => Action::None,
+            },
+            Overlay::ImageSource(st) => match id.kind {
+                ZoneKind::Row if (id.index as usize) < st.files.len() => {
+                    let already = st.sel == id.index as usize;
+                    st.sel = id.index as usize;
+                    if double || already {
+                        self.handle_key(synth(KeyCode::Enter))
+                    } else {
+                        Action::None
+                    }
+                }
+                _ => Action::None,
+            },
+            // A clicked QA row is a row index, and rows include the chapter
+            // headings; `qa_rows` is what makes the mapping back to a finding
+            // the same one the renderer used.
+            Overlay::Qa(st) => match id.kind {
+                ZoneKind::Row => {
+                    let rows = qa_rows(&st.report);
+                    match rows.get(id.index as usize) {
+                        Some(QaRow::Issue(n)) => {
+                            let already = st.sel == *n;
+                            st.sel = *n;
+                            if double || already {
+                                self.handle_key(synth(KeyCode::Enter))
+                            } else {
+                                Action::None
+                            }
+                        }
+                        _ => Action::None,
+                    }
+                }
+                _ => Action::None,
+            },
+            // Both translate-and-accept editors share one button row.
+            Overlay::Synopsis(_) | Overlay::ProjectTitle(_) => match (id.kind, id.index) {
+                (ZoneKind::Button, DIALOG_CONFIRM) => self.handle_key(synth(KeyCode::Enter)),
+                (ZoneKind::Button, DIALOG_CANCEL) => self.handle_key(synth(KeyCode::Esc)),
+                (ZoneKind::Button, DIALOG_ALTERNATE) => self.handle_key(synth(KeyCode::Tab)),
+                _ => Action::None,
+            },
+            Overlay::ReaderEdit(_) => match (id.kind, id.index) {
+                (ZoneKind::Button, DIALOG_CONFIRM) => {
+                    self.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
+                }
+                (ZoneKind::Button, DIALOG_CANCEL) => self.handle_key(synth(KeyCode::Esc)),
+                _ => Action::None,
+            },
+                        Overlay::ReaderNote(_) => match (id.kind, id.index) {
                 (ZoneKind::Button, DIALOG_CONFIRM) => self.handle_key(synth(KeyCode::Enter)),
                 (ZoneKind::Button, DIALOG_CANCEL) => self.handle_key(synth(KeyCode::Esc)),
                 _ => Action::None,
@@ -2126,7 +2255,7 @@ impl Overlay {
     }
 
     /// The centered rectangle each overlay variant draws into (mirrors its render
-    /// fn's `centered_modal` / `centered_pct` call), used for click hit-testing.
+    /// fn's `centered_modal` call), used for click hit-testing.
     fn modal_rect(&self, area: Rect) -> Rect {
         match self {
             // Kit-rendered overlays register the geometry they actually drew,
@@ -2143,20 +2272,20 @@ impl Overlay {
             | Overlay::Palette(_)
             | Overlay::ReaderJump(_)
             | Overlay::ReaderSearch(_)
-            | Overlay::ReaderNote(_) => area,
-            Overlay::Welcome(_) => centered_modal(76, 24, area),
+            | Overlay::ReaderNote(_)
+            | Overlay::Welcome(_)
+            | Overlay::ImageSource(_)
+            | Overlay::Synopsis(_)
+            | Overlay::ProjectTitle(_)
+            | Overlay::Qa(_)
+            | Overlay::ReaderInspect(_)
+            | Overlay::ReaderEdit(_) => area,
             // One size for every wizard step (the modal must not jump around as
             // the user advances); mirrors render_import.
             Overlay::Import(_) => centered_modal(78, 24, area),
-            Overlay::ImageSource(_) => centered_modal(78, 24, area),
             // Must mirror render_settings' centered_modal(72, 26, …) so clicks
             // near the modal's top/bottom hit-test inside it (not as a dismiss).
             Overlay::Settings(_) => centered_modal(72, 26, area),
-            Overlay::Synopsis(_) => centered_modal(76, 24, area),
-            Overlay::ProjectTitle(_) => centered_modal(72, 16, area),
-            Overlay::Qa(_) => centered_pct(80, 80, area),
-            Overlay::ReaderInspect(_) => centered_pct(82, 80, area),
-            Overlay::ReaderEdit(_) => centered_pct(82, 75, area),
         }
     }
 
@@ -3186,6 +3315,13 @@ impl Overlay {
                 | Overlay::ReaderJump(_)
                 | Overlay::ReaderSearch(_)
                 | Overlay::ReaderNote(_)
+                | Overlay::Welcome(_)
+                | Overlay::ImageSource(_)
+                | Overlay::Synopsis(_)
+                | Overlay::ProjectTitle(_)
+                | Overlay::Qa(_)
+                | Overlay::ReaderInspect(_)
+                | Overlay::ReaderEdit(_)
         )
     }
 
@@ -3207,44 +3343,23 @@ impl Overlay {
             Overlay::Export(st) => self.render_export_kit(ui, area, st),
             Overlay::Theme(st) => self.render_theme_kit(ui, area, st),
 
-            Overlay::Welcome(st) => {
-                let theme = ui.theme;
-                self.render_welcome(ui.frame, area, theme, st)
-            }
+            Overlay::Welcome(st) => self.render_welcome_kit(ui, area, st),
             Overlay::Import(st) => {
                 let theme = ui.theme;
                 self.render_import(ui.frame, area, theme, st)
             }
-            Overlay::ImageSource(st) => {
-                let theme = ui.theme;
-                self.render_image_source(ui.frame, area, theme, st)
-            }
+            Overlay::ImageSource(st) => self.render_image_source_kit(ui, area, st),
             Overlay::Settings(st) => {
                 let theme = ui.theme;
                 self.render_settings(ui.frame, area, theme, cfg, st)
             }
             Overlay::Palette(st) => self.render_palette_kit(ui, area, st),
-            Overlay::Synopsis(st) => {
-                let theme = ui.theme;
-                self.render_synopsis(ui.frame, area, theme, st)
-            }
-            Overlay::ProjectTitle(st) => {
-                let theme = ui.theme;
-                self.render_project_title(ui.frame, area, theme, st)
-            }
-            Overlay::Qa(st) => {
-                let theme = ui.theme;
-                self.render_qa(ui.frame, area, theme, st)
-            }
+            Overlay::Synopsis(st) => self.render_synopsis_kit(ui, area, st),
+            Overlay::ProjectTitle(st) => self.render_project_title_kit(ui, area, st),
+            Overlay::Qa(st) => self.render_qa_kit(ui, area, st),
             Overlay::ReaderNote(st) => self.render_reader_note_kit(ui, area, st),
-            Overlay::ReaderInspect(st) => {
-                let theme = ui.theme;
-                self.render_reader_inspect(ui.frame, area, theme, st)
-            }
-            Overlay::ReaderEdit(st) => {
-                let theme = ui.theme;
-                self.render_reader_edit(ui.frame, area, theme, st)
-            }
+            Overlay::ReaderInspect(st) => self.render_reader_inspect_kit(ui, area, st),
+            Overlay::ReaderEdit(st) => self.render_reader_edit_kit(ui, area, st),
             Overlay::ReaderSearch(st) => self.render_reader_search_kit(ui, area, st),
             Overlay::ReaderJump(st) => self.render_reader_jump_kit(ui, area, st),
         }
@@ -3695,6 +3810,477 @@ impl Overlay {
         );
     }
 
+    /// First-run menu: four ways in, each a real row.
+    fn render_welcome_kit(&self, ui: &mut crate::ui::kit::Ui, area: Rect, st: &WelcomeState) {
+        use crate::ui::kit::ctx::row_at;
+        use crate::ui::kit::list::{self, ListState, Row};
+        use crate::ui::kit::modal::{Modal, Sizing};
+
+        let frame = Modal::new("ようこそ · Welcome to honya 本屋")
+            .sizing(Sizing::medium())
+            .render(ui, area);
+
+        let bg = ui.theme.bg_elevated;
+        let soft = Style::default().fg(ui.theme.ink_soft).bg(bg);
+        let dim = Style::default().fg(ui.theme.ink_faint).bg(bg);
+        for (n, line) in [
+            "AI-assisted Japanese → Thai / English light-novel translation.",
+            "",
+            "Import an EPUB, then a three-agent pipeline works through it:",
+            "Orchestrator ◆ plans · Translator ▲ drafts · Reviewer ■ checks.",
+            "",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            ui.text(
+                row_at(frame.body, n as u16),
+                line,
+                if line.starts_with("AI-") { soft } else { dim },
+            );
+        }
+
+        let menu = welcome_items(st);
+        let list_area = Rect {
+            y: frame.body.y + 5,
+            height: frame.body.height.saturating_sub(5),
+            ..frame.body
+        };
+        let mut ls = ListState::new();
+        ls.select(Some(st.sel));
+        list::render(
+            ui,
+            list_area,
+            &mut ls,
+            menu.len(),
+            list::Opts {
+                rail: true,
+                scrollbar: false,
+                kind: ZoneKind::Row,
+                id_base: 0,
+            },
+            |i| {
+                let (label, note) = menu[i];
+                Row::new(Line::from(vec![
+                    Span::raw(label.to_string()),
+                    Span::styled(format!("   {note}"), dim),
+                ]))
+            },
+        );
+    }
+
+    /// Pick a source file to refresh a volume's images from.
+    fn render_image_source_kit(
+        &self,
+        ui: &mut crate::ui::kit::Ui,
+        area: Rect,
+        st: &ImageSourceState,
+    ) {
+        use crate::ui::kit::list::{self, ListState, Row};
+        use crate::ui::kit::modal::{self, Modal, Sizing};
+
+        let frame = Modal::new("Update volume images")
+            .sizing(Sizing::medium())
+            .subtitle(format!("Vol.{:02}", st.vol))
+            .footer(1)
+            .render(ui, area);
+
+        let dim = Style::default().fg(ui.theme.ink_faint);
+        let mut ls = ListState::new();
+        ls.select(Some(st.sel));
+        list::render(
+            ui,
+            frame.body,
+            &mut ls,
+            st.files.len(),
+            list::Opts {
+                rail: true,
+                scrollbar: true,
+                kind: ZoneKind::Row,
+                id_base: 0,
+            },
+            |i| {
+                let (path, size) = &st.files[i];
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                Row::new(Line::from(vec![
+                    Span::raw(name),
+                    Span::styled(format!("   {}", human_size(*size)), dim),
+                ]))
+            },
+        );
+        modal::footer_hint(ui, frame.footer, "  ↵ use this file · Esc cancel");
+    }
+
+    /// The QA inbox: a run summary, then every finding grouped under the
+    /// chapter it belongs to.
+    fn render_qa_kit(&self, ui: &mut crate::ui::kit::Ui, area: Rect, st: &QaState) {
+        use crate::ui::kit::ctx::row_at;
+        use crate::ui::kit::list::{self, ListState, Row};
+        use crate::ui::kit::modal::{self, Modal, Sizing};
+
+        let frame = Modal::new("QA review")
+            .sizing(Sizing::large())
+            .subtitle(truncate_cols(&thai_display_safe(&st.title), 48))
+            .footer(1)
+            .render(ui, area);
+
+        let bg = ui.theme.bg_elevated;
+        let dim = Style::default().fg(ui.theme.ink_faint).bg(bg);
+
+        // Summary band: how the run went, before the list of what went wrong.
+        let mut summary: Vec<Span<'static>> = Vec::new();
+        for (glyph, count, color) in [
+            (crate::ui::glyphs::MOON_FULL, st.report.done, ui.theme.status_done),
+            (crate::ui::glyphs::FLAG, st.report.review, ui.theme.status_warn),
+            (crate::ui::glyphs::CROSS, st.report.failed, ui.theme.status_failed),
+        ] {
+            summary.push(Span::styled(
+                format!("{}{count}", glyph.as_str()),
+                Style::default()
+                    .fg(if count == 0 { ui.theme.ink_faint } else { color })
+                    .bg(bg),
+            ));
+            summary.push(Span::styled("    ", dim));
+        }
+        if let Some(pct) = st.report.clean_pct() {
+            summary.push(Span::styled(
+                format!("{pct}% clean"),
+                Style::default()
+                    .fg(ui.theme.ink_soft)
+                    .bg(bg)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+        ui.line(row_at(frame.body, 0), Line::from(summary), Style::default().bg(bg));
+
+        let list_area = Rect {
+            y: frame.body.y + 2,
+            height: frame.body.height.saturating_sub(2),
+            ..frame.body
+        };
+
+        if st.report.issues.is_empty() {
+            ui.text(
+                row_at(list_area, 0),
+                "Nothing flagged — every finished chapter passed review.",
+                Style::default().fg(ui.theme.status_done).bg(bg),
+            );
+            modal::footer_hint(ui, frame.footer, "  Esc close");
+            return;
+        }
+
+        let rows = qa_rows(&st.report);
+        let selected_row = rows
+            .iter()
+            .position(|r| matches!(r, QaRow::Issue(i) if *i == st.sel));
+
+        let head = Style::default()
+            .fg(ui.theme.accent)
+            .add_modifier(Modifier::BOLD);
+        let plain = Style::default().fg(ui.theme.ink);
+        // Per-chapter counts, keyed the same way the headings are grouped.
+        let counts: Vec<usize> = rows
+            .iter()
+            .map(|r| match r {
+                QaRow::Heading(_) => 0,
+                QaRow::Issue(i) => st.report.count_for(st.report.issues[*i].chapter),
+            })
+            .collect();
+        let visuals: Vec<(String, ratatui::style::Color, String)> = st
+            .report
+            .issues
+            .iter()
+            .map(|iss| {
+                let (g, c, tag) = qa_visual(iss, ui.theme);
+                (g.to_string(), c, tag)
+            })
+            .collect();
+        // An empty reason still has to say something, or the row reads as a
+        // finding with no content.
+        let details: Vec<String> = st
+            .report
+            .issues
+            .iter()
+            .map(|iss| {
+                if iss.detail.trim().is_empty() {
+                    qa_default_detail(iss).to_string()
+                } else {
+                    thai_display_safe(&iss.detail)
+                }
+            })
+            .collect();
+
+        let mut ls = ListState::new();
+        ls.select(selected_row);
+        list::render(
+            ui,
+            list_area,
+            &mut ls,
+            rows.len(),
+            list::Opts {
+                rail: true,
+                scrollbar: true,
+                kind: ZoneKind::Row,
+                id_base: 0,
+            },
+            |i| match &rows[i] {
+                QaRow::Heading(t) => {
+                    // The count belongs to the heading, so take it from the
+                    // finding immediately below.
+                    let n = counts.get(i + 1).copied().unwrap_or(0);
+                    Row::header(Line::from(vec![
+                        Span::styled(t.clone(), head),
+                        Span::styled(
+                            if n > 1 { format!("   {n} findings") } else { String::new() },
+                            Style::default().fg(ui.theme.ink_faint),
+                        ),
+                    ]))
+                }
+                QaRow::Issue(n) => {
+                    let (glyph, color, tag) = &visuals[*n];
+                    Row::new(Line::from(vec![
+                        Span::styled(format!("  {glyph} "), Style::default().fg(*color)),
+                        Span::styled(
+                            format!("{tag:<12}"),
+                            Style::default().fg(ui.theme.ink_faint),
+                        ),
+                        Span::styled(details[*n].clone(), plain),
+                    ]))
+                }
+            },
+        );
+        modal::footer_hint(
+            ui,
+            frame.footer,
+            "  ↵ open in the Reader · jk move · Esc close",
+        );
+    }
+
+    /// Read-only source ‖ translation ‖ reviewer note for one chunk.
+    fn render_reader_inspect_kit(
+        &self,
+        ui: &mut crate::ui::kit::Ui,
+        area: Rect,
+        st: &ReaderInspectState,
+    ) {
+        use crate::ui::kit::card::Card;
+        use crate::ui::kit::editor;
+        use crate::ui::kit::modal::{self, Modal, Sizing};
+
+        let frame = Modal::new("Inspect chunk")
+            .sizing(Sizing::large())
+            .subtitle(format!("ch.{:03} · chunk {}", st.chapter, st.chunk + 1))
+            .footer(1)
+            .render(ui, area);
+
+        // Source and translation share the width; the reviewer note, when there
+        // is one, takes a band underneath both.
+        let note_rows = if st.review.is_some() {
+            (frame.body.height / 4).clamp(3, 8)
+        } else {
+            0
+        };
+        let panes_h = frame.body.height.saturating_sub(note_rows);
+        let half = frame.body.width / 2;
+
+        for (n, (title, text)) in [
+            ("Source 日本語", &st.source_jp),
+            ("Translation", &st.translated_text),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let pane = Rect {
+                x: frame.body.x + n as u16 * half,
+                y: frame.body.y,
+                width: half,
+                height: panes_h,
+            };
+            let body = Card::new(title).render(ui, pane);
+            let wrapped = editor::wrap(text, body.width);
+            editor::render(
+                ui,
+                body,
+                &editor::View::new(text, &wrapped).scroll(st.scroll as usize),
+                n as u32,
+            );
+        }
+
+        if let Some(review) = &st.review {
+            let band = Rect {
+                y: frame.body.y + panes_h,
+                height: note_rows,
+                ..frame.body
+            };
+            let body = Card::new("Reviewer note")
+                .accent(ui.theme.status_warn)
+                .render(ui, band);
+            let wrapped = editor::wrap(review, body.width);
+            editor::render(ui, body, &editor::View::new(review, &wrapped), 2);
+        }
+        modal::footer_hint(ui, frame.footer, "  jk scroll · Esc close");
+    }
+
+    /// In-place editor for one chunk's translated prose.
+    fn render_reader_edit_kit(
+        &self,
+        ui: &mut crate::ui::kit::Ui,
+        area: Rect,
+        st: &ReaderEditState,
+    ) {
+        use crate::ui::kit::button::{Button, ButtonRow};
+        use crate::ui::kit::editor;
+        use crate::ui::kit::modal::{self, Modal, Sizing};
+
+        let frame = Modal::new("Edit translation")
+            .sizing(Sizing::large())
+            .subtitle(format!("ch.{:03} · chunk {}", st.chapter, st.chunk + 1))
+            .footer(1)
+            .render(ui, area);
+
+        let wrapped = editor::wrap(&st.text, frame.body.width);
+        editor::render(
+            ui,
+            frame.body,
+            &editor::View::new(&st.text, &wrapped).cursor(st.cursor),
+            0,
+        );
+        modal::render_footer(
+            ui,
+            frame.footer,
+            ButtonRow::new(vec![
+                Button::new(ZoneId::button(DIALOG_CANCEL), "Discard").accel("esc"),
+                Button::new(ZoneId::button(DIALOG_CONFIRM), "Save")
+                    .accel("^s")
+                    .primary(),
+            ]),
+        );
+    }
+
+    /// The shared source/translation editor behind the synopsis and title
+    /// overlays: raw text above, its translation below, with the agent's phase
+    /// reported between them.
+    fn render_syn_body(
+        &self,
+        ui: &mut crate::ui::kit::Ui,
+        body: Rect,
+        syn: &SynopsisState,
+        raw_title: &str,
+    ) {
+        use crate::ui::kit::card::Card;
+        use crate::ui::kit::editor;
+
+        let half = body.height / 2;
+        let raw_area = Rect {
+            height: half,
+            ..body
+        };
+        let out_area = Rect {
+            y: body.y + half,
+            height: body.height.saturating_sub(half),
+            ..body
+        };
+
+        let raw_body = Card::new(raw_title).render(ui, raw_area);
+        let raw_wrapped = editor::wrap(&syn.raw, raw_body.width);
+        editor::render(
+            ui,
+            raw_body,
+            &editor::View::new(&syn.raw, &raw_wrapped)
+                .cursor(if syn.edit_translation { usize::MAX } else { syn.cursor }),
+            0,
+        );
+
+        let (label, accent) = match syn.phase {
+            SynPhase::Editing => ("Translation", ui.theme.rule),
+            SynPhase::Translating => ("Translation · working…", ui.theme.status_working),
+            SynPhase::Done => ("Translation", ui.theme.status_done),
+            SynPhase::Failed => ("Translation · failed", ui.theme.status_failed),
+        };
+        let out_body = Card::new(label).accent(accent).render(ui, out_area);
+        let shown = if matches!(syn.phase, SynPhase::Failed) && !syn.error.is_empty() {
+            &syn.error
+        } else {
+            &syn.translated_text
+        };
+        let out_wrapped = editor::wrap(shown, out_body.width);
+        editor::render(
+            ui,
+            out_body,
+            &editor::View::new(shown, &out_wrapped).cursor(if syn.edit_translation {
+                syn.translated_cursor
+            } else {
+                usize::MAX
+            }),
+            1,
+        );
+    }
+
+    /// Volume synopsis editor.
+    fn render_synopsis_kit(
+        &self,
+        ui: &mut crate::ui::kit::Ui,
+        area: Rect,
+        st: &SynopsisEditState,
+    ) {
+        use crate::ui::kit::modal::{Modal, Sizing};
+
+        let frame = Modal::new("Synopsis")
+            .sizing(Sizing::large())
+            .subtitle(format!(
+                "Vol.{:02} · {}",
+                st.vol,
+                truncate_cols(&thai_display_safe(&st.title), 30)
+            ))
+            .footer(1)
+            .render(ui, area);
+        self.render_syn_body(ui, frame.body, &st.syn, "Source 日本語");
+        self.render_syn_footer(ui, frame.footer, &st.syn);
+    }
+
+    /// Project title editor — the same shape, one line each.
+    fn render_project_title_kit(
+        &self,
+        ui: &mut crate::ui::kit::Ui,
+        area: Rect,
+        st: &TitleEditState,
+    ) {
+        use crate::ui::kit::modal::{Modal, Sizing};
+
+        let frame = Modal::new("Project title")
+            .sizing(Sizing::medium())
+            .footer(1)
+            .render(ui, area);
+        self.render_syn_body(ui, frame.body, &st.syn, "Title 日本語");
+        self.render_syn_footer(ui, frame.footer, &st.syn);
+    }
+
+    /// Buttons shared by both translate-and-accept editors.
+    fn render_syn_footer(&self, ui: &mut crate::ui::kit::Ui, footer: Rect, syn: &SynopsisState) {
+        use crate::ui::kit::button::{Button, ButtonRow};
+        use crate::ui::kit::modal;
+
+        let working = matches!(syn.phase, SynPhase::Translating);
+        let label = if syn.attempt > 0 { "Reroll" } else { "Translate" };
+        modal::render_footer(
+            ui,
+            footer,
+            ButtonRow::new(vec![
+                Button::new(ZoneId::button(DIALOG_CANCEL), "Cancel").accel("esc"),
+                Button::new(ZoneId::button(DIALOG_ALTERNATE), label)
+                    .accel("tab")
+                    .disabled(working || syn.raw.trim().is_empty()),
+                Button::new(ZoneId::button(DIALOG_CONFIRM), "Save")
+                    .accel("↵")
+                    .primary()
+                    .disabled(working),
+            ]),
+        );
+    }
+
     /// A confirm dialog, with its choices as real buttons.
     fn render_modal_kit(&self, ui: &mut crate::ui::kit::Ui, area: Rect, dlg: &Dialog) {
         use crate::ui::kit::button::{Button, ButtonRow};
@@ -3899,94 +4485,6 @@ impl Overlay {
             .style(Style::default().bg(theme.bg_panel))
     }
 
-    fn render_welcome(&self, f: &mut Frame, area: Rect, theme: &Theme, st: &WelcomeState) {
-        let modal = centered_modal(76, 24, area);
-        f.render_widget(Clear, modal);
-        let block = self.modal_block("ようこそ · Welcome to honya 本屋", theme);
-        let inner = block.inner(modal);
-        f.render_widget(block, modal);
-
-        let dim = Style::default().fg(theme.ink_faint);
-        let soft = Style::default().fg(theme.ink_soft);
-        let accent = Style::default().fg(theme.accent);
-
-        let mut lines: Vec<Line> = vec![
-            Line::raw(""),
-            Line::from(Span::styled(
-                "  AI-assisted Japanese → Thai / English light-novel translation.",
-                soft,
-            )),
-            Line::raw(""),
-            Line::from(Span::styled("  The five screens (1–5 / Tab):", dim)),
-        ];
-        let screens = [
-            ("1", "書架 Shelf", "import files · pick a project"),
-            ("2", "棚 Project", "chapters · queue · run translation"),
-            ("3", "訳 Translate", "watch the live 3-agent pipeline"),
-            ("4", "読 Reader", "read source ↔ translation side by side"),
-            ("5", "辞 Lexicon", "glossary · characters · style"),
-        ];
-        for (num, name, desc) in screens {
-            lines.push(Line::from(vec![
-                Span::styled(format!("   {num} "), accent),
-                Span::styled(format!("{name:<14}"), Style::default().fg(theme.ink)),
-                Span::styled(desc, soft),
-            ]));
-        }
-        lines.push(Line::raw(""));
-
-        let sample_label = if st.sample_exists {
-            "Open the sample project".to_string()
-        } else {
-            "Create a sample project".to_string()
-        };
-        let key_status = if st.api_key_present {
-            ("✓ key configured", theme.status_done)
-        } else {
-            ("needed to translate", theme.status_warn)
-        };
-        let items: [(String, Vec<Span>); WELCOME_ITEMS] = [
-            (
-                sample_label,
-                vec![Span::styled(" — explore offline, no API key needed", dim)],
-            ),
-            ("Import a file".to_string(), vec![]),
-            (
-                "Set OpenRouter API key".to_string(),
-                vec![
-                    Span::styled("  ", dim),
-                    Span::styled(key_status.0, Style::default().fg(key_status.1)),
-                ],
-            ),
-            ("Skip — I'll explore on my own".to_string(), vec![]),
-        ];
-        for (i, (label, suffix)) in items.into_iter().enumerate() {
-            let selected = i == st.sel;
-            let bar = if selected { theme::SELECT_BAR } else { ' ' };
-            let label_style = if selected {
-                Style::default()
-                    .fg(theme.ink)
-                    .bg(theme.accent_bg)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(theme.ink)
-            };
-            let mut spans = vec![
-                Span::styled(format!("  {bar} "), accent),
-                Span::styled(label, label_style),
-            ];
-            spans.extend(suffix);
-            lines.push(Line::from(spans));
-        }
-
-        f.render_widget(
-            Paragraph::new(lines)
-                .wrap(Wrap { trim: false })
-                .style(Style::default().bg(theme.bg_panel)),
-            inner,
-        );
-    }
-
     fn render_import(&self, f: &mut Frame, area: Rect, theme: &Theme, st: &ImportState) {
         // One fixed size for every step; mirrored by modal_rect for hit-testing.
         let modal = centered_modal(78, 24, area);
@@ -4027,248 +4525,6 @@ impl Overlay {
             4 => render_synopsis_body(f, rows[3], theme, &st.syn, "start import"),
             _ => self.render_import_progress(f, rows[3], theme, st),
         }
-    }
-
-    fn render_image_source(&self, f: &mut Frame, area: Rect, theme: &Theme, st: &ImageSourceState) {
-        let modal = centered_modal(78, 24, area);
-        f.render_widget(Clear, modal);
-        let title = format!("Update images — Vol.{:02}", st.vol);
-        let block = self.modal_block(&title, theme);
-        let inner = block.inner(modal);
-        f.render_widget(block, modal);
-
-        let rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Min(0),
-            ])
-            .split(inner);
-
-        f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(
-                    "  Source EPUB missing from VOLUME.md",
-                    Style::default().fg(theme.status_warn),
-                ),
-                Span::styled(
-                    "  choose the volume's original file",
-                    Style::default().fg(theme.ink_faint),
-                ),
-            ]))
-            .style(Style::default().bg(theme.bg_panel)),
-            rows[0],
-        );
-
-        if st.files.is_empty() {
-            let p = Paragraph::new(vec![
-                Line::raw(""),
-                Line::from(Span::styled(
-                    "  No EPUB files found in this folder.",
-                    Style::default().fg(theme.ink_soft),
-                )),
-                Line::raw(""),
-                Line::from(Span::styled(
-                    "  Drop the source EPUB into this folder, then press r to rescan.",
-                    Style::default().fg(theme.ink_faint),
-                )),
-            ])
-            .style(Style::default().bg(theme.bg_panel));
-            f.render_widget(p, rows[3]);
-            return;
-        }
-
-        f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(
-                    "  Choose a source EPUB",
-                    Style::default().fg(theme.ink_soft),
-                ),
-                Span::styled(
-                    format!("  ({} found · r rescan)", st.files.len()),
-                    Style::default().fg(theme.ink_faint),
-                ),
-            ]))
-            .style(Style::default().bg(theme.bg_panel)),
-            rows[2],
-        );
-
-        let cap = rows[3].height.max(1);
-        let start = windowed_start(st.sel, cap);
-        let end = (start + cap as usize).min(st.files.len());
-        let size_w = 9usize;
-        let name_w = (rows[3].width as usize).saturating_sub(6 + size_w);
-
-        let mut lines = Vec::with_capacity(end - start);
-        for (i, (p, size)) in st.files.iter().enumerate().take(end).skip(start) {
-            let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("?");
-            let selected = i == st.sel;
-            let bar = if selected {
-                theme::SELECT_BAR.to_string()
-            } else {
-                " ".to_string()
-            };
-            let style = if selected {
-                Style::default().fg(theme.ink).bg(theme.accent_bg)
-            } else {
-                Style::default().fg(theme.ink_soft)
-            };
-            lines.push(Line::from(vec![
-                Span::styled(format!(" {bar} "), Style::default().fg(theme.accent)),
-                Span::styled(pad_to_cols(&thai_display_safe(name), name_w), style),
-                Span::styled(
-                    format!("{:>size_w$}", super::shelf::human_size(*size)),
-                    Style::default().fg(theme.ink_faint),
-                ),
-            ]));
-        }
-        f.render_widget(
-            Paragraph::new(lines).style(Style::default().bg(theme.bg_panel)),
-            rows[3],
-        );
-    }
-
-    /// Standalone synopsis editor modal (re-opened from the Project screen).
-    fn render_synopsis(&self, f: &mut Frame, area: Rect, theme: &Theme, st: &SynopsisEditState) {
-        let modal = centered_modal(76, 24, area);
-        f.render_widget(Clear, modal);
-        let title = thai_display_safe(&format!(
-            "Synopsis — Vol.{:02} · {}",
-            st.vol,
-            truncate_cols(st.title.trim(), 40)
-        ));
-        let block = self.modal_block(&title, theme);
-        let inner = block.inner(modal);
-        f.render_widget(block, modal);
-        render_synopsis_body(f, inner, theme, &st.syn, "save");
-    }
-
-    fn render_project_title(&self, f: &mut Frame, area: Rect, theme: &Theme, st: &TitleEditState) {
-        let modal = centered_modal(72, 16, area);
-        f.render_widget(Clear, modal);
-        let title = thai_display_safe(&format!("Title — {}", truncate_cols(&st.id, 40)));
-        let block = self.modal_block(&title, theme);
-        let inner = block.inner(modal);
-        f.render_widget(block, modal);
-        render_editor_body(
-            f,
-            inner,
-            theme,
-            &st.syn,
-            "save",
-            &EditorLabels {
-                label: "  Title · source  (translate with the Translator agent)",
-                placeholder: "Type the source title…",
-                input_rows: 3,
-            },
-        );
-    }
-
-    fn render_reader_inspect(
-        &self,
-        f: &mut Frame,
-        area: Rect,
-        theme: &Theme,
-        st: &ReaderInspectState,
-    ) {
-        let modal = centered_pct(82, 80, area);
-        f.render_widget(Clear, modal);
-        let title = format!("Inspect · ch {:03} · chunk {}", st.chapter, st.chunk + 1);
-        let block = self.modal_block(&title, theme);
-        let inner = block.inner(modal);
-        f.render_widget(block, modal);
-
-        let head = |s: &str, c: ratatui::style::Color| {
-            Line::from(Span::styled(
-                s.to_string(),
-                Style::default().fg(c).add_modifier(Modifier::BOLD),
-            ))
-        };
-        let mut lines: Vec<Line> = Vec::new();
-        lines.push(head("ญี่ปุ่น · source", theme.accent));
-        for l in st.source_jp.lines() {
-            lines.push(Line::from(Span::styled(
-                l.to_string(),
-                Style::default().fg(theme.ja_text),
-            )));
-        }
-        lines.push(Line::raw(""));
-        lines.push(head("Translation", theme.accent));
-        for l in st.translated_text.lines() {
-            lines.push(Line::from(Span::styled(
-                l.to_string(),
-                Style::default().fg(theme.translated_text),
-            )));
-        }
-        if let Some(r) = &st.review {
-            lines.push(Line::raw(""));
-            lines.push(head("ผู้ตรวจ · reviewer", theme.status_warn));
-            let note = if r.trim().is_empty() {
-                "flagged for review (no reason recorded)"
-            } else {
-                r.as_str()
-            };
-            lines.push(Line::from(Span::styled(
-                note.to_string(),
-                Style::default().fg(theme.ink_soft),
-            )));
-        }
-
-        f.render_widget(
-            Paragraph::new(lines)
-                .wrap(Wrap { trim: false })
-                .scroll((st.scroll, 0))
-                .style(Style::default().bg(theme.bg_panel)),
-            inner,
-        );
-    }
-
-    fn render_reader_edit(&self, f: &mut Frame, area: Rect, theme: &Theme, st: &ReaderEditState) {
-        let modal = centered_pct(82, 75, area);
-        f.render_widget(Clear, modal);
-        let title = format!(
-            "Edit translation · ch {:03} · chunk {}",
-            st.chapter,
-            st.chunk + 1
-        );
-        let block = self.modal_block(&title, theme);
-        let inner = block.inner(modal);
-        f.render_widget(block, modal);
-
-        // Keep the buffer composed; decompose only the rendered preview.
-        let (before, after) = st.text.split_at(st.cursor.min(st.text.len()));
-        let mut body = String::with_capacity(st.text.len() + 1);
-        body.push_str(before);
-        body.push('▏');
-        body.push_str(after);
-        let body = crate::ui::text::thai_display_safe(&body);
-
-        let mut lines: Vec<Line> = body
-            .lines()
-            .map(|l| {
-                Line::from(Span::styled(
-                    l.to_string(),
-                    Style::default().fg(theme.translated_text),
-                ))
-            })
-            .collect();
-        if body.ends_with('\n') {
-            lines.push(Line::raw(""));
-        }
-        lines.push(Line::raw(""));
-        lines.push(Line::from(Span::styled(
-            "^S save · Enter newline · Esc cancel — saving clears this chunk's review flag",
-            Style::default().fg(theme.ink_faint),
-        )));
-
-        f.render_widget(
-            Paragraph::new(lines)
-                .wrap(Wrap { trim: false })
-                .style(Style::default().bg(theme.bg_inset)),
-            inner,
-        );
     }
 
     fn render_import_pick(&self, f: &mut Frame, area: Rect, theme: &Theme, st: &ImportState) {
@@ -5237,202 +5493,6 @@ impl Overlay {
         );
     }
 
-    /// Render the QA inbox: a chapter-level summary header over a navigable list of
-    /// findings grouped by chapter (each group headed by its issue count). The list
-    /// windows so the selected finding stays visible; one line per finding keeps the
-    /// selection index aligned with the rendered rows.
-    fn render_qa(&self, f: &mut Frame, area: Rect, theme: &Theme, st: &QaState) {
-        let modal = centered_pct(80, 80, area);
-        f.render_widget(Clear, modal);
-        let block = self.modal_block("Translation QA · レビュー", theme);
-        let inner = block.inner(modal);
-        f.render_widget(block, modal);
-
-        let rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(2), // title + summary counts
-                Constraint::Length(1), // divider
-                Constraint::Min(0),    // grouped findings
-            ])
-            .split(inner);
-
-        let report = &st.report;
-
-        let title = if st.title.is_empty() {
-            "Translation QA".to_string()
-        } else {
-            st.title.clone()
-        };
-        let mut counts = vec![
-            Span::styled(
-                format!(" ✓ {} done", report.done),
-                Style::default().fg(theme.status_done),
-            ),
-            Span::styled("    ", Style::default().fg(theme.ink_faint)),
-            Span::styled(
-                format!("⚠ {} review", report.review),
-                Style::default().fg(if report.review > 0 {
-                    theme.status_warn
-                } else {
-                    theme.ink_faint
-                }),
-            ),
-            Span::styled("    ", Style::default().fg(theme.ink_faint)),
-            Span::styled(
-                format!("✗ {} failed", report.failed),
-                Style::default().fg(if report.failed > 0 {
-                    theme.status_failed
-                } else {
-                    theme.ink_faint
-                }),
-            ),
-        ];
-        if let Some(pct) = report.clean_pct() {
-            counts.push(Span::styled("     ", Style::default().fg(theme.ink_faint)));
-            counts.push(Span::styled(
-                format!("{pct}% clean"),
-                Style::default()
-                    .fg(theme.ink_soft)
-                    .add_modifier(Modifier::BOLD),
-            ));
-        }
-        let header = vec![
-            Line::from(Span::styled(
-                format!(
-                    " {}",
-                    truncate_cols(
-                        &thai_display_safe(&title),
-                        rows[0].width.saturating_sub(2) as usize,
-                    )
-                ),
-                Style::default()
-                    .fg(theme.ink_soft)
-                    .add_modifier(Modifier::BOLD),
-            )),
-            Line::from(counts),
-        ];
-        f.render_widget(
-            Paragraph::new(header).style(Style::default().bg(theme.bg_panel)),
-            rows[0],
-        );
-
-        if rows[1].width > 0 {
-            f.render_widget(
-                Paragraph::new("─".repeat(rows[1].width as usize))
-                    .style(Style::default().fg(theme.rule).bg(theme.bg_panel)),
-                rows[1],
-            );
-        }
-
-        let list_area = rows[2];
-        let n = report.issues.len();
-
-        if n == 0 {
-            let (msg, color) = if report.done + report.review + report.failed == 0 {
-                (
-                    "   ยังไม่มีบทที่แปล — nothing translated yet for this volume.",
-                    theme.ink_faint,
-                )
-            } else {
-                (
-                    "   ✓ All clear — no QA issues for this volume.",
-                    theme.status_done,
-                )
-            };
-            f.render_widget(
-                Paragraph::new(Line::from(Span::styled(msg, Style::default().fg(color))))
-                    .style(Style::default().bg(theme.bg_panel)),
-                list_area,
-            );
-            return;
-        }
-
-        let sel = st.sel.min(n - 1);
-        // Fixed prefix is 7+TAG_W cols; TAG_W fits "chunk 999" and "conflict".
-        const TAG_W: usize = 9;
-        let detail_w = (list_area.width as usize).saturating_sub(7 + TAG_W);
-
-        let mut lines: Vec<Line> = Vec::new();
-        let mut sel_line = 0usize;
-        let mut prev: Option<Option<u32>> = None;
-        for (i, issue) in report.issues.iter().enumerate() {
-            if prev != Some(issue.chapter) {
-                prev = Some(issue.chapter);
-                let count = report.count_for(issue.chapter);
-                let ch_label = match issue.chapter {
-                    Some(c) => format!(" ch {c:03}"),
-                    None => " ch —".to_string(),
-                };
-                let mut head = vec![Span::styled(
-                    ch_label,
-                    Style::default()
-                        .fg(theme.ink_soft)
-                        .add_modifier(Modifier::BOLD),
-                )];
-                if !issue.title.is_empty() {
-                    // Leave room for the count badge after title truncation.
-                    head.push(Span::styled(
-                        format!(
-                            "  {}",
-                            truncate_cols(&thai_display_safe(&issue.title), detail_w)
-                        ),
-                        Style::default().fg(theme.ink_faint),
-                    ));
-                }
-                head.push(Span::styled(
-                    format!("  ({count})"),
-                    Style::default().fg(theme.accent_soft),
-                ));
-                lines.push(Line::from(head));
-            }
-
-            let selected = i == sel;
-            if selected {
-                sel_line = lines.len();
-            }
-            let row_bg = if selected {
-                theme.accent_bg
-            } else {
-                theme.bg_panel
-            };
-            let (glyph, color, tag) = qa_visual(issue, theme);
-            let bar = if selected { theme::SELECT_BAR } else { ' ' };
-            let detail_src = if issue.detail.trim().is_empty() {
-                qa_default_detail(issue).to_string()
-            } else {
-                thai_display_safe(&issue.detail)
-            };
-            let detail = truncate_cols(&detail_src, detail_w);
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!("  {bar} "),
-                    Style::default().fg(theme.accent).bg(row_bg),
-                ),
-                Span::styled(format!("{glyph} "), Style::default().fg(color).bg(row_bg)),
-                Span::styled(
-                    // Keep long tags from shifting detail.
-                    format!("{} ", pad_to_cols(&tag, TAG_W)),
-                    Style::default().fg(theme.ink_soft).bg(row_bg),
-                ),
-                Span::styled(detail, Style::default().fg(theme.ink).bg(row_bg)),
-            ]));
-        }
-
-        let cap = (list_area.height as usize).max(1);
-        let start = if sel_line >= cap {
-            sel_line + 1 - cap
-        } else {
-            0
-        };
-        let end = (start + cap).min(lines.len());
-        let visible: Vec<Line> = lines[start..end].to_vec();
-        f.render_widget(
-            Paragraph::new(visible).style(Style::default().bg(theme.bg_panel)),
-            list_area,
-        );
-    }
-
 }
 
 /// What a resolved overlay click should do — a synthesized key (reusing the
@@ -6136,6 +6196,33 @@ mod tests {
             Overlay::palette(),
             Overlay::reader_search(),
             Overlay::reader_note(3, 12),
+            Overlay::welcome(false, false),
+            Overlay::image_source(
+                vec![(std::path::PathBuf::from("book.epub"), 4_200_000)],
+                1,
+            ),
+            Overlay::qa_placeholder(),
+            Overlay::synopsis_edit(
+                "夏の物語".into(),
+                "เรื่องราวฤดูร้อน".into(),
+                2,
+                "ある夏".into(),
+                TargetLanguage::Thai,
+            ),
+            Overlay::project_title_edit(
+                "natsu".into(),
+                "ある夏の物語".into(),
+                "เรื่องราวฤดูร้อนหนึ่ง".into(),
+                TargetLanguage::Thai,
+            ),
+            Overlay::reader_inspect(
+                3,
+                1,
+                "「月が綺麗ですね。」".into(),
+                "พระจันทร์คืนนี้สวยนะ".into(),
+                Some("tone drifts formal here".into()),
+            ),
+            Overlay::reader_edit(3, 1, "พระจันทร์คืนนี้สวยนะ".into()),
             Overlay::reader_jump(
                 "ある夏の物語".into(),
                 vec![
@@ -6406,6 +6493,89 @@ mod tests {
         assert!(matches!(ov.handle_mouse_zones(m(false), &zones), Action::None));
         let got = ov.handle_mouse_zones(m(false), &zones);
         assert_eq!(format!("{got:?}"), expected);
+    }
+
+    #[test]
+    fn a_qa_row_click_maps_back_to_the_finding_it_shows() {
+        // Rows interleave chapter headings with findings, so a clicked row
+        // index is not a finding index. Both sides go through `qa_rows`.
+        let mut ov = Overlay::Qa(QaState {
+            title: "proj".into(),
+            report: qa::QaReport {
+                issues: vec![
+                    qa::QaIssue {
+                        chapter: Some(1),
+                        title: "one".into(),
+                        kind: qa::QaKind::ChapterFailed,
+                        detail: String::new(),
+                    },
+                    qa::QaIssue {
+                        chapter: Some(2),
+                        title: "two".into(),
+                        kind: qa::QaKind::ChapterFailed,
+                        detail: "boom".into(),
+                    },
+                ],
+                done: 3,
+                review: 1,
+                failed: 1,
+            },
+            sel: 0,
+        });
+        let (lines, zones) = render_overlay(&ov, 100, 30);
+        let joined = lines.join("\n");
+        assert!(joined.contains("clean"), "summary missing:\n{joined}");
+
+        let rows = match &ov {
+            Overlay::Qa(st) => qa_rows(&st.report),
+            _ => unreachable!(),
+        };
+        // Row 3 is the second finding (heading, finding, heading, finding).
+        assert!(matches!(rows[3], QaRow::Issue(1)));
+        let rect = zones.rect_of(ZoneId::row(3)).expect("row 3 registered");
+        ov.handle_mouse_zones(
+            MouseInput {
+                gesture: MouseGesture::Click { double: false },
+                col: rect.x + 4,
+                row: rect.y,
+            },
+            &zones,
+        );
+        match &ov {
+            Overlay::Qa(st) => assert_eq!(st.sel, 1, "clicked row selected the wrong finding"),
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn a_finding_with_no_reason_still_says_something() {
+        let ov = Overlay::Qa(QaState {
+            title: "proj".into(),
+            report: qa::QaReport {
+                issues: vec![qa::QaIssue {
+                    chapter: Some(1),
+                    title: "one".into(),
+                    kind: qa::QaKind::ChapterFailed,
+                    detail: String::new(),
+                }],
+                done: 0,
+                review: 0,
+                failed: 1,
+            },
+            sel: 0,
+        });
+        let (lines, _) = render_overlay(&ov, 100, 20);
+        let joined = lines.join("\n");
+        let expected = qa_default_detail(&qa::QaIssue {
+            chapter: Some(1),
+            title: "one".into(),
+            kind: qa::QaKind::ChapterFailed,
+            detail: String::new(),
+        });
+        assert!(
+            joined.contains(expected),
+            "an empty reason should fall back to {expected:?}:\n{joined}"
+        );
     }
 
     #[test]
