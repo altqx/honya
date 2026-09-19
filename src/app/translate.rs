@@ -599,7 +599,11 @@ impl TranslateScreen {
     /// queue panel, walks the queue selection; clicking an agent line focuses that
     /// agent (its spinner moves there); double-clicking the preview opens the
     /// result in the Reader, matching Enter; right-click drops queue focus (Esc).
-    pub fn handle_mouse(&mut self, m: MouseInput) -> Action {
+    pub fn handle_mouse(
+        &mut self,
+        m: MouseInput,
+        zone: Option<crate::ui::kit::ZoneId>,
+    ) -> Action {
         match m.gesture {
             MouseGesture::ScrollUp => {
                 if m.in_rect(self.queue_area) {
@@ -620,14 +624,14 @@ impl TranslateScreen {
             MouseGesture::Click { double } => {
                 if m.in_rect(self.queue_area) {
                     self.queue_focused = true;
-                    let running_present = self.queue.first().map(|r| r.running).unwrap_or(false);
-                    let row_in_panel = (m.row - self.queue_area.y) as usize;
-                    // Convert the clicked row into a pending index; running is pinned.
-                    let visible = row_in_panel.saturating_sub(usize::from(running_present));
-                    let pidx = visible + self.queue_offset;
-                    let pc = self.pending_count();
-                    if pc > 0 {
-                        self.queue_sel = pidx.min(pc - 1);
+                    // Pending rows register their own index, so nothing here
+                    // re-derives one from the panel origin, the scroll offset
+                    // and whether a running head is pinned above them.
+                    if let Some(idx) = zone.and_then(|z| z.row_index()) {
+                        let pc = self.pending_count();
+                        if pc > 0 {
+                            self.queue_sel = idx.min(pc - 1);
+                        }
                     }
                     return Action::None;
                 }
@@ -685,9 +689,6 @@ impl TranslateScreen {
         area: Rect,
         service_tier: Option<ServiceTier>,
     ) {
-        let theme: &Theme = ui.theme;
-        let frame = ui.frame_count;
-        let f: &mut Frame = ui.frame;
         // A configured tier gets a one-line speed/cost disclaimer between the
         // pipeline header and the body, so the trade-off is visible mid-run, not
         // only back in Settings.
@@ -706,28 +707,34 @@ impl TranslateScreen {
                 .constraints([Constraint::Length(9), Constraint::Min(6)])
                 .split(area)
         };
-
-        self.render_pipeline(f, rows[0], frame, theme);
-
-        let body = if let Some(tier) = service_tier {
-            self.render_tier_disclaimer(f, rows[1], tier, theme);
-            rows[2]
-        } else {
-            rows[1]
-        };
+        let body = if service_tier.is_some() { rows[2] } else { rows[1] };
 
         // Hide the queue on narrow terminals so the preview stays usable.
-        if !self.queue.is_empty() && body.width >= 56 {
+        let (preview_col, queue_col) = if !self.queue.is_empty() && body.width >= 56 {
             let cols = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Min(40), Constraint::Length(34)])
                 .split(body);
-            self.render_translation_body(f, cols[0], theme);
-            self.render_queue(f, cols[1], theme);
+            (cols[0], Some(cols[1]))
         } else {
             self.queue_area = Rect::default();
-            self.render_translation_body(f, body, theme);
+            (body, None)
+        };
+
+        // The queue draws through the kit; everything else is still on the old
+        // path and takes the frame back out afterwards.
+        if let Some(col) = queue_col {
+            self.render_queue(ui, col);
         }
+
+        let theme: &Theme = ui.theme;
+        let frame = ui.frame_count;
+        let f: &mut Frame = ui.frame;
+        self.render_pipeline(f, rows[0], frame, theme);
+        if let Some(tier) = service_tier {
+            self.render_tier_disclaimer(f, rows[1], tier, theme);
+        }
+        self.render_translation_body(f, preview_col, theme);
     }
 
     /// One-line, full-width banner naming the active OpenRouter tier and its
@@ -759,121 +766,104 @@ impl TranslateScreen {
         );
     }
 
-    fn render_queue(&mut self, f: &mut Frame, area: Rect, theme: &Theme) {
+    /// The run queue: the active chapter pinned at the top, pending rows
+    /// scrolling below it.
+    ///
+    /// Only pending rows register zones. The running chapter is not a thing the
+    /// queue can reorder or remove — it has already started — so offering a
+    /// click target for it would promise something the pipeline cannot honour.
+    fn render_queue(&mut self, ui: &mut crate::ui::kit::Ui, area: Rect) {
+        use crate::ui::kit::ZoneKind;
+        use crate::ui::kit::card::Card;
+        use crate::ui::kit::list::{self, ListState, Row as KitRow};
+
         let pending = self.pending_count();
-        let title_color = if self.queue_focused {
-            theme.accent
-        } else {
-            theme.ink_soft
-        };
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_set(theme::hairline_set())
-            .border_style(Style::default().fg(if self.queue_focused {
-                theme.accent
+        let inner = Card::new(" คิว · Queue ")
+            .meta(format!("{pending}"))
+            .accent(if self.queue_focused {
+                ui.theme.border_focus
             } else {
-                theme.rule
-            }))
-            .title(Span::styled(
-                format!(" คิว · Queue ({pending}) "),
-                Style::default()
-                    .fg(title_color)
-                    .add_modifier(Modifier::BOLD),
-            ))
-            .style(Style::default().bg(theme.bg_panel));
-        let inner = block.inner(area);
-        f.render_widget(block, area);
+                ui.theme.rule
+            })
+            .render(ui, area);
         self.queue_area = inner;
         if inner.height == 0 || inner.width < 6 {
             return;
         }
         if self.queue.is_empty() {
-            f.render_widget(
-                Paragraph::new(Span::styled(
-                    " no queue",
-                    Style::default().fg(theme.ink_faint),
-                ))
-                .style(Style::default().bg(theme.bg_panel)),
-                inner,
+            ui.text(
+                crate::ui::kit::ctx::row_at(inner, 0),
+                " no queue",
+                Style::default()
+                    .fg(ui.theme.ink_faint)
+                    .bg(ui.theme.bg_panel),
             );
             return;
         }
 
         let multi_vol = self.queue.iter().any(|r| r.vol != self.queue[0].vol);
         let width = inner.width as usize;
+        let mut body = inner;
 
-        let mut y = inner.y;
-        // Keep the running head visible while pending rows scroll.
-        if let Some(row) = self.queue.first().filter(|r| r.running) {
-            let line_area = Rect {
-                x: inner.x,
-                y,
-                width: inner.width,
-                height: 1,
-            };
-            f.render_widget(
-                Paragraph::new(self.queue_line(row, false, multi_vol, width, theme))
-                    .style(Style::default().bg(theme.bg_panel)),
-                line_area,
+        if let Some(row) = self.queue.first().filter(|r| r.running).cloned() {
+            let line = self.queue_line(&row, false, multi_vol, width, ui.theme);
+            ui.line(
+                crate::ui::kit::ctx::row_at(inner, 0),
+                line,
+                Style::default().bg(ui.theme.bg_panel),
             );
-            y += 1;
+            body = Rect {
+                y: inner.y + 1,
+                height: inner.height.saturating_sub(1),
+                ..inner
+            };
         }
-
-        let avail = (inner.y + inner.height).saturating_sub(y) as usize;
-        if avail == 0 {
+        if body.height == 0 {
             return;
         }
-        let pend: Vec<&QueueRow> = self.queue.iter().filter(|r| !r.running).collect();
-        let offset = if self.queue_sel >= avail {
-            self.queue_sel + 1 - avail
-        } else {
-            0
-        };
-        self.queue_offset = offset;
-        // Scrollbar along the pending window (the running head stays pinned).
-        crate::ui::widgets::render_scrollbar(
-            f,
-            Rect {
-                x: area.x,
-                y,
-                width: area.width,
-                height: avail as u16,
+
+        let pend: Vec<QueueRow> = self
+            .queue
+            .iter()
+            .filter(|r| !r.running)
+            .cloned()
+            .collect();
+        let theme = ui.theme;
+        let lines: Vec<Line<'static>> = pend
+            .iter()
+            .map(|r| self.queue_line(r, false, multi_vol, width, theme))
+            .collect();
+
+        let mut state = ListState::new();
+        state.select(self.queue_focused.then_some(self.queue_sel));
+        list::render(
+            ui,
+            body,
+            &mut state,
+            lines.len(),
+            list::Opts {
+                rail: true,
+                scrollbar: true,
+                kind: ZoneKind::Row,
+                id_base: 0,
             },
-            pend.len(),
-            offset,
-            theme,
+            |i| KitRow::new(lines[i].clone()),
         );
-        for (i, row) in pend.iter().enumerate().skip(offset).take(avail) {
-            let selected = self.queue_focused && i == self.queue_sel;
-            let line_area = Rect {
-                x: inner.x,
-                y,
-                width: inner.width,
-                height: 1,
-            };
-            let bg = if selected {
-                theme.accent_bg
-            } else {
-                theme.bg_panel
-            };
-            f.render_widget(
-                Paragraph::new(self.queue_line(row, selected, multi_vol, width, theme))
-                    .style(Style::default().bg(bg)),
-                line_area,
-            );
-            y += 1;
-        }
+        self.queue_offset = state.offset();
     }
 
     /// Queue row, width-budgeted in display columns for CJK/Thai titles.
-    fn queue_line<'a>(
+    /// One queue row. Every span is built from an owned `format!`, so the
+    /// line does not borrow the row it describes and can outlive it — which is
+    /// what lets the rows be built before the list takes its borrow.
+    fn queue_line(
         &self,
-        row: &'a QueueRow,
+        row: &QueueRow,
         selected: bool,
         multi_vol: bool,
         width: usize,
         theme: &Theme,
-    ) -> Line<'a> {
+    ) -> Line<'static> {
         let caret = if selected { "›" } else { " " };
         let pos = if row.running {
             " ▶ ".to_string()
@@ -1818,15 +1808,15 @@ mod queue_panel_tests {
             row: 4,
         };
 
-        screen.handle_mouse(at(MouseGesture::ScrollDown));
+        screen.handle_mouse(at(MouseGesture::ScrollDown), None);
         assert!(screen.queue_focused, "wheel over the queue focuses it");
         assert_eq!(screen.queue_sel, 1);
-        screen.handle_mouse(at(MouseGesture::ScrollDown));
+        screen.handle_mouse(at(MouseGesture::ScrollDown), None);
         assert_eq!(screen.queue_sel, 1, "clamps at the last pending row");
-        screen.handle_mouse(at(MouseGesture::ScrollUp));
+        screen.handle_mouse(at(MouseGesture::ScrollUp), None);
         assert_eq!(screen.queue_sel, 0);
 
-        screen.handle_mouse(at(MouseGesture::RightClick));
+        screen.handle_mouse(at(MouseGesture::RightClick), None);
         assert!(!screen.queue_focused, "right-click backs out of the queue");
     }
 }
