@@ -2297,9 +2297,18 @@ impl App {
     /// screen regions (mirrors `route_key`'s precedence: overlay first, then the
     /// global chrome, then the active screen).
     fn route_mouse(&mut self, m: MouseInput) -> Action {
-        // 1) An open overlay gets first refusal, just like keys.
+        // 1) An open overlay gets first refusal, just like keys. A kit-rendered
+        // one answers from the registry; the rest still restate their geometry
+        // in `modal_rect`, until they are converted too.
         if !matches!(self.overlay, Overlay::None) {
-            return self.overlay.handle_mouse(m, self.last_area);
+            return if self.overlay.is_kit_rendered() {
+                let zones = std::mem::take(&mut self.zones);
+                let action = self.overlay.handle_mouse_zones(m, &zones);
+                self.zones = zones;
+                action
+            } else {
+                self.overlay.handle_mouse(m, self.last_area)
+            };
         }
         let Some(sk) = self.last_skeleton else {
             return Action::None;
@@ -5165,8 +5174,16 @@ impl App {
 
         // Overlay last, over a Clear, so it always wins.
         if !matches!(self.overlay, Overlay::None) {
-            self.overlay
-                .render(f, area, &self.theme, &self.cfg, &self.log, self.frame);
+            let mut ui = Ui::new(
+                f,
+                &mut self.zones,
+                &self.theme,
+                metrics,
+                &self.focus,
+                self.hover,
+                frame_count,
+            );
+            self.overlay.render(&mut ui, area, &self.cfg, &self.log);
         }
 
         // Settle focus and hover against what was actually drawn. A list can
@@ -6561,18 +6578,63 @@ mod mouse_tests {
     }
 
     /// Clicking a confirm dialog's confirm button runs its wrapped action.
+    ///
+    /// The button's position is read from the registry rather than recomputed
+    /// here. A test that re-derives the geometry can only ever check that two
+    /// copies of the arithmetic agree, which is the thing that went wrong.
     #[test]
     fn clicking_confirm_button_runs_action() {
         let mut app = app();
         app.overlay = Overlay::confirm("Title", "Body", Action::Goto(Screen::Lexicon));
         render(&mut app, 80, 24);
-        // Resolve the modal the same way the render/hit-test path does, then click
-        // the start of the confirm label on the button (last interior) row.
-        let modal = crate::ui::layout::centered_modal(64, 9, app.last_area);
-        let button_row = modal.y + modal.height - 2; // inner bottom line
-        click(&mut app, modal.x + 4, button_row);
+        let rect = app
+            .zones
+            .rect_of(crate::ui::kit::ZoneId::button(
+                crate::app::overlay::DIALOG_CONFIRM,
+            ))
+            .expect("the confirm button should be registered");
+        click(&mut app, rect.x + rect.width / 2, rect.y);
         assert!(matches!(app.overlay, Overlay::None));
         assert_eq!(app.screen, Screen::Lexicon);
+    }
+
+    /// And its cancel button closes without running anything.
+    #[test]
+    fn clicking_cancel_closes_without_acting() {
+        let mut app = app();
+        let before = app.screen;
+        app.overlay = Overlay::confirm("Title", "Body", Action::Goto(Screen::Lexicon));
+        render(&mut app, 80, 24);
+        let rect = app
+            .zones
+            .rect_of(crate::ui::kit::ZoneId::button(
+                crate::app::overlay::DIALOG_CANCEL,
+            ))
+            .expect("the cancel button should be registered");
+        click(&mut app, rect.x + rect.width / 2, rect.y);
+        assert!(matches!(app.overlay, Overlay::None));
+        assert_eq!(app.screen, before, "cancel must not run the action");
+    }
+
+    /// A click inside a modal but on none of its controls does nothing — it is
+    /// inert, not a dismiss.
+    #[test]
+    fn clicking_dead_space_inside_a_modal_is_inert() {
+        let mut app = app();
+        app.overlay = Overlay::confirm("Title", "Body", Action::Goto(Screen::Lexicon));
+        render(&mut app, 80, 24);
+        let frame = app
+            .zones
+            .rect_of(crate::ui::kit::ZoneId::bare(
+                crate::ui::kit::ZoneKind::ModalFrame,
+            ))
+            .expect("the modal frame should be registered");
+        // The middle of the frame, well away from the title and button rows.
+        click(&mut app, frame.x + frame.width / 2, frame.y + frame.height / 2);
+        assert!(
+            !matches!(app.overlay, Overlay::None),
+            "dead space inside a modal must not close it"
+        );
     }
 }
 

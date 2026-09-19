@@ -21,10 +21,83 @@ use crate::ui::input::{self, EditOpts, Edited};
 use crate::ui::layout::{centered_modal, centered_pct};
 use crate::ui::mouse::{MouseGesture, MouseInput, hit};
 use crate::ui::text::{col_width, pad_to_cols, thai_display_safe, truncate_cols};
+use crate::ui::kit::{ZoneId, ZoneKind};
 use crate::ui::widgets::render_gauge;
 
 use super::qa;
 use super::{Action, Screen, slugify};
+
+/// Zone indices for the choices every confirm dialog offers. Distinct from a
+/// modal's close button, which the kit owns.
+pub const DIALOG_CANCEL: u32 = 1;
+pub const DIALOG_CONFIRM: u32 = 2;
+pub const DIALOG_ALTERNATE: u32 = 3;
+
+/// One line of the keybinding reference.
+enum HelpRow {
+    Section(&'static str),
+    Binding(&'static str, &'static str),
+    Blank,
+}
+
+/// The keybinding reference, as data rather than as pre-formatted lines.
+///
+/// Structured so the list component can window it, and so the same table can
+/// later feed the shortcuts bar and the command bar instead of all three
+/// keeping their own copy.
+fn help_rows() -> Vec<HelpRow> {
+    use HelpRow::{Binding, Blank, Section};
+    vec![
+        Section("Global"),
+        Binding("1–6 / Tab", "switch primary tab"),
+        Binding(": / Ctrl-P / Ctrl-K", "command bar"),
+        Binding("Ctrl-T", "theme picker"),
+        Binding("` / l", "activity log (Project keeps l)"),
+        Binding("?", "this help"),
+        Binding("Esc / Backspace", "close overlay · dismiss toast"),
+        Binding("Ctrl-C", "quit (twice)"),
+        Blank,
+        Section("Mouse"),
+        Binding("click", "tabs, rows, buttons, breadcrumb, tally"),
+        Binding("double-click", "open the row under the pointer"),
+        Binding("wheel", "scroll the pane under the pointer"),
+        Binding("right-click", "back · dismiss"),
+        Blank,
+        Section("Shelf 書架"),
+        Binding("↵", "open project"),
+        Binding("i", "import a source file"),
+        Binding("d / R / r", "delete · rename · rescan"),
+        Blank,
+        Section("Project 棚"),
+        Binding("↵", "read chapter"),
+        Binding("Space", "mark chapter (cross-volume ok)"),
+        Binding("t / a", "translate · queue marked or current"),
+        Binding("T / A", "translate volume · whole project"),
+        Binding("V / i", "add volume · add chapters"),
+        Binding("h / l", "collapse · expand volume, focus panel"),
+        Binding("z / Z", "collapse · expand all volumes"),
+        Binding("x / Q", "export · QA report"),
+        Binding("e / y", "edit title · synopsis"),
+        Blank,
+        Section("Translate 訳"),
+        Binding("p / s", "pause · stop the run"),
+        Binding("J / K", "move queued chapter down · up"),
+        Blank,
+        Section("Reader 読"),
+        Binding("/ ", "search both panes"),
+        Binding("g", "jump to chapter, section or bookmark"),
+        Binding("w / y", "wrap · sync the panes"),
+        Binding("b / n", "bookmark · note this line"),
+        Blank,
+        Section("Lexicon 辞"),
+        Binding("↵ / d", "edit · delete entry"),
+        Binding("/ ", "filter"),
+        Blank,
+        Section("Refine 推"),
+        Binding("Ctrl-R", "new session"),
+        Binding("Ctrl-C", "cancel the in-flight turn"),
+    ]
+}
 
 /// Where a synopsis editor sits in its lifecycle.
 #[derive(Debug, Clone, PartialEq)]
@@ -1914,7 +1987,99 @@ impl Overlay {
         match self.resolve_click(m, inner, double) {
             ClickOutcome::Nothing => Action::None,
             ClickOutcome::Key(code) => self.handle_key(synth(code)),
-            ClickOutcome::Act(action) => action,
+        }
+    }
+
+    /// Mouse handling for a kit-rendered overlay: clicks resolve from the zone
+    /// registry rather than from a restated copy of the layout.
+    ///
+    /// The wheel and right-click still go through the keyboard handlers, since
+    /// scrolling and stepping back mean the same thing however they arrive.
+    pub fn handle_mouse_zones(
+        &mut self,
+        m: MouseInput,
+        zones: &crate::ui::kit::Zones,
+    ) -> Action {
+        match m.gesture {
+            MouseGesture::ScrollUp => return self.handle_key(synth(KeyCode::Up)),
+            MouseGesture::ScrollDown => return self.handle_key(synth(KeyCode::Down)),
+            MouseGesture::RightClick => return self.handle_key(synth(KeyCode::Esc)),
+            MouseGesture::Click { .. } => {}
+        }
+        let Some(id) = zones.at(m.col, m.row) else {
+            return Action::None;
+        };
+        self.zone_action(id, m.is_double())
+    }
+
+    /// What a click on `id` means for this overlay.
+    fn zone_action(&mut self, id: ZoneId, double: bool) -> Action {
+        use crate::ui::kit::modal::CLOSE_BUTTON;
+
+        // Shared frame behaviour first: these mean the same in every modal.
+        match id.kind {
+            // Clicking beside the modal steps back, exactly as Esc does.
+            ZoneKind::Backdrop => return self.handle_key(synth(KeyCode::Esc)),
+            ZoneKind::Button if id.index == CLOSE_BUTTON => {
+                return self.handle_key(synth(KeyCode::Esc));
+            }
+            // Inside the modal but on nothing: inert, never a dismiss.
+            ZoneKind::ModalFrame => return Action::None,
+            _ => {}
+        }
+
+        match self {
+            // Every button routes through its own keyboard accelerator rather
+            // than re-deriving what the choice means. Confirm has to dismiss
+            // the dialog before running the wrapped action, and stating that
+            // twice is how the two paths drift apart.
+            Overlay::Modal(dlg) => {
+                let alt_key = dlg.alternate.as_ref().map(|a| a.key);
+                match (id.kind, id.index) {
+                    (ZoneKind::Button, DIALOG_CONFIRM) => {
+                        self.handle_key(synth(KeyCode::Enter))
+                    }
+                    (ZoneKind::Button, DIALOG_CANCEL) => self.handle_key(synth(KeyCode::Esc)),
+                    (ZoneKind::Button, DIALOG_ALTERNATE) => match alt_key {
+                        Some(k) => self.handle_key(synth(KeyCode::Char(k))),
+                        None => Action::None,
+                    },
+                    _ => Action::None,
+                }
+            }
+            Overlay::Export(st) => match (id.kind, id.index) {
+                (ZoneKind::Button, DIALOG_CANCEL) => Action::CloseOverlay,
+                (ZoneKind::Button, DIALOG_CONFIRM) => self.handle_key(synth(KeyCode::Enter)),
+                (ZoneKind::Row, i) if (i as usize) < st.formats.len() => {
+                    st.sel = i as usize;
+                    // A single click toggles, because a checklist row *is* the
+                    // checkbox; a double click also runs the export.
+                    st.formats[st.sel] = !st.formats[st.sel];
+                    if double {
+                        self.handle_key(synth(KeyCode::Enter))
+                    } else {
+                        Action::None
+                    }
+                }
+                _ => Action::None,
+            },
+            Overlay::Theme(st) => match (id.kind, id.index) {
+                (ZoneKind::Row, i) if (i as usize) < ALL_THEMES.len() => {
+                    let already = st.sel == i as usize;
+                    st.sel = i as usize;
+                    if double || already {
+                        self.handle_key(synth(KeyCode::Enter))
+                    } else {
+                        // A single click previews, so the list doubles as the
+                        // preview surface.
+                        Action::PreviewTheme(st.current())
+                    }
+                }
+                _ => Action::None,
+            },
+            // Help, About and the Log are read-only: their rows do nothing, and
+            // the frame behaviour above already covers closing them.
+            _ => Action::None,
         }
     }
 
@@ -1922,7 +2087,17 @@ impl Overlay {
     /// fn's `centered_modal` / `centered_pct` call), used for click hit-testing.
     fn modal_rect(&self, area: Rect) -> Rect {
         match self {
-            Overlay::None => area,
+            // Kit-rendered overlays register the geometry they actually drew,
+            // so nothing here may restate it — a second copy is what let
+            // Settings draw at 76x24 while this claimed 72x26. These arms are
+            // unreachable: `handle_mouse_zones` answers for them instead.
+            Overlay::None
+            | Overlay::Help(_)
+            | Overlay::About
+            | Overlay::Log(_)
+            | Overlay::Modal(_)
+            | Overlay::Export(_)
+            | Overlay::Theme(_) => area,
             Overlay::Welcome(_) => centered_modal(76, 24, area),
             // One size for every wizard step (the modal must not jump around as
             // the user advances); mirrors render_import.
@@ -1931,14 +2106,7 @@ impl Overlay {
             // Must mirror render_settings' centered_modal(72, 26, …) so clicks
             // near the modal's top/bottom hit-test inside it (not as a dismiss).
             Overlay::Settings(_) => centered_modal(72, 26, area),
-            Overlay::Theme(_) => centered_modal(60, 20, area),
             Overlay::Palette(_) => centered_modal(60, 20, area),
-            Overlay::Log(_) => centered_pct(80, 80, area),
-            Overlay::Help(_) => centered_modal(72, 24, area),
-            Overlay::About => centered_modal(64, 20, area),
-            Overlay::Modal(dlg) => {
-                centered_modal(64, if dlg.alternate.is_some() { 11 } else { 9 }, area)
-            }
             Overlay::Synopsis(_) => centered_modal(76, 24, area),
             Overlay::ProjectTitle(_) => centered_modal(72, 16, area),
             Overlay::Qa(_) => centered_pct(80, 80, area),
@@ -1947,7 +2115,6 @@ impl Overlay {
             Overlay::ReaderEdit(_) => centered_pct(82, 75, area),
             Overlay::ReaderSearch(_) => centered_modal(64, 7, area),
             Overlay::ReaderJump(_) => centered_modal(72, 24, area),
-            Overlay::Export(_) => centered_modal(66, 15, area),
         }
     }
 
@@ -1955,20 +2122,10 @@ impl Overlay {
     /// here (within the borrow); the actual activation key is synthesized by the
     /// caller after the borrow ends. `inner` is the bordered modal's content rect.
     fn resolve_click(&mut self, m: MouseInput, inner: Rect, double: bool) -> ClickOutcome {
+        // Kit-rendered overlays are absent here on purpose: they answer clicks
+        // from the zone registry, so re-deriving their row offsets would be a
+        // second source of truth. The catch-all at the bottom covers them.
         match self {
-            Overlay::Modal(dlg) => {
-                // The button row is the last interior line.
-                let row = inner.y + inner.height.saturating_sub(1);
-                if m.row != row {
-                    return ClickOutcome::Nothing;
-                }
-                match modal_button_at(dlg, inner, m.col) {
-                    Some(ModalButton::Confirm) => ClickOutcome::Key(KeyCode::Enter),
-                    Some(ModalButton::Cancel) => ClickOutcome::Key(KeyCode::Esc),
-                    Some(ModalButton::Alternate(c)) => ClickOutcome::Key(KeyCode::Char(c)),
-                    None => ClickOutcome::Nothing,
-                }
-            }
             // Welcome menu: 4 items at a fixed offset below the preamble (see
             // `render_welcome` — 10 preamble lines precede the first item).
             Overlay::Welcome(st) => {
@@ -1979,24 +2136,6 @@ impl Overlay {
                     st.sel = idx;
                     if double || already {
                         return ClickOutcome::Key(KeyCode::Enter);
-                    }
-                }
-                ClickOutcome::Nothing
-            }
-            // Theme list fills the interior above a 2-line swatch; windowed so the
-            // selection stays visible. Single click previews; double commits.
-            Overlay::Theme(st) => {
-                let list_h = inner.height.saturating_sub(2);
-                if m.row >= inner.y && (m.row - inner.y) < list_h {
-                    let start = windowed_start(st.sel, list_h);
-                    let idx = start + (m.row - inner.y) as usize;
-                    if idx < ALL_THEMES.len() {
-                        let already = st.sel == idx;
-                        st.sel = idx;
-                        if double || already {
-                            return ClickOutcome::Key(KeyCode::Enter);
-                        }
-                        return ClickOutcome::Act(Action::PreviewTheme(st.current()));
                     }
                 }
                 ClickOutcome::Nothing
@@ -2032,27 +2171,6 @@ impl Overlay {
                             return ClickOutcome::Key(KeyCode::Enter);
                         }
                     }
-                }
-                ClickOutcome::Nothing
-            }
-            // Export format checklist: rows start 2 lines down. A single click
-            // toggles the format under it; a double click exports.
-            Overlay::Export(st) => {
-                if st.done.is_some() || st.progress.is_some() {
-                    return if double {
-                        ClickOutcome::Key(KeyCode::Enter)
-                    } else {
-                        ClickOutcome::Nothing
-                    };
-                }
-                let base = inner.y + 2;
-                if m.row >= base && ((m.row - base) as usize) < st.formats.len() {
-                    st.sel = (m.row - base) as usize;
-                    return if double {
-                        ClickOutcome::Key(KeyCode::Enter)
-                    } else {
-                        ClickOutcome::Key(KeyCode::Char(' '))
-                    };
                 }
                 ClickOutcome::Nothing
             }
@@ -3006,37 +3124,528 @@ impl Overlay {
         }
     }
 
+    /// Whether this overlay draws through the component kit.
+    ///
+    /// Migration marker. A kit-rendered overlay registers its own zones, so its
+    /// clicks resolve from the registry and it needs no entry in `modal_rect`
+    /// or `resolve_click`. Both of those go away once this returns true for
+    /// every variant.
+    pub fn is_kit_rendered(&self) -> bool {
+        matches!(
+            self,
+            Overlay::None
+                | Overlay::Help(_)
+                | Overlay::About
+                | Overlay::Log(_)
+                | Overlay::Modal(_)
+                | Overlay::Export(_)
+                | Overlay::Theme(_)
+        )
+    }
+
     pub fn render(
         &self,
-        f: &mut Frame,
+        ui: &mut crate::ui::kit::Ui,
         area: Rect,
-        theme: &Theme,
         cfg: &AppConfig,
         log: &[(LogLevel, String)],
-        frame: u64,
     ) {
+        // Overlays still on the old path draw straight to the frame. They are
+        // converted a batch at a time; `is_kit_rendered` says which are done.
         match self {
             Overlay::None => {}
-            Overlay::Welcome(st) => self.render_welcome(f, area, theme, st),
-            Overlay::Import(st) => self.render_import(f, area, theme, st),
-            Overlay::ImageSource(st) => self.render_image_source(f, area, theme, st),
-            Overlay::Settings(st) => self.render_settings(f, area, theme, cfg, st),
-            Overlay::Theme(st) => self.render_theme(f, area, theme, st),
-            Overlay::Palette(st) => self.render_palette(f, area, theme, st),
-            Overlay::Log(off) => self.render_log(f, area, theme, log, *off),
-            Overlay::Help(off) => self.render_help(f, area, theme, *off),
-            Overlay::About => self.render_about(f, area, theme, frame),
-            Overlay::Modal(dlg) => self.render_modal(f, area, theme, dlg),
-            Overlay::Synopsis(st) => self.render_synopsis(f, area, theme, st),
-            Overlay::ProjectTitle(st) => self.render_project_title(f, area, theme, st),
-            Overlay::Qa(st) => self.render_qa(f, area, theme, st),
-            Overlay::ReaderNote(st) => self.render_reader_note(f, area, theme, st),
-            Overlay::ReaderInspect(st) => self.render_reader_inspect(f, area, theme, st),
-            Overlay::ReaderEdit(st) => self.render_reader_edit(f, area, theme, st),
-            Overlay::ReaderSearch(st) => self.render_reader_search(f, area, theme, st),
-            Overlay::ReaderJump(st) => self.render_reader_jump(f, area, theme, st),
-            Overlay::Export(st) => self.render_export(f, area, theme, st),
+            Overlay::Help(off) => self.render_help_kit(ui, area, *off),
+            Overlay::About => self.render_about_kit(ui, area),
+            Overlay::Log(off) => self.render_log_kit(ui, area, log, *off),
+            Overlay::Modal(dlg) => self.render_modal_kit(ui, area, dlg),
+            Overlay::Export(st) => self.render_export_kit(ui, area, st),
+            Overlay::Theme(st) => self.render_theme_kit(ui, area, st),
+
+            Overlay::Welcome(st) => {
+                let theme = ui.theme;
+                self.render_welcome(ui.frame, area, theme, st)
+            }
+            Overlay::Import(st) => {
+                let theme = ui.theme;
+                self.render_import(ui.frame, area, theme, st)
+            }
+            Overlay::ImageSource(st) => {
+                let theme = ui.theme;
+                self.render_image_source(ui.frame, area, theme, st)
+            }
+            Overlay::Settings(st) => {
+                let theme = ui.theme;
+                self.render_settings(ui.frame, area, theme, cfg, st)
+            }
+            Overlay::Palette(st) => {
+                let theme = ui.theme;
+                self.render_palette(ui.frame, area, theme, st)
+            }
+            Overlay::Synopsis(st) => {
+                let theme = ui.theme;
+                self.render_synopsis(ui.frame, area, theme, st)
+            }
+            Overlay::ProjectTitle(st) => {
+                let theme = ui.theme;
+                self.render_project_title(ui.frame, area, theme, st)
+            }
+            Overlay::Qa(st) => {
+                let theme = ui.theme;
+                self.render_qa(ui.frame, area, theme, st)
+            }
+            Overlay::ReaderNote(st) => {
+                let theme = ui.theme;
+                self.render_reader_note(ui.frame, area, theme, st)
+            }
+            Overlay::ReaderInspect(st) => {
+                let theme = ui.theme;
+                self.render_reader_inspect(ui.frame, area, theme, st)
+            }
+            Overlay::ReaderEdit(st) => {
+                let theme = ui.theme;
+                self.render_reader_edit(ui.frame, area, theme, st)
+            }
+            Overlay::ReaderSearch(st) => {
+                let theme = ui.theme;
+                self.render_reader_search(ui.frame, area, theme, st)
+            }
+            Overlay::ReaderJump(st) => {
+                let theme = ui.theme;
+                self.render_reader_jump(ui.frame, area, theme, st)
+            }
         }
+    }
+
+    // ---- kit-rendered overlays -------------------------------------------
+    //
+    // Each of these draws through `kit::Modal`, which owns the frame, the
+    // backdrop, the close affordance and the focus trap. None of them restate
+    // their geometry anywhere: the registry the modal writes to is what clicks
+    // resolve against.
+
+    /// Keybinding reference, grouped by where the bindings apply.
+    fn render_help_kit(&self, ui: &mut crate::ui::kit::Ui, area: Rect, off: u16) {
+        use crate::ui::kit::list::{self, ListState, Row};
+        use crate::ui::kit::modal::{Modal, Sizing};
+
+        let frame = Modal::new("Help — keybindings")
+            .sizing(Sizing::large())
+            .subtitle("jk scroll · Esc close")
+            .render(ui, area);
+
+        let rows = help_rows();
+        let mut st = ListState::new();
+        st.scroll_by(off as isize, frame.body.height, rows.len());
+        let dim = Style::default().fg(ui.theme.ink_faint);
+        let key = Style::default()
+            .fg(ui.theme.ink_soft)
+            .add_modifier(Modifier::BOLD);
+        let head = Style::default()
+            .fg(ui.theme.accent)
+            .add_modifier(Modifier::BOLD);
+
+        list::render(
+            ui,
+            frame.body,
+            &mut st,
+            rows.len(),
+            list::Opts {
+                rail: false,
+                scrollbar: true,
+                kind: ZoneKind::Row,
+                id_base: 0,
+            },
+            |i| match &rows[i] {
+                HelpRow::Section(title) => {
+                    Row::header(Line::from(Span::styled(title.to_string(), head)))
+                }
+                HelpRow::Blank => Row::header(Line::raw("")),
+                HelpRow::Binding(k, what) => Row::header(Line::from(vec![
+                    Span::styled(format!("  {k:<18}"), key),
+                    Span::styled(what.to_string(), dim),
+                ])),
+            },
+        );
+    }
+
+    /// About card. Animated off the frame ticker: the waxing-moon status
+    /// metaphor cycles, the three agents pulse left to right, and a line of
+    /// Japanese is typed out in Thai one grapheme at a time — typing by
+    /// grapheme rather than by char so a Thai cluster is never split mid-mark.
+    fn render_about_kit(&self, ui: &mut crate::ui::kit::Ui, area: Rect) {
+        use crate::ui::kit::ctx::row_at;
+        use crate::ui::kit::modal::{Modal, Sizing};
+        use unicode_segmentation::UnicodeSegmentation;
+
+        let frame = ui.frame_count;
+        let title = thai_display_safe("About · เกี่ยวกับ");
+        let f = Modal::new(&title)
+            .sizing(Sizing::small())
+            .subtitle(env!("CARGO_PKG_VERSION"))
+            .render(ui, area);
+
+        let bg = ui.theme.bg_elevated;
+        let dim = Style::default().fg(ui.theme.ink_faint).bg(bg);
+        let soft = Style::default().fg(ui.theme.ink_soft).bg(bg);
+        let accent = Style::default()
+            .fg(ui.theme.accent)
+            .bg(bg)
+            .add_modifier(Modifier::BOLD);
+
+        const PHASES: [crate::ui::glyphs::Glyph; 5] = [
+            crate::ui::glyphs::MOON_NEW,
+            crate::ui::glyphs::MOON_CRESCENT,
+            crate::ui::glyphs::MOON_FIRST_QUARTER,
+            crate::ui::glyphs::MOON_LAST_QUARTER,
+            crate::ui::glyphs::MOON_FULL,
+        ];
+        let moon = PHASES[(frame / 4) as usize % PHASES.len()];
+
+        let mut row = 0u16;
+        let mut put = |ui: &mut crate::ui::kit::Ui, line: Line<'static>| {
+            let r = row_at(f.body, row);
+            if r.height > 0 {
+                ui.line(r, line, Style::default().bg(bg));
+            }
+            row += 1;
+        };
+
+        put(
+            ui,
+            Line::from(vec![
+                Span::styled(format!("{} ", moon.as_str()), accent),
+                Span::styled("honya 本屋", accent),
+            ]),
+        );
+        put(
+            ui,
+            Line::from(Span::styled(
+                "Japanese → Thai / English light-novel translation.",
+                soft,
+            )),
+        );
+        put(ui, Line::raw(""));
+
+        // The typing demo: hold the finished line a moment, then start over.
+        let jp = "「月が綺麗ですね。」";
+        let th_full = thai_display_safe("— พระจันทร์คืนนี้สวยเหลือเกินนะ");
+        let graphemes: Vec<&str> = th_full.graphemes(true).collect();
+        const HOLD: usize = 22;
+        let pos = (frame as usize) % (graphemes.len() + HOLD);
+        let shown = pos.min(graphemes.len());
+        let typed: String = graphemes[..shown].concat();
+        let caret_on = shown < graphemes.len() || frame % 10 < 5;
+
+        put(ui, Line::from(Span::styled(jp, soft)));
+        put(
+            ui,
+            Line::from(vec![
+                Span::styled(typed, Style::default().fg(ui.theme.translated_text).bg(bg)),
+                Span::styled(
+                    if caret_on {
+                        crate::ui::glyphs::ACCENT_RAIL.as_str()
+                    } else {
+                        " "
+                    },
+                    Style::default().fg(ui.theme.stream_cursor).bg(bg),
+                ),
+            ]),
+        );
+        put(ui, Line::raw(""));
+
+        // The three agents, pulsing left to right.
+        let active = ((frame / 6) % 3) as usize;
+        let agents = [
+            ("Orchestrator", ui.theme.accent),
+            ("Translator", ui.theme.status_working),
+            ("Reviewer", ui.theme.accent_soft),
+        ];
+        let spinner = crate::ui::glyphs::frame_of(&crate::ui::glyphs::SPINNER, frame);
+        let mut pipeline: Vec<Span<'static>> = Vec::new();
+        for (i, (name, color)) in agents.into_iter().enumerate() {
+            if i > 0 {
+                pipeline.push(Span::styled(
+                    format!(" {} ", crate::ui::glyphs::RULE_H.as_str()),
+                    dim,
+                ));
+            }
+            let (mark, style) = if i == active {
+                (
+                    spinner.as_str().to_string(),
+                    Style::default().fg(color).bg(bg).add_modifier(Modifier::BOLD),
+                )
+            } else {
+                (crate::ui::glyphs::BADGE_ORCHESTRATOR.as_str().to_string(), dim)
+            };
+            pipeline.push(Span::styled(format!("{mark} {name}"), style));
+        }
+        put(ui, Line::from(pipeline));
+        put(ui, Line::raw(""));
+
+        let commit = option_env!("HONYA_BUILD_COMMIT").unwrap_or("dev");
+        put(
+            ui,
+            Line::from(vec![
+                Span::styled(format!("build {commit}   "), dim),
+                Span::styled(env!("CARGO_PKG_HOMEPAGE"), dim),
+            ]),
+        );
+    }
+
+    /// The activity log, newest last, scrolled back by `off`.
+    fn render_log_kit(
+        &self,
+        ui: &mut crate::ui::kit::Ui,
+        area: Rect,
+        log: &[(LogLevel, String)],
+        off: u16,
+    ) {
+        use crate::ui::kit::list::{self, ListState, Row};
+        use crate::ui::kit::modal::{Modal, Sizing};
+
+        let frame = Modal::new("Activity log")
+            .sizing(Sizing::large())
+            .subtitle(format!("{} entries", log.len()))
+            .render(ui, area);
+
+        // `off` counts backwards from the newest entry, which is where the log
+        // sits when opened.
+        let mut st = ListState::following();
+        if off > 0 {
+            st.set_follow(false);
+            st.scroll_by(
+                -(off as isize),
+                frame.body.height,
+                log.len(),
+            );
+        }
+        let colors = [
+            ui.theme.ink_faint,
+            ui.theme.ink_soft,
+            ui.theme.status_warn,
+            ui.theme.status_failed,
+        ];
+        list::render(
+            ui,
+            frame.body,
+            &mut st,
+            log.len(),
+            list::Opts {
+                rail: false,
+                scrollbar: true,
+                kind: ZoneKind::Row,
+                id_base: 0,
+            },
+            |i| {
+                let (level, msg) = &log[i];
+                let (glyph, color) = match level {
+                    LogLevel::Trace => (crate::ui::glyphs::DOT, colors[0]),
+                    LogLevel::Info => (crate::ui::glyphs::CHECK, colors[1]),
+                    LogLevel::Warn => (crate::ui::glyphs::FLAG, colors[2]),
+                    LogLevel::Error => (crate::ui::glyphs::CROSS, colors[3]),
+                };
+                Row::header(Line::from(vec![
+                    Span::styled(
+                        format!("{} ", glyph.as_str()),
+                        Style::default().fg(color),
+                    ),
+                    Span::styled(
+                        thai_display_safe(msg),
+                        Style::default().fg(colors[1]),
+                    ),
+                ]))
+            },
+        );
+    }
+
+    /// A confirm dialog, with its choices as real buttons.
+    fn render_modal_kit(&self, ui: &mut crate::ui::kit::Ui, area: Rect, dlg: &Dialog) {
+        use crate::ui::kit::button::{Button, ButtonRow};
+        use crate::ui::kit::modal::{self, Modal, Sizing};
+
+        let frame = Modal::new(&dlg.title)
+            .sizing(Sizing::small())
+            .footer(1)
+            .closable(false)
+            .render(ui, area);
+
+        let wrapped = crate::ui::kit::editor::wrap(&dlg.body, frame.body.width);
+        for (n, range) in wrapped.iter().enumerate() {
+            if (n as u16) >= frame.body.height.saturating_sub(1) {
+                break;
+            }
+            ui.text(
+                crate::ui::kit::ctx::row_at(frame.body, n as u16),
+                thai_display_safe(&dlg.body[range.clone()]),
+                Style::default()
+                    .fg(ui.theme.ink_soft)
+                    .bg(ui.theme.bg_elevated),
+            );
+        }
+
+        let mut buttons = vec![Button::new(ZoneId::button(DIALOG_CANCEL), "Cancel").accel("esc")];
+        if let Some(alt) = &dlg.alternate {
+            buttons.push(
+                Button::new(ZoneId::button(DIALOG_ALTERNATE), alt.label.clone())
+                    .accel(alt.key.to_string()),
+            );
+        }
+        buttons.push(
+            Button::new(ZoneId::button(DIALOG_CONFIRM), dlg.confirm_label.clone())
+                .accel("↵")
+                .primary(),
+        );
+        modal::render_footer(ui, frame.footer, ButtonRow::new(buttons));
+    }
+
+    /// Export picker: a format checklist, then progress, then results.
+    fn render_export_kit(&self, ui: &mut crate::ui::kit::Ui, area: Rect, st: &ExportState) {
+        use crate::ui::kit::button::{Button, ButtonRow};
+        use crate::ui::kit::modal::{self, Modal, Sizing};
+        use crate::ui::kit::{badge::Chip, progress};
+
+        let frame = Modal::new("Export volume")
+            .sizing(Sizing::medium())
+            .subtitle(format!("Vol.{:02}", st.vol))
+            .footer(1)
+            .render(ui, area);
+
+        if let Some((written, warnings)) = &st.done {
+            let mut n = 0u16;
+            ui.text(
+                crate::ui::kit::ctx::row_at(frame.body, n),
+                format!("Wrote {} file(s)", written.len()),
+                Style::default()
+                    .fg(ui.theme.status_done)
+                    .bg(ui.theme.bg_elevated)
+                    .add_modifier(Modifier::BOLD),
+            );
+            n += 1;
+            for path in written.iter().take(frame.body.height.saturating_sub(2) as usize) {
+                ui.text(
+                    crate::ui::kit::ctx::row_at(frame.body, n),
+                    truncate_cols(&path.display().to_string(), frame.body.width as usize),
+                    Style::default()
+                        .fg(ui.theme.ink_soft)
+                        .bg(ui.theme.bg_elevated),
+                );
+                n += 1;
+            }
+            for w in warnings.iter().take(2) {
+                ui.text(
+                    crate::ui::kit::ctx::row_at(frame.body, n),
+                    truncate_cols(w, frame.body.width as usize),
+                    Style::default()
+                        .fg(ui.theme.status_warn)
+                        .bg(ui.theme.bg_elevated),
+                );
+                n += 1;
+            }
+            modal::render_footer(
+                ui,
+                frame.footer,
+                ButtonRow::new(vec![
+                    Button::new(ZoneId::button(DIALOG_CONFIRM), "Close")
+                        .accel("↵")
+                        .primary(),
+                ]),
+            );
+            return;
+        }
+
+        if let Some((done, total, what)) = &st.progress {
+            ui.text(
+                crate::ui::kit::ctx::row_at(frame.body, 0),
+                format!("Exporting {what}…"),
+                Style::default()
+                    .fg(ui.theme.ink_soft)
+                    .bg(ui.theme.bg_elevated),
+            );
+            progress::bar_with_label(
+                ui,
+                crate::ui::kit::ctx::row_at(frame.body, 2),
+                *done,
+                *total,
+            );
+            modal::footer_hint(ui, frame.footer, "  export continues in the background");
+            return;
+        }
+
+        for (i, fmt) in crate::export::ExportFormat::ALL.iter().enumerate() {
+            let row = crate::ui::kit::ctx::row_at(frame.body, i as u16);
+            if row.height == 0 {
+                break;
+            }
+            Chip::new(ZoneId::row(i), fmt.label(), st.formats[i]).render(ui, row);
+            let desc_x = row.x + 18;
+            if desc_x < row.x + row.width {
+                ui.text(
+                    Rect {
+                        x: desc_x,
+                        width: row.width - 18,
+                        ..row
+                    },
+                    export_desc(*fmt),
+                    Style::default()
+                        .fg(ui.theme.ink_faint)
+                        .bg(ui.theme.bg_elevated),
+                );
+            }
+        }
+
+        let any = st.formats.iter().any(|b| *b);
+        modal::render_footer(
+            ui,
+            frame.footer,
+            ButtonRow::new(vec![
+                Button::new(ZoneId::button(DIALOG_CANCEL), "Cancel").accel("esc"),
+                Button::new(ZoneId::button(DIALOG_CONFIRM), "Export")
+                    .accel("↵")
+                    .primary()
+                    .disabled(!any),
+            ]),
+        );
+    }
+
+    /// Theme picker. The selection previews live, so the list doubles as the
+    /// preview surface and needs no separate swatch.
+    fn render_theme_kit(&self, ui: &mut crate::ui::kit::Ui, area: Rect, st: &ThemePickerState) {
+        use crate::ui::kit::list::{self, ListState, Row};
+        use crate::ui::kit::modal::{self, Modal, Sizing};
+
+        let frame = Modal::new("Theme")
+            .sizing(Sizing::medium())
+            .subtitle("↵ keep · Esc revert")
+            .footer(1)
+            .render(ui, area);
+
+        let mut list_state = ListState::new();
+        list_state.select(Some(st.sel));
+        let dim = Style::default().fg(ui.theme.ink_faint);
+        list::render(
+            ui,
+            frame.body,
+            &mut list_state,
+            ALL_THEMES.len(),
+            list::Opts {
+                rail: true,
+                scrollbar: true,
+                kind: ZoneKind::Row,
+                id_base: 0,
+            },
+            |i| {
+                let id = ALL_THEMES[i];
+                Row::new(Line::from(vec![
+                    Span::raw(format!("{:<22}", id.label())),
+                    Span::styled(id.tone().to_string(), dim),
+                ]))
+            },
+        );
+        modal::footer_hint(
+            ui,
+            frame.footer,
+            "  the selection previews live — Esc puts the old one back",
+        );
     }
 
     fn modal_block<'a>(&self, title: &'a str, theme: &Theme) -> Block<'a> {
@@ -4100,145 +4709,6 @@ impl Overlay {
         );
     }
 
-    fn render_export(&self, f: &mut Frame, area: Rect, theme: &Theme, st: &ExportState) {
-        let modal = centered_modal(66, 15, area);
-        f.render_widget(Clear, modal);
-        let title = format!("Export volume — Vol.{:02}", st.vol);
-        let block = self.modal_block(&title, theme);
-        let inner = block.inner(modal);
-        f.render_widget(block, modal);
-
-        if let Some((paths, warnings)) = st.done.as_ref() {
-            self.render_export_done(f, inner, theme, paths, warnings);
-        } else if let Some((done, total, label)) = st.progress.as_ref() {
-            let rows = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Length(2),
-                    Constraint::Length(1), // label
-                    Constraint::Length(1), // gauge
-                    Constraint::Min(0),
-                ])
-                .split(inner);
-            f.render_widget(
-                Paragraph::new(Line::from(vec![
-                    Span::styled("  Writing  ", Style::default().fg(theme.ink_soft)),
-                    Span::styled(label.clone(), Style::default().fg(theme.accent_soft)),
-                ]))
-                .style(Style::default().bg(theme.bg_panel)),
-                rows[1],
-            );
-            render_gauge(f, indent(rows[2], 2), *done, (*total).max(1), theme);
-        } else {
-            self.render_export_pick(f, inner, theme, st);
-        }
-    }
-
-    fn render_export_pick(&self, f: &mut Frame, area: Rect, theme: &Theme, st: &ExportState) {
-        let mut lines = vec![
-            Line::from(Span::styled(
-                "  Choose formats, then ↵ to export:",
-                Style::default().fg(theme.ink_soft),
-            )),
-            Line::from(""),
-        ];
-        for (i, fmt) in ExportFormat::ALL.iter().enumerate() {
-            let on = st.formats[i];
-            let selected = i == st.sel;
-            let checkbox = if on { "[x]" } else { "[ ]" };
-            let name_style = if selected {
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD)
-            } else if on {
-                Style::default().fg(theme.ink)
-            } else {
-                Style::default().fg(theme.ink_faint)
-            };
-            lines.push(Line::from(vec![
-                Span::styled(
-                    if selected { "  › " } else { "    " },
-                    Style::default().fg(theme.accent),
-                ),
-                Span::styled(
-                    format!("{checkbox} "),
-                    Style::default().fg(if on {
-                        theme.status_done
-                    } else {
-                        theme.ink_faint
-                    }),
-                ),
-                Span::styled(format!("{:<9}", fmt.label()), name_style),
-                Span::styled(export_desc(*fmt), Style::default().fg(theme.ink_faint)),
-            ]));
-        }
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "  written to the project's exports/ folder",
-            Style::default().fg(theme.ink_faint),
-        )));
-        f.render_widget(
-            Paragraph::new(lines).style(Style::default().bg(theme.bg_panel)),
-            area,
-        );
-    }
-
-    fn render_export_done(
-        &self,
-        f: &mut Frame,
-        area: Rect,
-        theme: &Theme,
-        paths: &[PathBuf],
-        warnings: &[String],
-    ) {
-        let mut lines = vec![Line::from(Span::styled(
-            format!("  ✓ wrote {} file(s):", paths.len()),
-            Style::default().fg(theme.status_done),
-        ))];
-        for p in paths {
-            let name = p
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or_default()
-                .to_string();
-            lines.push(Line::from(Span::styled(
-                format!("    {name}"),
-                Style::default().fg(theme.ink),
-            )));
-        }
-        lines.push(Line::from(""));
-        if warnings.is_empty() {
-            lines.push(Line::from(Span::styled(
-                "  no warnings",
-                Style::default().fg(theme.ink_faint),
-            )));
-        } else {
-            let shown = warnings.len().min(4);
-            lines.push(Line::from(Span::styled(
-                format!("  ! {} warning(s):", warnings.len()),
-                Style::default().fg(theme.status_warn),
-            )));
-            for w in warnings.iter().take(shown) {
-                lines.push(Line::from(Span::styled(
-                    format!("    {}", thai_display_safe(w)),
-                    Style::default().fg(theme.ink_soft),
-                )));
-            }
-            if warnings.len() > shown {
-                lines.push(Line::from(Span::styled(
-                    format!("    … +{} more (see activity log)", warnings.len() - shown),
-                    Style::default().fg(theme.ink_faint),
-                )));
-            }
-        }
-        f.render_widget(
-            Paragraph::new(lines)
-                .wrap(Wrap { trim: false })
-                .style(Style::default().bg(theme.bg_panel)),
-            area,
-        );
-    }
-
     fn render_settings(
         &self,
         f: &mut Frame,
@@ -4773,71 +5243,6 @@ impl Overlay {
         );
     }
 
-    /// Render the theme picker: a name list plus a swatch row of the focused
-    /// theme's key colors. Drawn with the live `theme`, so the modal recolors too.
-    fn render_theme(&self, f: &mut Frame, area: Rect, theme: &Theme, st: &ThemePickerState) {
-        let modal = centered_modal(60, 20, area);
-        f.render_widget(Clear, modal);
-        let block = self.modal_block("Theme 配色", theme);
-        let inner = block.inner(modal);
-        f.render_widget(block, modal);
-
-        let rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(0), Constraint::Length(2)])
-            .split(inner);
-
-        // Windowed so the selected row stays visible when the modal is clamped short.
-        let cap = (rows[0].height as usize).max(1);
-        let start = if st.sel >= cap { st.sel + 1 - cap } else { 0 };
-        let end = (start + cap).min(ALL_THEMES.len());
-        let mut lines = Vec::with_capacity(end - start);
-        for (i, id) in ALL_THEMES.iter().enumerate().take(end).skip(start) {
-            let selected = i == st.sel;
-            let bar = if selected {
-                theme::SELECT_BAR.to_string()
-            } else {
-                " ".to_string()
-            };
-            let name_style = if selected {
-                Style::default().fg(theme.ink).bg(theme.accent_bg)
-            } else {
-                Style::default().fg(theme.ink_soft)
-            };
-            lines.push(Line::from(vec![
-                Span::styled(format!(" {bar} "), Style::default().fg(theme.accent)),
-                Span::styled(format!("{:<22}", id.label()), name_style),
-                Span::styled(
-                    format!(" {}", id.tone()),
-                    Style::default().fg(theme.ink_faint),
-                ),
-            ]));
-        }
-        f.render_widget(
-            Paragraph::new(lines).style(Style::default().bg(theme.bg_panel)),
-            rows[0],
-        );
-
-        let swatch = |glyph: &str, color, label: &str| -> Vec<Span<'static>> {
-            vec![
-                Span::styled(format!(" {glyph} "), Style::default().fg(color)),
-                Span::styled(format!("{label}  "), Style::default().fg(theme.ink_faint)),
-            ]
-        };
-        let mut chips = Vec::new();
-        chips.extend(swatch("●", theme.accent, "accent"));
-        chips.extend(swatch("◐", theme.status_working, "live"));
-        chips.extend(swatch("●", theme.status_done, "done"));
-        chips.extend(swatch("✗", theme.status_failed, "fail"));
-        chips.extend(swatch("‖", theme.status_warn, "warn"));
-        chips.extend(swatch("▣", theme.status_image, "img"));
-        f.render_widget(
-            Paragraph::new(vec![Line::raw(""), Line::from(chips)])
-                .style(Style::default().bg(theme.bg_panel)),
-            rows[1],
-        );
-    }
-
     fn render_palette(&self, f: &mut Frame, area: Rect, theme: &Theme, st: &PaletteState) {
         let modal = centered_modal(60, 20, area);
         f.render_widget(Clear, modal);
@@ -4908,326 +5313,6 @@ impl Overlay {
             rows[1],
         );
         crate::ui::widgets::render_scrollbar(f, rows[1], matches.len(), start, theme);
-    }
-
-    fn render_log(
-        &self,
-        f: &mut Frame,
-        area: Rect,
-        theme: &Theme,
-        log: &[(LogLevel, String)],
-        off: u16,
-    ) {
-        let modal = centered_pct(80, 80, area);
-        f.render_widget(Clear, modal);
-        let block = self.modal_block("Activity log", theme);
-        let inner = block.inner(modal);
-        f.render_widget(block, modal);
-
-        // Window of `cap` entries ending `off` rows back from the newest (off=0
-        // shows the tail; k scrolls back into history).
-        let cap = inner.height as usize;
-        let max_off = log.len().saturating_sub(cap);
-        let off = (off as usize).min(max_off);
-        let end = log.len().saturating_sub(off);
-        let start = end.saturating_sub(cap);
-        let mut lines = Vec::new();
-        for (level, msg) in &log[start..end] {
-            let (glyph, color) = match level {
-                LogLevel::Trace => ("·", theme.ink_faint),
-                LogLevel::Info => ("✓", theme.status_done),
-                LogLevel::Warn => ("!", theme.status_warn),
-                LogLevel::Error => ("✗", theme.status_failed),
-            };
-            lines.push(Line::from(vec![
-                Span::styled(format!(" {glyph} "), Style::default().fg(color)),
-                Span::styled(
-                    truncate_cols(
-                        &crate::ui::text::thai_display_safe(msg),
-                        inner.width.saturating_sub(4) as usize,
-                    ),
-                    Style::default().fg(theme.ink_soft),
-                ),
-            ]));
-        }
-        if lines.is_empty() {
-            lines.push(Line::from(Span::styled(
-                "   (no activity yet)",
-                Style::default().fg(theme.ink_faint),
-            )));
-        }
-        f.render_widget(
-            Paragraph::new(lines).style(Style::default().bg(theme.bg_panel)),
-            inner,
-        );
-        crate::ui::widgets::render_panel_scrollbar(f, modal, log.len(), start, theme);
-    }
-
-    fn render_help(&self, f: &mut Frame, area: Rect, theme: &Theme, off: u16) {
-        let modal = centered_modal(72, 24, area);
-        f.render_widget(Clear, modal);
-        let block = self.modal_block("Help — keybindings", theme);
-        let inner = block.inner(modal);
-        f.render_widget(block, modal);
-
-        // 2-column key table, grouped by section.
-        let groups: &[(&str, &[(&str, &str)])] = &[
-            (
-                "Global",
-                &[
-                    ("1–5 / Tab", "switch primary tab"),
-                    ("?", "toggle this help"),
-                    (": / Ctrl-P", "command palette (→ Getting started)"),
-                    ("Ctrl-T", "theme picker"),
-                    ("` / l", "activity log (Project keeps l)"),
-                    ("Esc / Backspace", "close overlay / dismiss toast"),
-                    ("Mouse", "click tabs/rows · wheel scrolls · dbl-click opens"),
-                    ("Ctrl-C", "quit"),
-                ],
-            ),
-            (
-                "Shelf 書架",
-                &[
-                    ("↵", "open project"),
-                    ("i", "import file"),
-                    ("d / R / r", "delete · rename · rescan"),
-                ],
-            ),
-            (
-                "Project 棚",
-                &[
-                    ("↵", "read chapter"),
-                    ("Space", "mark chapter (cross-volume ok)"),
-                    ("t / a", "translate / queue marked or current"),
-                    ("T", "whole volume"),
-                    ("A", "whole project"),
-                    ("h / l", "collapse · expand volume / focus panel"),
-                    ("z / Z", "collapse all · expand all volumes"),
-                    ("V", "add volume (import wizard)"),
-                    ("i", "add chapters to volume (append import)"),
-                    ("M", "update volume images from source EPUB"),
-                    ("x", "export volume EPUB"),
-                    ("e", "edit translated project name"),
-                    ("y", "volume synopsis (translate/reroll)"),
-                    ("d", "delete marked/current chapter(s)"),
-                    ("Q", "QA review (flagged issues)"),
-                ],
-            ),
-            (
-                "Translate 訳",
-                &[
-                    ("p / s", "pause · stop"),
-                    ("f", "toggle follow-streaming"),
-                    ("c", "cycle focused agent"),
-                    ("g", "focus the run queue"),
-                    ("J / K", "move queued chapter down · up"),
-                    ("S", "sort the queue"),
-                    ("x", "remove queued chapter"),
-                    ("↵", "open result in Reader"),
-                ],
-            ),
-            (
-                "Reader 読",
-                &[
-                    ("jk / ↑↓", "scroll (synced)"),
-                    ("[ ]", "prev · next chapter"),
-                    ("z / w / o", "sync · wrap · layout"),
-                    ("/  > <", "search both panes · next · prev match"),
-                    ("g", "jump (chapters · sections · marks)"),
-                    ("G", "toggle glossary highlight"),
-                    ("r", "next [REVIEW NEEDED] in chapter"),
-                    ("s", "show source for this translation chunk"),
-                    ("i / e", "inspect chunk (JP‖translation‖review) · edit"),
-                    ("m", "toggle bookmark at this line"),
-                    ("n / N", "add note · show/hide notes"),
-                    ("d / y", "rerun diff · copy visible translation"),
-                    ("Q", "QA review (flagged issues)"),
-                ],
-            ),
-            (
-                "Lexicon 辞",
-                &[
-                    ("Tab", "Glossary↔Characters↔Style"),
-                    ("↵ / e / n", "edit · edit · new"),
-                    ("d / /", "delete · search"),
-                ],
-            ),
-            (
-                "Refine 精",
-                &[
-                    ("↵", "send message · run slash command"),
-                    ("@", "mention a chapter / character / term"),
-                    ("⌃R", "expand / collapse reasoning + tool details"),
-                    ("/new /sessions", "new conversation · switch"),
-                    ("/undo /diff", "restore · diff last chapter edit"),
-                    ("/model", "set the refine model"),
-                    ("/cancel", "stop the in-flight reply"),
-                ],
-            ),
-        ];
-
-        let mut lines = Vec::new();
-        for (section, keys) in groups {
-            lines.push(Line::from(Span::styled(
-                format!(" {section}"),
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            )));
-            for (k, desc) in *keys {
-                lines.push(Line::from(vec![
-                    Span::styled(format!("   {k:<14}"), Style::default().fg(theme.ink)),
-                    Span::styled(*desc, Style::default().fg(theme.ink_soft)),
-                ]));
-            }
-            lines.push(Line::raw(""));
-        }
-        // Scroll instead of truncating so the lower sections stay reachable.
-        let cap = inner.height as usize;
-        let total = lines.len();
-        let max_off = total.saturating_sub(cap) as u16;
-        let off = off.min(max_off);
-        f.render_widget(
-            Paragraph::new(Text::from(lines))
-                .wrap(Wrap { trim: false })
-                .scroll((off, 0))
-                .style(Style::default().bg(theme.bg_panel)),
-            inner,
-        );
-        crate::ui::widgets::render_panel_scrollbar(f, modal, total, off as usize, theme);
-    }
-
-    /// The About card, animated off the app's 100ms ticker: a moon that waxes
-    /// through the chapter-status phases, a looping JA→TH typing demo, the
-    /// three-agent pipeline pulsing, and a phase-shifted moon wave divider.
-    fn render_about(&self, f: &mut Frame, area: Rect, theme: &Theme, frame: u64) {
-        use ratatui::layout::Alignment;
-        use unicode_segmentation::UnicodeSegmentation;
-
-        let modal = centered_modal(64, 20, area);
-        f.render_widget(Clear, modal);
-        let title = thai_display_safe("About · เกี่ยวกับ");
-        let block = self.modal_block(&title, theme);
-        let inner = block.inner(modal);
-        f.render_widget(block, modal);
-
-        // The waxing-moon chapter-status metaphor, here as a slow cycle.
-        const PHASES: [char; 5] = ['○', '◔', '◐', '◑', '●'];
-        let moon = PHASES[(frame / 4) as usize % PHASES.len()];
-
-        // Looping typing demo: type one grapheme per tick, hold the finished
-        // line, then start over. Graphemes keep Thai clusters intact mid-type.
-        let jp = "「月が綺麗ですね。」";
-        let th_full = thai_display_safe("— พระจันทร์คืนนี้สวยเหลือเกินนะ");
-        let graphemes: Vec<&str> = th_full.graphemes(true).collect();
-        const HOLD: usize = 22;
-        let pos = (frame as usize) % (graphemes.len() + HOLD);
-        let shown = pos.min(graphemes.len());
-        let typed: String = graphemes[..shown].concat();
-        let caret_on = shown < graphemes.len() || frame % 10 < 5;
-
-        // The three-agent pipeline, pulsing left to right.
-        let active = ((frame / 6) % 3) as usize;
-        let mut pipeline: Vec<Span> = Vec::new();
-        for (i, (name, color)) in [
-            ("Orchestrator", theme.accent),
-            ("Translator", theme.status_working),
-            ("Reviewer", theme.accent_soft),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            if i > 0 {
-                pipeline.push(Span::styled(" ─── ", Style::default().fg(theme.rule)));
-            }
-            if i == active {
-                pipeline.push(Span::styled(
-                    format!("{} {name}", theme::spinner_frame(frame)),
-                    Style::default().fg(color).add_modifier(Modifier::BOLD),
-                ));
-            } else {
-                pipeline.push(Span::styled(
-                    format!("◇ {name}"),
-                    Style::default().fg(theme.ink_faint),
-                ));
-            }
-        }
-
-        // A moon wave: each column sits a phase behind its neighbour, so the
-        // waxing/waning cycle ripples across the divider.
-        let wave_cols = (inner.width.saturating_sub(8) / 2).min(22) as usize;
-        let mut wave: Vec<Span> = Vec::new();
-        for i in 0..wave_cols {
-            // Ping-pong through the phases: ○◔◐◑●◑◐◔ …
-            let idx = ((frame / 2) as usize + i) % (PHASES.len() * 2 - 2);
-            let phase = if idx < PHASES.len() {
-                idx
-            } else {
-                PHASES.len() * 2 - 2 - idx
-            };
-            let color = if phase == PHASES.len() - 1 {
-                theme.accent_soft
-            } else {
-                theme.ink_faint
-            };
-            wave.push(Span::styled(
-                format!("{} ", PHASES[phase]),
-                Style::default().fg(color),
-            ));
-        }
-
-        let lines = vec![
-            Line::raw(""),
-            Line::from(vec![
-                Span::styled(format!("{moon} "), Style::default().fg(theme.accent)),
-                Span::styled(
-                    "本屋 honya",
-                    Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
-                ),
-            ]),
-            Line::from(Span::styled(
-                format!("v{}", crate::update::version_string()),
-                Style::default().fg(theme.ink_faint),
-            )),
-            Line::raw(""),
-            Line::from(Span::styled(
-                "AI-assisted Japanese → Thai / English light-novel translation TUI",
-                Style::default().fg(theme.ink_soft),
-            )),
-            Line::from(Span::styled(
-                thai_display_safe("แอปเทอร์มินัลช่วยแปลไลต์โนเวลญี่ปุ่นเป็นไทยด้วย AI"),
-                Style::default().fg(theme.ink_soft),
-            )),
-            Line::raw(""),
-            Line::from(Span::styled(jp, Style::default().fg(theme.ink_faint))),
-            Line::from(vec![
-                Span::styled(typed, Style::default().fg(theme.ink)),
-                if caret_on {
-                    Span::styled("▏", Style::default().fg(theme.stream_cursor))
-                } else {
-                    Span::raw(" ")
-                },
-            ]),
-            Line::raw(""),
-            Line::from(pipeline),
-            Line::raw(""),
-            Line::from(wave),
-            Line::raw(""),
-            Line::from(Span::styled(
-                "github.com/altqx/honya",
-                Style::default().fg(theme.accent_soft),
-            )),
-            Line::from(Span::styled(
-                "honya.altqx.com",
-                Style::default().fg(theme.accent_soft),
-            )),
-        ];
-        f.render_widget(
-            Paragraph::new(lines)
-                .alignment(Alignment::Center)
-                .style(Style::default().bg(theme.bg_panel)),
-            inner,
-        );
     }
 
     /// Render the QA inbox: a chapter-level summary header over a navigable list of
@@ -5426,47 +5511,6 @@ impl Overlay {
         );
     }
 
-    fn render_modal(&self, f: &mut Frame, area: Rect, theme: &Theme, dlg: &Dialog) {
-        let modal = centered_modal(64, if dlg.alternate.is_some() { 11 } else { 9 }, area);
-        f.render_widget(Clear, modal);
-        let block = self.modal_block(&dlg.title, theme);
-        let inner = block.inner(modal);
-        f.render_widget(block, modal);
-
-        let rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(0), Constraint::Length(1)])
-            .split(inner);
-        f.render_widget(
-            Paragraph::new(Span::styled(
-                format!("  {}", thai_display_safe(&dlg.body)),
-                Style::default().fg(theme.ink_soft),
-            ))
-            .wrap(Wrap { trim: false })
-            .style(Style::default().bg(theme.bg_panel)),
-            rows[0],
-        );
-        let mut controls = vec![Span::styled(
-            format!("  [ y/↵ ] {}", dlg.confirm_label),
-            Style::default().fg(theme.accent),
-        )];
-        if let Some(alt) = &dlg.alternate {
-            controls.push(Span::raw("     "));
-            controls.push(Span::styled(
-                format!("[ {} ] {}", alt.key, alt.label),
-                Style::default().fg(theme.status_warn),
-            ));
-        }
-        controls.push(Span::raw("     "));
-        controls.push(Span::styled(
-            "[ n / Esc ] cancel",
-            Style::default().fg(theme.ink_faint),
-        ));
-        f.render_widget(
-            Paragraph::new(Line::from(controls)).style(Style::default().bg(theme.bg_panel)),
-            rows[1],
-        );
-    }
 }
 
 /// What a resolved overlay click should do — a synthesized key (reusing the
@@ -5474,14 +5518,6 @@ impl Overlay {
 enum ClickOutcome {
     Nothing,
     Key(KeyCode),
-    Act(Action),
-}
-
-/// A confirm-dialog button identified by a click on the control row.
-enum ModalButton {
-    Confirm,
-    Cancel,
-    Alternate(char),
 }
 
 /// A key event with no modifiers — used to replay a gesture through the keyboard
@@ -5506,36 +5542,6 @@ fn inset(r: Rect) -> Rect {
 fn windowed_start(sel: usize, cap: u16) -> usize {
     let cap = (cap as usize).max(1);
     if sel >= cap { sel + 1 - cap } else { 0 }
-}
-
-/// Which confirm-dialog button (if any) sits at column `col` on the control row.
-/// The label spans mirror `render_modal`: `  [ y/↵ ] confirm`, an optional
-/// `[ key ] alt`, then `[ n / Esc ] cancel`, each separated by five spaces.
-fn modal_button_at(dlg: &Dialog, inner: Rect, col: u16) -> Option<ModalButton> {
-    let in_range = |start: u16, width: u16| col >= start && col < start.saturating_add(width);
-
-    let confirm = format!("  [ y/↵ ] {}", dlg.confirm_label);
-    let confirm_w = col_width(&confirm) as u16;
-    let mut x = inner.x;
-    if in_range(x, confirm_w) {
-        return Some(ModalButton::Confirm);
-    }
-    x = x.saturating_add(confirm_w).saturating_add(5);
-
-    if let Some(alt) = &dlg.alternate {
-        let s = format!("[ {} ] {}", alt.key, alt.label);
-        let w = col_width(&s) as u16;
-        if in_range(x, w) {
-            return Some(ModalButton::Alternate(alt.key));
-        }
-        x = x.saturating_add(w).saturating_add(5);
-    }
-
-    let cancel_w = col_width("[ n / Esc ] cancel") as u16;
-    if in_range(x, cancel_w) {
-        return Some(ModalButton::Cancel);
-    }
-    None
 }
 
 /// Rows of wizard chrome (step rail · context line · gap) above each step body;
@@ -6146,8 +6152,284 @@ mod tests {
             .collect()
     }
 
+    /// Render `ov` at `w`x`h` and hand back the painted lines plus the zones it
+    /// registered. Kit-rendered overlays declare their own geometry, so this is
+    /// how a test asks what is on screen and what is clickable at once.
+    fn render_overlay(
+        ov: &Overlay,
+        w: u16,
+        h: u16,
+    ) -> (Vec<String>, crate::ui::kit::Zones) {
+        render_overlay_at(ov, w, h, 0)
+    }
+
+    /// As [`render_overlay`], at a chosen animation frame.
+    fn render_overlay_at(
+        ov: &Overlay,
+        w: u16,
+        h: u16,
+        frame: u64,
+    ) -> (Vec<String>, crate::ui::kit::Zones) {
+        use crate::ui::kit::focus::{Focus, Hover};
+        use crate::ui::kit::tokens::Metrics;
+        use crate::ui::kit::{Ui, Zones};
+
+        let theme = Theme::washi();
+        let cfg = AppConfig::default();
+        let mut zones = Zones::new();
+        let focus = Focus::new();
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: w,
+            height: h,
+        };
+        term.draw(|f| {
+            let metrics = Metrics::new(area, false);
+            let mut ui = Ui::new(f, &mut zones, &theme, metrics, &focus, Hover::default(), frame);
+            ov.render(&mut ui, area, &cfg, &[]);
+        })
+        .unwrap();
+        let buf = term.backend().buffer().clone();
+        let lines = (0..h)
+            .map(|y| (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect())
+            .collect();
+        (lines, zones)
+    }
+
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    /// The kit-rendered overlays, with something in each worth drawing.
+    fn kit_overlays() -> Vec<Overlay> {
+        vec![
+            Overlay::Help(0),
+            Overlay::About,
+            Overlay::Log(0),
+            Overlay::confirm("Delete project?", "This cannot be undone.", Action::Quit),
+            Overlay::export(2),
+            Overlay::theme(ThemeId::default()),
+        ]
+    }
+
+    #[test]
+    fn every_kit_overlay_registers_only_what_it_drew() {
+        // The invariant the whole phase is for: no zone outside the frame, and
+        // no point inside a registered rect that hit-tests to nothing.
+        for ov in kit_overlays() {
+            for (w, h) in [(60u16, 20u16), (80, 24), (120, 40)] {
+                let (_, zones) = render_overlay(&ov, w, h);
+                assert!(
+                    !zones.is_empty(),
+                    "{ov:?} at {w}x{h} registered nothing at all"
+                );
+                for (rect, id) in zones.all() {
+                    assert!(
+                        rect.x + rect.width <= w && rect.y + rect.height <= h,
+                        "{ov:?} at {w}x{h}: {id:?} at {rect:?} escaped the frame"
+                    );
+                    let (cx, cy) = (rect.x + rect.width / 2, rect.y + rect.height / 2);
+                    assert!(
+                        zones.at(cx, cy).is_some(),
+                        "{ov:?} at {w}x{h}: nothing hit-tests inside {id:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_kit_overlay_shields_the_screen_behind_it() {
+        // A click beside a modal must reach the backdrop, never the screen.
+        for ov in kit_overlays() {
+            let (_, zones) = render_overlay(&ov, 100, 30);
+            assert_eq!(
+                zones.at(0, 0),
+                Some(ZoneId::bare(ZoneKind::Backdrop)),
+                "{ov:?} left its corner unshielded"
+            );
+        }
+    }
+
+    #[test]
+    fn every_kit_overlay_traps_the_focus_ring() {
+        for ov in kit_overlays() {
+            let (_, zones) = render_overlay(&ov, 100, 30);
+            assert!(
+                zones.is_trapped(),
+                "{ov:?} did not trap focus, so Tab could wander behind it"
+            );
+        }
+    }
+
+    #[test]
+    fn a_dialogs_buttons_do_exactly_what_their_keys_do() {
+        // Keyboard and mouse parity, asserted rather than assumed: clicking a
+        // button must leave the overlay in the same state its accelerator does.
+        let mk = || {
+            Overlay::confirm_with_alternate(
+                "Resume run?",
+                "An interrupted run was found.",
+                "Resume",
+                Action::Quit,
+                'd',
+                "Discard",
+                Action::CloseOverlay,
+            )
+        };
+        let (_, zones) = render_overlay(&mk(), 100, 30);
+
+        for (button, code) in [
+            (DIALOG_CONFIRM, KeyCode::Enter),
+            (DIALOG_CANCEL, KeyCode::Esc),
+            (DIALOG_ALTERNATE, KeyCode::Char('d')),
+        ] {
+            let rect = zones
+                .rect_of(ZoneId::button(button))
+                .unwrap_or_else(|| panic!("button {button} not registered"));
+
+            let mut by_click = mk();
+            let clicked = by_click.handle_mouse_zones(
+                MouseInput {
+                    gesture: MouseGesture::Click { double: false },
+                    col: rect.x + rect.width / 2,
+                    row: rect.y,
+                },
+                &zones,
+            );
+            let mut by_key = mk();
+            let pressed = by_key.handle_key(key(code));
+
+            assert_eq!(
+                format!("{clicked:?}"),
+                format!("{pressed:?}"),
+                "button {button} and {code:?} produced different actions"
+            );
+            assert_eq!(
+                matches!(by_click, Overlay::None),
+                matches!(by_key, Overlay::None),
+                "button {button} and {code:?} left different overlay state"
+            );
+        }
+    }
+
+    #[test]
+    fn clicking_an_export_format_toggles_just_that_one() {
+        let mut ov = Overlay::export(1);
+        let (_, zones) = render_overlay(&ov, 100, 30);
+        let before = match &ov {
+            Overlay::Export(st) => st.formats,
+            _ => unreachable!(),
+        };
+        let rect = zones.rect_of(ZoneId::row(0)).expect("format row 0");
+        ov.handle_mouse_zones(
+            MouseInput {
+                gesture: MouseGesture::Click { double: false },
+                col: rect.x + 1,
+                row: rect.y,
+            },
+            &zones,
+        );
+        let after = match &ov {
+            Overlay::Export(st) => st.formats,
+            _ => unreachable!(),
+        };
+        assert_ne!(before[0], after[0], "the clicked format should have flipped");
+        assert_eq!(&before[1..], &after[1..], "no other format may change");
+    }
+
+    #[test]
+    fn clicking_a_theme_previews_and_double_clicking_keeps_it() {
+        let mut ov = Overlay::theme(ThemeId::default());
+        let (_, zones) = render_overlay(&ov, 100, 30);
+        let rect = zones.rect_of(ZoneId::row(3)).expect("theme row 3");
+
+        let preview = ov.handle_mouse_zones(
+            MouseInput {
+                gesture: MouseGesture::Click { double: false },
+                col: rect.x + 2,
+                row: rect.y,
+            },
+            &zones,
+        );
+        assert!(
+            matches!(preview, Action::PreviewTheme(_)),
+            "a single click should preview, got {preview:?}"
+        );
+        match &ov {
+            Overlay::Theme(st) => assert_eq!(st.sel, 3),
+            _ => unreachable!(),
+        }
+
+        let commit = ov.handle_mouse_zones(
+            MouseInput {
+                gesture: MouseGesture::Click { double: true },
+                col: rect.x + 2,
+                row: rect.y,
+            },
+            &zones,
+        );
+        assert!(
+            matches!(commit, Action::SaveTheme(_)),
+            "a double click should keep it, got {commit:?}"
+        );
+    }
+
+    /// The close glyph and the backdrop both mean Esc, for every kit overlay.
+    ///
+    /// Asserted on the returned `Action` rather than on the overlay: most
+    /// overlays hand `CloseOverlay` back for `App::apply` to act on, while a
+    /// confirm dialog closes itself first so it can dismiss before running the
+    /// action it wraps. Both are Esc; only one of them is visible from here.
+    #[test]
+    fn the_close_glyph_and_the_backdrop_both_mean_esc() {
+        for ov in kit_overlays() {
+            let (_, zones) = render_overlay(&ov, 100, 30);
+            let close = zones
+                .rect_of(ZoneId::button(crate::ui::kit::modal::CLOSE_BUTTON))
+                // A dialog is answered, not dismissed, so it offers no close.
+                .map(|r| (r.x + 1, r.y));
+            let targets = [close, Some((0u16, 0u16))];
+
+            for target in targets.into_iter().flatten() {
+                let mut by_click = ov.clone();
+                let clicked = by_click.handle_mouse_zones(
+                    MouseInput {
+                        gesture: MouseGesture::Click { double: false },
+                        col: target.0,
+                        row: target.1,
+                    },
+                    &zones,
+                );
+                let mut by_key = ov.clone();
+                let pressed = by_key.handle_key(key(KeyCode::Esc));
+                assert_eq!(
+                    format!("{clicked:?}"),
+                    format!("{pressed:?}"),
+                    "{ov:?}: clicking {target:?} disagreed with Esc"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_help_table_covers_every_screen() {
+        let rows = help_rows();
+        let sections: Vec<&str> = rows
+            .iter()
+            .filter_map(|r| match r {
+                HelpRow::Section(s) => Some(*s),
+                _ => None,
+            })
+            .collect();
+        for needle in ["Global", "Mouse", "Shelf", "Project", "Translate", "Reader", "Lexicon", "Refine"] {
+            assert!(
+                sections.iter().any(|s| s.contains(needle)),
+                "help has no section for {needle}: {sections:?}"
+            );
+        }
     }
 
     fn ctrl(code: KeyCode) -> KeyEvent {
@@ -6826,19 +7108,10 @@ mod tests {
     /// loop must reach the full Thai line.
     #[test]
     fn about_card_renders_across_animation_frames() {
-        let theme = Theme::washi();
         let mut saw_full_line = false;
         for frame in 0..80u64 {
-            let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
-            term.draw(|f| Overlay::About.render_about(f, f.area(), &theme, frame))
-                .unwrap();
-            let glyphs: String = term
-                .backend()
-                .buffer()
-                .content()
-                .iter()
-                .map(|cell| cell.symbol())
-                .collect();
+            let (lines, _) = render_overlay_at(&Overlay::About, 80, 24, frame);
+            let glyphs: String = lines.concat();
             assert!(
                 !glyphs.contains('\u{0E33}'),
                 "raw SARA AM leaked into the About card at frame {frame}"
@@ -6900,7 +7173,6 @@ mod tests {
 
     #[test]
     fn palette_keeps_selection_visible_when_list_overflows() {
-        let theme = Theme::washi();
         let mut ov = Overlay::palette();
         let Overlay::Palette(st) = &mut ov else {
             unreachable!()
@@ -6909,16 +7181,8 @@ mod tests {
         st.sel = st.items.len().saturating_sub(1);
         let last_label = st.items[st.sel].label;
 
-        let mut term = Terminal::new(TestBackend::new(80, 16)).unwrap();
-        term.draw(|f| ov.render(f, f.area(), &theme, &AppConfig::default(), &[], 0))
-            .unwrap();
-        let glyphs: String = term
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect();
+        let (lines, _) = render_overlay(&ov, 80, 16);
+        let glyphs: String = lines.concat();
         assert!(
             glyphs.contains(last_label),
             "selected palette row should stay in view: missing {last_label:?} in {glyphs:?}"
