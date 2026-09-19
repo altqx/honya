@@ -91,7 +91,7 @@ pub async fn run_prepass(
     model: &crate::model::AgentModel,
     ws: &Workspace,
     target_language: TargetLanguage,
-    aligner: Option<crate::agents::tools::Aligner<'_>>,
+    system_one: Option<&crate::llm::decisions::SystemOneHandle>,
 ) -> Result<Option<PrepassSeeded>> {
     let sample = sample_volume_raw(ws);
     if sample.trim().is_empty() {
@@ -174,13 +174,13 @@ pub async fn run_prepass(
         }
         // The roster fills as this loop runs, so a nickname extracted from the
         // same sample as its full name can still be aligned onto it.
-        let alignment = match aligner {
-            Some(a) => {
+        let alignment = match system_one {
+            Some(s1) => {
                 let roster = characters::load(ws);
                 let candidates = characters::alignment_candidates(&roster, &character);
                 crate::agents::entity_align::align(
-                    a.backend,
-                    a.system_one,
+                    s1.backend.as_ref(),
+                    &s1.config,
                     &character,
                     &candidates,
                 )

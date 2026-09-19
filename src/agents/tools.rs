@@ -6,13 +6,13 @@
 //! `WorkspaceTools` adapts this to the generic `ToolExecutor`.
 
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::json;
 
 use crate::agents::entity_align;
+use crate::llm::decisions::SystemOneHandle;
 use crate::llm::tool_loop::ToolExecutor;
 use crate::model::{
     AppEvent, Character, ContinuityNote, EventTx, GlossaryTerm, Relationship, TermPolicy,
@@ -337,14 +337,6 @@ fn slugify(name: &str) -> String {
     out
 }
 
-/// The System One backend plus its settings, for the tools a judgement can
-/// help. `None` means the deterministic rules decide alone.
-#[derive(Clone, Copy)]
-pub struct Aligner<'a> {
-    pub backend: &'a dyn crate::llm::decisions::DecisionsBackend,
-    pub system_one: &'a crate::model::SystemOne,
-}
-
 /// Execute one tool call, emit the matching `AppEvent`, return a `ToolResult`.
 /// Bad args or unknown tool yield `ToolResult::err` so the loop can recover.
 pub async fn dispatch_tool(
@@ -353,7 +345,7 @@ pub async fn dispatch_tool(
     chapter: u32,
     name: &str,
     args_json: &str,
-    aligner: Option<Aligner<'_>>,
+    system_one: Option<&SystemOneHandle>,
 ) -> ToolResult {
     match name {
         "upsert_character" => {
@@ -378,12 +370,17 @@ pub async fn dispatch_tool(
             };
             // Name matching cannot connect a nickname to the full name it
             // belongs to; ask before letting a duplicate onto the roster.
-            let alignment = match aligner {
-                Some(a) => {
+            let alignment = match system_one {
+                Some(s1) => {
                     let roster = characters::load(ws);
                     let candidates = characters::alignment_candidates(&roster, &character);
-                    match entity_align::align(a.backend, a.system_one, &character, &candidates)
-                        .await
+                    match entity_align::align(
+                        s1.backend.as_ref(),
+                        &s1.config,
+                        &character,
+                        &candidates,
+                    )
+                    .await
                     {
                         Some(out) => {
                             if let Some(summary) = out.summary {
@@ -717,8 +714,7 @@ pub struct WorkspaceTools {
     vol_number: u32,
     tx: EventTx,
     chapter: u32,
-    decisions: Option<Arc<dyn crate::llm::decisions::DecisionsBackend>>,
-    system_one: crate::model::SystemOne,
+    system_one: Option<SystemOneHandle>,
 }
 
 impl WorkspaceTools {
@@ -727,15 +723,13 @@ impl WorkspaceTools {
         vol_number: u32,
         tx: EventTx,
         chapter: u32,
-        decisions: Option<Arc<dyn crate::llm::decisions::DecisionsBackend>>,
-        system_one: crate::model::SystemOne,
+        system_one: Option<SystemOneHandle>,
     ) -> Self {
         Self {
             root,
             vol_number,
             tx,
             chapter,
-            decisions,
             system_one,
         }
     }
@@ -749,12 +743,15 @@ impl WorkspaceTools {
 impl ToolExecutor for WorkspaceTools {
     async fn execute(&self, name: &str, arguments_json: &str) -> anyhow::Result<String> {
         let ws = self.workspace();
-        let aligner = self.decisions.as_ref().map(|b| Aligner {
-            backend: b.as_ref(),
-            system_one: &self.system_one,
-        });
-        let result =
-            dispatch_tool(&ws, &self.tx, self.chapter, name, arguments_json, aligner).await;
+        let result = dispatch_tool(
+            &ws,
+            &self.tx,
+            self.chapter,
+            name,
+            arguments_json,
+            self.system_one.as_ref(),
+        )
+        .await;
         Ok(serde_json::to_string(&result)?)
     }
 }

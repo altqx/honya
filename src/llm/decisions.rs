@@ -184,6 +184,27 @@ impl DecisionsUsage {
     }
 }
 
+/// A ready-to-use System One: the backend paired with the settings that govern
+/// it. `Option<SystemOneHandle>` is how every caller carries "a judgement is
+/// available, or it is not" — `None` always means run the deterministic path.
+#[derive(Clone)]
+pub struct SystemOneHandle {
+    pub backend: std::sync::Arc<dyn DecisionsBackend>,
+    pub config: crate::model::SystemOne,
+}
+
+impl SystemOneHandle {
+    pub fn new(
+        backend: Option<std::sync::Arc<dyn DecisionsBackend>>,
+        config: &crate::model::SystemOne,
+    ) -> Option<Self> {
+        Some(Self {
+            backend: backend?,
+            config: config.clone(),
+        })
+    }
+}
+
 /// A System One backend. Separate from `LlmClient` because the two wire
 /// contracts have nothing in common, and so tests can inject a fake.
 #[async_trait]

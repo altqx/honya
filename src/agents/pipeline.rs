@@ -979,16 +979,14 @@ async fn maybe_run_prepass(ctx: &PipelineCtx, acc: &mut Acc) {
             return;
         }
     };
-    let decisions = ctx.clients.decisions();
+    let system_one =
+        crate::llm::decisions::SystemOneHandle::new(ctx.clients.decisions(), &ctx.cfg.system_one);
     match prepass::run_prepass(
         prepass_client.as_ref(),
         &ctx.models.translator,
         &ctx.ws,
         ctx.target_language,
-        decisions.as_ref().map(|b| crate::agents::tools::Aligner {
-            backend: b.as_ref(),
-            system_one: &ctx.cfg.system_one,
-        }),
+        system_one.as_ref(),
     )
     .await
     {
@@ -3414,8 +3412,10 @@ async fn run_orchestrator_metadata_turn(
         ctx.vol_number(),
         ctx.tx.clone(),
         chapter,
-        ctx.clients.decisions(),
-        ctx.cfg.system_one.clone(),
+        crate::llm::decisions::SystemOneHandle::new(
+            ctx.clients.decisions(),
+            &ctx.cfg.system_one,
+        ),
     );
 
     let orch_client = ctx.client_for(&ctx.models.orchestrator)?;

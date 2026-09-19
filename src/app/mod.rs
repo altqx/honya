@@ -3236,11 +3236,14 @@ impl App {
         }
 
         let tx = self.tx.clone();
+        let system_one = crate::llm::client::system_one_from_config(&self.cfg);
         self.overlay = Overlay::None;
         self.run_active = true;
         self.toast = Some(Toast::info(format!("updating Vol.{vol:02} images …")));
         tokio::spawn(async move {
-            match run_volume_image_refresh(source, project_dir, vol, &tx).await {
+            match run_volume_image_refresh(source, project_dir, vol, &tx, system_one.as_ref())
+                .await
+            {
                 Ok(report) => tx.send(AppEvent::VolumeImagesUpdated {
                     project_id,
                     vol,
@@ -4393,6 +4396,8 @@ impl App {
         let dest = working_root().join(&slug);
         let models = self.cfg.models.clone();
         let tx = self.tx.clone();
+        // Import runs before a project is open, so there is no `ClientSet` yet.
+        let system_one = crate::llm::client::system_one_from_config(&self.cfg);
         self.run_active = true;
         let verb = if append {
             "adding chapters to"
@@ -4413,6 +4418,7 @@ impl App {
                 translated_synopsis,
                 append,
                 &tx,
+                system_one,
             )
             .await
             {
@@ -5688,6 +5694,7 @@ async fn run_import(
     translated_synopsis: String,
     append: bool,
     tx: &EventTx,
+    system_one: Option<crate::llm::decisions::SystemOneHandle>,
 ) -> anyhow::Result<String> {
     if !crate::document_import::is_supported_import_path(&source) {
         anyhow::bail!("unsupported import source: {}", source.display());
@@ -5729,7 +5736,7 @@ async fn run_import(
     }
 
     if crate::document_import::is_epub_path(&source) {
-        run_epub_import(source, dest.clone(), vol, append, tx).await?;
+        run_epub_import(source, dest.clone(), vol, append, tx, system_one.as_ref()).await?;
     } else {
         run_markitdown_import(source, dest.clone(), title, vol, append, tx).await?;
     }
@@ -5743,6 +5750,7 @@ async fn run_epub_import(
     vol: u32,
     append: bool,
     tx: &EventTx,
+    system_one: Option<&crate::llm::decisions::SystemOneHandle>,
 ) -> anyhow::Result<()> {
     let prepared = prepare_epub_import(
         epub.clone(),
@@ -5750,6 +5758,7 @@ async fn run_epub_import(
         dest.join("images"),
         vol,
         tx,
+        system_one,
     )
     .await?;
     let ws = Workspace::new(dest.clone(), vol);
@@ -5792,6 +5801,7 @@ async fn prepare_epub_import(
     images_dir: PathBuf,
     vol: u32,
     tx: &EventTx,
+    system_one: Option<&crate::llm::decisions::SystemOneHandle>,
 ) -> anyhow::Result<PreparedEpubImport> {
     use crate::epub::import::import_with_media_prefixed;
     use crate::epub::paths::{dir_of, resolve_href};
@@ -5886,7 +5896,19 @@ async fn prepare_epub_import(
         tokio::task::yield_now().await;
     }
 
-    let chapters = crate::epub::segment::segment(&docs);
+    // One classification pass over the whole spine, before any grouping: the
+    // per-publisher thresholds only guess at what this answers directly.
+    let roles = match crate::epub::judge::classify_spine(system_one, &docs).await {
+        Some(out) => {
+            tx.send(AppEvent::Log {
+                level: LogLevel::Info,
+                msg: out.summary,
+            });
+            out.roles
+        }
+        None => Vec::new(),
+    };
+    let chapters = crate::epub::segment::segment_with_roles(&docs, &roles);
     let chapters = chapters
         .iter()
         .map(|lc| match lc.kind {
@@ -5923,13 +5945,21 @@ async fn run_volume_image_refresh(
     dest: PathBuf,
     vol: u32,
     tx: &EventTx,
+    system_one: Option<&crate::llm::decisions::SystemOneHandle>,
 ) -> anyhow::Result<RefreshImageReport> {
     let work_dir = dest
         .join(".epub_image_refresh")
         .join(format!("Vol_{vol:02}"));
     let _ = tokio::fs::remove_dir_all(&work_dir).await;
-    let prepared =
-        prepare_epub_import(source.clone(), work_dir, dest.join("images"), vol, tx).await?;
+    let prepared = prepare_epub_import(
+        source.clone(),
+        work_dir,
+        dest.join("images"),
+        vol,
+        tx,
+        system_one,
+    )
+    .await?;
     let ws = Workspace::new(dest, vol);
     crate::workspace::volume::set_source_metadata(
         &ws,

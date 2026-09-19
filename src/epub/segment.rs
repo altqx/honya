@@ -41,7 +41,7 @@ pub enum LogicalKind {
 }
 
 /// An emitted logical chapter, ready to write to `ch_NNN.md` (title not yet prepended).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LogicalChapter {
     pub title: Option<String>,
     pub kind: LogicalKind,
@@ -79,14 +79,50 @@ fn class_says_toc(body_class: Option<&str>) -> bool {
         .unwrap_or(false)
 }
 
+/// What a spine document is doing in the book. Supplied per document by
+/// `epub::judge` when System One is on, replacing the parts of [`classify`] and
+/// `is_start` that are guessing — the `toc` body-class and link-count thresholds,
+/// and the hardcoded list of Japanese chrome labels. Everything the code can
+/// settle outright (empty, image-only, spine order) stays code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DocRole {
+    /// Cover, title page, insert plates — chrome before the book proper.
+    FrontMatter,
+    /// In-spine table of contents or navigation list.
+    NavToc,
+    /// Opens a chapter; the pages after it belong to it.
+    ChapterStart,
+    /// Continues the chapter already open.
+    Continuation,
+    /// Afterword plates, colophon, advertisements.
+    BackMatter,
+}
+
 /// Order is load-bearing: image pages settle first (never a TOC), then the
 /// nav/TOC page, then a header-image start, then plain prose.
+///
+/// The heuristics alone, with no judged role — the composition every import
+/// without System One still uses, kept here so the test suite pins it.
+#[cfg(test)]
 pub fn classify(doc: &DocInput) -> DocClass {
+    classify_with_role(doc, None)
+}
+
+fn classify_with_role(doc: &DocInput, role: Option<DocRole>) -> DocClass {
     if doc.markdown.trim().is_empty() {
         return DocClass::Empty;
     }
     if cleanse::is_image_only(&doc.markdown) {
         return DocClass::ImageOnly;
+    }
+    // A judged role replaces the nav/TOC guess but never the mechanical tests
+    // above it: an image-only page is image-only whatever anyone thinks.
+    if let Some(role) = role {
+        return match role {
+            DocRole::NavToc => DocClass::NavToc,
+            _ if starts_with_image_link(&doc.markdown) => DocClass::ChapterHeaderImage,
+            _ => DocClass::Prose,
+        };
     }
     // Explicit `toc` body-class, or a page dominated by internal `.xhtml` links;
     // real chapters never link to ~8+ siblings, so the threshold is conservative.
@@ -174,10 +210,23 @@ fn chapter_toc_title(doc: &DocInput) -> Option<&str> {
         .filter(|t| !t.is_empty() && !is_structural_toc_title(t))
 }
 
-/// Group spine docs (reading order) into logical chapters.
+/// Group spine docs (reading order) into logical chapters, heuristics only.
+#[cfg(test)]
 pub fn segment(docs: &[DocInput]) -> Vec<LogicalChapter> {
+    segment_with_roles(docs, &[])
+}
+
+/// [`segment`], with a per-document role supplied by the caller. `roles` is
+/// indexed alongside `docs`; a `None` entry (or a short slice) falls back to the
+/// heuristics for that document, so a partial answer is still useful.
+pub fn segment_with_roles(docs: &[DocInput], roles: &[Option<DocRole>]) -> Vec<LogicalChapter> {
     let n = docs.len();
-    let classes: Vec<DocClass> = docs.iter().map(classify).collect();
+    let role_of = |i: usize| roles.get(i).copied().flatten();
+    let classes: Vec<DocClass> = docs
+        .iter()
+        .enumerate()
+        .map(|(i, d)| classify_with_role(d, role_of(i)))
+        .collect();
 
     // Kadokawa often puts the chapter title on its own image-only spine page
     // (`m###.png`) that the nav points at, with prose in the following file(s).
@@ -190,6 +239,13 @@ pub fn segment(docs: &[DocInput]) -> Vec<LogicalChapter> {
         });
 
     let is_start = |i: usize| -> bool {
+        // A judged role settles the boundary outright; front/back matter and a
+        // continuation are all "not a start", which is what the hardcoded
+        // chrome-label list was approximating.
+        if let Some(role) = role_of(i) {
+            return role == DocRole::ChapterStart
+                && !matches!(classes[i], DocClass::NavToc | DocClass::Empty);
+        }
         match classes[i] {
             DocClass::NavToc | DocClass::Empty => false,
             // Image-only TOC targets (chapter title plates) open a chapter so
@@ -523,5 +579,69 @@ mod tests {
         let rendered = format!("# {}\n\n{}", ch.title.as_deref().unwrap(), ch.body);
         assert_eq!(rendered.lines().next(), Some("# 第一章"));
         assert!(rendered.contains("m005.png"));
+    }
+
+    /// A short in-spine contents list: five links, so the "eight or more"
+    /// threshold misses it and its entries get swallowed into the running
+    /// chapter as prose. A judged role settles it without another threshold.
+    #[test]
+    fn a_judged_nav_page_is_skipped_where_the_link_threshold_misses_it() {
+        let mut toc = doc(
+            "xhtml/p-contents.xhtml",
+            "- 第一章\n- 第二章\n- 第三章\n- 第四章\n- 第五章".to_string(),
+        );
+        toc.internal_link_count = 5;
+        let docs = vec![
+            header_doc("xhtml/p-001.xhtml", "m001.png", "本文が始まる。", "第一章"),
+            toc,
+            doc("xhtml/p-002.xhtml", "続きの本文。".to_string()),
+        ];
+
+        let heuristic = segment(&docs);
+        assert_eq!(heuristic.len(), 1);
+        assert!(
+            heuristic[0].body.contains("第五章"),
+            "precondition: the contents list leaks into the chapter body"
+        );
+
+        let judged = segment_with_roles(
+            &docs,
+            &[
+                Some(DocRole::ChapterStart),
+                Some(DocRole::NavToc),
+                Some(DocRole::Continuation),
+            ],
+        );
+        assert_eq!(judged.len(), 1);
+        assert!(!judged[0].body.contains("第五章"));
+        assert!(judged[0].body.contains("続きの本文。"));
+    }
+
+    /// A role only ever replaces a guess. Image-only and empty are settled from
+    /// the text itself, so no judgement can talk the segmenter out of them.
+    #[test]
+    fn a_role_never_overrides_the_mechanical_classes() {
+        let image = doc("xhtml/p-plate.xhtml", img("i001.png"));
+        assert_eq!(
+            classify_with_role(&image, Some(DocRole::Continuation)),
+            DocClass::ImageOnly
+        );
+        let empty = doc("xhtml/p-blank.xhtml", "   ".to_string());
+        assert_eq!(
+            classify_with_role(&empty, Some(DocRole::ChapterStart)),
+            DocClass::Empty
+        );
+    }
+
+    /// An empty or short `roles` slice must leave every document it does not
+    /// cover on the heuristic path.
+    #[test]
+    fn missing_roles_fall_back_per_document() {
+        let docs = vec![
+            header_doc("xhtml/p-001.xhtml", "m001.png", "本文。", "第一章"),
+            doc("xhtml/p-002.xhtml", "続き。".to_string()),
+        ];
+        assert_eq!(segment_with_roles(&docs, &[]), segment(&docs));
+        assert_eq!(segment_with_roles(&docs, &[None]), segment(&docs));
     }
 }

@@ -364,6 +364,12 @@ impl ClientSet {
     }
 }
 
+/// A System One handle built straight from config, for paths that run before a
+/// `ClientSet` exists — EPUB import happens before a project is open.
+pub fn system_one_from_config(cfg: &AppConfig) -> Option<super::decisions::SystemOneHandle> {
+    super::decisions::SystemOneHandle::new(build_decisions(cfg).ok().flatten(), &cfg.system_one)
+}
+
 /// Build the System One backend for the configured transport, or `None` when
 /// every judgement is off or the transport has no key. A missing key is not an
 /// error: System One is optional and each caller falls back to its
