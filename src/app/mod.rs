@@ -2305,18 +2305,14 @@ impl App {
     /// screen regions (mirrors `route_key`'s precedence: overlay first, then the
     /// global chrome, then the active screen).
     fn route_mouse(&mut self, m: MouseInput) -> Action {
-        // 1) An open overlay gets first refusal, just like keys. A kit-rendered
-        // one answers from the registry; the rest still restate their geometry
-        // in `modal_rect`, until they are converted too.
+        // 1) An open overlay gets first refusal, just like keys, and answers
+        // from the zone registry — there is no longer a second copy of any
+        // overlay's geometry to consult.
         if !matches!(self.overlay, Overlay::None) {
-            return if self.overlay.is_kit_rendered() {
-                let zones = std::mem::take(&mut self.zones);
-                let action = self.overlay.handle_mouse_zones(m, &zones);
-                self.zones = zones;
-                action
-            } else {
-                self.overlay.handle_mouse(m, self.last_area)
-            };
+            let zones = std::mem::take(&mut self.zones);
+            let action = self.overlay.handle_mouse_zones(m, &zones);
+            self.zones = zones;
+            return action;
         }
         let Some(sk) = self.last_skeleton else {
             return Action::None;

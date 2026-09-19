@@ -8,7 +8,7 @@ use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Gauge, LineGauge, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
+    LineGauge, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
 };
 
 use crate::model::{ChapterKind, ChapterStatus};
@@ -28,25 +28,6 @@ pub fn render_spinner(f: &mut Frame, area: Rect, frame: u64, label: &str, theme:
         Paragraph::new(line).style(Style::default().bg(theme.bg)),
         area,
     );
-}
-
-/// Render a block-style [`Gauge`] for `done`/`total`; a `total` of 0 renders an
-/// empty 0% gauge rather than dividing by zero.
-pub fn render_gauge(f: &mut Frame, area: Rect, done: usize, total: usize, theme: &Theme) {
-    let ratio = if total == 0 {
-        0.0
-    } else {
-        (done as f64 / total as f64).clamp(0.0, 1.0)
-    };
-    let pct = (ratio * 100.0).round() as u16;
-    let label = format!("{done}/{total}  {pct}%");
-    let gauge = Gauge::default()
-        .ratio(ratio)
-        .label(Span::styled(label, Style::default().fg(theme.ink)))
-        .use_unicode(true)
-        .gauge_style(Style::default().fg(theme.accent_soft).bg(theme.bg_inset))
-        .style(Style::default().bg(theme.bg));
-    f.render_widget(gauge, area);
 }
 
 /// Render a single-line [`LineGauge`] for a 0.0–1.0 `ratio` with a trailing

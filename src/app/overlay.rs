@@ -5,24 +5,20 @@
 
 use std::path::PathBuf;
 
-use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+use ratatui::text::{Line, Span};
 
 use crate::export::ExportFormat;
 use crate::model::{
     AppConfig, LogLevel, ReleaseChannel, ServiceTier, TargetLanguage, ThemeId, UpdateMode,
 };
-use crate::theme::{self, ALL_THEMES, Theme};
+use crate::theme::{ALL_THEMES, Theme};
 use crate::ui::input::{self, EditOpts, Edited};
-use crate::ui::layout::centered_modal;
-use crate::ui::mouse::{MouseGesture, MouseInput, hit};
-use crate::ui::text::{col_width, pad_to_cols, thai_display_safe, truncate_cols};
+use crate::ui::mouse::{MouseGesture, MouseInput};
 use crate::ui::kit::{ZoneId, ZoneKind};
-use crate::ui::widgets::render_gauge;
+use crate::ui::text::{thai_display_safe, truncate_cols};
 
 use super::qa;
 use super::settings_defs::{self, Group, SField};
@@ -33,6 +29,56 @@ use super::{Action, Screen, slugify};
 pub const DIALOG_CANCEL: u32 = 1;
 pub const DIALOG_CONFIRM: u32 = 2;
 pub const DIALOG_ALTERNATE: u32 = 3;
+
+/// Where the import wizard is.
+///
+/// Was a bare `u8` compared against literals in twenty-odd places, where
+/// nothing said which number meant which step and an off-by-one would simply
+/// land somewhere else. `Ord` is derived because the step rail genuinely asks
+/// "is this step behind the one we are on".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ImportStep {
+    /// Choose a source file.
+    Pick,
+    /// Name the project.
+    Name,
+    /// Optional: translate the title.
+    Title,
+    /// Choose the volume number.
+    Volume,
+    /// Optional: write and translate a synopsis.
+    Synopsis,
+    /// Running; progress only.
+    Importing,
+}
+
+impl ImportStep {
+    /// The steps in order, for the rail.
+    pub const ALL: [ImportStep; 6] = [
+        ImportStep::Pick,
+        ImportStep::Name,
+        ImportStep::Title,
+        ImportStep::Volume,
+        ImportStep::Synopsis,
+        ImportStep::Importing,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ImportStep::Pick => "File",
+            ImportStep::Name => "Name",
+            ImportStep::Title => "Title",
+            ImportStep::Volume => "Volume",
+            ImportStep::Synopsis => "Synopsis",
+            ImportStep::Importing => "Import",
+        }
+    }
+
+    /// Steps the wizard will happily skip past.
+    pub fn is_optional(self) -> bool {
+        matches!(self, ImportStep::Title | ImportStep::Synopsis)
+    }
+}
 
 /// Rank `labels` against `query` with the kit's matcher, best first.
 ///
@@ -446,7 +492,7 @@ impl ProjectRef {
 #[derive(Debug, Clone)]
 pub struct ImportState {
     /// 0 = pick, 1 = name, 2 = translated title, 3 = volume, 4 = synopsis, 5 = importing.
-    pub step: u8,
+    pub step: ImportStep,
     /// Importable source files (path, byte size) found in the working root.
     pub files: Vec<(PathBuf, u64)>,
     pub sel: usize,
@@ -479,6 +525,27 @@ pub struct ImportState {
 }
 
 impl ImportState {
+    /// The steps this flow actually visits.
+    ///
+    /// The three entry points take different routes: a plain import walks
+    /// everything, "add volume" already knows the project so it skips naming,
+    /// and "add chapters" only needs the file. Showing steps the wizard will
+    /// never reach would misreport how far along you are.
+    pub fn visible_steps(&self) -> Vec<ImportStep> {
+        if self.append_to.is_some() {
+            return vec![ImportStep::Pick, ImportStep::Importing];
+        }
+        if self.lock_name {
+            return vec![
+                ImportStep::Pick,
+                ImportStep::Volume,
+                ImportStep::Synopsis,
+                ImportStep::Importing,
+            ];
+        }
+        ImportStep::ALL.to_vec()
+    }
+
     fn new(
         files: Vec<(PathBuf, u64)>,
         projects: Vec<ProjectRef>,
@@ -492,7 +559,7 @@ impl ImportState {
             .map(prettify_stem)
             .unwrap_or_default();
         Self {
-            step: 0,
+            step: ImportStep::Pick,
             files,
             sel: 0,
             name_cursor: name.len(),
@@ -538,7 +605,7 @@ impl ImportState {
         target_language: TargetLanguage,
     ) -> Self {
         Self {
-            step: 0,
+            step: ImportStep::Pick,
             files,
             sel: 0,
             name_cursor: title.len(),
@@ -1829,7 +1896,7 @@ impl Overlay {
 
     pub fn set_import_progress(&mut self, done: usize, total: usize, label: &str) {
         if let Overlay::Import(st) = self {
-            st.step = 5;
+            st.step = ImportStep::Importing;
             st.progress = Some((done, total, label.to_string()));
         }
     }
@@ -1856,8 +1923,8 @@ impl Overlay {
     /// is still awaiting it.
     pub fn set_synopsis_result(&mut self, result: std::result::Result<String, String>) {
         let st = match self {
-            Overlay::Import(s) if s.step == 2 => &mut s.title_syn,
-            Overlay::Import(s) if s.step == 4 => &mut s.syn,
+            Overlay::Import(s) if s.step == ImportStep::Title => &mut s.title_syn,
+            Overlay::Import(s) if s.step == ImportStep::Synopsis => &mut s.syn,
             Overlay::Synopsis(s) => &mut s.syn,
             Overlay::ProjectTitle(s) => &mut s.syn,
             _ => return,
@@ -1889,9 +1956,9 @@ impl Overlay {
     pub fn is_input_capturing(&self) -> bool {
         match self {
             Overlay::Import(st) => {
-                st.step == 1
-                    || (st.step == 2 && st.title_syn.edit_translation)
-                    || (st.step == 4
+                st.step == ImportStep::Name
+                    || (st.step == ImportStep::Title && st.title_syn.edit_translation)
+                    || (st.step == ImportStep::Synopsis
                         && (st.syn.phase == SynPhase::Editing || st.syn.edit_translation))
             }
             Overlay::Synopsis(st) => st.syn.phase == SynPhase::Editing || st.syn.edit_translation,
@@ -1958,32 +2025,6 @@ impl Overlay {
                 }
                 _ => Action::None,
             },
-        }
-    }
-
-    /// Fold one mouse gesture into the open overlay. Scroll and right-click reuse
-    /// the keyboard handlers (navigation / scroll / dismiss logic stays in one
-    /// place); a left click is resolved against the overlay's modal geometry —
-    /// outside the modal dismisses, inside selects or activates a row / button.
-    pub fn handle_mouse(&mut self, m: MouseInput, area: Rect) -> Action {
-        match m.gesture {
-            MouseGesture::ScrollUp => return self.handle_key(synth(KeyCode::Up)),
-            MouseGesture::ScrollDown => return self.handle_key(synth(KeyCode::Down)),
-            MouseGesture::RightClick => return self.handle_key(synth(KeyCode::Esc)),
-            MouseGesture::Click { .. } => {}
-        }
-        let double = m.is_double();
-        let modal = self.modal_rect(area);
-        if !hit(modal, m.col, m.row) {
-            // A click off the modal dismisses / steps back (each overlay's Esc).
-            return self.handle_key(synth(KeyCode::Esc));
-        }
-        // Resolve the click against the modal's interior, then act on the outcome
-        // outside the borrow so the keyboard handlers can be reused.
-        let inner = inset(modal);
-        match self.resolve_click(m, inner, double) {
-            ClickOutcome::Nothing => Action::None,
-            ClickOutcome::Key(code) => self.handle_key(synth(code)),
         }
     }
 
@@ -2161,6 +2202,34 @@ impl Overlay {
                 (ZoneKind::Button, DIALOG_CANCEL) => self.handle_key(synth(KeyCode::Esc)),
                 _ => Action::None,
             },
+                        Overlay::Import(st) => match id.kind {
+                // Only completed steps register, so this can only ever go back.
+                ZoneKind::Step => {
+                    let visible = st.visible_steps();
+                    if let Some(&target) = visible.get(id.index as usize)
+                        && target < st.step
+                    {
+                        st.step = target;
+                    }
+                    Action::None
+                }
+                ZoneKind::Row if (id.index as usize) < st.files.len() => {
+                    let already = st.sel == id.index as usize;
+                    st.sel = id.index as usize;
+                    if double || already {
+                        self.handle_key(synth(KeyCode::Enter))
+                    } else {
+                        Action::None
+                    }
+                }
+                ZoneKind::Button => match id.index {
+                    DIALOG_CONFIRM => self.handle_key(synth(KeyCode::Enter)),
+                    DIALOG_CANCEL => self.handle_key(synth(KeyCode::Esc)),
+                    DIALOG_ALTERNATE => self.handle_key(synth(KeyCode::Tab)),
+                    _ => Action::None,
+                },
+                _ => Action::None,
+            },
                         Overlay::ReaderNote(_) => match (id.kind, id.index) {
                 (ZoneKind::Button, DIALOG_CONFIRM) => self.handle_key(synth(KeyCode::Enter)),
                 (ZoneKind::Button, DIALOG_CANCEL) => self.handle_key(synth(KeyCode::Esc)),
@@ -2169,150 +2238,6 @@ impl Overlay {
             // Help, About, the Log and Reader search are read-only or
             // single-field: the frame behaviour above already covers them.
             _ => Action::None,
-        }
-    }
-
-    /// The centered rectangle each overlay variant draws into (mirrors its render
-    /// fn's `centered_modal` call), used for click hit-testing.
-    fn modal_rect(&self, area: Rect) -> Rect {
-        match self {
-            // Kit-rendered overlays register the geometry they actually drew,
-            // so nothing here may restate it — a second copy is what let
-            // Settings draw at 76x24 while this claimed 72x26. These arms are
-            // unreachable: `handle_mouse_zones` answers for them instead.
-            Overlay::None
-            | Overlay::Help(_)
-            | Overlay::About
-            | Overlay::Log(_)
-            | Overlay::Modal(_)
-            | Overlay::Export(_)
-            | Overlay::Theme(_)
-            | Overlay::Palette(_)
-            | Overlay::ReaderJump(_)
-            | Overlay::ReaderSearch(_)
-            | Overlay::ReaderNote(_)
-            | Overlay::Welcome(_)
-            | Overlay::ImageSource(_)
-            | Overlay::Synopsis(_)
-            | Overlay::ProjectTitle(_)
-            | Overlay::Qa(_)
-            | Overlay::ReaderInspect(_)
-            | Overlay::ReaderEdit(_) => area,
-            // One size for every wizard step (the modal must not jump around as
-            // the user advances); mirrors render_import.
-            Overlay::Import(_) => centered_modal(78, 24, area),
-            // Must mirror render_settings' centered_modal(72, 26, …) so clicks
-            // near the modal's top/bottom hit-test inside it (not as a dismiss).
-            Overlay::Settings(_) => centered_modal(72, 26, area),
-        }
-    }
-
-    /// Map a click inside the modal interior to an outcome. Row selection is set
-    /// here (within the borrow); the actual activation key is synthesized by the
-    /// caller after the borrow ends. `inner` is the bordered modal's content rect.
-    fn resolve_click(&mut self, m: MouseInput, inner: Rect, double: bool) -> ClickOutcome {
-        // Kit-rendered overlays are absent here on purpose: they answer clicks
-        // from the zone registry, so re-deriving their row offsets would be a
-        // second source of truth. The catch-all at the bottom covers them.
-        match self {
-            // Welcome menu: 4 items at a fixed offset below the preamble (see
-            // `render_welcome` — 10 preamble lines precede the first item).
-            Overlay::Welcome(st) => {
-                let base = inner.y + 10;
-                if m.row >= base && (m.row - base) < WELCOME_ITEMS as u16 {
-                    let idx = (m.row - base) as usize;
-                    let already = st.sel == idx;
-                    st.sel = idx;
-                    if double || already {
-                        return ClickOutcome::Key(KeyCode::Enter);
-                    }
-                }
-                ClickOutcome::Nothing
-            }
-            // Palette list starts 2 lines below the query and isn't windowed.
-            Overlay::Palette(st) => {
-                let top = inner.y + 2;
-                let len = st.matches().len();
-                if m.row >= top {
-                    let idx = (m.row - top) as usize;
-                    if idx < len {
-                        let already = st.sel == idx;
-                        st.sel = idx;
-                        if double || already {
-                            return ClickOutcome::Key(KeyCode::Enter);
-                        }
-                    }
-                }
-                ClickOutcome::Nothing
-            }
-            // Jump list starts 2 lines below the query and is windowed.
-            Overlay::ReaderJump(st) => {
-                let top = inner.y + 2;
-                let list_h = inner.height.saturating_sub(2);
-                let len = st.matches().len();
-                if m.row >= top && (m.row - top) < list_h {
-                    let start = windowed_start(st.sel, list_h);
-                    let idx = start + (m.row - top) as usize;
-                    if idx < len {
-                        let already = st.sel == idx;
-                        st.sel = idx;
-                        if double || already {
-                            return ClickOutcome::Key(KeyCode::Enter);
-                        }
-                    }
-                }
-                ClickOutcome::Nothing
-            }
-            // Import wizard: in the file-pick step a click selects the row under
-            // it; a double click (or a click on the current pick) advances.
-            Overlay::Import(st) if st.step == 0 => {
-                let top = inner.y + IMPORT_HEADER_ROWS + IMPORT_PICK_LIST_OFFSET;
-                let list_h = inner
-                    .height
-                    .saturating_sub(IMPORT_HEADER_ROWS + IMPORT_PICK_LIST_OFFSET);
-                if m.row >= top && (m.row - top) < list_h {
-                    let start = windowed_start(st.sel, list_h);
-                    let idx = start + (m.row - top) as usize;
-                    if idx < st.files.len() {
-                        let already = st.sel == idx;
-                        st.sel = idx;
-                        if double || already {
-                            return ClickOutcome::Key(KeyCode::Enter);
-                        }
-                    }
-                }
-                ClickOutcome::Nothing
-            }
-            Overlay::ImageSource(st) => {
-                let top = inner.y + IMPORT_HEADER_ROWS + IMPORT_PICK_LIST_OFFSET;
-                let list_h = inner
-                    .height
-                    .saturating_sub(IMPORT_HEADER_ROWS + IMPORT_PICK_LIST_OFFSET);
-                if m.row >= top && (m.row - top) < list_h {
-                    let start = windowed_start(st.sel, list_h);
-                    let idx = start + (m.row - top) as usize;
-                    if idx < st.files.len() {
-                        let already = st.sel == idx;
-                        st.sel = idx;
-                        if double || already {
-                            return ClickOutcome::Key(KeyCode::Enter);
-                        }
-                    }
-                }
-                ClickOutcome::Nothing
-            }
-            // QA findings interleave non-selectable chapter headers, so a click
-            // just activates the current pick (the wheel moves it).
-            Overlay::Qa(_) => {
-                if double {
-                    ClickOutcome::Key(KeyCode::Enter)
-                } else {
-                    ClickOutcome::Nothing
-                }
-            }
-            // Text editors / progress views: inside-clicks do nothing (scroll and
-            // click-outside still work).
-            _ => ClickOutcome::Nothing,
         }
     }
 
@@ -2394,7 +2319,7 @@ impl Overlay {
             return Action::None;
         };
         match st.step {
-            0 => match key.code {
+            ImportStep::Pick => match key.code {
                 KeyCode::Esc => Action::CloseOverlay,
                 KeyCode::Char('r') | KeyCode::Char('R') => Action::RescanImports,
                 KeyCode::Up | KeyCode::Char('k') => {
@@ -2433,7 +2358,7 @@ impl Overlay {
                         // file straight into the target volume.
                         let source = st.selected_file().cloned().unwrap_or_default();
                         let title = st.name.trim().to_string();
-                        st.step = 5;
+                        st.step = ImportStep::Importing;
                         st.progress = Some((0, 0, "starting".to_string()));
                         Action::ImportFile {
                             source,
@@ -2459,16 +2384,16 @@ impl Overlay {
                         }
                         st.name_cursor = st.name.len();
                         if st.lock_name {
-                            st.step = 3;
+                            st.step = ImportStep::Volume;
                         } else {
-                            st.step = 1;
+                            st.step = ImportStep::Name;
                         }
                         Action::None
                     }
                 }
                 _ => Action::None,
             },
-            1 => {
+            ImportStep::Name => {
                 if input::handle(&mut st.name, &mut st.name_cursor, key, EditOpts::default())
                     != Edited::Ignored
                 {
@@ -2478,7 +2403,7 @@ impl Overlay {
                 }
                 match key.code {
                     KeyCode::Esc => {
-                        st.step = 0;
+                        st.step = ImportStep::Pick;
                         st.note = None;
                         Action::None
                     }
@@ -2492,14 +2417,14 @@ impl Overlay {
                             if st.title_syn.raw != raw {
                                 st.title_syn = SynopsisState::new_title(raw, String::new());
                             }
-                            st.step = 2;
+                            st.step = ImportStep::Title;
                         }
                         Action::None
                     }
                     _ => Action::None,
                 }
             }
-            2 => {
+            ImportStep::Title => {
                 // Type the translated title by hand; Tab translates via the agent;
                 // Enter (with or without one) continues; Esc returns to the name step.
                 match handle_synopsis_keys(&mut st.title_syn, key) {
@@ -2510,20 +2435,20 @@ impl Overlay {
                         target_language: st.effective_target_language(),
                     },
                     SynKey::Accept | SynKey::Skip => {
-                        st.step = 3;
+                        st.step = ImportStep::Volume;
                         st.suggest_volume();
                         Action::None
                     }
                     SynKey::Back => {
-                        st.step = 1;
+                        st.step = ImportStep::Name;
                         st.name_cursor = st.name.len();
                         Action::None
                     }
                 }
             }
-            3 => match key.code {
+            ImportStep::Volume => match key.code {
                 KeyCode::Esc => {
-                    st.step = if st.lock_name { 0 } else { 2 };
+                    st.step = if st.lock_name { ImportStep::Pick } else { ImportStep::Title };
                     Action::None
                 }
                 KeyCode::Up | KeyCode::Char('k') | KeyCode::Char('+') | KeyCode::Right => {
@@ -2548,12 +2473,12 @@ impl Overlay {
                     Action::None
                 }
                 KeyCode::Enter => {
-                    st.step = 4;
+                    st.step = ImportStep::Synopsis;
                     Action::None
                 }
                 _ => Action::None,
             },
-            4 => {
+            ImportStep::Synopsis => {
                 let intent = handle_synopsis_keys(&mut st.syn, key);
                 match intent {
                     SynKey::None => Action::None,
@@ -2563,7 +2488,7 @@ impl Overlay {
                         target_language: st.effective_target_language(),
                     },
                     SynKey::Back => {
-                        st.step = 3;
+                        st.step = ImportStep::Volume;
                         Action::None
                     }
                     SynKey::Accept => {
@@ -2573,7 +2498,7 @@ impl Overlay {
                         let vol = st.vol.max(1);
                         let synopsis_raw = st.syn.raw.trim().to_string();
                         let translated_synopsis = st.syn.translated_text.trim().to_string();
-                        st.step = 5;
+                        st.step = ImportStep::Importing;
                         st.progress = Some((0, 0, "starting".to_string()));
                         Action::ImportFile {
                             source,
@@ -2591,7 +2516,7 @@ impl Overlay {
                         let title = st.name.trim().to_string();
                         let translated_title = st.title_syn.translated_text.trim().to_string();
                         let vol = st.vol.max(1);
-                        st.step = 5;
+                        st.step = ImportStep::Importing;
                         st.progress = Some((0, 0, "starting".to_string()));
                         Action::ImportFile {
                             source,
@@ -3134,17 +3059,17 @@ impl Overlay {
         match self {
             Overlay::Welcome(_) => &[("↑↓", "move"), ("↵", "select"), ("Esc", "skip")],
             Overlay::Import(st) => match st.step {
-                0 => &[
+                ImportStep::Pick => &[
                     ("↑↓", "pick"),
                     ("←→", "language"),
                     ("↵", "next"),
                     ("r", "rescan"),
                     ("Esc", "cancel"),
                 ],
-                1 => &[("type", "name"), ("↵/Tab", "next"), ("Esc", "back")],
-                2 => import_title_hints(&st.title_syn),
-                3 => &[("↑↓/type", "volume"), ("↵", "next"), ("Esc", "back")],
-                4 => synopsis_hints(&st.syn, true),
+                ImportStep::Name => &[("type", "name"), ("↵/Tab", "next"), ("Esc", "back")],
+                ImportStep::Title => import_title_hints(&st.title_syn),
+                ImportStep::Volume => &[("↑↓/type", "volume"), ("↵", "next"), ("Esc", "back")],
+                ImportStep::Synopsis => synopsis_hints(&st.syn, true),
                 _ => &[("Esc", "close")],
             },
             Overlay::ImageSource(_) => &[
@@ -3213,37 +3138,6 @@ impl Overlay {
         }
     }
 
-    /// Whether this overlay draws through the component kit.
-    ///
-    /// Migration marker. A kit-rendered overlay registers its own zones, so its
-    /// clicks resolve from the registry and it needs no entry in `modal_rect`
-    /// or `resolve_click`. Both of those go away once this returns true for
-    /// every variant.
-    pub fn is_kit_rendered(&self) -> bool {
-        matches!(
-            self,
-            Overlay::None
-                | Overlay::Help(_)
-                | Overlay::About
-                | Overlay::Log(_)
-                | Overlay::Modal(_)
-                | Overlay::Export(_)
-                | Overlay::Theme(_)
-                | Overlay::Palette(_)
-                | Overlay::ReaderJump(_)
-                | Overlay::ReaderSearch(_)
-                | Overlay::ReaderNote(_)
-                | Overlay::Welcome(_)
-                | Overlay::ImageSource(_)
-                | Overlay::Synopsis(_)
-                | Overlay::ProjectTitle(_)
-                | Overlay::Qa(_)
-                | Overlay::ReaderInspect(_)
-                | Overlay::ReaderEdit(_)
-                | Overlay::Settings(_)
-        )
-    }
-
     pub fn render(
         &self,
         ui: &mut crate::ui::kit::Ui,
@@ -3263,10 +3157,7 @@ impl Overlay {
             Overlay::Theme(st) => self.render_theme_kit(ui, area, st),
 
             Overlay::Welcome(st) => self.render_welcome_kit(ui, area, st),
-            Overlay::Import(st) => {
-                let theme = ui.theme;
-                self.render_import(ui.frame, area, theme, st)
-            }
+            Overlay::Import(st) => self.render_import_kit(ui, area, st),
             Overlay::ImageSource(st) => self.render_image_source_kit(ui, area, st),
             Overlay::Settings(st) => self.render_settings_kit(ui, area, cfg, st),
             Overlay::Palette(st) => self.render_palette_kit(ui, area, st),
@@ -3817,10 +3708,12 @@ impl Overlay {
             },
             |i| {
                 let (path, size) = &st.files[i];
-                let name = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default();
+                let name = thai_display_safe(
+                    &path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default(),
+                );
                 Row::new(Line::from(vec![
                     Span::raw(name),
                     Span::styled(format!("   {}", human_size(*size)), dim),
@@ -4561,6 +4454,242 @@ impl Overlay {
         in_block && !st.system_one.enabled
     }
 
+    /// The import wizard.
+    ///
+    /// The frame is a fixed height across every step on purpose: a modal that
+    /// resized as you advanced would move the controls out from under the
+    /// pointer. Completed steps on the rail are clickable, so going back is one
+    /// click rather than the right number of Escapes.
+    fn render_import_kit(&self, ui: &mut crate::ui::kit::Ui, area: Rect, st: &ImportState) {
+        use crate::ui::kit::ctx::row_at;
+        use crate::ui::kit::modal::{Modal, Sizing};
+        use crate::ui::kit::progress::{self, Step, StepState};
+
+        let title = thai_display_safe(if st.lock_name {
+            "Add volume · เพิ่มเล่ม"
+        } else {
+            "New project · นำเข้าไฟล์"
+        });
+        let frame = Modal::new(&title)
+            .sizing(Sizing::medium())
+            .fixed_height(24)
+            .footer(1)
+            .render(ui, area);
+
+        // The rail shows only the steps this flow actually visits.
+        let visible = st.visible_steps();
+        let steps: Vec<Step> = visible
+            .iter()
+            .map(|&s| {
+                let state = if s < st.step {
+                    StepState::Done
+                } else if s == st.step {
+                    StepState::Current
+                } else if s.is_optional() {
+                    StepState::Optional
+                } else {
+                    StepState::Ahead
+                };
+                Step::new(s.label(), state)
+            })
+            .collect();
+        progress::stepper(ui, row_at(frame.body, 0), &steps);
+
+        ui.line(
+            row_at(frame.body, 1),
+            import_context_line(st, ui.theme),
+            Style::default().bg(ui.theme.bg_elevated),
+        );
+
+        let body = Rect {
+            y: frame.body.y + 3,
+            height: frame.body.height.saturating_sub(3),
+            ..frame.body
+        };
+        self.render_import_body(ui, body, st);
+        self.render_import_footer(ui, frame.footer, st);
+    }
+
+    fn render_import_body(
+        &self,
+        ui: &mut crate::ui::kit::Ui,
+        body: Rect,
+        st: &ImportState,
+    ) {
+        use crate::ui::kit::ctx::row_at;
+        use crate::ui::kit::list::{self, ListState, Row};
+        use crate::ui::kit::progress;
+
+        let bg = ui.theme.bg_elevated;
+        let dim = Style::default().fg(ui.theme.ink_faint).bg(bg);
+        let ink = Style::default().fg(ui.theme.ink).bg(bg);
+
+        match st.step {
+            ImportStep::Pick => {
+                if st.files.is_empty() {
+                    ui.text(
+                        row_at(body, 0),
+                        "No importable files in this folder — press r to rescan.",
+                        dim,
+                    );
+                    ui.text(
+                        row_at(body, 2),
+                        format!(
+                            "Accepted: {}",
+                            crate::document_import::supported_import_summary()
+                        ),
+                        dim,
+                    );
+                    return;
+                }
+                let mut ls = ListState::new();
+                ls.select(Some(st.sel));
+                list::render(
+                    ui,
+                    body,
+                    &mut ls,
+                    st.files.len(),
+                    list::Opts {
+                        rail: true,
+                        scrollbar: true,
+                        kind: ZoneKind::Row,
+                        id_base: 0,
+                    },
+                    |i| {
+                        let (path, size) = &st.files[i];
+                        // A filename can be Thai, and every string reaching
+                        // the screen has to be decomposed first or the cells
+                        // drift.
+                        let name = thai_display_safe(
+                            &path
+                                .file_name()
+                                .map(|n| n.to_string_lossy().to_string())
+                                .unwrap_or_default(),
+                        );
+                        Row::new(Line::from(vec![
+                            Span::raw(name),
+                            Span::styled(format!("   {}", human_size(*size)), dim),
+                        ]))
+                    },
+                );
+            }
+            ImportStep::Name => {
+                ui.text(row_at(body, 0), "What is this project called?", dim);
+                let (before, after) = input::caret_halves(
+                    &st.name,
+                    st.name_cursor,
+                    body.width.saturating_sub(2) as usize,
+                );
+                ui.line(
+                    row_at(body, 2),
+                    Line::from(vec![
+                        Span::styled(before, ink),
+                        Span::styled(
+                            crate::ui::glyphs::ACCENT_RAIL.as_str().to_string(),
+                            Style::default().fg(ui.theme.stream_cursor).bg(bg),
+                        ),
+                        Span::styled(after, ink),
+                    ]),
+                    Style::default().bg(bg),
+                );
+                if let Some(note) = st.note {
+                    ui.text(
+                        row_at(body, 4),
+                        note,
+                        Style::default().fg(ui.theme.status_warn).bg(bg),
+                    );
+                }
+            }
+            ImportStep::Title => {
+                self.render_syn_body(ui, body, &st.title_syn, "Title 日本語");
+            }
+            ImportStep::Volume => {
+                ui.text(row_at(body, 0), "Which volume is this?", dim);
+                ui.line(
+                    row_at(body, 2),
+                    Line::from(vec![
+                        Span::styled("  ", ink),
+                        Span::styled(
+                            format!("Vol.{:02}", st.vol),
+                            Style::default()
+                                .fg(ui.theme.accent)
+                                .bg(bg)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                    ]),
+                    Style::default().bg(bg),
+                );
+                ui.text(row_at(body, 4), "↑↓ or type a number", dim);
+                if let Some(target) = st.target_project()
+                    && !target.volumes.is_empty()
+                {
+                    ui.text(
+                        row_at(body, 6),
+                        format!("Already has  {}", volume_chips(&target.volumes)),
+                        dim,
+                    );
+                }
+            }
+            ImportStep::Synopsis => {
+                self.render_syn_body(ui, body, &st.syn, "Synopsis 日本語");
+            }
+            ImportStep::Importing => {
+                let (done, total, what) =
+                    st.progress.clone().unwrap_or((0, 0, "starting".into()));
+                ui.text(row_at(body, 0), format!("Importing · {what}"), ink);
+                progress::bar_with_label(ui, row_at(body, 2), done, total);
+                ui.text(
+                    row_at(body, 4),
+                    "Chapters are read in spine order and illustrations relocated.",
+                    dim,
+                );
+            }
+        }
+    }
+
+    /// Back / Skip / Next, as real buttons.
+    fn render_import_footer(
+        &self,
+        ui: &mut crate::ui::kit::Ui,
+        footer: Rect,
+        st: &ImportState,
+    ) {
+        use crate::ui::kit::button::{Button, ButtonRow};
+        use crate::ui::kit::modal;
+
+        if st.step == ImportStep::Importing {
+            modal::footer_hint(ui, footer, "  import continues in the background");
+            return;
+        }
+        let mut buttons = vec![Button::new(ZoneId::button(DIALOG_CANCEL), "Back").accel("esc")];
+        if matches!(st.step, ImportStep::Title | ImportStep::Synopsis) {
+            buttons.push(
+                Button::new(ZoneId::button(DIALOG_ALTERNATE), "Translate").accel("tab"),
+            );
+        }
+        // One forward button, labelled for what it will actually do. A separate
+        // Skip would be a second button doing the same thing as Next, since an
+        // optional step advances either way.
+        let empty_optional = match st.step {
+            ImportStep::Title => st.title_syn.translated_text.trim().is_empty(),
+            ImportStep::Synopsis => st.syn.raw.trim().is_empty(),
+            _ => false,
+        };
+        let next_label = match st.step {
+            ImportStep::Synopsis if !empty_optional => "Import",
+            ImportStep::Synopsis => "Skip · import",
+            s if s.is_optional() && empty_optional => "Skip",
+            _ => "Next",
+        };
+        buttons.push(
+            Button::new(ZoneId::button(DIALOG_CONFIRM), next_label)
+                .accel("↵")
+                .primary()
+                .disabled(st.step == ImportStep::Pick && st.files.is_empty()),
+        );
+        modal::render_footer(ui, footer, ButtonRow::new(buttons));
+    }
+
     /// A confirm dialog, with its choices as real buttons.
     fn render_modal_kit(&self, ui: &mut crate::ui::kit::Ui, area: Rect, dlg: &Dialog) {
         use crate::ui::kit::button::{Button, ButtonRow};
@@ -4751,585 +4880,12 @@ impl Overlay {
         );
     }
 
-    fn modal_block<'a>(&self, title: &'a str, theme: &Theme) -> Block<'a> {
-        Block::default()
-            .borders(Borders::ALL)
-            .border_set(theme::hairline_set())
-            .border_style(Style::default().fg(theme.accent))
-            .title(Span::styled(
-                format!(" {title} "),
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            ))
-            .style(Style::default().bg(theme.bg_panel))
-    }
-
-    fn render_import(&self, f: &mut Frame, area: Rect, theme: &Theme, st: &ImportState) {
-        // One fixed size for every step; mirrored by modal_rect for hit-testing.
-        let modal = centered_modal(78, 24, area);
-        f.render_widget(Clear, modal);
-        let title = thai_display_safe(if st.lock_name {
-            "Add volume · เพิ่มเล่ม"
-        } else {
-            "New project · นำเข้าไฟล์"
-        });
-        let block = self.modal_block(&title, theme);
-        let inner = block.inner(modal);
-        f.render_widget(block, modal);
-
-        let rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(1), // step rail
-                Constraint::Length(1), // accumulated choices
-                Constraint::Length(1), // gap
-                Constraint::Min(0),    // step body
-            ])
-            .split(inner);
-        f.render_widget(
-            Paragraph::new(step_rail(st, theme)).style(Style::default().bg(theme.bg_panel)),
-            rows[0],
-        );
-        f.render_widget(
-            Paragraph::new(import_context_line(st, theme))
-                .style(Style::default().bg(theme.bg_panel)),
-            rows[1],
-        );
-
-        match st.step {
-            0 => self.render_import_pick(f, rows[3], theme, st),
-            1 => self.render_import_name(f, rows[3], theme, st),
-            2 => self.render_import_title(f, rows[3], theme, st),
-            3 => self.render_import_volume(f, rows[3], theme, st),
-            4 => render_synopsis_body(f, rows[3], theme, &st.syn, "start import"),
-            _ => self.render_import_progress(f, rows[3], theme, st),
-        }
-    }
-
-    fn render_import_pick(&self, f: &mut Frame, area: Rect, theme: &Theme, st: &ImportState) {
-        if st.files.is_empty() {
-            let p = Paragraph::new(vec![
-                Line::raw(""),
-                Line::from(Span::styled(
-                    "  No importable files found in this folder.",
-                    Style::default().fg(theme.ink_soft),
-                )),
-                Line::raw(""),
-                Line::from(Span::styled(
-                    "  Drop a supported file into this folder, then press r to rescan.",
-                    Style::default().fg(theme.ink_faint),
-                )),
-                Line::raw(""),
-                Line::from(Span::styled(
-                    format!(
-                        "  Supported: {}",
-                        crate::document_import::supported_import_summary()
-                    ),
-                    Style::default().fg(theme.ink_faint),
-                )),
-            ])
-            .style(Style::default().bg(theme.bg_panel));
-            f.render_widget(p, area);
-            return;
-        }
-
-        let rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(1), // header
-                Constraint::Length(1), // language selector
-                Constraint::Length(1), // gap
-                Constraint::Min(0),    // windowed file list
-            ])
-            .split(area);
-        let header = match st.append_to {
-            Some(vol) => format!("  Add chapters to Vol.{vol:02} — choose a source file"),
-            None => "  Choose a source file".to_string(),
-        };
-        f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(header, Style::default().fg(theme.ink_soft)),
-                Span::styled(
-                    format!("  ({} found · r rescan)", st.files.len()),
-                    Style::default().fg(theme.ink_faint),
-                ),
-            ]))
-            .style(Style::default().bg(theme.bg_panel)),
-            rows[0],
-        );
-
-        let language_locked = st.lock_name;
-        let language = if language_locked {
-            st.effective_target_language()
-        } else {
-            st.target_language
-        };
-        f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(
-                    "  Translation language  ",
-                    Style::default().fg(theme.ink_faint),
-                ),
-                Span::styled(
-                    if language_locked { "  " } else { "◂ " },
-                    Style::default().fg(theme.accent_soft),
-                ),
-                Span::styled(
-                    language.label(),
-                    Style::default()
-                        .fg(theme.accent)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    if language_locked {
-                        "  (fixed for this project)"
-                    } else {
-                        " ▸  (from Settings preference)"
-                    },
-                    Style::default().fg(theme.ink_faint),
-                ),
-            ]))
-            .style(Style::default().bg(theme.bg_panel)),
-            rows[1],
-        );
-
-        // Window the rows so the selection stays visible with long file lists.
-        let cap = rows[3].height.max(1);
-        let start = windowed_start(st.sel, cap);
-        let end = (start + cap as usize).min(st.files.len());
-        let size_w = 9usize;
-        let name_w = (rows[3].width as usize).saturating_sub(6 + size_w);
-
-        let mut lines = Vec::with_capacity(end - start);
-        for (i, (p, size)) in st.files.iter().enumerate().take(end).skip(start) {
-            let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("?");
-            let selected = i == st.sel;
-            let bar = if selected {
-                theme::SELECT_BAR.to_string()
-            } else {
-                " ".to_string()
-            };
-            let style = if selected {
-                Style::default().fg(theme.ink).bg(theme.accent_bg)
-            } else {
-                Style::default().fg(theme.ink_soft)
-            };
-            lines.push(Line::from(vec![
-                Span::styled(format!(" {bar} "), Style::default().fg(theme.accent)),
-                Span::styled(pad_to_cols(&thai_display_safe(name), name_w), style),
-                Span::styled(
-                    format!("{:>size_w$}", super::shelf::human_size(*size)),
-                    Style::default().fg(theme.ink_faint),
-                ),
-            ]));
-        }
-        f.render_widget(
-            Paragraph::new(lines).style(Style::default().bg(theme.bg_panel)),
-            rows[3],
-        );
-    }
-
-    fn render_import_name(&self, f: &mut Frame, area: Rect, theme: &Theme, st: &ImportState) {
-        let slug = slugify(st.name.trim());
-        let rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(1), // label
-                Constraint::Length(3), // boxed input
-                Constraint::Length(1), // folder preview
-                Constraint::Length(1), // gap
-                Constraint::Min(0),    // validation / merge feedback
-            ])
-            .split(area);
-
-        f.render_widget(
-            Paragraph::new(Span::styled(
-                "  Project name",
-                Style::default().fg(theme.ink_soft),
-            ))
-            .style(Style::default().bg(theme.bg_panel)),
-            rows[0],
-        );
-
-        let input_block = Block::default()
-            .borders(Borders::ALL)
-            .border_set(theme::hairline_set())
-            .border_style(Style::default().fg(theme.accent_soft))
-            .style(Style::default().bg(theme.bg_inset));
-        let field_w = rows[1].width.saturating_sub(6) as usize;
-        let (before, after) = input::caret_halves(&st.name, st.name_cursor, field_w);
-        let caret_line = Line::from(vec![
-            Span::styled(thai_display_safe(&before), Style::default().fg(theme.ink)),
-            Span::styled("▏", Style::default().fg(theme.stream_cursor)),
-            Span::styled(thai_display_safe(&after), Style::default().fg(theme.ink)),
-        ]);
-        f.render_widget(
-            Paragraph::new(caret_line).block(input_block),
-            indent(rows[1], 2),
-        );
-
-        f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled("  Folder   ", Style::default().fg(theme.ink_faint)),
-                Span::styled(
-                    if slug.is_empty() {
-                        "—".to_string()
-                    } else {
-                        thai_display_safe(&format!("./{slug}/"))
-                    },
-                    Style::default().fg(theme.accent_soft),
-                ),
-            ]))
-            .style(Style::default().bg(theme.bg_panel)),
-            rows[2],
-        );
-
-        // Live feedback: required-name nudge, or what this name will do (create
-        // a fresh project vs merge into the existing one with the same slug).
-        let mut feedback: Vec<Line> = Vec::new();
-        if let Some(note) = st.note {
-            feedback.push(Line::from(Span::styled(
-                thai_display_safe(&format!("  ⚠ {note}")),
-                Style::default().fg(theme.status_warn),
-            )));
-        } else if st.name.trim().is_empty() {
-            feedback.push(Line::from(Span::styled(
-                "  type a project name to continue",
-                Style::default().fg(theme.ink_faint),
-            )));
-        } else if let Some(target) = st.target_project() {
-            feedback.push(Line::from(Span::styled(
-                thai_display_safe(&format!(
-                    "  ⊕ adds into the existing project “{}”",
-                    truncate_cols(target.title.trim(), 40)
-                )),
-                Style::default().fg(theme.status_warn),
-            )));
-            feedback.push(Line::from(Span::styled(
-                format!("    already has {}", volume_chips(&target.volumes)),
-                Style::default().fg(theme.ink_faint),
-            )));
-            feedback.push(Line::from(Span::styled(
-                format!("    project language: {}", target.target_language.label()),
-                Style::default().fg(theme.ink_faint),
-            )));
-        } else {
-            feedback.push(Line::from(Span::styled(
-                "  ✓ creates a new project",
-                Style::default().fg(theme.status_done),
-            )));
-        }
-        f.render_widget(
-            Paragraph::new(feedback)
-                .wrap(Wrap { trim: false })
-                .style(Style::default().bg(theme.bg_panel)),
-            rows[4],
-        );
-    }
-
-    fn render_import_title(&self, f: &mut Frame, area: Rect, theme: &Theme, st: &ImportState) {
-        let syn = &st.title_syn;
-        let faint = Style::default().fg(theme.ink_faint);
-        let mut lines = vec![
-            Line::from(vec![
-                Span::styled(
-                    format!(
-                        "  Translated title ({})",
-                        st.effective_target_language().label()
-                    ),
-                    Style::default().fg(theme.ink_soft),
-                ),
-                Span::styled("   ◦ optional", faint),
-            ]),
-            Line::from(Span::styled(
-                "  Shown on the Shelf and in exports — or add it later from the Project screen.",
-                faint,
-            )),
-            Line::raw(""),
-            Line::from(vec![
-                Span::styled("  Original  ", faint),
-                Span::styled(
-                    thai_display_safe(syn.raw.trim()),
-                    Style::default().fg(theme.ink),
-                ),
-            ]),
-            Line::raw(""),
-            {
-                let mut spans = vec![Span::styled("  Translation", faint)];
-                if syn.edit_translation {
-                    if syn.translated_text.is_empty() {
-                        spans.push(Span::styled("Type translated title…", faint));
-                        spans.push(Span::styled("▏", Style::default().fg(theme.stream_cursor)));
-                    } else {
-                        let (before, after) =
-                            input::caret_halves(&syn.translated_text, syn.translated_cursor, 48);
-                        spans.push(Span::styled(
-                            thai_display_safe(&before),
-                            Style::default()
-                                .fg(theme.accent)
-                                .add_modifier(Modifier::BOLD),
-                        ));
-                        spans.push(Span::styled("▏", Style::default().fg(theme.stream_cursor)));
-                        spans.push(Span::styled(
-                            thai_display_safe(&after),
-                            Style::default()
-                                .fg(theme.accent)
-                                .add_modifier(Modifier::BOLD),
-                        ));
-                    }
-                } else if syn.translated_text.trim().is_empty() {
-                    spans.push(Span::styled(
-                        thai_display_safe("(no translated title yet.)"),
-                        faint,
-                    ));
-                } else {
-                    spans.push(Span::styled(
-                        thai_display_safe(syn.translated_text.trim()),
-                        Style::default()
-                            .fg(theme.accent)
-                            .add_modifier(Modifier::BOLD),
-                    ));
-                }
-                Line::from(spans)
-            },
-            Line::raw(""),
-        ];
-        match syn.phase {
-            SynPhase::Translating => lines.push(Line::from(Span::styled(
-                thai_display_safe("  ◐ Translator agent is working … (Esc to cancel)"),
-                Style::default().fg(theme.status_working),
-            ))),
-            SynPhase::Failed => {
-                lines.push(Line::from(Span::styled(
-                    thai_display_safe(
-                        "  ✗ failed — type a translated title, Tab to retry · Esc cancel",
-                    ),
-                    Style::default().fg(theme.status_failed),
-                )));
-                lines.push(Line::from(Span::styled(
-                    thai_display_safe(&format!("    {}", syn.error)),
-                    Style::default().fg(theme.status_failed),
-                )));
-            }
-            // Translation editing is active for both Editing and Done in the title flow.
-            _ => {
-                let msg = if syn.translated_text.trim().is_empty() {
-                    "  ↵ skip · type a translated title · Tab to translate it for you"
-                } else {
-                    "  ↵ next · type to edit · Tab to retranslate"
-                };
-                lines.push(Line::from(Span::styled(thai_display_safe(msg), faint)));
-            }
-        }
-        f.render_widget(
-            Paragraph::new(lines)
-                .wrap(Wrap { trim: false })
-                .style(Style::default().bg(theme.bg_panel)),
-            area,
-        );
-    }
-
-    fn render_import_volume(&self, f: &mut Frame, area: Rect, theme: &Theme, st: &ImportState) {
-        let target = st.target_project();
-        let existing = target.map(|t| t.volumes.as_slice()).unwrap_or(&[]);
-        let collides = existing.iter().any(|&(n, _)| n == st.vol);
-
-        let mut lines = vec![
-            Line::from(vec![
-                Span::styled("  Project   ", Style::default().fg(theme.ink_faint)),
-                Span::styled(
-                    thai_display_safe(st.name.trim()),
-                    Style::default().fg(theme.ink_soft),
-                ),
-                Span::styled(
-                    if target.is_some() {
-                        "  (existing)"
-                    } else {
-                        "  (new)"
-                    },
-                    Style::default().fg(theme.ink_faint),
-                ),
-            ]),
-            Line::raw(""),
-            Line::from(vec![
-                Span::styled("  Volume    ", Style::default().fg(theme.ink_faint)),
-                Span::styled("◂  ", Style::default().fg(theme.accent_soft)),
-                Span::styled(
-                    format!("Vol.{:02}", st.vol),
-                    Style::default()
-                        .fg(theme.accent)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled("  ▸", Style::default().fg(theme.accent_soft)),
-            ]),
-            Line::raw(""),
-            Line::from(vec![
-                Span::styled("  Existing  ", Style::default().fg(theme.ink_faint)),
-                Span::styled(
-                    if existing.is_empty() {
-                        "none — this is the project's first volume".to_string()
-                    } else {
-                        volume_chips(existing)
-                    },
-                    Style::default().fg(theme.ink_soft),
-                ),
-            ]),
-            Line::raw(""),
-        ];
-        if collides {
-            lines.push(Line::from(Span::styled(
-                format!(
-                    "  ⚠ Vol.{:02} already exists — imported chapters are added into it",
-                    st.vol
-                ),
-                Style::default().fg(theme.status_warn),
-            )));
-        } else {
-            lines.push(Line::from(Span::styled(
-                format!("  ✓ creates a new volume (Vol_{:02})", st.vol),
-                Style::default().fg(theme.status_done),
-            )));
-        }
-        lines.push(Line::raw(""));
-        lines.push(Line::from(Span::styled(
-            "  ↑↓ / + - adjust · type a number · Enter to continue",
-            Style::default().fg(theme.ink_faint),
-        )));
-        f.render_widget(
-            Paragraph::new(lines).style(Style::default().bg(theme.bg_panel)),
-            area,
-        );
-    }
-
-    fn render_import_progress(&self, f: &mut Frame, area: Rect, theme: &Theme, st: &ImportState) {
-        let (done, total, label) = st
-            .progress
-            .clone()
-            .unwrap_or((0, 0, "preparing".to_string()));
-        let rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(2),
-                Constraint::Length(1), // label
-                Constraint::Length(1), // gauge
-                Constraint::Length(2), // gap
-                Constraint::Min(0),    // background note
-            ])
-            .split(area);
-        f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled("  Preprocessing  ", Style::default().fg(theme.ink_soft)),
-                Span::styled(
-                    thai_display_safe(&label),
-                    Style::default().fg(theme.accent_soft),
-                ),
-            ]))
-            .style(Style::default().bg(theme.bg_panel)),
-            rows[1],
-        );
-        render_gauge(f, indent(rows[2], 2), done, total.max(1), theme);
-        f.render_widget(
-            Paragraph::new(Span::styled(
-                "  Esc closes this dialog — the import keeps running in the background.",
-                Style::default().fg(theme.ink_faint),
-            ))
-            .style(Style::default().bg(theme.bg_panel)),
-            rows[4],
-        );
-    }
-
-}
-
-/// What a resolved overlay click should do — a synthesized key (reusing the
-/// keyboard handlers), a direct action, or nothing.
-enum ClickOutcome {
-    Nothing,
-    Key(KeyCode),
 }
 
 /// A key event with no modifiers — used to replay a gesture through the keyboard
 /// handlers so navigation / dismiss logic lives in exactly one place.
 fn synth(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::empty())
-}
-
-/// The content rectangle inside a single-cell border (mirrors `Block::inner` for
-/// `Borders::ALL`), used to hit-test modal interiors.
-fn inset(r: Rect) -> Rect {
-    Rect {
-        x: r.x.saturating_add(1),
-        y: r.y.saturating_add(1),
-        width: r.width.saturating_sub(2),
-        height: r.height.saturating_sub(2),
-    }
-}
-
-/// First visible index of a windowed list that keeps `sel` on screen given a
-/// visible height of `cap` rows — the shared rule the list overlays render with.
-fn windowed_start(sel: usize, cap: u16) -> usize {
-    let cap = (cap as usize).max(1);
-    if sel >= cap { sel + 1 - cap } else { 0 }
-}
-
-/// Rows of wizard chrome (step rail · context line · gap) above each step body;
-/// resolve_click must mirror render_import's layout.
-const IMPORT_HEADER_ROWS: u16 = 3;
-/// Rows the pick step draws above its file list (header · gap).
-const IMPORT_PICK_LIST_OFFSET: u16 = 3;
-
-/// The wizard's step rail: done steps get a check, the current step is
-/// highlighted, future steps are dimmed. The add-volume flow hides "Name".
-fn step_rail(st: &ImportState, theme: &Theme) -> Line<'static> {
-    // (step id, label, optional). Required steps are numbered; optional steps
-    // Optional translated title and synopsis steps get a `◦` marker.
-    let steps: &[(u8, &str, bool)] = if st.lock_name {
-        &[
-            (0, "File", false),
-            (3, "Volume", false),
-            (4, "Synopsis", true),
-        ]
-    } else {
-        &[
-            (0, "File", false),
-            (1, "Name", false),
-            (2, "Translated title", true),
-            (3, "Volume", false),
-            (4, "Synopsis", true),
-        ]
-    };
-    let mut spans = vec![Span::raw(" ")];
-    let mut num = 0u8;
-    for (i, &(id, label, optional)) in steps.iter().enumerate() {
-        if i > 0 {
-            spans.push(Span::styled("  ›  ", Style::default().fg(theme.rule)));
-        }
-        let marker = if optional {
-            "◦".to_string()
-        } else {
-            num += 1;
-            num.to_string()
-        };
-        if st.step > id {
-            spans.push(Span::styled(
-                format!("✓ {label}"),
-                Style::default().fg(theme.status_done),
-            ));
-        } else if st.step == id {
-            spans.push(Span::styled(
-                format!("{marker} {label}"),
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            ));
-        } else {
-            spans.push(Span::styled(
-                format!("{marker} {label}"),
-                Style::default().fg(theme.ink_faint),
-            ));
-        }
-    }
-    Line::from(spans)
 }
 
 /// One line of accumulated choices under the rail, so every step shows what is
@@ -5347,21 +4903,21 @@ fn import_context_line(st: &ImportState, theme: &Theme) -> Line<'static> {
         .unwrap_or("—");
     spans.push(Span::styled(
         truncate_cols(&thai_display_safe(file), 30),
-        if st.step == 0 { pending } else { confirmed },
+        if st.step == ImportStep::Pick { pending } else { confirmed },
     ));
     spans.push(sep.clone());
     spans.push(Span::styled(
         st.effective_target_language().label().to_string(),
         Style::default().fg(theme.accent_soft),
     ));
-    if st.lock_name || st.step > 1 {
+    if st.lock_name || st.step > ImportStep::Name {
         spans.push(sep.clone());
         spans.push(Span::styled(
             truncate_cols(&thai_display_safe(st.name.trim()), 30),
             confirmed,
         ));
     }
-    if st.lock_name || st.step > 3 {
+    if st.lock_name || st.step > ImportStep::Volume {
         spans.push(sep);
         spans.push(Span::styled(
             format!("Vol.{:02}", st.vol),
@@ -5456,329 +5012,6 @@ fn title_hints(st: &SynopsisState) -> &'static [(&'static str, &'static str)] {
     ]
 }
 
-struct EditorLabels {
-    label: &'static str,
-    placeholder: &'static str,
-    input_rows: u16,
-}
-
-/// Render the synopsis editor body used by import and standalone edit.
-fn render_synopsis_body(
-    f: &mut Frame,
-    area: Rect,
-    theme: &Theme,
-    st: &SynopsisState,
-    accept_label: &str,
-) {
-    render_editor_body(
-        f,
-        area,
-        theme,
-        st,
-        accept_label,
-        &EditorLabels {
-            label: "  Synopsis · source  (optional — used as translation context)",
-            placeholder: "Type or paste the source-language synopsis…  (leave empty, Tab to skip)",
-            input_rows: 9,
-        },
-    );
-}
-
-/// Render `text` as caret-bearing lines (multi-line aware) for an editable field.
-fn caret_text_lines<'a>(text: &'a str, cursor: usize, theme: &Theme) -> Vec<Line<'a>> {
-    let cursor = input::clamp_cursor(text, cursor);
-    let mut lines = Vec::new();
-    let mut line_start = 0usize;
-    for part in text.split('\n') {
-        let line_end = line_start + part.len();
-        let on_line = cursor >= line_start && cursor <= line_end;
-        let mut spans: Vec<Span> = Vec::new();
-        if on_line {
-            let off = cursor - line_start;
-            spans.push(Span::styled(
-                thai_display_safe(&part[..off]),
-                Style::default().fg(theme.ink),
-            ));
-            spans.push(Span::styled("▏", Style::default().fg(theme.stream_cursor)));
-            spans.push(Span::styled(
-                thai_display_safe(&part[off..]),
-                Style::default().fg(theme.ink),
-            ));
-        } else {
-            spans.push(Span::styled(
-                thai_display_safe(part),
-                Style::default().fg(theme.ink),
-            ));
-        }
-        lines.push(Line::from(spans));
-        line_start = line_end + 1;
-    }
-    lines
-}
-
-/// Shared edit/translate/accept body for synopsis and title editors.
-fn render_editor_body(
-    f: &mut Frame,
-    area: Rect,
-    theme: &Theme,
-    st: &SynopsisState,
-    accept_label: &str,
-    labels: &EditorLabels,
-) {
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Length(labels.input_rows),
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Min(0),
-        ])
-        .split(area);
-
-    f.render_widget(
-        Paragraph::new(Span::styled(
-            thai_display_safe(labels.label),
-            Style::default().fg(theme.ink_soft),
-        ))
-        .style(Style::default().bg(theme.bg_panel)),
-        rows[0],
-    );
-
-    // While hand-editing the translation, the source box is a read-only reference.
-    let editing = st.phase == SynPhase::Editing && !st.edit_translation;
-    let border_color = if st.edit_translation || !editing {
-        theme.rule
-    } else {
-        theme.accent_soft
-    };
-    let input_block = Block::default()
-        .borders(Borders::ALL)
-        .border_set(theme::hairline_set())
-        .border_style(Style::default().fg(border_color))
-        .style(Style::default().bg(theme.bg_inset));
-    let mut text_lines: Vec<Line> = Vec::new();
-    if st.raw.is_empty() {
-        text_lines.push(Line::from(vec![
-            Span::styled(
-                thai_display_safe(labels.placeholder),
-                Style::default().fg(theme.ink_faint),
-            ),
-            if editing {
-                Span::styled("▏", Style::default().fg(theme.stream_cursor))
-            } else {
-                Span::raw("")
-            },
-        ]));
-    } else {
-        let cursor = input::clamp_cursor(&st.raw, st.cursor);
-        let mut line_start = 0usize;
-        for part in st.raw.split('\n') {
-            let line_end = line_start + part.len();
-            // The caret sits on this line when the (clamped) cursor falls within
-            // it; at a '\n' boundary it belongs to the earlier line's tail.
-            let on_line = editing && cursor >= line_start && cursor <= line_end;
-            let mut spans: Vec<Span> = Vec::new();
-            if on_line {
-                let off = cursor - line_start;
-                spans.push(Span::styled(
-                    thai_display_safe(&part[..off]),
-                    Style::default().fg(theme.ink),
-                ));
-                spans.push(Span::styled("▏", Style::default().fg(theme.stream_cursor)));
-                spans.push(Span::styled(
-                    thai_display_safe(&part[off..]),
-                    Style::default().fg(theme.ink),
-                ));
-            } else {
-                spans.push(Span::styled(
-                    thai_display_safe(part),
-                    Style::default().fg(theme.ink),
-                ));
-            }
-            text_lines.push(Line::from(spans));
-            line_start = line_end + 1; // skip the '\n'
-        }
-    }
-    f.render_widget(
-        Paragraph::new(Text::from(text_lines))
-            .wrap(Wrap { trim: false })
-            .block(input_block),
-        indent(rows[1], 2),
-    );
-
-    f.render_widget(
-        Paragraph::new(editor_status(st, accept_label, theme, rows[2].width))
-            .style(Style::default().bg(theme.bg_panel)),
-        rows[2],
-    );
-
-    f.render_widget(
-        Paragraph::new(Span::styled(
-            "  Translation",
-            Style::default().fg(theme.ink_soft),
-        ))
-        .style(Style::default().bg(theme.bg_panel)),
-        rows[3],
-    );
-
-    // The translated output gets the same boxed treatment as the source, so the pair
-    // reads as siblings; its border accents while it is the field being edited.
-    let translation_block = Block::default()
-        .borders(Borders::ALL)
-        .border_set(theme::hairline_set())
-        .border_style(Style::default().fg(if st.edit_translation {
-            theme.accent_soft
-        } else {
-            theme.rule
-        }))
-        .style(Style::default().bg(theme.bg_inset));
-
-    if st.edit_translation {
-        let lines = if st.translated_text.is_empty() {
-            vec![Line::from(vec![
-                Span::styled(
-                    "Type the translation, or press Tab to translate",
-                    Style::default().fg(theme.ink_faint),
-                ),
-                Span::styled("▏", Style::default().fg(theme.stream_cursor)),
-            ])]
-        } else {
-            caret_text_lines(&st.translated_text, st.translated_cursor, theme)
-        };
-        f.render_widget(
-            Paragraph::new(Text::from(lines))
-                .wrap(Wrap { trim: false })
-                .block(translation_block),
-            indent(rows[4], 2),
-        );
-        return;
-    }
-
-    let (body, color) = match st.phase {
-        SynPhase::Failed => (st.error.clone(), theme.status_failed),
-        _ if st.translated_text.trim().is_empty() => (
-            "No translation yet — press Tab to translate".to_string(),
-            theme.ink_faint,
-        ),
-        _ => (st.translated_text.clone(), theme.ink),
-    };
-    f.render_widget(
-        Paragraph::new(crate::ui::text::thai_display_safe(&body))
-            .wrap(Wrap { trim: false })
-            .block(translation_block)
-            .style(Style::default().fg(color).bg(theme.bg_inset)),
-        indent(rows[4], 2),
-    );
-}
-
-/// The editor's status/actions line — phase-aware, English chrome. `accept_label`
-/// is the verb shown for the commit key (e.g. "save" / "start import").
-fn editor_status(
-    st: &SynopsisState,
-    accept_label: &str,
-    theme: &Theme,
-    max_cols: u16,
-) -> Span<'static> {
-    let faint = Style::default().fg(theme.ink_faint);
-    let text = editor_status_text(st, accept_label, max_cols as usize);
-    if st.edit_translation {
-        return Span::styled(text, faint);
-    }
-    match st.phase {
-        SynPhase::Editing => Span::styled(text, faint),
-        SynPhase::Translating => Span::styled(text, Style::default().fg(theme.status_working)),
-        SynPhase::Done => Span::styled(text, Style::default().fg(theme.status_done)),
-        SynPhase::Failed => Span::styled(text, Style::default().fg(theme.status_failed)),
-    }
-}
-
-fn editor_status_text(st: &SynopsisState, accept_label: &str, max_cols: usize) -> String {
-    if st.edit_translation {
-        let msg = if st.multiline {
-            "  Editing translation · Tab retranslate · Enter newline · Esc done".to_string()
-        } else {
-            format!("  Editing translation · Tab retranslate · Enter {accept_label} · Esc done")
-        };
-        return fit_status_text(std::iter::once(msg), max_cols);
-    }
-
-    match st.phase {
-        SynPhase::Editing => {
-            let msg = if st.raw.trim().is_empty() {
-                "  Empty — Tab to skip · Esc back".to_string()
-            } else if st.multiline {
-                format!(
-                    "  {} chars · Tab translate · Ctrl+S continue · Esc back",
-                    st.raw.chars().count()
-                )
-            } else {
-                format!(
-                    "  {} chars · Tab/Enter translate · Esc back",
-                    st.raw.chars().count()
-                )
-            };
-            fit_status_text(std::iter::once(msg), max_cols)
-        }
-        SynPhase::Translating => fit_status_text(
-            std::iter::once("  ◐ Translating with the agent… (Esc to cancel)".to_string()),
-            max_cols,
-        ),
-        SynPhase::Done => {
-            let attempt = st.attempt + 1;
-            let accept = accept_label.trim();
-            let short_accept = if accept == "start import" {
-                "start"
-            } else {
-                accept
-            };
-            fit_status_text(
-                [
-                    format!(
-                        "  ✓ Translated (try {attempt}) · Enter {accept} · e edit · r reroll · o source · s skip"
-                    ),
-                    format!(
-                        "  ✓ Translated (try {attempt}) · Enter {short_accept} · e edit · r reroll · o source · s skip"
-                    ),
-                    format!(
-                        "  ✓ Translated (try {attempt}) · Enter {short_accept} · e edit · r reroll · s skip"
-                    ),
-                    format!(
-                        "  ✓ Translated (try {attempt}) · Enter {short_accept} · e edit · r reroll"
-                    ),
-                    format!("  ✓ Translated (try {attempt}) · Enter {short_accept}"),
-                    format!("  ✓ Translated (try {attempt})"),
-                ],
-                max_cols,
-            )
-        }
-        SynPhase::Failed => fit_status_text(
-            [
-                "  ✗ Translation failed · e write it · r retry · o source · s skip".to_string(),
-                "  ✗ Translation failed · e write · r retry · s skip".to_string(),
-                "  ✗ Translation failed · r retry · s skip".to_string(),
-                "  ✗ Translation failed".to_string(),
-            ],
-            max_cols,
-        ),
-    }
-}
-
-fn fit_status_text<I>(candidates: I, max_cols: usize) -> String
-where
-    I: IntoIterator<Item = String>,
-{
-    let mut fallback = String::new();
-    for msg in candidates {
-        let safe = thai_display_safe(&msg);
-        if col_width(&safe) <= max_cols {
-            return safe;
-        }
-        fallback = safe;
-    }
-    truncate_cols(&fallback, max_cols)
-}
-
 /// The glyph, color, and short tag for a QA finding row.
 fn qa_visual(issue: &qa::QaIssue, theme: &Theme) -> (&'static str, ratatui::style::Color, String) {
     use qa::{QaKind, Severity};
@@ -5814,17 +5047,6 @@ fn export_desc(fmt: ExportFormat) -> &'static str {
     }
 }
 
-/// Indent a Rect from the left/right by `pad` columns (keeps modals breathing).
-fn indent(area: Rect, pad: u16) -> Rect {
-    let pad = pad.min(area.width / 2);
-    Rect {
-        x: area.x + pad,
-        y: area.y,
-        width: area.width.saturating_sub(pad * 2),
-        height: area.height,
-    }
-}
-
 /// Turn an epub file stem into a readable default title: `_`/`-` → spaces,
 /// trailing `_vNN` volume tags dropped, then word-cased lightly.
 pub fn prettify_stem(stem: &str) -> String {
@@ -5853,18 +5075,17 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
-    /// Every glyph the terminal would draw for the synopsis editor, concatenated.
+    /// Every glyph the terminal would draw for the synopsis editor,
+    /// concatenated. Goes through the real overlay so the test exercises the
+    /// path the app actually renders.
     fn rendered_glyphs(st: &SynopsisState) -> String {
-        let theme = Theme::washi();
-        let mut term = Terminal::new(TestBackend::new(80, 16)).unwrap();
-        term.draw(|f| render_synopsis_body(f, f.area(), &theme, st, "บันทึก"))
-            .unwrap();
-        term.backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect()
+        let ov = Overlay::Synopsis(SynopsisEditState {
+            vol: 1,
+            title: "t".into(),
+            target_language: TargetLanguage::Thai,
+            syn: st.clone(),
+        });
+        render_overlay(&ov, 80, 20).0.concat()
     }
 
     /// Render `ov` at `w`x`h` and hand back the painted lines plus the zones it
@@ -6445,7 +5666,7 @@ mod tests {
         assert_eq!(st.target_language, TargetLanguage::English);
         assert_eq!(st.effective_target_language(), TargetLanguage::English);
         if let Overlay::Import(st) = &mut seeded {
-            st.step = 4;
+            st.step = ImportStep::Synopsis;
         }
         match seeded.handle_key(key(KeyCode::Tab)) {
             Action::ImportFile {
@@ -6475,7 +5696,7 @@ mod tests {
             vec![existing],
             TargetLanguage::English,
         );
-        st.step = 4;
+        st.step = ImportStep::Synopsis;
         let mut ov = Overlay::Import(st);
 
         match ov.handle_key(key(KeyCode::Tab)) {
@@ -6673,7 +5894,7 @@ mod tests {
     fn name_step_requires_a_name_and_says_so() {
         let mut ov = wizard(vec![]);
         if let Overlay::Import(st) = &mut ov {
-            st.step = 1;
+            st.step = ImportStep::Name;
             st.name.clear();
             st.name_cursor = 0;
         }
@@ -6681,7 +5902,7 @@ mod tests {
         let Overlay::Import(st) = &ov else {
             panic!("overlay changed variant")
         };
-        assert_eq!(st.step, 1, "must not advance without a name");
+        assert_eq!(st.step, ImportStep::Name, "must not advance without a name");
         assert!(st.note.is_some(), "must surface why Enter did nothing");
 
         ov.handle_key(key(KeyCode::Char('x')));
@@ -6703,7 +5924,7 @@ mod tests {
         };
         let mut ov = wizard(vec![existing]);
         if let Overlay::Import(st) = &mut ov {
-            st.step = 1;
+            st.step = ImportStep::Name;
             st.name = "Cursed Blade".to_string();
             st.name_cursor = st.name.len();
         }
@@ -6713,7 +5934,7 @@ mod tests {
             panic!("overlay changed variant")
         };
         assert!(st.target_project().is_some());
-        assert_eq!(st.step, 3);
+        assert_eq!(st.step, ImportStep::Volume);
         assert_eq!(st.vol, 3, "should pre-pick one past the highest volume");
     }
 
@@ -6728,7 +5949,7 @@ mod tests {
         };
         let mut ov = wizard(vec![existing]);
         if let Overlay::Import(st) = &mut ov {
-            st.step = 1;
+            st.step = ImportStep::Name;
             st.name = "Cursed Blade".to_string();
             st.name_cursor = st.name.len();
         }
@@ -6752,7 +5973,7 @@ mod tests {
     fn wizard_title_step_threads_translated_title_into_import() {
         let mut ov = wizard(vec![]);
         if let Overlay::Import(st) = &mut ov {
-            st.step = 1;
+            st.step = ImportStep::Name;
             st.name = "夜の影".to_string();
             st.name_cursor = st.name.len();
         }
@@ -6792,7 +6013,7 @@ mod tests {
     fn wizard_title_translation_survives_back_unless_name_changes() {
         let mut ov = wizard(vec![]);
         if let Overlay::Import(st) = &mut ov {
-            st.step = 1;
+            st.step = ImportStep::Name;
             st.name = "夜の影".to_string();
             st.name_cursor = st.name.len();
         }
@@ -6824,7 +6045,6 @@ mod tests {
     /// new chrome (step rail, context line, feedback, volume chips).
     #[test]
     fn import_wizard_steps_render_without_raw_sara_am() {
-        let theme = Theme::washi();
         let existing = ProjectRef {
             slug: slugify("Cursed Blade"),
             title: "ดาบคำสาป".to_string(),
@@ -6841,21 +6061,13 @@ mod tests {
         st.title_syn =
             SynopsisState::new_single_line("ดาบคำสาป".to_string(), "คำสาปดาบ".to_string());
         st.syn.raw = "คำสาปแห่งดาบ".to_string();
-        for step in 0..=5u8 {
+        for step in ImportStep::ALL {
             st.step = step;
-            let mut term = Terminal::new(TestBackend::new(80, 26)).unwrap();
-            term.draw(|f| Overlay::None.render_import(f, f.area(), &theme, &st))
-                .unwrap();
-            let glyphs: String = term
-                .backend()
-                .buffer()
-                .content()
-                .iter()
-                .map(|cell| cell.symbol())
-                .collect();
+            let ov = Overlay::Import(st.clone());
+            let glyphs: String = render_overlay(&ov, 80, 26).0.concat();
             assert!(
                 !glyphs.contains('\u{0E33}'),
-                "raw SARA AM leaked into wizard step {step}"
+                "raw SARA AM leaked into wizard step {step:?}"
             );
         }
     }
@@ -7133,25 +6345,45 @@ mod tests {
         }
     }
 
+    /// The wizard's forward action survives at every width it can be shown at.
+    ///
+    /// This used to be a hand-fitted status line that chose between phrasings
+    /// to avoid truncating. The footer is a real button row now, which drops
+    /// buttons from the left and keeps the primary one, so the property is the
+    /// same but the mechanism no longer needs to know about phrasings.
     #[test]
-    fn import_done_status_fits_modal_body() {
-        let mut st = SynopsisState::new("源のあらすじ".to_string(), "เรื่องย่อภาษาไทย".to_string());
-        st.phase = SynPhase::Done;
-
-        let status = editor_status_text(&st, "start import", 76);
-
-        assert!(
-            col_width(&status) <= 76,
-            "status exceeds import modal body: {status}"
+    fn the_wizards_forward_action_survives_every_width() {
+        let mut st = ImportState::new(
+            vec![(PathBuf::from("book.epub"), 1_000)],
+            vec![],
+            TargetLanguage::Thai,
         );
-        assert!(
-            !status.ends_with('…'),
-            "status should choose a fitting variant, not truncate: {status}"
-        );
-        assert!(
-            status.contains("s skip"),
-            "status lost the final action hint: {status}"
-        );
+        st.name = "ดาบคำสาป".to_string();
+        for step in [
+            ImportStep::Pick,
+            ImportStep::Name,
+            ImportStep::Volume,
+            ImportStep::Synopsis,
+        ] {
+            st.step = step;
+            let ov = Overlay::Import(st.clone());
+            for w in [50u16, 66, 80, 120] {
+                let (_, zones) = render_overlay(&ov, w, 26);
+                assert!(
+                    zones.contains(ZoneId::button(DIALOG_CONFIRM)),
+                    "{step:?} at {w}: the forward action was dropped"
+                );
+                // Zone bounds rather than a character count: a wide glyph
+                // occupies two cells but yields one symbol, so counting
+                // characters under-reads any row carrying CJK or Thai.
+                for (rect, id) in zones.all() {
+                    assert!(
+                        rect.x + rect.width <= w && rect.y + rect.height <= 26,
+                        "{step:?} at {w}: {id:?} at {rect:?} escaped"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
