@@ -717,7 +717,11 @@ impl RefineScreen {
     /// the list, click selects / opens, right-click closes); while a slash/mention
     /// popup is open the wheel moves its selection and a click on a row accepts
     /// it. Otherwise the wheel scrolls the transcript and a click focuses input.
-    pub fn handle_mouse(&mut self, m: MouseInput) -> Action {
+    pub fn handle_mouse(
+        &mut self,
+        m: MouseInput,
+        zone: Option<crate::ui::kit::ZoneId>,
+    ) -> Action {
         if let Some(sel) = self.picker {
             return self.handle_picker_mouse(m, sel);
         }
@@ -732,8 +736,11 @@ impl RefineScreen {
                     return Action::None;
                 }
                 MouseGesture::Click { .. } if m.in_rect(self.popup_area) => {
-                    let idx = self.popup_offset + (m.row - self.popup_area.y) as usize;
-                    if self.popup_select(idx) {
+                    // The entry's index comes from the registry rather than
+                    // from the popup origin plus the scroll offset.
+                    if let Some(idx) = zone.and_then(|z| z.row_index())
+                        && self.popup_select(idx)
+                    {
                         self.accept_popup();
                     }
                     return Action::None;
@@ -1258,6 +1265,9 @@ impl RefineScreen {
     ) {
         let theme: &Theme = ui.theme;
         let frame = ui.frame_count;
+        // Disjoint field borrows: the frame to draw into, the registry to
+        // record interactive rects in.
+        let zones: &mut crate::ui::kit::Zones = ui.zones;
         let f: &mut Frame = ui.frame;
         if !has_project {
             self.render_no_project(f, area, theme);
@@ -1305,7 +1315,7 @@ impl RefineScreen {
         } else if self.pending.is_some() {
             self.render_pending(f, area, theme);
         } else {
-            self.render_popup(f, area, input_row.y, theme);
+            self.render_popup(f, zones, area, input_row.y, theme);
         }
     }
 
@@ -1952,7 +1962,16 @@ impl RefineScreen {
         );
     }
 
-    fn render_popup(&mut self, f: &mut Frame, body: Rect, input_top: u16, theme: &Theme) {
+    fn render_popup(
+        &mut self,
+        f: &mut Frame,
+        zones: &mut crate::ui::kit::Zones,
+        body: Rect,
+        input_top: u16,
+        theme: &Theme,
+    ) {
+        use crate::ui::kit::{ZoneId, ZoneKind};
+
         let rows: Vec<(String, bool)> = match &self.popup {
             Popup::None => return,
             Popup::Mention { items, sel } => items
@@ -1998,26 +2017,38 @@ impl RefineScreen {
         self.popup_area = inner;
         self.popup_offset = offset;
 
+        // Each visible entry registers its own index, so a click resolves from
+        // the registry rather than from the popup origin plus the scroll
+        // offset — the arithmetic that has to be kept in step by hand.
         let label_w = inner.width as usize;
-        let lines: Vec<Line> = rows
-            .iter()
-            .skip(offset)
-            .take(max_rows)
-            .map(|(label, selected)| {
-                let style = if *selected {
-                    Style::default()
-                        .fg(theme.accent)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(theme.ink_soft)
-                };
-                Line::from(Span::styled(truncate_cols(label, label_w), style))
-            })
-            .collect();
-        f.render_widget(
-            Paragraph::new(lines).style(Style::default().bg(theme.bg_inset)),
-            inner,
-        );
+        for (n, (label, selected)) in rows.iter().skip(offset).take(max_rows).enumerate() {
+            let rect = Rect {
+                x: inner.x,
+                y: inner.y + n as u16,
+                width: inner.width,
+                height: 1,
+            };
+            if rect.y >= inner.y + inner.height {
+                break;
+            }
+            zones.push(rect, ZoneId::new(ZoneKind::Row, (offset + n) as u32));
+            let style = if *selected {
+                Style::default()
+                    .fg(theme.accent)
+                    .bg(theme.bg_inset)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.ink_soft).bg(theme.bg_inset)
+            };
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    truncate_cols(label, label_w),
+                    style,
+                )))
+                .style(Style::default().bg(theme.bg_inset)),
+                rect,
+            );
+        }
     }
 }
 
@@ -2348,17 +2379,20 @@ mod tests {
         };
 
         // Wheel walks the selection.
-        s.handle_mouse(MouseInput {
-            gesture: MouseGesture::ScrollDown,
-            col: 0,
-            row: 0,
-        });
+        s.handle_mouse(
+            MouseInput {
+                gesture: MouseGesture::ScrollDown,
+                col: 0,
+                row: 0,
+            },
+            None,
+        );
         assert_eq!(s.picker, Some(1));
 
         // Click row 0 selects it; a second click opens that session.
-        assert!(matches!(s.handle_mouse(click(12, 5)), Action::None));
+        assert!(matches!(s.handle_mouse(click(12, 5), None), Action::None));
         assert_eq!(s.picker, Some(0));
-        match s.handle_mouse(click(12, 5)) {
+        match s.handle_mouse(click(12, 5), None) {
             Action::RefineSwitchSession { id } => assert_eq!(id, "a"),
             other => panic!("expected switch to a, got {other:?}"),
         }
@@ -2366,11 +2400,14 @@ mod tests {
 
         // Right-click closes without switching.
         s.open_picker(sessions, "a".to_string());
-        s.handle_mouse(MouseInput {
-            gesture: MouseGesture::RightClick,
-            col: 0,
-            row: 0,
-        });
+        s.handle_mouse(
+            MouseInput {
+                gesture: MouseGesture::RightClick,
+                col: 0,
+                row: 0,
+            },
+            None,
+        );
         assert!(!s.picker_open());
     }
 
