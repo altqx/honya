@@ -9,6 +9,7 @@ pub mod audit_judge;
 pub mod chunk;
 pub mod coherence;
 pub mod continuity;
+pub mod entity_align;
 pub mod pipeline;
 pub mod prepass;
 pub mod prompts;

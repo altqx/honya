@@ -6,11 +6,13 @@
 //! `WorkspaceTools` adapts this to the generic `ToolExecutor`.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::agents::entity_align;
 use crate::llm::tool_loop::ToolExecutor;
 use crate::model::{
     AppEvent, Character, ContinuityNote, EventTx, GlossaryTerm, Relationship, TermPolicy,
@@ -335,6 +337,14 @@ fn slugify(name: &str) -> String {
     out
 }
 
+/// The System One backend plus its settings, for the tools a judgement can
+/// help. `None` means the deterministic rules decide alone.
+#[derive(Clone, Copy)]
+pub struct Aligner<'a> {
+    pub backend: &'a dyn crate::llm::decisions::DecisionsBackend,
+    pub system_one: &'a crate::model::SystemOne,
+}
+
 /// Execute one tool call, emit the matching `AppEvent`, return a `ToolResult`.
 /// Bad args or unknown tool yield `ToolResult::err` so the loop can recover.
 pub async fn dispatch_tool(
@@ -343,6 +353,7 @@ pub async fn dispatch_tool(
     chapter: u32,
     name: &str,
     args_json: &str,
+    aligner: Option<Aligner<'_>>,
 ) -> ToolResult {
     match name {
         "upsert_character" => {
@@ -365,7 +376,30 @@ pub async fn dispatch_tool(
                 notes: a.notes,
                 first_seen_chapter: a.first_seen_chapter.or(Some(chapter)),
             };
-            match characters::upsert_keep_translation(ws, character) {
+            // Name matching cannot connect a nickname to the full name it
+            // belongs to; ask before letting a duplicate onto the roster.
+            let alignment = match aligner {
+                Some(a) => {
+                    let roster = characters::load(ws);
+                    let candidates = characters::alignment_candidates(&roster, &character);
+                    match entity_align::align(a.backend, a.system_one, &character, &candidates)
+                        .await
+                    {
+                        Some(out) => {
+                            if let Some(summary) = out.summary {
+                                tx.send(AppEvent::Log {
+                                    level: crate::model::LogLevel::Info,
+                                    msg: format!("ch{chapter} {summary}"),
+                                });
+                            }
+                            out.alignment
+                        }
+                        None => characters::Alignment::default(),
+                    }
+                }
+                None => characters::Alignment::default(),
+            };
+            match characters::upsert_keep_translation(ws, character, &alignment) {
                 Ok(outcome) => {
                     tx.send(AppEvent::CharacterUpserted {
                         id: id.clone(),
@@ -683,15 +717,26 @@ pub struct WorkspaceTools {
     vol_number: u32,
     tx: EventTx,
     chapter: u32,
+    decisions: Option<Arc<dyn crate::llm::decisions::DecisionsBackend>>,
+    system_one: crate::model::SystemOne,
 }
 
 impl WorkspaceTools {
-    pub fn new(root: PathBuf, vol_number: u32, tx: EventTx, chapter: u32) -> Self {
+    pub fn new(
+        root: PathBuf,
+        vol_number: u32,
+        tx: EventTx,
+        chapter: u32,
+        decisions: Option<Arc<dyn crate::llm::decisions::DecisionsBackend>>,
+        system_one: crate::model::SystemOne,
+    ) -> Self {
         Self {
             root,
             vol_number,
             tx,
             chapter,
+            decisions,
+            system_one,
         }
     }
 
@@ -704,7 +749,12 @@ impl WorkspaceTools {
 impl ToolExecutor for WorkspaceTools {
     async fn execute(&self, name: &str, arguments_json: &str) -> anyhow::Result<String> {
         let ws = self.workspace();
-        let result = dispatch_tool(&ws, &self.tx, self.chapter, name, arguments_json).await;
+        let aligner = self.decisions.as_ref().map(|b| Aligner {
+            backend: b.as_ref(),
+            system_one: &self.system_one,
+        });
+        let result =
+            dispatch_tool(&ws, &self.tx, self.chapter, name, arguments_json, aligner).await;
         Ok(serde_json::to_string(&result)?)
     }
 }
@@ -759,6 +809,7 @@ mod tests {
             1,
             "upsert_character",
             r#"{"id":"rin","jp_name":"鈴","thai_name":"ริน","also_called":[{"jp":"鈴ちゃん","thai":"รินจัง"}]}"#,
+            None,
         )
         .await;
         assert!(character.ok, "{}", character.message);
@@ -772,6 +823,7 @@ mod tests {
             1,
             "upsert_glossary_term",
             r#"{"jp_term":"魔法","thai_term":"เวทมนตร์","forbidden_thai":["มายากล"]}"#,
+            None,
         )
         .await;
         assert!(term.ok, "{}", term.message);
@@ -785,6 +837,7 @@ mod tests {
             1,
             "append_translation",
             r#"{"chapter":1,"chunk_index":0,"thai_text":"คำแปล"}"#,
+            None,
         )
         .await;
         assert!(appended.ok, "{}", appended.message);
@@ -827,6 +880,7 @@ mod tests {
             3,
             "upsert_glossary_term",
             r#"{"jp_term":"聖剣","translated_term":"ดาบเทพ","do_not_translate":true}"#,
+            None,
         )
         .await;
 
@@ -884,6 +938,7 @@ mod tests {
             3,
             "get_glossary",
             r#"{"protected_only":true,"limit":10}"#,
+            None,
         )
         .await;
 
@@ -930,6 +985,7 @@ mod tests {
             3,
             "upsert_character",
             r#"{"id":"yuu","jp_name":"有月勇","translated_name":"อาริทสึกิ ยู","aliases":["勇"]}"#,
+            None,
         )
         .await;
         assert!(result.ok, "{}", result.message);
@@ -952,6 +1008,7 @@ mod tests {
             3,
             "upsert_character",
             r#"{"id":"miya2","jp_name":"未夜","translated_name":"มิยะ","romaji":"Miya"}"#,
+            None,
         )
         .await;
         assert!(result.ok);
@@ -991,6 +1048,7 @@ mod tests {
             5,
             "merge_character",
             r#"{"from_id":"yuu-bare","into_id":"yuu"}"#,
+            None,
         )
         .await;
         assert!(result.ok, "{}", result.message);
@@ -1019,7 +1077,7 @@ mod tests {
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let result =
-            dispatch_tool(&ws, &EventTx(tx), 3, "get_character", r#"{"query":"勇"}"#).await;
+            dispatch_tool(&ws, &EventTx(tx), 3, "get_character", r#"{"query":"勇"}"#, None).await;
         assert!(result.ok);
         let arr = result
             .data
@@ -1044,6 +1102,7 @@ mod tests {
             3,
             "get_character",
             r#"{"query":"乃々香"}"#,
+            None,
         )
         .await;
         assert!(result.ok);
@@ -1078,7 +1137,8 @@ mod tests {
                 3,
                 "get_glossary",
                 &format!(r#"{{"query":"{query}"}}"#),
-            )
+            None,
+        )
             .await;
             assert!(result.ok);
             let n = result

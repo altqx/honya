@@ -91,6 +91,7 @@ pub async fn run_prepass(
     model: &crate::model::AgentModel,
     ws: &Workspace,
     target_language: TargetLanguage,
+    aligner: Option<crate::agents::tools::Aligner<'_>>,
 ) -> Result<Option<PrepassSeeded>> {
     let sample = sample_volume_raw(ws);
     if sample.trim().is_empty() {
@@ -171,8 +172,26 @@ pub async fn run_prepass(
         {
             character.translated_name = String::new();
         }
+        // The roster fills as this loop runs, so a nickname extracted from the
+        // same sample as its full name can still be aligned onto it.
+        let alignment = match aligner {
+            Some(a) => {
+                let roster = characters::load(ws);
+                let candidates = characters::alignment_candidates(&roster, &character);
+                crate::agents::entity_align::align(
+                    a.backend,
+                    a.system_one,
+                    &character,
+                    &candidates,
+                )
+                .await
+                .map(|out| out.alignment)
+                .unwrap_or_default()
+            }
+            None => characters::Alignment::default(),
+        };
         // Best-effort: a single bad row must not sink the whole seed.
-        if characters::upsert(ws, character).is_ok() {
+        if characters::upsert_aligned(ws, character, &alignment).is_ok() {
             characters_added += 1;
         }
     }
@@ -397,6 +416,7 @@ mod tests {
             &crate::model::AgentModel::openrouter("mock"),
             &ws,
             TargetLanguage::Thai,
+            None,
         )
         .await
         .expect("run_prepass ok")
@@ -436,6 +456,7 @@ mod tests {
             &crate::model::AgentModel::openrouter("mock"),
             &ws,
             TargetLanguage::Thai,
+            None,
         )
         .await
         .expect("run_prepass ok")
@@ -463,6 +484,7 @@ mod tests {
             &crate::model::AgentModel::openrouter("mock"),
             &ws,
             TargetLanguage::Thai,
+            None,
         )
         .await
         .unwrap();

@@ -36,11 +36,41 @@ pub enum CharacterUpsertOutcome {
     InsertedWithCandidates { id: String, candidates: Vec<String> },
 }
 
+/// A same-person verdict supplied by the caller for the entries the name rules
+/// cannot settle — see `agents::entity_align`. Default is empty, which is
+/// exactly today's behaviour.
+///
+/// Name matching cannot connect 高橋陽菜, ハル and 先輩; a judgement can. It is
+/// only ever consulted at the tiers that were already uncertain: an exact id or
+/// an exact written name still merges on its own, because the same written name
+/// can never be two different people.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Alignment {
+    /// Roster id the incoming entry is the same person as.
+    pub same_as: Option<String>,
+    /// Roster ids that might be, for the model to inspect and `merge`.
+    pub maybe: Vec<String>,
+    /// Roster ids positively ruled out, so a weak name signal does not
+    /// auto-merge them. Merging the wrong pair corrupts every linked fact;
+    /// missing a merge only leaves a duplicate, so this direction is the safe
+    /// one to act on.
+    pub ruled_out: Vec<String>,
+}
+
 /// Insert or merge a character. Matching, in order: exact `id`; exact JP surface
 /// form against an existing `jp_name`/alias; an unambiguous JA surname+given pair
 /// (one name is the other with a surname prepended, corroborated by a shared romaji
 /// token). Weaker signals return merge candidates; see [`CharacterUpsertOutcome`].
-pub fn upsert(ws: &Workspace, mut c: Character) -> std::io::Result<CharacterUpsertOutcome> {
+pub fn upsert(ws: &Workspace, c: Character) -> std::io::Result<CharacterUpsertOutcome> {
+    upsert_aligned(ws, c, &Alignment::default())
+}
+
+/// [`upsert`], with a caller-supplied verdict folded into the uncertain tiers.
+pub fn upsert_aligned(
+    ws: &Workspace,
+    mut c: Character,
+    alignment: &Alignment,
+) -> std::io::Result<CharacterUpsertOutcome> {
     if c.id.trim().is_empty() {
         c.id = derive_id(&c);
     }
@@ -62,9 +92,24 @@ pub fn upsert(ws: &Workspace, mut c: Character) -> std::io::Result<CharacterUpse
         return finish(ws, chars, CharacterUpsertOutcome::Merged { into_id });
     }
 
+    // 1c. Judged same person — the tier that reaches name forms sharing no
+    //     surface at all (a nickname, a title, an address form).
+    if let Some(i) = alignment
+        .same_as
+        .as_deref()
+        .and_then(|id| chars.iter().position(|e| e.id == id))
+    {
+        let into_id = chars[i].id.clone();
+        absorb(&mut chars[i], c);
+        return finish(ws, chars, CharacterUpsertOutcome::Merged { into_id });
+    }
+
     // 2. Conservative surname+given auto-merge: only when exactly one existing entry
     //    forms an unambiguous pair with the incoming name.
-    let suffix = suffix_candidates(&chars, &c);
+    let suffix: Vec<usize> = suffix_candidates(&chars, &c)
+        .into_iter()
+        .filter(|&i| !alignment.ruled_out.iter().any(|id| *id == chars[i].id))
+        .collect();
     if suffix.len() == 1 {
         let i = suffix[0];
         let into_id = chars[i].id.clone();
@@ -76,6 +121,13 @@ pub fn upsert(ws: &Workspace, mut c: Character) -> std::io::Result<CharacterUpse
     let mut cand_idx = suffix; // ambiguous (>=2) surname+given matches
     for i in reading_candidates(&chars, &c) {
         if !cand_idx.contains(&i) {
+            cand_idx.push(i);
+        }
+    }
+    for id in &alignment.maybe {
+        if let Some(i) = chars.iter().position(|e| e.id == *id)
+            && !cand_idx.contains(&i)
+        {
             cand_idx.push(i);
         }
     }
@@ -95,32 +147,60 @@ pub fn upsert(ws: &Workspace, mut c: Character) -> std::io::Result<CharacterUpse
 pub fn upsert_keep_translation(
     ws: &Workspace,
     mut c: Character,
+    alignment: &Alignment,
 ) -> std::io::Result<CharacterUpsertOutcome> {
     if !c.translated_name.trim().is_empty() {
         if c.id.trim().is_empty() {
             c.id = derive_id(&c);
         }
         let chars = load(ws);
-        if let Some(i) = find_match(&chars, &c)
+        if let Some(i) = find_match(&chars, &c, alignment)
             && !chars[i].translated_name.trim().is_empty()
         {
             c.translated_name = String::new();
         }
     }
-    upsert(ws, c)
+    upsert_aligned(ws, c, alignment)
 }
 
 /// Existing entry that would receive `c` under the auto-merge rules.
-fn find_match(chars: &[Character], c: &Character) -> Option<usize> {
+fn find_match(chars: &[Character], c: &Character, alignment: &Alignment) -> Option<usize> {
     if let Some(i) = chars.iter().position(|e| e.id == c.id) {
         return Some(i);
     }
     if let Some(i) = find_exact(chars, &c.jp_name) {
         return Some(i);
     }
-    let suffix = suffix_candidates(chars, c);
+    if let Some(i) = alignment
+        .same_as
+        .as_deref()
+        .and_then(|id| chars.iter().position(|e| e.id == id))
+    {
+        return Some(i);
+    }
+    let suffix: Vec<usize> = suffix_candidates(chars, c)
+        .into_iter()
+        .filter(|&i| !alignment.ruled_out.iter().any(|id| *id == chars[i].id))
+        .collect();
     (suffix.len() == 1).then(|| suffix[0])
 }
+
+/// Roster entries worth putting a same-person question to. The judgement has to
+/// reach pairs that share no surface at all, so this is the roster itself —
+/// newest first and capped, since a Choice caps at 255 options and the state
+/// has to stay small.
+pub fn alignment_candidates(chars: &[Character], inc: &Character) -> Vec<Character> {
+    let mut out: Vec<&Character> = chars
+        .iter()
+        .filter(|e| e.id != inc.id && norm_name(&e.jp_name) != norm_name(&inc.jp_name))
+        .collect();
+    out.sort_by_key(|e| std::cmp::Reverse(e.first_seen_chapter.unwrap_or(0)));
+    out.truncate(MAX_ALIGNMENT_CANDIDATES);
+    out.into_iter().cloned().collect()
+}
+
+/// Roster entries offered to one alignment question.
+const MAX_ALIGNMENT_CANDIDATES: usize = 60;
 
 /// Sort by id, re-render the table, and write the data block atomically.
 fn finish(
@@ -994,8 +1074,8 @@ honya:data -->
     #[test]
     fn keep_translation_preserves_established_name() {
         let (base, ws) = temp_ws("keep_translation");
-        upsert_keep_translation(&ws, ch("yuu", "勇", "ยู", Some("Yuu"))).unwrap();
-        upsert_keep_translation(&ws, ch("yuu", "勇", "ยูว์", Some("Yuu"))).unwrap();
+        upsert_keep_translation(&ws, ch("yuu", "勇", "ยู", Some("Yuu")), &Alignment::default()).unwrap();
+        upsert_keep_translation(&ws, ch("yuu", "勇", "ยูว์", Some("Yuu")), &Alignment::default()).unwrap();
 
         let chars = load(&ws);
         assert_eq!(chars.len(), 1);
@@ -1004,7 +1084,7 @@ honya:data -->
             "established Thai name must stick"
         );
 
-        upsert_keep_translation(&ws, ch("miya", "未夜", "มิยะ", Some("Miya"))).unwrap();
+        upsert_keep_translation(&ws, ch("miya", "未夜", "มิยะ", Some("Miya")), &Alignment::default()).unwrap();
         assert_eq!(find(&load(&ws), "miya").unwrap().translated_name, "มิยะ");
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -1282,5 +1362,129 @@ honya:data -->
             !round.contains("aliases"),
             "empty aliases must be skipped on serialize: {round}"
         );
+    }
+
+    /// The case name matching cannot reach: a nickname sharing no surface with
+    /// the full name already on the roster.
+    #[test]
+    fn a_judged_match_merges_a_nickname_onto_the_full_name() {
+        let (_base, ws) = temp_ws("align_same_as");
+        upsert(&ws, ch("takahashi-hina", "高橋陽菜", "ทาคาฮาชิ ฮินะ", Some("Takahashi Hina")))
+            .unwrap();
+
+        let unaligned = upsert(&ws, ch("haru", "ハル", "ฮารุ", None)).unwrap();
+        assert_eq!(
+            unaligned,
+            CharacterUpsertOutcome::Inserted,
+            "name matching has nothing to go on here, which is the point"
+        );
+
+        let (_base, ws) = temp_ws("align_same_as_judged");
+        upsert(&ws, ch("takahashi-hina", "高橋陽菜", "ทาคาฮาชิ ฮินะ", Some("Takahashi Hina")))
+            .unwrap();
+        let outcome = upsert_aligned(
+            &ws,
+            ch("haru", "ハル", "ฮารุ", None),
+            &Alignment {
+                same_as: Some("takahashi-hina".to_string()),
+                ..Alignment::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            outcome,
+            CharacterUpsertOutcome::Merged {
+                into_id: "takahashi-hina".to_string()
+            }
+        );
+        assert_eq!(load(&ws).len(), 1, "the duplicate must not reach the roster");
+    }
+
+    /// Merging the wrong pair corrupts every linked fact, so a confident "this
+    /// is someone new" has to be able to hold back a weak name match.
+    #[test]
+    fn a_ruled_out_entry_does_not_auto_merge_on_a_name_suffix() {
+        let seed = ch("arituki-yuu", "有月勇", "อาริซึกิ ยู", Some("Aritsuki Yuu"));
+        let incoming = ch("yuu", "勇", "ยู", Some("Yuu"));
+
+        let (_base, ws) = temp_ws("align_suffix_merges");
+        upsert(&ws, seed.clone()).unwrap();
+        assert_eq!(
+            upsert(&ws, incoming.clone()).unwrap(),
+            CharacterUpsertOutcome::Merged {
+                into_id: "arituki-yuu".to_string()
+            },
+            "precondition: the suffix rule auto-merges this pair on its own"
+        );
+
+        let (_base, ws) = temp_ws("align_suffix_ruled_out");
+        upsert(&ws, seed).unwrap();
+        let outcome = upsert_aligned(
+            &ws,
+            incoming,
+            &Alignment {
+                ruled_out: vec!["arituki-yuu".to_string()],
+                ..Alignment::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(outcome, CharacterUpsertOutcome::Inserted);
+        assert_eq!(load(&ws).len(), 2, "a second Yuu is a duplicate, not a corruption");
+    }
+
+    #[test]
+    fn a_maybe_surfaces_as_a_merge_candidate_without_merging() {
+        let (_base, ws) = temp_ws("align_maybe");
+        upsert(&ws, ch("takahashi-hina", "高橋陽菜", "ทาคาฮาชิ ฮินะ", None)).unwrap();
+        let outcome = upsert_aligned(
+            &ws,
+            ch("senpai", "先輩", "รุ่นพี่", None),
+            &Alignment {
+                maybe: vec!["takahashi-hina".to_string()],
+                ..Alignment::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            outcome,
+            CharacterUpsertOutcome::InsertedWithCandidates {
+                id: "senpai".to_string(),
+                candidates: vec!["takahashi-hina".to_string()],
+            }
+        );
+    }
+
+    /// An exact written name can never be two different people, so no judgement
+    /// is consulted there.
+    #[test]
+    fn an_exact_name_merge_ignores_a_contrary_alignment() {
+        let (_base, ws) = temp_ws("align_exact_wins");
+        upsert(&ws, ch("hina", "陽菜", "ฮินะ", None)).unwrap();
+        let outcome = upsert_aligned(
+            &ws,
+            ch("hina-2", "陽菜", "ฮินะ", None),
+            &Alignment {
+                ruled_out: vec!["hina".to_string()],
+                ..Alignment::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            outcome,
+            CharacterUpsertOutcome::Merged {
+                into_id: "hina".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn alignment_candidates_skip_the_incoming_entry_and_its_own_name() {
+        let roster = vec![
+            ch("hina", "陽菜", "ฮินะ", None),
+            ch("haru", "ハル", "ฮารุ", None),
+        ];
+        let candidates = alignment_candidates(&roster, &ch("hina", "陽菜", "ฮินะ", None));
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].id, "haru");
     }
 }
