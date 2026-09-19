@@ -1427,31 +1427,12 @@ impl TranslateScreen {
         )
     }
 
+    /// Navigation only: the run controls and the queue verbs are drawn now.
     pub fn hints(&self) -> &'static [(&'static str, &'static str)] {
         if self.queue_focused {
-            &[
-                ("J/K", "move"),
-                ("S", "sort"),
-                ("x", "remove"),
-                ("g/esc", "unfocus"),
-                ("p", "pause"),
-            ]
-        } else if self.pending_count() > 0 {
-            &[
-                ("p", "pause"),
-                ("s", "stop"),
-                ("f", "follow"),
-                ("g", "queue"),
-                ("↵", "open result"),
-            ]
+            &[("↑↓", "queue"), ("g/esc", "unfocus")]
         } else {
-            &[
-                ("p", "pause"),
-                ("s", "stop"),
-                ("f", "follow"),
-                ("↵", "open result"),
-                ("c", "cycle agent"),
-            ]
+            &[("↑↓", "scroll"), ("g", "queue")]
         }
     }
 }

@@ -478,14 +478,11 @@ impl ShelfScreen {
         })
     }
 
+    /// Navigation only. Every command this screen has is a control now — a
+    /// toolbar button or a button on the selected row — so the footer no longer
+    /// restates them.
     pub fn hints(&self) -> &'static [(&'static str, &'static str)] {
-        &[
-            ("↵", "open"),
-            ("i", "import"),
-            ("d", "delete"),
-            ("R", "rename"),
-            ("r", "rescan"),
-        ]
+        &[("↑↓", "move"), ("Home/End", "ends")]
     }
 }
 

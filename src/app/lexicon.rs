@@ -1149,17 +1149,13 @@ impl LexiconScreen {
         })
     }
 
+    /// Navigation only, except inside a form — where the keys genuinely have
+    /// no control, because the form is the control.
     pub fn hints(&self) -> &'static [(&'static str, &'static str)] {
         if self.editing.is_some() {
             return &[("↵", "save"), ("Tab", "field"), ("Esc", "cancel")];
         }
-        &[
-            ("↵", "edit"),
-            ("n", "new"),
-            ("d", "del"),
-            ("/", "search"),
-            ("Tab", "section"),
-        ]
+        &[("Tab", "section"), ("↑↓", "move")]
     }
 }
 

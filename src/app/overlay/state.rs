@@ -169,7 +169,7 @@ pub(super) fn qa_rows(report: &qa::QaReport) -> Vec<QaRow> {
 /// One line of the keybinding reference.
 pub(super) enum HelpRow {
     Section(&'static str),
-    Binding(&'static str, &'static str),
+    Binding(String, String),
     Blank,
 }
 
@@ -186,7 +186,7 @@ pub(super) fn help_rows() -> Vec<HelpRow> {
         }
         rows.push(HelpRow::Section(scope.title()));
         for b in crate::app::bindings::in_scope(*scope) {
-            rows.push(HelpRow::Binding(b.keys, b.what));
+            rows.push(HelpRow::Binding(b.keys.clone(), b.what.clone()));
         }
     }
     rows

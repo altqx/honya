@@ -263,19 +263,24 @@ impl ProjectScreen {
     pub fn actions(&self, active: Option<&ActiveProject>) -> Vec<Act> {
         use action_table::Accel;
 
-        let Some(active) = active else {
-            return Vec::new();
-        };
-        let on_volume_row = self.selected_volume_row(active).is_some();
-        let on_chapter = self.selected_chapter_id(active).is_some();
-        let marked = self.marked_ids(active).len();
-        let vol = self.selected_volume(active).unwrap_or(active.vol);
-        let deletable = on_chapter || !self.marked_chapters_in_vol(vol).is_empty();
+        // With no project open nothing is available, but the table is still
+        // the table: help and the command bar read the screen's commands from
+        // here, and a list that disappeared with the project would document
+        // nothing.
+        let live = active.is_some();
+        let on_volume_row = active.is_some_and(|a| self.selected_volume_row(a).is_some());
+        let on_chapter = active.is_some_and(|a| self.selected_chapter_id(a).is_some());
+        let marked = active.map_or(0, |a| self.marked_ids(a).len());
+        let deletable = on_chapter
+            || active.is_some_and(|a| {
+                let vol = self.selected_volume(a).unwrap_or(a.vol);
+                !self.marked_chapters_in_vol(vol).is_empty()
+            });
 
         vec![
-            Act::toolbar(P_TRANSLATE_VOL, "translate vol", Accel::key('T')),
-            Act::toolbar(P_EXPORT, "export", Accel::key('x')),
-            Act::toolbar(P_ADD_VOLUME, "add volume", Accel::key('V')),
+            Act::toolbar(P_TRANSLATE_VOL, "translate vol", Accel::key('T')).when(live),
+            Act::toolbar(P_EXPORT, "export", Accel::key('x')).when(live),
+            Act::toolbar(P_ADD_VOLUME, "add volume", Accel::key('V')).when(live),
             Act::row(P_READ, "read", Accel::code(KeyCode::Enter))
                 .when(on_chapter || on_volume_row),
             Act::row(
@@ -286,12 +291,12 @@ impl ProjectScreen {
             .when(on_chapter || marked > 0),
             Act::row(P_MARK, "mark", Accel::key(' ')).when(on_chapter),
             Act::row(P_DELETE, "delete", Accel::key('d')).when(deletable),
-            Act::menu(P_TRANSLATE_ALL, "translate whole project", Accel::key('A')),
-            Act::menu(P_ADD_CHAPTERS, "add chapters", Accel::key('i')),
-            Act::menu(P_IMAGES, "refresh images", Accel::key('M')),
-            Act::menu(P_TITLE, "edit title", Accel::key('e')),
-            Act::menu(P_SYNOPSIS, "edit synopsis", Accel::key('y')),
-            Act::menu(P_QA, "QA report", Accel::key('Q')),
+            Act::menu(P_TRANSLATE_ALL, "translate whole project", Accel::key('A')).when(live),
+            Act::menu(P_ADD_CHAPTERS, "add chapters", Accel::key('i')).when(live),
+            Act::menu(P_IMAGES, "refresh images", Accel::key('M')).when(live),
+            Act::menu(P_TITLE, "edit title", Accel::key('e')).when(live),
+            Act::menu(P_SYNOPSIS, "edit synopsis", Accel::key('y')).when(live),
+            Act::menu(P_QA, "QA report", Accel::key('Q')).when(live),
         ]
     }
 
@@ -1019,24 +1024,11 @@ impl ProjectScreen {
         );
     }
 
+    /// Navigation only. Every command this screen has is a control now — the
+    /// toolbar, the selected row's buttons, or the menu behind `⋯` — so the
+    /// footer no longer restates fifteen keys.
     pub fn hints(&self) -> &'static [(&'static str, &'static str)] {
-        &[
-            ("↵", "read"),
-            ("Space", "mark"),
-            ("t/a", "queue"),
-            ("T", "vol"),
-            ("A", "all"),
-            ("V", "add vol"),
-            ("i", "add ch"),
-            ("M", "images"),
-            ("x", "export"),
-            ("e", "title"),
-            ("y", "synopsis"),
-            ("d", "del"),
-            ("h/l", "nav"),
-            ("z/Z", "fold"),
-            ("Q", "QA"),
-        ]
+        &[("↑↓", "move"), ("h/l", "panel"), ("z/Z", "fold")]
     }
 }
 

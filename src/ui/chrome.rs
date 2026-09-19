@@ -37,6 +37,23 @@ pub const TAB_SCREENS: [Screen; 6] = [
 pub const HELP_HINT: usize = 0xF000;
 /// Zone index for the update badge when one is showing.
 pub const UPDATE_HINT: usize = 0xF001;
+/// Zone index for the command-bar hint.
+pub const PALETTE_HINT: usize = 0xF002;
+/// Zone index for the activity-log hint.
+pub const LOG_HINT: usize = 0xF003;
+
+/// The bindings that are true on every screen, and that the footer leads with
+/// now that each screen's commands have controls of their own.
+///
+/// The two that open something are clickable; the focus ring is not, because
+/// clicking is what it is a substitute for.
+pub fn global_hints() -> Vec<Hint> {
+    vec![
+        Hint::new("Tab", "focus"),
+        Hint::new("⌃K", "commands").id(ZoneId::hint(PALETTE_HINT)),
+        Hint::new("`", "log").id(ZoneId::hint(LOG_HINT)),
+    ]
+}
 
 /// Aggregate chapter counts shown in the header.
 #[derive(Debug, Clone, Copy, Default)]

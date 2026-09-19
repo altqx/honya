@@ -1128,9 +1128,10 @@ impl ReaderScreen {
     /// it, the status row draws it as a toolbar, right-click lists it, and help
     /// prints it. See [`super::action_table`].
     ///
-    /// `[` and `]` are declared only while a chapter is open. Declaring them
-    /// disabled would claim the keys and leave no way to cycle screens from an
-    /// empty Reader; omitting them lets the global binding through instead.
+    /// `[` and `]` are declared here so they step chapters in the Reader and
+    /// cycle screens everywhere else. With nothing open they are unavailable
+    /// rather than absent, and an unavailable key falls through to the global
+    /// binding — so an empty Reader can still be left with `]`.
     pub fn actions(&self) -> Vec<Act> {
         use action_table::Accel;
 
@@ -1142,7 +1143,7 @@ impl ReaderScreen {
             _ => "split",
         };
 
-        let mut acts = vec![
+        vec![
             Act::toolbar(A_SYNC, "sync", Accel::key('z')).toggle(self.sync),
             Act::toolbar(A_WRAP, "wrap", Accel::key('w')).toggle(self.wrap),
             Act::toolbar(A_MODE, "mode", Accel::key('o')).cycle().value(mode),
@@ -1177,12 +1178,9 @@ impl ReaderScreen {
                 Accel::key('<').or(KeyCode::Char(',')),
             )
             .when(searching),
-        ];
-        if has_ch {
-            acts.push(Act::menu(A_PREV_CH, "previous chapter", Accel::key('[')));
-            acts.push(Act::menu(A_NEXT_CH, "next chapter", Accel::key(']')));
-        }
-        acts
+            Act::menu(A_PREV_CH, "previous chapter", Accel::key('[')).when(has_ch),
+            Act::menu(A_NEXT_CH, "next chapter", Accel::key(']')).when(has_ch),
+        ]
     }
 
     /// Run the action `id` stands for, whether it was reached by key, by a chip
@@ -1269,23 +1267,11 @@ impl ReaderScreen {
         })
     }
 
+    /// Navigation only: the toggles are chips on the status row and the rest
+    /// is a right-click away, so the footer no longer lists fourteen keys under
+    /// a row that already shows most of them.
     pub fn hints(&self) -> &'static [(&'static str, &'static str)] {
-        &[
-            ("↑↓", "scroll"),
-            ("[ ]", "chapter"),
-            ("/", "search"),
-            ("g", "jump"),
-            ("r", "review"),
-            ("s", "source"),
-            ("i", "inspect"),
-            ("e", "edit"),
-            ("m", "mark"),
-            ("n", "note"),
-            ("G", "hilite"),
-            ("z", "sync"),
-            ("d", "diff"),
-            ("Q", "QA"),
-        ]
+        &[("↑↓", "scroll"), ("Space/b", "page"), ("[ ]", "chapter")]
     }
 }
 
@@ -1812,14 +1798,22 @@ mod tests {
             Action::ReaderStepChapter { forward: false }
         ));
 
-        // With nothing open they are not declared at all, so the global
-        // screen-cycling binding still gets them.
+        // With nothing open they are still declared — help documents them —
+        // but unavailable, which the router lets fall through to the global
+        // screen-cycling binding rather than swallowing.
         r.chapter = 0;
         let acts = r.actions();
-        assert!(!action_table::claims(
-            &acts,
-            &KeyEvent::new(KeyCode::Char(']'), ratatui::crossterm::event::KeyModifiers::NONE)
-        ));
+        assert_eq!(
+            action_table::hit(
+                &acts,
+                &KeyEvent::new(
+                    KeyCode::Char(']'),
+                    ratatui::crossterm::event::KeyModifiers::NONE
+                )
+            ),
+            action_table::KeyHit::Blocked,
+            "an empty Reader must still be leavable with ]"
+        );
     }
 
     /// The table is the only place an action's effect is written, so every id

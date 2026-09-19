@@ -1307,28 +1307,16 @@ impl RefineScreen {
                 ("esc", "close"),
             ]
         } else if self.in_flight {
-            &[
-                ("⌃C", "interrupt"),
-                ("⌃End", "bottom"),
-                ("⌃R", "details"),
-                ("↑↓", "scroll"),
-            ]
+            &[("⌃C", "interrupt"), ("⌃End", "bottom"), ("↑↓", "scroll")]
         } else if self.focused {
             &[
                 ("↵", "send"),
                 ("@", "mention"),
                 ("/", "cmd"),
-                ("⌃End", "bottom"),
-                ("⌃R", "details"),
                 ("esc", "unfocus"),
             ]
         } else {
-            &[
-                ("type", "focus"),
-                ("⌃End", "bottom"),
-                ("↑↓", "scroll"),
-                ("⌃R", "details"),
-            ]
+            &[("type", "focus"), ("↑↓", "scroll"), ("⌃End", "bottom")]
         }
     }
 

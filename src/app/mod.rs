@@ -2432,6 +2432,8 @@ impl App {
             }
             ZoneKind::Hint => match id.index as usize {
                 chrome::HELP_HINT => Some(Action::show_overlay(Overlay::Help(0))),
+                chrome::PALETTE_HINT => Some(Action::show_overlay(Overlay::palette())),
+                chrome::LOG_HINT => Some(Action::show_overlay(Overlay::Log(0))),
                 // The update is applied by the `honya update` command, so the
                 // badge says what to run rather than pretending to run it.
                 chrome::UPDATE_HINT => Some(Action::None),
@@ -2580,11 +2582,13 @@ impl App {
         // what lets `[`/`]` step chapters in the Reader while still cycling
         // screens everywhere else.
         let acts = self.screen_actions();
+        // Declared here but unavailable. The key is claimed against the
+        // screen's own navigation arms, but not against the globals below: a
+        // Reader with nothing open should still be leavable with `]`.
+        let mut blocked = false;
         match action_table::hit(&acts, &k) {
             action_table::KeyHit::Run(id) => return self.run_screen_action(id),
-            // Declared here but unavailable: the key is claimed, so it does
-            // nothing rather than falling through to a navigation arm.
-            action_table::KeyHit::Blocked => return Action::None,
+            action_table::KeyHit::Blocked => blocked = true,
             action_table::KeyHit::Miss => {}
         }
 
@@ -2606,6 +2610,10 @@ impl App {
                 return Action::None;
             }
             _ => {}
+        }
+
+        if blocked {
+            return Action::None;
         }
 
         // 6) Otherwise the active screen's navigation arms decide.
@@ -5438,7 +5446,7 @@ impl App {
 
         let area = f.area();
         let show_toast = self.toast.is_some() || self.quit_armed();
-        let hints = crate::ui::kit::shortcuts::hints_from(self.hints());
+        let hints = self.footer_hints();
         let update = self.update_available.clone();
         let installed = self.update_installed.clone();
         let footer_h = chrome::footer_height(
@@ -5688,18 +5696,29 @@ impl App {
         t
     }
 
-    fn hints(&self) -> &'static [(&'static str, &'static str)] {
+    /// What the footer advertises.
+    ///
+    /// It used to be a legend of everything a screen could do — fifteen keys in
+    /// a row on Project, fourteen more under the Reader's chip row. Those are
+    /// controls now, drawn where they act, so the footer is left with what has
+    /// no control: the screen's navigation, and the globals that are true
+    /// wherever you are. Help, and the `⋯` menu, cover the rest.
+    fn footer_hints(&self) -> Vec<crate::ui::kit::shortcuts::Hint> {
+        use crate::ui::kit::shortcuts::hints_from;
         if !matches!(self.overlay, Overlay::None) {
-            return self.overlay.hints();
+            return hints_from(self.overlay.hints());
         }
-        match self.screen {
+        let screen = match self.screen {
             Screen::Shelf => self.shelf.hints(),
             Screen::Project => self.project.hints(),
             Screen::Translate => self.translate.hints(),
             Screen::Reader => self.reader.hints(),
             Screen::Lexicon => self.lexicon.hints(),
             Screen::Refine => self.refine.hints(),
-        }
+        };
+        let mut hints = hints_from(screen);
+        hints.extend(chrome::global_hints());
+        hints
     }
 }
 
