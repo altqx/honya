@@ -157,8 +157,10 @@ pub struct Act {
     /// Falls back to the accelerator when unset.
     pub icon: Option<&'static str>,
     /// Replaces `label` on the control for this frame, for a chip whose text is
-    /// its value (`split` / `JA` / `TR`) or that carries a count.
+    /// its value (`split` / `JA` / `TR`) rather than its name.
     pub value: Option<&'static str>,
+    /// A live count appended to the label — how many notes, how many flags.
+    pub count: Option<u32>,
 }
 
 impl Act {
@@ -172,6 +174,7 @@ impl Act {
             enabled: true,
             icon: None,
             value: None,
+            count: None,
         }
     }
 
@@ -207,6 +210,11 @@ impl Act {
         self
     }
 
+    pub const fn count(mut self, n: u32) -> Self {
+        self.count = Some(n);
+        self
+    }
+
     /// Resolve availability. Chained on the declaration so a screen reads as a
     /// table rather than a sequence of pushes.
     pub const fn when(mut self, yes: bool) -> Self {
@@ -218,9 +226,16 @@ impl Act {
         ZoneId::action(self.id)
     }
 
-    /// The text drawn on the control: the live value when one is set.
-    pub fn control_label(&self) -> &str {
-        self.value.unwrap_or(self.label)
+    /// The text drawn on the control: the live value when one is set, plus a
+    /// live count when there is one.
+    pub fn control_label(&self) -> String {
+        with_count(self.value.unwrap_or(self.label), self.count)
+    }
+
+    /// The text in a menu or in help: always the action's *name*, because
+    /// `split` as a menu entry says nothing about what picking it would do.
+    pub fn menu_label(&self) -> String {
+        with_count(self.label, self.count)
     }
 
     /// The narrow form: an explicit icon, else the accelerator.
@@ -229,6 +244,13 @@ impl Act {
             Some(i) => i.to_string(),
             None => self.accel.shown(),
         }
+    }
+}
+
+fn with_count(base: &str, count: Option<u32>) -> String {
+    match count {
+        Some(n) => format!("{base} {n}"),
+        None => base.to_string(),
     }
 }
 
@@ -330,7 +352,14 @@ mod tests {
     fn a_value_overrides_the_label_on_the_control_only() {
         let a = Act::toolbar(0, "mode", Accel::key('o')).cycle().value("split");
         assert_eq!(a.control_label(), "split");
-        assert_eq!(a.label, "mode", "help still names the action, not its value");
+        assert_eq!(
+            a.menu_label(),
+            "mode",
+            "a menu entry reading `split` says nothing about what picking it does"
+        );
+        let counted = Act::toolbar(1, "notes", Accel::key('N')).count(3);
+        assert_eq!(counted.control_label(), "notes 3");
+        assert_eq!(counted.menu_label(), "notes 3");
     }
 
     #[test]

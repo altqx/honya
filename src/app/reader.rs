@@ -21,9 +21,32 @@ use crate::theme::{self, Theme};
 use crate::ui::mouse::{MouseGesture, MouseInput};
 use crate::workspace::Workspace;
 
-use super::action_table::Act;
+use super::action_table::{self, Act};
 use super::Action;
 use super::overlay::Overlay;
+
+/// Action ids for this screen's table. Stable within the screen: they are also
+/// the zone index every one of its controls registers under.
+const A_SYNC: u16 = 0;
+const A_WRAP: u16 = 1;
+const A_MODE: u16 = 2;
+const A_HILITE: u16 = 3;
+const A_NOTES: u16 = 4;
+const A_DIFF: u16 = 5;
+const A_SEARCH: u16 = 6;
+const A_JUMP: u16 = 7;
+const A_INSPECT: u16 = 8;
+const A_EDIT: u16 = 9;
+const A_NOTE: u16 = 10;
+const A_MARK: u16 = 11;
+const A_REVIEW: u16 = 12;
+const A_SOURCE: u16 = 13;
+const A_COPY: u16 = 14;
+const A_QA: u16 = 15;
+const A_SEARCH_NEXT: u16 = 16;
+const A_SEARCH_PREV: u16 = 17;
+const A_PREV_CH: u16 = 18;
+const A_NEXT_CH: u16 = 19;
 
 /// Layout modes for `o`.
 const MODE_SPLIT: u8 = 0;
@@ -47,43 +70,6 @@ enum Side {
 struct SearchHit {
     side: Side,
     line: u16,
-}
-
-/// A clickable segment of the Reader's status bar, mirroring its key binding.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum StatusHit {
-    Sync,       // z
-    Wrap,       // w
-    Mode,       // o
-    Highlight,  // G
-    Notes,      // N
-    NextReview, // r
-    ToggleDiff, // d
-    SearchNext, // >
-}
-
-impl StatusHit {
-    const ALL: [StatusHit; 8] = [
-        StatusHit::Sync,
-        StatusHit::Wrap,
-        StatusHit::Mode,
-        StatusHit::Highlight,
-        StatusHit::Notes,
-        StatusHit::NextReview,
-        StatusHit::ToggleDiff,
-        StatusHit::SearchNext,
-    ];
-
-    /// The zone this control registers under.
-    fn zone(self) -> crate::ui::kit::ZoneId {
-        crate::ui::kit::ZoneId::button(self as u32)
-    }
-
-    fn from_zone(id: crate::ui::kit::ZoneId) -> Option<Self> {
-        (id.kind == crate::ui::kit::ZoneKind::Button)
-            .then(|| Self::ALL.get(id.index as usize).copied())
-            .flatten()
-    }
 }
 
 /// Active Reader search across both panes.
@@ -367,6 +353,14 @@ impl ReaderScreen {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Action {
+        // Commands come from the table, so the key printed on a chip or listed
+        // in the menu is the one that runs it. Only navigation is left here.
+        let acts = self.actions();
+        match action_table::hit(&acts, &key) {
+            action_table::KeyHit::Run(id) => return self.run(id).unwrap_or(Action::None),
+            action_table::KeyHit::Blocked => return Action::None,
+            action_table::KeyHit::Miss => {}
+        }
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => {
                 self.scroll_by(1);
@@ -384,120 +378,10 @@ impl ReaderScreen {
                 self.scroll_by(-10);
                 Action::None
             }
-            KeyCode::Char('[') => {
-                if self.chapter == 0 {
-                    Action::None
-                } else {
-                    Action::ReaderStepChapter { forward: false }
-                }
-            }
-            KeyCode::Char(']') => {
-                if self.chapter == 0 {
-                    Action::None
-                } else {
-                    Action::ReaderStepChapter { forward: true }
-                }
-            }
-            KeyCode::Char('z') => {
-                self.sync = !self.sync;
-                if self.sync {
-                    self.translation_scroll = self.scroll;
-                }
-                Action::None
-            }
-            KeyCode::Char('w') => {
-                self.wrap = !self.wrap;
-                Action::None
-            }
-            KeyCode::Char('o') => {
-                self.layout_mode = (self.layout_mode + 1) % 3;
-                Action::None
-            }
-            KeyCode::Char('d') => {
-                // Toggle the rerun diff view; a no-op when nothing was retranslated.
-                if self.compare.is_some() {
-                    self.diff_mode = !self.diff_mode;
-                }
-                Action::None
-            }
-            KeyCode::Char('n') => {
-                if self.chapter == 0 {
-                    Action::None
-                } else {
-                    let line = self.current_annotation_line();
-                    Action::show_overlay(Overlay::reader_note(self.chapter, line))
-                }
-            }
-            KeyCode::Char('N') => {
-                self.show_annotations = !self.show_annotations;
-                Action::None
-            }
-            KeyCode::Char('y') => {
-                if self.chapter == 0 {
-                    Action::None
-                } else {
-                    let text = crate::workspace::translation::prose_only(&self.translated_text);
-                    if text.trim().is_empty() {
-                        Action::None
-                    } else {
-                        let lines = text.lines().filter(|l| !l.trim().is_empty()).count();
-                        Action::ReaderCopy { text, lines }
-                    }
-                }
-            }
-            KeyCode::Char('/') => {
-                if self.chapter == 0 {
-                    Action::None
-                } else {
-                    Action::show_overlay(Overlay::reader_search())
-                }
-            }
-            KeyCode::Char('>') | KeyCode::Char('.') if self.search.is_some() => {
-                self.search_step(true);
-                Action::None
-            }
-            KeyCode::Char('<') | KeyCode::Char(',') if self.search.is_some() => {
-                self.search_step(false);
-                Action::None
-            }
             KeyCode::Esc if self.search.is_some() => {
                 self.search = None;
                 Action::None
             }
-            KeyCode::Char('g') => {
-                if self.chapter == 0 {
-                    Action::None
-                } else {
-                    Action::show_overlay(Overlay::reader_jump_placeholder())
-                }
-            }
-            KeyCode::Char('G') => {
-                self.highlight = !self.highlight;
-                Action::None
-            }
-            KeyCode::Char('r') => {
-                self.jump_next_review();
-                Action::None
-            }
-            KeyCode::Char('s') => {
-                self.show_source();
-                Action::None
-            }
-            KeyCode::Char('i') => self.inspect_overlay(),
-            KeyCode::Char('e') => self.edit_overlay(),
-            KeyCode::Char('m') => {
-                if self.chapter == 0 {
-                    Action::None
-                } else {
-                    Action::ToggleReaderBookmark {
-                        chapter: self.chapter,
-                        line: self.current_annotation_line(),
-                        label: self.current_line_preview(),
-                    }
-                }
-            }
-            // Translation QA inbox (App rebuilds the report from the live project).
-            KeyCode::Char('Q') => Action::show_overlay(Overlay::qa_placeholder()),
             _ => Action::None,
         }
     }
@@ -514,40 +398,13 @@ impl ReaderScreen {
         match m.gesture {
             MouseGesture::ScrollUp => self.scroll_targeted(m.col, -3),
             MouseGesture::ScrollDown => self.scroll_targeted(m.col, 3),
-            MouseGesture::Click { .. } => {
-                // Toolbar chips register themselves, so the screen no longer
-                // keeps a parallel list of where each one landed.
-                if let Some(hit) = zone.and_then(StatusHit::from_zone) {
-                    self.apply_status_hit(hit);
-                }
-            }
-            MouseGesture::RightClick => {}
+            // A toolbar control is registered under its action id and is
+            // answered by the router, which runs the same `run` arm the key
+            // does — so there is nothing for the screen to mirror here.
+            MouseGesture::Click { .. } | MouseGesture::RightClick => {}
         }
+        let _ = zone;
         Action::None
-    }
-
-    /// Run the state change a clicked status-bar cell stands for (the same
-    /// mutation its key binding performs in `handle_key`).
-    fn apply_status_hit(&mut self, hit: StatusHit) {
-        match hit {
-            StatusHit::Sync => {
-                self.sync = !self.sync;
-                if self.sync {
-                    self.translation_scroll = self.scroll;
-                }
-            }
-            StatusHit::Wrap => self.wrap = !self.wrap,
-            StatusHit::Mode => self.layout_mode = (self.layout_mode + 1) % 3,
-            StatusHit::Highlight => self.highlight = !self.highlight,
-            StatusHit::Notes => self.show_annotations = !self.show_annotations,
-            StatusHit::NextReview => self.jump_next_review(),
-            StatusHit::ToggleDiff => {
-                if self.compare.is_some() {
-                    self.diff_mode = !self.diff_mode;
-                }
-            }
-            StatusHit::SearchNext => self.search_step(true),
-        }
     }
 
     fn scroll_targeted(&mut self, col: u16, delta: i32) {
@@ -1050,7 +907,7 @@ impl ReaderScreen {
         );
         let exit_zone = self.render_compare_summary(f, rows[1], theme, cmp);
         // The one control the diff view offers, registered like any other.
-        ui.zones.push(exit_zone, StatusHit::ToggleDiff.zone());
+        ui.zones.push(exit_zone, crate::ui::kit::ZoneId::action(A_DIFF));
     }
 
     /// One pane of the diff: plain prose lines (no Markdown styling, so changed
@@ -1192,13 +1049,25 @@ impl ReaderScreen {
     /// where everything landed.
     fn render_status(&mut self, ui: &mut crate::ui::kit::Ui, area: Rect) {
         use crate::ui::kit::badge::Chip;
+        use crate::ui::kit::toolbar::Toolbar;
 
         ui.fill(area, Style::default().bg(ui.theme.bg));
         let faint = Style::default().fg(ui.theme.ink_faint).bg(ui.theme.bg);
         let mut x = area.x + 1;
         let right = area.x + area.width;
 
-        // An active search leads the bar: it is the most relevant state when set.
+        // The position readout is measured first: it is right-aligned so it
+        // does not move as controls come and go, which means the toolbar's
+        // budget is whatever it leaves behind.
+        let pos = format!(
+            "line {} · ch {:03}",
+            self.current_annotation_line(),
+            self.chapter
+        );
+        let pw = crate::ui::text::col_width(&pos) as u16;
+
+        // An active search leads the bar: it is the most relevant state when
+        // set, and the readout doubles as the control for the next match.
         if let Some(search) = self.search.as_ref() {
             let label = format!(
                 "“{}” {}/{}",
@@ -1209,45 +1078,13 @@ impl ReaderScreen {
                 if search.hits.is_empty() { 0 } else { search.sel + 1 },
                 search.hits.len()
             );
-            let chip = Chip::new(StatusHit::SearchNext.zone(), label, true).plain();
+            let chip = Chip::new(crate::ui::kit::ZoneId::action(A_SEARCH_NEXT), label, true).plain();
             let w = chip.width().min(right.saturating_sub(x));
             chip.render(ui, Rect { x, width: w, height: 1, ..area });
             x += w + 1;
         }
 
-        let mode = match self.layout_mode {
-            MODE_JA => "JA",
-            MODE_TRANSLATION => "TR",
-            _ => "split",
-        };
-        let toggles: [(StatusHit, String, bool); 5] = [
-            (StatusHit::Sync, "sync".into(), self.sync),
-            (StatusHit::Wrap, "wrap".into(), self.wrap),
-            (StatusHit::Mode, mode.to_string(), true),
-            (StatusHit::Highlight, "hl".into(), self.highlight),
-            (
-                StatusHit::Notes,
-                format!("notes {}", self.annotations.len()),
-                self.show_annotations,
-            ),
-        ];
-        for (hit, label, on) in toggles {
-            // `Mode` cycles rather than toggling, so it shows its value
-            // instead of an on/off mark.
-            let chip = if matches!(hit, StatusHit::Mode) {
-                Chip::new(hit.zone(), label, false).plain()
-            } else {
-                Chip::new(hit.zone(), label, on)
-            };
-            let want = chip.width();
-            if x + want > right {
-                break;
-            }
-            chip.render(ui, Rect { x, width: want, height: 1, ..area });
-            x += want + 1;
-        }
-
-        // Counters. Bookmarks are a readout; review flags are somewhere to go.
+        // Bookmarks are a readout — there is nowhere to go from a count of them.
         if !self.bookmark_lines.is_empty() && x < right {
             let text = format!(" ★ {} ", self.bookmark_lines.len());
             let w = (crate::ui::text::col_width(&text) as u16).min(right - x);
@@ -1258,31 +1095,19 @@ impl ReaderScreen {
             );
             x += w + 1;
         }
-        if !self.review_lines.is_empty() && x < right {
-            let chip = Chip::new(
-                StatusHit::NextReview.zone(),
-                format!("⚑ {}", self.review_lines.len()),
-                false,
-            )
-            .plain();
-            let w = chip.width().min(right - x);
-            chip.render(ui, Rect { x, width: w, height: 1, ..area });
-            x += w + 1;
-        }
-        if self.compare.is_some() && x < right {
-            let chip = Chip::new(StatusHit::ToggleDiff.zone(), "diff", self.diff_mode);
-            let w = chip.width().min(right - x);
-            chip.render(ui, Rect { x, width: w, height: 1, ..area });
-            x += w + 1;
-        }
 
-        // Position, right-aligned so it does not move as chips come and go.
-        let pos = format!(
-            "line {} · ch {:03}",
-            self.current_annotation_line(),
-            self.chapter
+        let acts = self.actions();
+        let budget = right.saturating_sub(x).saturating_sub(pw + 2);
+        Toolbar::new(&acts).has_menu(true).render(
+            ui,
+            Rect {
+                x,
+                width: budget,
+                height: 1,
+                ..area
+            },
         );
-        let pw = crate::ui::text::col_width(&pos) as u16;
+
         if right.saturating_sub(x) > pw + 1 {
             ui.text(
                 Rect {
@@ -1300,20 +1125,148 @@ impl ReaderScreen {
     /// This screen's commands, availability resolved for this frame.
     ///
     /// The one declaration everything else reads: `handle_key` dispatches from
-    /// it, the toolbar and the context menu draw from it, and help lists it.
-    /// See [`super::action_table`].
+    /// it, the status row draws it as a toolbar, right-click lists it, and help
+    /// prints it. See [`super::action_table`].
+    ///
+    /// `[` and `]` are declared only while a chapter is open. Declaring them
+    /// disabled would claim the keys and leave no way to cycle screens from an
+    /// empty Reader; omitting them lets the global binding through instead.
     pub fn actions(&self) -> Vec<Act> {
-        Vec::new()
+        use action_table::Accel;
+
+        let has_ch = self.chapter != 0;
+        let searching = self.search.is_some();
+        let mode = match self.layout_mode {
+            MODE_JA => "JA",
+            MODE_TRANSLATION => "TR",
+            _ => "split",
+        };
+
+        let mut acts = vec![
+            Act::toolbar(A_SYNC, "sync", Accel::key('z')).toggle(self.sync),
+            Act::toolbar(A_WRAP, "wrap", Accel::key('w')).toggle(self.wrap),
+            Act::toolbar(A_MODE, "mode", Accel::key('o')).cycle().value(mode),
+            Act::toolbar(A_HILITE, "hl", Accel::key('G')).toggle(self.highlight),
+            Act::toolbar(A_NOTES, "notes", Accel::key('N'))
+                .toggle(self.show_annotations)
+                .count(self.annotations.len() as u32),
+            Act::toolbar(A_DIFF, "diff", Accel::key('d'))
+                .toggle(self.diff_mode)
+                .when(self.compare.is_some()),
+            Act::toolbar(A_SEARCH, "search", Accel::key('/')).when(has_ch),
+            Act::toolbar(A_JUMP, "jump", Accel::key('g')).when(has_ch),
+            Act::menu(A_INSPECT, "inspect chunk", Accel::key('i')).when(has_ch),
+            Act::menu(A_EDIT, "edit translation", Accel::key('e')).when(has_ch),
+            Act::menu(A_NOTE, "add note", Accel::key('n')).when(has_ch),
+            Act::menu(A_MARK, "bookmark line", Accel::key('m')).when(has_ch),
+            Act::menu(A_REVIEW, "next flag", Accel::key('r'))
+                .count(self.review_lines.len() as u32)
+                .when(!self.review_lines.is_empty()),
+            Act::menu(A_SOURCE, "show source", Accel::key('s')).when(has_ch),
+            Act::menu(A_COPY, "copy translation", Accel::key('y')).when(has_ch),
+            Act::menu(A_QA, "QA report", Accel::key('Q')),
+            Act::menu(
+                A_SEARCH_NEXT,
+                "next match",
+                Accel::key('>').or(KeyCode::Char('.')),
+            )
+            .when(searching),
+            Act::menu(
+                A_SEARCH_PREV,
+                "previous match",
+                Accel::key('<').or(KeyCode::Char(',')),
+            )
+            .when(searching),
+        ];
+        if has_ch {
+            acts.push(Act::menu(A_PREV_CH, "previous chapter", Accel::key('[')));
+            acts.push(Act::menu(A_NEXT_CH, "next chapter", Accel::key(']')));
+        }
+        acts
     }
 
-    /// Run the action `id` stands for, whether it was reached by key, by a
-    /// toolbar control, by a row button or from the menu.
+    /// Run the action `id` stands for, whether it was reached by key, by a chip
+    /// on the status row or from the context menu.
     ///
     /// `None` means "no such action here" — the sentinel that makes an
     /// advertised binding with no handler impossible to write.
     pub fn run(&mut self, id: u16) -> Option<Action> {
-        let _ = id;
-        None
+        Some(match id {
+            A_SYNC => {
+                self.sync = !self.sync;
+                if self.sync {
+                    self.translation_scroll = self.scroll;
+                }
+                Action::None
+            }
+            A_WRAP => {
+                self.wrap = !self.wrap;
+                Action::None
+            }
+            A_MODE => {
+                self.layout_mode = (self.layout_mode + 1) % 3;
+                Action::None
+            }
+            A_HILITE => {
+                self.highlight = !self.highlight;
+                Action::None
+            }
+            A_NOTES => {
+                self.show_annotations = !self.show_annotations;
+                Action::None
+            }
+            A_DIFF => {
+                // A no-op when nothing was retranslated; the control is
+                // unavailable then, so this only guards the key.
+                if self.compare.is_some() {
+                    self.diff_mode = !self.diff_mode;
+                }
+                Action::None
+            }
+            A_SEARCH => Action::show_overlay(Overlay::reader_search()),
+            A_JUMP => Action::show_overlay(Overlay::reader_jump_placeholder()),
+            A_INSPECT => self.inspect_overlay(),
+            A_EDIT => self.edit_overlay(),
+            A_NOTE => {
+                let line = self.current_annotation_line();
+                Action::show_overlay(Overlay::reader_note(self.chapter, line))
+            }
+            A_MARK => Action::ToggleReaderBookmark {
+                chapter: self.chapter,
+                line: self.current_annotation_line(),
+                label: self.current_line_preview(),
+            },
+            A_REVIEW => {
+                self.jump_next_review();
+                Action::None
+            }
+            A_SOURCE => {
+                self.show_source();
+                Action::None
+            }
+            A_COPY => {
+                let text = crate::workspace::translation::prose_only(&self.translated_text);
+                if text.trim().is_empty() {
+                    Action::None
+                } else {
+                    let lines = text.lines().filter(|l| !l.trim().is_empty()).count();
+                    Action::ReaderCopy { text, lines }
+                }
+            }
+            // The App rebuilds the report from the live project on show.
+            A_QA => Action::show_overlay(Overlay::qa_placeholder()),
+            A_SEARCH_NEXT => {
+                self.search_step(true);
+                Action::None
+            }
+            A_SEARCH_PREV => {
+                self.search_step(false);
+                Action::None
+            }
+            A_PREV_CH => Action::ReaderStepChapter { forward: false },
+            A_NEXT_CH => Action::ReaderStepChapter { forward: true },
+            _ => return None,
+        })
     }
 
     pub fn hints(&self) -> &'static [(&'static str, &'static str)] {
@@ -1797,47 +1750,94 @@ mod tests {
         assert!(hidden.contains("สวัสดี"));
     }
 
-    /// Clicking a status-bar cell fires its key binding: the sync and wrap
-    /// toggles flip, and the mode cell cycles the layout.
+    /// Every toolbar control draws where the registry says it is, and running
+    /// it by id does what its key does. The two used to be separate matches
+    /// that had to be kept in step by hand.
     #[test]
-    fn clicking_status_bar_toggles_state() {
+    fn status_controls_and_their_keys_agree() {
+        use ratatui::crossterm::event::KeyModifiers;
 
         let mut r = screen_with("raw ja", "translated text");
-        let (_, zones) = crate::ui::kit::ctx::draw_test(100, 24, |ui, area| r.render(ui, area));
+        let (_, zones) = crate::ui::kit::ctx::draw_test(140, 24, |ui, area| r.render(ui, area));
 
-        // Where each control landed comes from the registry the toolbar wrote
-        // while drawing, not from a copy the screen kept.
-        let zone_for = |hit: StatusHit| {
-            zones
-                .rect_of(hit.zone())
-                .unwrap_or_else(|| panic!("no zone for {hit:?}"))
-        };
-        let click = |r: &mut ReaderScreen, rect: Rect| {
-            let (col, row) = (rect.x + rect.width / 2, rect.y);
-            r.handle_mouse(
-                MouseInput {
-                    gesture: MouseGesture::Click { double: false },
-                    col,
-                    row,
-                },
-                zones.at(col, row),
-            )
+        for act in r.actions() {
+            if act.placement != action_table::Placement::Toolbar {
+                continue;
+            }
+            assert!(
+                zones.contains(act.zone()),
+                "{} is declared for the toolbar but nothing drew it",
+                act.label
+            );
+        }
+
+        // A click resolves to the action id the router then runs, so running
+        // the id and pressing the key must leave the same state.
+        let by_key = |r: &mut ReaderScreen, c: char| {
+            r.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
         };
 
         assert!(r.sync);
-        let z = zone_for(StatusHit::Sync);
-        click(&mut r, z);
-        assert!(!r.sync, "clicking the sync cell toggles it off");
+        r.run(A_SYNC);
+        assert!(!r.sync, "the control toggles it off");
+        by_key(&mut r, 'z');
+        assert!(r.sync, "and the key toggles it back");
 
         assert!(r.wrap);
-        let z = zone_for(StatusHit::Wrap);
-        click(&mut r, z);
+        r.run(A_WRAP);
         assert!(!r.wrap);
+        by_key(&mut r, 'w');
+        assert!(r.wrap);
 
         assert_eq!(r.layout_mode, MODE_SPLIT);
-        let z = zone_for(StatusHit::Mode);
-        click(&mut r, z);
-        assert_eq!(r.layout_mode, MODE_JA, "mode cell cycles the layout");
+        r.run(A_MODE);
+        assert_eq!(r.layout_mode, MODE_JA, "the mode chip cycles the layout");
+        by_key(&mut r, 'o');
+        assert_eq!(r.layout_mode, MODE_TRANSLATION);
+    }
+
+    /// The regression the Phase 6 remap introduced: `]` and `[` were claimed by
+    /// the chrome for screen cycling before the Reader was consulted, leaving
+    /// `ReaderStepChapter` with no caller at all.
+    #[test]
+    fn bracket_keys_step_chapters_while_a_chapter_is_open() {
+        let mut r = screen_with("raw ja", "translated text");
+        r.chapter = 4;
+        assert!(matches!(
+            r.handle_key(KeyEvent::new(KeyCode::Char(']'), ratatui::crossterm::event::KeyModifiers::NONE)),
+            Action::ReaderStepChapter { forward: true }
+        ));
+        assert!(matches!(
+            r.handle_key(KeyEvent::new(KeyCode::Char('['), ratatui::crossterm::event::KeyModifiers::NONE)),
+            Action::ReaderStepChapter { forward: false }
+        ));
+
+        // With nothing open they are not declared at all, so the global
+        // screen-cycling binding still gets them.
+        r.chapter = 0;
+        let acts = r.actions();
+        assert!(!action_table::claims(
+            &acts,
+            &KeyEvent::new(KeyCode::Char(']'), ratatui::crossterm::event::KeyModifiers::NONE)
+        ));
+    }
+
+    /// The table is the only place an action's effect is written, so every id
+    /// it declares must have a `run` arm.
+    #[test]
+    fn every_declared_action_has_a_handler() {
+        let mut r = screen_with("raw ja", "translated text");
+        r.chapter = 2;
+        for act in r.actions() {
+            let mut probe = screen_with("raw ja", "translated text");
+            probe.chapter = 2;
+            assert!(
+                probe.run(act.id).is_some(),
+                "{} ({}) is advertised with no handler",
+                act.label,
+                act.accel.shown()
+            );
+        }
     }
 
     #[test]

@@ -60,7 +60,7 @@ impl<'a> Menu<'a> {
         let label = self
             .items
             .iter()
-            .map(|a| col_width(a.label) as u16)
+            .map(|a| col_width(&a.menu_label()) as u16)
             .max()
             .unwrap_or(0);
         let accel = self
@@ -186,7 +186,7 @@ impl<'a> Menu<'a> {
         let label_budget = row
             .width
             .saturating_sub(H_PAD * 2 + accel_cols + ACCEL_GAP) as usize;
-        let label = pad_to_cols(&truncate_cols(act.label, label_budget), label_budget);
+        let label = pad_to_cols(&truncate_cols(&act.menu_label(), label_budget), label_budget);
 
         let gap = row
             .width

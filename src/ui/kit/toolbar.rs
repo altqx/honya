@@ -179,7 +179,7 @@ fn label_for(a: &Act, narrow: bool) -> String {
     if narrow {
         a.icon_label()
     } else {
-        a.control_label().to_string()
+        a.control_label()
     }
 }
 
