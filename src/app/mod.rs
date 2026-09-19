@@ -7650,6 +7650,43 @@ mod action_table_tests {
         );
     }
 
+    /// The headline path end to end: a pointer press on a drawn control runs
+    /// the same action its key does, through the same `run` arm.
+    #[test]
+    fn clicking_a_control_runs_it() {
+        use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+        let mut app = on(Screen::Reader);
+        render(&mut app, 120, 40);
+        let sync = app
+            .screen_actions()
+            .into_iter()
+            .find(|a| a.label == "sync")
+            .expect("the Reader draws a sync chip");
+        let rect = app.zones.rect_of(sync.zone()).expect("registered");
+
+        // Read the state back out of the table, which is where the chip gets
+        // it from in the first place.
+        let state = |app: &App| {
+            app.screen_actions()
+                .into_iter()
+                .find(|a| a.label == "sync")
+                .map(|a| a.kind)
+        };
+        let before = state(&app);
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: rect.x + rect.width / 2,
+            row: rect.y,
+            modifiers: KeyModifiers::empty(),
+        });
+        assert_ne!(state(&app), before, "the click did not reach run");
+
+        // …and the key printed on it puts it back.
+        app.on_key(press(&sync.accel));
+        assert_eq!(state(&app), before);
+    }
+
     /// An overlay closes the menu, so the two are never both on screen and a
     /// key never has two claimants.
     #[test]
