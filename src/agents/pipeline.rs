@@ -2745,7 +2745,6 @@ async fn process_chunk_with_lookahead(
             ctx.target_language,
             &chunk.text,
             &translated,
-            &previous_translation,
             &audit_terms,
         );
         audit_findings.extend(audit_character_pronoun_rules(
@@ -2756,7 +2755,7 @@ async fn process_chunk_with_lookahead(
         ));
         // The judgement-shaped checks are decided separately: System One when it
         // is on, otherwise the same hand-tuned predicates as before.
-        let candidates = audit::semantic_candidates(ctx.target_language, &translated);
+        let candidates = audit::semantic_candidates(ctx.target_language, &translated, &previous_translation);
         let judged = match ctx.clients.decisions() {
             Some(backend) => {
                 let _wait = wd.external_wait();

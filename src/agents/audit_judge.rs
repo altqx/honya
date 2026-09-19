@@ -48,6 +48,14 @@ fn question(check: SemanticCheck, index: usize) -> Question {
             "In `{path}.context`, `{path}.span` is a sentence-final casual Thai particle, \
              rather than a syllable inside a word or a name."
         ),
+        // Whole-chunk, so it reads the translation rather than a span. Worded
+        // around restating rather than copying: a reworded echo is the common
+        // failure and exact matching cannot see it at all.
+        SemanticCheck::ContinuityEcho => format!(
+            "`translation` restates material already present in `{path}.context`, the \
+             previously-translated tail, instead of translating the new material in \
+             `source_jp`. Judge it as restatement even when the wording differs."
+        ),
     })
 }
 
@@ -66,6 +74,15 @@ fn build_state(
     })
 }
 
+/// Which toggle governs a check. They share one request — the state is what
+/// costs — but each is asked only when its own feature is on.
+fn asks(system_one: &SystemOne, check: SemanticCheck) -> bool {
+    system_one.feature(match check {
+        SemanticCheck::ContinuityEcho => SystemOneFeature::Continuity,
+        _ => SystemOneFeature::Audit,
+    })
+}
+
 /// Decide `candidates`. `None` means fall back to the heuristic verdict for all
 /// of them; an individual answer that is unusable falls back on its own.
 pub async fn judge(
@@ -75,29 +92,23 @@ pub async fn judge(
     translated: &str,
     candidates: &[SemanticCandidate],
 ) -> Option<JudgeOutcome> {
-    if !system_one.feature(SystemOneFeature::Audit) {
+    let questions: std::collections::BTreeMap<_, _> = candidates
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| asks(system_one, c.check))
+        .map(|(i, c)| (format!("c{i}"), question(c.check, i)))
+        .collect();
+    // Nothing to ask — a clean chunk, or every check switched off. Either way
+    // the heuristics reach the same answer for free.
+    if questions.is_empty() {
         return None;
     }
-    // A clean chunk is the common case; it costs nothing and agrees with the
-    // heuristic trivially, since the scan is strictly wider than the predicates.
-    if candidates.is_empty() {
-        return Some(JudgeOutcome {
-            findings: Vec::new(),
-            usage: Usage::default(),
-            summary: None,
-        });
-    }
 
+    let asked = questions.len();
     let state = build_state(source_jp, translated, candidates);
     if state.to_string().chars().count() > MAX_STATE_CHARS {
         return None;
     }
-
-    let questions = candidates
-        .iter()
-        .enumerate()
-        .map(|(i, c)| (format!("c{i}"), question(c.check, i)))
-        .collect();
 
     let resp = backend
         .decide(&DecisionsRequest {
@@ -120,8 +131,11 @@ pub async fn judge(
             {
                 Some(p) if p >= CONFIRM_AT => true,
                 Some(p) if p <= DISMISS_BELOW => false,
+                // Not asked, unanswered, mistyped, or too close to call.
                 _ => {
-                    deferred += 1;
+                    if asks(system_one, c.check) {
+                        deferred += 1;
+                    }
                     c.heuristic
                 }
             }
@@ -130,7 +144,6 @@ pub async fn judge(
 
     let findings = crate::agents::audit::semantic_findings(candidates, |i, _| verdicts[i]);
     let n = findings.len();
-    let asked = candidates.len();
     Some(JudgeOutcome {
         findings,
         usage: resp.usage.to_usage(),
@@ -220,7 +233,7 @@ mod tests {
     const UNLISTED_GLOSS: &str = "ยัยคุณหนู (โอโจซามะ) ยิ้มให้";
 
     fn candidates(text: &str) -> Vec<SemanticCandidate> {
-        audit::semantic_candidates(TargetLanguage::Thai, text)
+        audit::semantic_candidates(TargetLanguage::Thai, text, &[])
     }
 
     #[tokio::test]
@@ -307,17 +320,76 @@ mod tests {
         assert_eq!(b.calls(), 0);
     }
 
+    /// Nothing to ask, so nothing is sent. The caller falls back to the
+    /// heuristics, which find nothing either — the scan is strictly wider.
     #[tokio::test]
     async fn a_clean_chunk_costs_no_call() {
         let c = candidates("แมวกำลังนอนอยู่ริมหน้าต่าง");
         assert!(c.is_empty());
         let b = FakeBackend::answering(&[]);
-        let out = judge(&b, &system_one(true), "猫が眠っている。", "แมว", &c)
+        assert!(
+            judge(&b, &system_one(true), "猫が眠っている。", "แมว", &c)
+                .await
+                .is_none()
+        );
+        assert_eq!(b.calls(), 0);
+    }
+
+    /// The echo rides in the same request as the span checks — the state is
+    /// what costs — but answers to its own toggle.
+    #[tokio::test]
+    async fn the_continuity_echo_follows_its_own_toggle() {
+        let previous = vec!["เขาเปิดประตูออกไปโดยไม่หันกลับมามองอีกเลย".to_string()];
+        let c = audit::semantic_candidates(TargetLanguage::Thai, "กูจะไปเอง", &previous);
+        assert_eq!(c.len(), 2, "one echo candidate plus one span candidate");
+
+        // Continuity off, audit on: only the span question is sent.
+        let b = FakeBackend::answering(&[("c1", 0.99)]);
+        let mut s1 = system_one(true);
+        s1.continuity = false;
+        let out = judge(&b, &s1, "俺が行く。", "กูจะไปเอง", &c).await.unwrap();
+        assert!(out.summary.unwrap().contains("1 candidate"));
+
+        // Audit off, continuity on: only the echo question is sent, and a
+        // confident yes produces the echo finding.
+        let b = FakeBackend::answering(&[("c0", 0.96)]);
+        let mut s1 = system_one(true);
+        s1.audit = false;
+        let out = judge(&b, &s1, "俺が行く。", "กูจะไปเอง", &c).await.unwrap();
+        assert!(
+            out.findings.iter().any(|f| f.message.contains("continuity")),
+            "{:?}",
+            out.findings
+        );
+
+        // Both off: nothing is asked and nothing is sent.
+        let b = FakeBackend::answering(&[("c0", 0.96), ("c1", 0.99)]);
+        let mut s1 = system_one(true);
+        s1.audit = false;
+        s1.continuity = false;
+        assert!(judge(&b, &s1, "俺が行く。", "กูจะไปเอง", &c).await.is_none());
+        assert_eq!(b.calls(), 0);
+    }
+
+    /// Exact matching cannot see a reworded echo; the judgement is the only
+    /// thing that can.
+    #[tokio::test]
+    async fn a_reworded_echo_is_caught_where_exact_matching_cannot_be() {
+        let previous = vec!["เขาเปิดประตูออกไปโดยไม่หันกลับมามองอีกเลย".to_string()];
+        let reworded = "เขาก้าวผ่านประตูไปโดยไม่เหลียวหลังกลับมาแม้แต่ครั้งเดียว";
+        let c = audit::semantic_candidates(TargetLanguage::Thai, reworded, &previous);
+        assert_eq!(c.len(), 1);
+        assert!(
+            !c[0].heuristic,
+            "precondition: normalized substring matching misses a reworded echo"
+        );
+
+        let b = FakeBackend::answering(&[("c0", 0.91)]);
+        let out = judge(&b, &system_one(true), "彼は振り返らずに出て行った。", reworded, &c)
             .await
             .unwrap();
-        assert!(out.findings.is_empty());
-        assert_eq!(b.calls(), 0, "no candidate means nothing to ask");
-        assert_eq!(out.usage.total_tokens, 0);
+        assert_eq!(out.findings.len(), 1);
+        assert!(!out.findings[0].advisory, "an echo forces a retry");
     }
 
     #[tokio::test]
