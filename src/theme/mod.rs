@@ -461,6 +461,52 @@ impl Theme {
     }
 }
 
+impl Theme {
+    /// Map every slot into what `depth` can display.
+    ///
+    /// Applied once when a theme is built rather than per draw: a palette is
+    /// authored in truecolor because that is how colours are chosen, but what
+    /// reaches the terminal has to be something it can show.
+    pub fn quantized(self, depth: quantize::ColorDepth) -> Self {
+        let q = |c: Color| quantize::quantize(c, depth);
+        Self {
+            bg: q(self.bg),
+            bg_panel: q(self.bg_panel),
+            bg_inset: q(self.bg_inset),
+            ink: q(self.ink),
+            ink_soft: q(self.ink_soft),
+            ink_faint: q(self.ink_faint),
+            rule: q(self.rule),
+            accent: q(self.accent),
+            accent_soft: q(self.accent_soft),
+            accent_bg: q(self.accent_bg),
+            status_pending: q(self.status_pending),
+            status_working: q(self.status_working),
+            status_done: q(self.status_done),
+            status_failed: q(self.status_failed),
+            status_warn: q(self.status_warn),
+            status_image: q(self.status_image),
+            ja_text: q(self.ja_text),
+            translated_text: q(self.translated_text),
+            stream_cursor: q(self.stream_cursor),
+            bg_elevated: q(self.bg_elevated),
+            bg_hover: q(self.bg_hover),
+            bg_active: q(self.bg_active),
+            border_focus: q(self.border_focus),
+            accent_fg: q(self.accent_fg),
+            scrim: q(self.scrim),
+            ink_inverse: q(self.ink_inverse),
+        }
+    }
+}
+
+/// The terminal's colour depth, detected once. Detection reads the
+/// environment, which does not change under a running process.
+pub fn terminal_depth() -> quantize::ColorDepth {
+    static DEPTH: std::sync::OnceLock<quantize::ColorDepth> = std::sync::OnceLock::new();
+    *DEPTH.get_or_init(quantize::ColorDepth::detect)
+}
+
 /// Every theme in picker order: lights, native dark + adaptive, then schemes.
 pub const ALL_THEMES: &[ThemeId] = &[
     ThemeId::Washi,
@@ -478,6 +524,15 @@ pub const ALL_THEMES: &[ThemeId] = &[
 ];
 
 impl ThemeId {
+    /// Build this palette and map it to what the terminal can show.
+    ///
+    /// The app uses this; [`ThemeId::build`] stays exact so tests and the GUI
+    /// see the authored colours rather than whatever the test runner's
+    /// environment happens to advertise.
+    pub fn build_adaptive(self) -> Theme {
+        self.build().quantized(terminal_depth())
+    }
+
     pub fn build(self) -> Theme {
         match self {
             ThemeId::Washi => Theme::washi(),

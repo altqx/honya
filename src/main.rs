@@ -9,6 +9,7 @@ mod app;
 mod cleanse;
 mod codex;
 mod config;
+mod doctor;
 mod document_import;
 mod epub;
 mod error;
@@ -59,11 +60,22 @@ async fn main() -> anyhow::Result<()> {
             print_help();
             return Ok(());
         }
+        Some("doctor") => {
+            return doctor::run();
+        }
         _ => {}
     }
 
     let want_gui = std::env::args().any(|a| a == "--gui" || a == "-g")
         || config::env_truthy("HONYA_GUI");
+
+    // An unambiguously single-column glyph set, for a locale that widens the
+    // geometric shapes. `honya doctor` recommends this when it detects one.
+    if config::env_truthy("HONYA_GLYPHS_ASCII")
+        || std::env::var("HONYA_GLYPHS").is_ok_and(|v| v.eq_ignore_ascii_case("ascii"))
+    {
+        ui::glyphs::set_glyph_set(ui::glyphs::GlyphSet::Ascii);
+    }
 
     let mut cfg = config::load();
     if cfg.codex_auth.is_none()

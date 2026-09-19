@@ -543,7 +543,7 @@ impl App {
         if !projects.is_empty() {
             shelf.select_first();
         }
-        let theme = cfg.theme.build();
+        let theme = cfg.theme.build_adaptive();
         // Keep Reader source chunks aligned with the pipeline budget.
         let mut reader = ReaderScreen::new();
         reader.set_chunk_cfg(cfg.chunk_target_tokens, cfg.chunk_hard_cap_tokens);
@@ -2986,11 +2986,11 @@ impl App {
             }
             Action::PreviewTheme(id) => {
                 // Live recolor only; picker stays open, config untouched.
-                self.theme = id.build();
+                self.theme = id.build_adaptive();
             }
             Action::SaveTheme(id) => {
                 self.cfg.theme = id;
-                self.theme = id.build();
+                self.theme = id.build_adaptive();
                 match crate::config::save(&self.cfg) {
                     Ok(()) => self.toast = Some(Toast::info(format!("theme → {}", id.label()))),
                     Err(e) => self.toast = Some(Toast::error(format!("save failed: {e}"))),
@@ -3003,7 +3003,7 @@ impl App {
             }
             Action::CancelTheme => {
                 // Revert any preview to the saved theme and close.
-                self.theme = self.cfg.theme.build();
+                self.theme = self.cfg.theme.build_adaptive();
                 self.overlay = Overlay::None;
             }
             Action::StartRemoteLogin => self.start_remote_login(),
