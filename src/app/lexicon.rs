@@ -16,7 +16,7 @@ use crate::ui::mouse::{MouseGesture, MouseInput};
 use crate::ui::text::{col_width, pad_to_cols, thai_display_safe, truncate_cols};
 use crate::workspace::Workspace;
 
-use super::action_table::Act;
+use super::action_table::{self, Act};
 use super::Action;
 use super::overlay::Overlay;
 
@@ -195,6 +195,13 @@ pub struct LexiconScreen {
     style_scroll: u16,
 }
 
+/// Action ids for this screen's table. Stable within the screen: they are also
+/// the zone index every one of its controls registers under.
+const L_NEW: u16 = 0;
+const L_SEARCH: u16 = 1;
+const L_EDIT: u16 = 2;
+const L_DELETE: u16 = 3;
+
 impl LexiconScreen {
     pub fn new() -> Self {
         let mut list = ListState::default();
@@ -297,6 +304,16 @@ impl LexiconScreen {
             return Action::None;
         }
 
+        // Commands come from the table; only navigation is left below. Tab is
+        // the documented exception — it is a reserved global everywhere else,
+        // and the Lexicon keeps it for its sections.
+        let acts = self.actions(ws);
+        match action_table::hit(&acts, &key) {
+            action_table::KeyHit::Run(id) => return self.run(id, ws).unwrap_or(Action::None),
+            action_table::KeyHit::Blocked => return Action::None,
+            action_table::KeyHit::Miss => {}
+        }
+
         match key.code {
             KeyCode::Tab => {
                 self.sub = (self.sub + 1) % 3;
@@ -342,34 +359,6 @@ impl LexiconScreen {
                 self.style_scroll = u16::MAX; // clamped to content in render_style
                 Action::None
             }
-            KeyCode::Char('/') => {
-                self.searching = true;
-                self.filter.clear();
-                self.filter_cursor = 0;
-                Action::None
-            }
-            KeyCode::Char('n') => {
-                if ws.is_some() {
-                    self.editing = Some(match self.sub {
-                        SUB_CHARACTERS => EditForm::new_character(None),
-                        SUB_STYLE => EditForm {
-                            kind: SUB_STYLE,
-                            id: None,
-                            fields: vec![("Style note", String::new())],
-                            field: 0,
-                            cursor: 0,
-                            is_new: true,
-                        },
-                        _ => EditForm::new_glossary(None),
-                    });
-                }
-                Action::None
-            }
-            KeyCode::Enter | KeyCode::Char('e') => {
-                self.begin_edit(ws);
-                Action::None
-            }
-            KeyCode::Char('d') => self.begin_delete(ws),
             _ => Action::None,
         }
     }
@@ -416,19 +405,12 @@ impl LexiconScreen {
                     }
                     return Action::None;
                 }
-                // Style has no selectable rows; only the tabs are interactive.
-                if self.sub == SUB_STYLE || !m.in_rect(self.table_area) {
+                // The clicked row comes from the registry the table wrote while
+                // drawing, so there is no column arithmetic here to fall out of
+                // step with it. Style has no selectable rows and registers none.
+                let Some(idx) = zone.and_then(|z| z.row_index()) else {
                     return Action::None;
-                }
-                let len = self.current_len(ws);
-                // Row 0 of the table is the column header; data starts one below.
-                if m.row <= self.table_area.y {
-                    return Action::None;
-                }
-                let idx = (m.row - self.table_area.y - 1) as usize + self.list.offset();
-                if idx >= len {
-                    return Action::None;
-                }
+                };
                 let already = self.list.selected() == Some(idx);
                 self.list.select(Some(idx));
                 if double || already {
@@ -436,7 +418,14 @@ impl LexiconScreen {
                 }
                 Action::None
             }
-            MouseGesture::RightClick => Action::None,
+            // The router opens this row's menu straight after, so the selection
+            // has to be on the row the menu is about.
+            MouseGesture::RightClick => {
+                if let Some(idx) = zone.and_then(|z| z.row_index()) {
+                    self.list.select(Some(idx));
+                }
+                Action::None
+            }
         }
     }
 
@@ -632,13 +621,56 @@ impl LexiconScreen {
             height: area.height.saturating_sub(1),
             ..area
         };
-        self.render_header(ui, header, ws);
+        let acts = self.actions(ws);
+        self.render_header(ui, header, ws, &acts);
         let theme: &Theme = ui.theme;
         let f: &mut Frame = ui.frame;
         self.render_table(f, body, ws, theme);
+        self.register_rows(ui, ws);
 
+        // The selected row's own verbs, over the right end of the row the table
+        // just registered.
+        if let Some(sel) = self.list.selected()
+            && let Some(rect) = ui.zones.rect_of(crate::ui::kit::ZoneId::row(sel))
+        {
+            crate::ui::kit::toolbar::RowActions::new(&acts).render(ui, rect);
+        }
+
+        let theme: &Theme = ui.theme;
+        let f: &mut Frame = ui.frame;
         if self.editing.is_some() {
             self.render_edit(f, area, theme);
+        }
+    }
+
+    /// Register the data rows the table just drew.
+    ///
+    /// The table is still a ratatui `List` rather than a kit component, so this
+    /// is where its row geometry is written down — once, and read back by the
+    /// click handler and the row buttons, instead of being re-derived by each.
+    fn register_rows(&mut self, ui: &mut crate::ui::kit::Ui, ws: Option<&Workspace>) {
+        if ws.is_none() || self.sub == SUB_STYLE {
+            return;
+        }
+        let area = self.table_area;
+        // Row 0 of the table is the column header; data starts one below.
+        let visible = area.height.saturating_sub(1);
+        if visible == 0 || area.width == 0 {
+            return;
+        }
+        let offset = self.list.offset();
+        let len = self.current_len(ws);
+        let cols = area.width.saturating_sub(crate::ui::kit::tokens::SCROLLBAR_COLS);
+        for i in offset..len.min(offset + visible as usize) {
+            ui.zones.push(
+                Rect {
+                    x: area.x,
+                    y: area.y + 1 + (i - offset) as u16,
+                    width: cols,
+                    height: 1,
+                },
+                crate::ui::kit::ZoneId::row(i),
+            );
         }
     }
 
@@ -648,9 +680,11 @@ impl LexiconScreen {
         ui: &mut crate::ui::kit::Ui,
         area: Rect,
         ws: Option<&Workspace>,
+        acts: &[Act],
     ) {
         use crate::ui::kit::ZoneKind;
         use crate::ui::kit::tabs::{Segment, SegmentedControl};
+        use crate::ui::kit::toolbar::Toolbar;
 
         ui.fill(area, Style::default().bg(ui.theme.bg));
 
@@ -676,10 +710,32 @@ impl LexiconScreen {
             .render(ui, strip);
 
         // Filter, right-aligned, only when there is one or it is being typed.
-        if !self.searching && self.filter.is_empty() {
+        // Measured before the toolbar so the two share the free half rather
+        // than drawing over each other.
+        let faint = Style::default().fg(ui.theme.ink_faint).bg(ui.theme.bg);
+        let showing_filter = self.searching || !self.filter.is_empty();
+        let filter_cols = if showing_filter {
+            col_width(&thai_display_safe(&self.filter)) as u16 + 3
+        } else {
+            0
+        };
+        let toolbar_x = area.x + strip.width + 1;
+        let toolbar_w = (area.x + area.width)
+            .saturating_sub(toolbar_x)
+            .saturating_sub(filter_cols + 1);
+        Toolbar::new(acts).render(
+            ui,
+            Rect {
+                x: toolbar_x,
+                y: area.y,
+                width: toolbar_w,
+                height: 1,
+            },
+        );
+
+        if !showing_filter {
             return;
         }
-        let faint = Style::default().fg(ui.theme.ink_faint).bg(ui.theme.bg);
         let mut spans = vec![Span::styled("/ ", faint)];
         if self.searching {
             let (before, after) =
@@ -1031,26 +1087,66 @@ impl LexiconScreen {
 
     /// This screen's commands, availability resolved for this frame.
     ///
-    /// The one declaration everything else reads: `handle_key` dispatches from
-    /// it, the toolbar and the context menu draw from it, and help lists it.
-    /// See [`super::action_table`].
+    /// Everything greys out while a form or the filter holds the keyboard —
+    /// those keys belong to the field being typed into — rather than the
+    /// toolbar vanishing and the header changing shape mid-word.
     pub fn actions(&self, ws: Option<&Workspace>) -> Vec<Act> {
-        let _ = ws;
-        Vec::new()
+        use action_table::Accel;
+
+        let live = ws.is_some() && !self.is_capturing();
+        let has_ws = live;
+        // Style is prose, not a list: it has no row to edit or delete.
+        let on_row = live && self.sub != SUB_STYLE && self.current_len(ws) > 0;
+        vec![
+            Act::toolbar(L_NEW, "new", Accel::key('n')).when(has_ws),
+            Act::toolbar(L_SEARCH, "search", Accel::key('/')).when(!self.is_capturing()),
+            Act::row(
+                L_EDIT,
+                "edit",
+                Accel::code(KeyCode::Enter).or(KeyCode::Char('e')),
+            )
+            .when(on_row),
+            Act::row(L_DELETE, "delete", Accel::key('d')).when(on_row),
+        ]
     }
 
     /// Run the action `id` stands for, whether it was reached by key, by a
-    /// toolbar control, by a row button or from the menu.
+    /// toolbar button, by a row button or from the context menu.
     ///
     /// `None` means "no such action here" — the sentinel that makes an
     /// advertised binding with no handler impossible to write.
-    pub fn run(
-        &mut self,
-        id: u16,
-        ws: Option<&Workspace>,
-    ) -> Option<Action> {
-        let _ = (id, ws);
-        None
+    pub fn run(&mut self, id: u16, ws: Option<&Workspace>) -> Option<Action> {
+        Some(match id {
+            L_NEW => {
+                if ws.is_some() {
+                    self.editing = Some(match self.sub {
+                        SUB_CHARACTERS => EditForm::new_character(None),
+                        SUB_STYLE => EditForm {
+                            kind: SUB_STYLE,
+                            id: None,
+                            fields: vec![("Style note", String::new())],
+                            field: 0,
+                            cursor: 0,
+                            is_new: true,
+                        },
+                        _ => EditForm::new_glossary(None),
+                    });
+                }
+                Action::None
+            }
+            L_SEARCH => {
+                self.searching = true;
+                self.filter.clear();
+                self.filter_cursor = 0;
+                Action::None
+            }
+            L_EDIT => {
+                self.begin_edit(ws);
+                Action::None
+            }
+            L_DELETE => self.begin_delete(ws),
+            _ => return None,
+        })
     }
 
     pub fn hints(&self) -> &'static [(&'static str, &'static str)] {
