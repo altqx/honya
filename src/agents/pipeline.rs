@@ -10,8 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::agents::audit::{
-    advisory_findings_with_references_for_language, audit_character_pronoun_rules,
-    audit_translation_for_language, normalize_japanese_punctuation_residue,
+    audit_character_pronoun_rules, normalize_japanese_punctuation_residue,
     strip_copied_continuity_for_language,
 };
 use crate::agents::chunk::{Chunk, chunk_chapter};
@@ -19,6 +18,8 @@ use crate::agents::coherence;
 use crate::agents::continuity;
 use crate::agents::prepass;
 use crate::agents::prompts::{build_orchestrator_metadata_msg, orchestrator_system};
+use crate::agents::audit;
+use crate::agents::audit_judge;
 use crate::agents::review_gate;
 use crate::agents::reviewer::review_chunk;
 use crate::agents::tools::{WorkspaceTools, orchestrator_tools};
@@ -2737,7 +2738,7 @@ async fn process_chunk_with_lookahead(
             glossary_terms_for_chunk(&ctx.ws, &chunk.text, MAX_GLOSSARY_IN_CTX),
             ctx.target_language,
         );
-        let mut audit_findings = audit_translation_for_language(
+        let mut audit_findings = audit::audit_translation_mechanical(
             ctx.target_language,
             &chunk.text,
             &translated,
@@ -2750,12 +2751,63 @@ async fn process_chunk_with_lookahead(
             pov.as_deref(),
             &audit_characters,
         ));
+        // The judgement-shaped checks are decided separately: System One when it
+        // is on, otherwise the same hand-tuned predicates as before.
+        let candidates = audit::semantic_candidates(ctx.target_language, &translated);
+        let judged = match ctx.clients.decisions() {
+            Some(backend) => {
+                let _wait = wd.external_wait();
+                audit_judge::judge(
+                    backend.as_ref(),
+                    &ctx.cfg.system_one,
+                    &chunk.text,
+                    &translated,
+                    &candidates,
+                )
+                .await
+            }
+            None => None,
+        };
+        let semantic = match judged {
+            Some(out) => {
+                wd.ping();
+                acc.fold(&out.usage);
+                if let Some(summary) = out.summary {
+                    ctx.tx.send(AppEvent::Log {
+                        level: LogLevel::Info,
+                        msg: format!("ch{chapter} chunk{} {summary}", chunk.index),
+                    });
+                }
+                out.findings
+            }
+            None => audit::semantic_findings(&candidates, |_, c| c.heuristic),
+        };
+        audit_findings.extend(
+            semantic
+                .iter()
+                .filter(|f| !f.advisory)
+                .map(|f| f.message.clone()),
+        );
         // Non-gating signals for the Reviewer to verify.
-        let advisory = advisory_findings_with_references_for_language(
+        let advisory = audit::advisory_findings_with_references_mechanical(
             ctx.target_language,
             &chunk.text,
             &translated,
             &audit_characters,
+            {
+                let mut base = audit::advisory_findings_mechanical(
+                    ctx.target_language,
+                    &chunk.text,
+                    &translated,
+                );
+                base.extend(
+                    semantic
+                        .iter()
+                        .filter(|f| f.advisory)
+                        .map(|f| f.message.clone()),
+                );
+                base
+            },
         );
         ctx.tx.send(AppEvent::ChunkStateChanged {
             chapter,

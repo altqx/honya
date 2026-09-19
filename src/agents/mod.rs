@@ -5,6 +5,7 @@
 //! per committed chunk as a metadata turn that persists discoveries via tools.
 
 pub mod audit;
+pub mod audit_judge;
 pub mod chunk;
 pub mod coherence;
 pub mod continuity;

@@ -116,19 +116,6 @@ fn is_koo_pronoun_frame(before: &str, after: &str) -> bool {
             .any(|suffix| after.starts_with(suffix))
 }
 
-fn contains_forbidden_thai_self_pronoun(translated: &str) -> bool {
-    let mut search_from = 0;
-    while let Some(rel) = translated[search_from..].find(FORBIDDEN_THAI_SELF_PRONOUN) {
-        let idx = search_from + rel;
-        let after_at = idx + FORBIDDEN_THAI_SELF_PRONOUN.len();
-        if is_koo_pronoun_frame(&translated[..idx], &translated[after_at..]) {
-            return true;
-        }
-        search_from = after_at;
-    }
-    false
-}
-
 /// A blank-line run — two or more newlines with any surrounding spaces/tabs —
 /// left behind after excising a copied span. Collapsed to a single blank line so
 /// removing a copy from the middle of a chunk doesn't leave a gap.
@@ -153,7 +140,37 @@ pub fn audit_translation_with_terms(
     )
 }
 
+/// Mechanical checks plus the semantic tier decided by the hand-tuned
+/// predicates: the whole audit as it stood before the tiers were split. The
+/// pipeline composes the two halves itself so System One can decide the second
+/// one; this keeps the original composition pinned by the test suite.
+#[cfg(test)]
 pub fn audit_translation_for_language(
+    target_language: TargetLanguage,
+    source_jp: &str,
+    translated_text: &str,
+    previous: &[String],
+    terms: &[GlossaryTerm],
+) -> Vec<String> {
+    let mut findings = audit_translation_mechanical(
+        target_language,
+        source_jp,
+        translated_text,
+        previous,
+        terms,
+    );
+    findings.extend(heuristic_semantic_messages(
+        target_language,
+        translated_text.trim(),
+        false,
+    ));
+    findings
+}
+
+/// Everything the audit can settle from the text itself — counts, markers,
+/// scripts, glossary locks. The judgement-shaped checks are excluded so a caller
+/// with System One available can decide those instead; see [`semantic_findings`].
+pub fn audit_translation_mechanical(
     target_language: TargetLanguage,
     source_jp: &str,
     translated_text: &str,
@@ -219,26 +236,11 @@ pub fn audit_translation_for_language(
         ));
     }
 
-    if target_language == TargetLanguage::Thai
-        && let Some(gloss) = translated_parenthetical_gloss(translated)
-    {
-        findings.push(format!(
-            "remove reading/original gloss `{gloss}` from translated_text; choose the natural Thai wording only unless the original sound/spelling is plot-critical"
-        ));
-    }
-
     if let Some(residue) = hard_japanese_punctuation_residue(translated) {
         findings.push(format!(
             "replace Japanese punctuation/brackets `{residue}` in translated_text with natural {} punctuation, unless the source explicitly requires visible Japanese story text",
             target_language.label()
         ));
-    }
-
-    if target_language == TargetLanguage::Thai && contains_forbidden_thai_self_pronoun(translated) {
-        findings.push(
-            "translated_text uses forbidden Thai self-pronoun `กู`; replace it with `ฉัน` or another non-vulgar form that fits the speaker, even when SOURCE_JP uses `俺` or older reference text suggests `กู`"
-                .to_string(),
-        );
     }
 
     compare_count(
@@ -330,7 +332,25 @@ pub fn advisory_findings(source_jp: &str, translated: &str) -> Vec<String> {
     advisory_findings_for_language(TargetLanguage::Thai, source_jp, translated)
 }
 
+#[cfg(test)]
 pub fn advisory_findings_for_language(
+    target_language: TargetLanguage,
+    source_jp: &str,
+    translated_text: &str,
+) -> Vec<String> {
+    let mut findings =
+        advisory_findings_mechanical(target_language, source_jp, translated_text);
+    findings.extend(heuristic_semantic_messages(
+        target_language,
+        translated_text.trim(),
+        true,
+    ));
+    findings
+}
+
+/// The advisory tier minus its judgement-shaped checks; see
+/// [`audit_translation_mechanical`].
+pub fn advisory_findings_mechanical(
     target_language: TargetLanguage,
     source_jp: &str,
     translated_text: &str,
@@ -340,14 +360,6 @@ pub fn advisory_findings_for_language(
     let mut findings = Vec::new();
     if translated.is_empty() {
         return findings;
-    }
-
-    if target_language == TargetLanguage::Thai
-        && let Some((particle, preferred)) = discouraged_casual_particle(translated)
-    {
-        findings.push(format!(
-            "discouraged casual Thai particle `{particle}` appears; prefer `{preferred}` unless this rare roughness is important to SOURCE_JP or an established character voice"
-        ));
     }
 
     if let Some(residue) = japanese_punctuation_residue(translated) {
@@ -424,13 +436,31 @@ pub fn advisory_findings_with_references(
     )
 }
 
+#[cfg(test)]
 pub fn advisory_findings_with_references_for_language(
     target_language: TargetLanguage,
     source_jp: &str,
     translated: &str,
     characters: &[Character],
 ) -> Vec<String> {
-    let mut findings = advisory_findings_for_language(target_language, source_jp, translated);
+    advisory_findings_with_references_mechanical(
+        target_language,
+        source_jp,
+        translated,
+        characters,
+        advisory_findings_for_language(target_language, source_jp, translated),
+    )
+}
+
+/// As above, but starting from a caller-supplied advisory base — the hook the
+/// pipeline uses to substitute judged semantic findings for heuristic ones.
+pub fn advisory_findings_with_references_mechanical(
+    target_language: TargetLanguage,
+    source_jp: &str,
+    translated: &str,
+    characters: &[Character],
+    mut findings: Vec<String>,
+) -> Vec<String> {
     if translated.trim().is_empty() {
         return findings;
     }
@@ -474,12 +504,6 @@ fn character_is_female(character: &Character) -> bool {
         let gender = gender.trim();
         gender.eq_ignore_ascii_case("female") || gender == "หญิง"
     })
-}
-
-fn discouraged_casual_particle(text: &str) -> Option<(&'static str, &'static str)> {
-    DISCOURAGED_CASUAL_PARTICLES
-        .into_iter()
-        .find(|(particle, _)| contains_discouraged_particle(text, particle))
 }
 
 fn japanese_punctuation_residue(text: &str) -> Option<String> {
@@ -605,24 +629,14 @@ fn audit_character_surface(
     ));
 }
 
-fn contains_discouraged_particle(text: &str, particle: &str) -> bool {
-    let mut start = 0usize;
-    while let Some(rel) = text[start..].find(particle) {
-        let idx = start + rel;
-        let end = idx + particle.len();
-        let embedded_name_syllable =
-            matches!(particle, "วะ" | "ว่ะ") && previous_char(text, idx).is_some_and(is_thai_mark);
-        let embedded_masked_name =
-            matches!(particle, "วะ" | "ว่ะ") && previous_char(text, idx).is_some_and(is_mask_char);
-        if !embedded_name_syllable
-            && !embedded_masked_name
-            && has_particle_boundary_after(text, end)
-        {
-            return true;
-        }
-        start = end;
-    }
-    false
+/// Whether the occurrence at `idx..end` is framed like a sentence-final
+/// particle rather than a syllable inside a word or a masked name.
+fn particle_is_discouraged_at(text: &str, idx: usize, end: usize, particle: &str) -> bool {
+    let embedded_name_syllable =
+        matches!(particle, "วะ" | "ว่ะ") && previous_char(text, idx).is_some_and(is_thai_mark);
+    let embedded_masked_name =
+        matches!(particle, "วะ" | "ว่ะ") && previous_char(text, idx).is_some_and(is_mask_char);
+    !embedded_name_syllable && !embedded_masked_name && has_particle_boundary_after(text, end)
 }
 
 fn has_particle_boundary_after(text: &str, end: usize) -> bool {
@@ -838,7 +852,171 @@ fn is_japanese_parenthetical_punct(ch: char) -> bool {
     )
 }
 
-fn translated_parenthetical_gloss(translated: &str) -> Option<String> {
+/// The audit checks whose verdict is a judgement about meaning rather than a
+/// mechanical property of the text. Each is found by an over-inclusive scan in
+/// code and then decided — by System One when it is on (`agents::audit_judge`),
+/// otherwise by the hand-tuned predicate that has always decided it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SemanticCheck {
+    /// A parenthetical repeating a name/term in another script or spelling
+    /// rather than adding meaning.
+    Gloss,
+    /// `กู` as the vulgar first-person pronoun rather than part of a word.
+    SelfPronoun,
+    /// `วะ`/`ว่ะ` as a sentence-final casual particle rather than a syllable.
+    CasualParticle,
+}
+
+/// Most candidates are decided the same way every time; a chunk carrying more
+/// than this is pathological, and the cap bounds the request either way.
+const MAX_SEMANTIC_CANDIDATES: usize = 12;
+/// Characters of surrounding text handed to the judge with each candidate. The
+/// frame is what decides `กู`, so a bare span would not be answerable.
+const CANDIDATE_CONTEXT_CHARS: usize = 60;
+
+/// One span the scan found, with everything needed to decide it either way.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SemanticCandidate {
+    pub check: SemanticCheck,
+    /// The exact text found, quoted back in the finding.
+    pub span: String,
+    /// Surrounding text; for `SelfPronoun` and `CasualParticle` the frame *is*
+    /// the evidence.
+    pub context: String,
+    /// What the hand-tuned predicate says. Used verbatim whenever the judgement
+    /// is off, unavailable, or too close to call.
+    pub heuristic: bool,
+}
+
+/// A decided semantic check, ready for the pipeline to file.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SemanticFinding {
+    /// Advisory findings go to the Reviewer as context; the rest force a retry.
+    pub advisory: bool,
+    pub message: String,
+}
+
+impl SemanticCheck {
+    fn advisory(self) -> bool {
+        matches!(self, SemanticCheck::CasualParticle)
+    }
+
+}
+
+impl SemanticCandidate {
+    fn finding(&self) -> SemanticFinding {
+        let span = &self.span;
+        SemanticFinding {
+            advisory: self.check.advisory(),
+            message: match self.check {
+                SemanticCheck::Gloss => format!(
+                    "remove reading/original gloss `{span}` from translated_text; choose the natural Thai wording only unless the original sound/spelling is plot-critical"
+                ),
+                SemanticCheck::SelfPronoun => {
+                    "translated_text uses forbidden Thai self-pronoun `กู`; replace it with `ฉัน` or another non-vulgar form that fits the speaker, even when SOURCE_JP uses `俺` or older reference text suggests `กู`".to_string()
+                }
+                SemanticCheck::CasualParticle => {
+                    let preferred = DISCOURAGED_CASUAL_PARTICLES
+                        .iter()
+                        .find(|(p, _)| *p == span)
+                        .map(|(_, preferred)| *preferred)
+                        .unwrap_or("ฟะ");
+                    format!(
+                        "discouraged casual Thai particle `{span}` appears; prefer `{preferred}` unless this rare roughness is important to SOURCE_JP or an established character voice"
+                    )
+                }
+            },
+        }
+    }
+}
+
+/// Every span a semantic check could plausibly apply to, deliberately
+/// over-found: the judgement can reject a candidate, but it can never see one
+/// the scan omitted. The narrow predicates that used to *be* the checks survive
+/// as each candidate's `heuristic` fallback.
+pub fn semantic_candidates(
+    target_language: TargetLanguage,
+    translated: &str,
+) -> Vec<SemanticCandidate> {
+    let mut out = Vec::new();
+    let text = translated.trim();
+    // All three checks are Thai-specific; English chunks never call out.
+    if text.is_empty() || target_language != TargetLanguage::Thai {
+        return out;
+    }
+    collect_gloss_candidates(text, &mut out);
+    collect_self_pronoun_candidates(text, &mut out);
+    collect_casual_particle_candidates(text, &mut out);
+    out.truncate(MAX_SEMANTIC_CANDIDATES);
+    out
+}
+
+/// Turn decided candidates into findings, at most one per check — the same
+/// volume the single-shot predicates produced.
+pub fn semantic_findings(
+    candidates: &[SemanticCandidate],
+    confirmed: impl Fn(usize, &SemanticCandidate) -> bool,
+) -> Vec<SemanticFinding> {
+    let mut seen: Vec<SemanticCheck> = Vec::new();
+    let mut out = Vec::new();
+    for (_, c) in candidates
+        .iter()
+        .enumerate()
+        .filter(|(i, c)| confirmed(*i, c))
+    {
+        if seen.contains(&c.check) {
+            continue;
+        }
+        seen.push(c.check);
+        out.push(c.finding());
+    }
+    out
+}
+
+/// The semantic tier decided the way it always was, split by tier so the
+/// mechanical audit and the advisory list each take their own.
+#[cfg(test)]
+fn heuristic_semantic_messages(
+    target_language: TargetLanguage,
+    translated: &str,
+    advisory: bool,
+) -> Vec<String> {
+    let candidates = semantic_candidates(target_language, translated);
+    semantic_findings(&candidates, |_, c| c.heuristic)
+        .into_iter()
+        .filter(|f| f.advisory == advisory)
+        .map(|f| f.message)
+        .collect()
+}
+
+fn context_around(text: &str, start: usize, end: usize) -> String {
+    let lead = floor_char_boundary_back(text, start, CANDIDATE_CONTEXT_CHARS);
+    let trail = ceil_char_boundary_fwd(text, end, CANDIDATE_CONTEXT_CHARS);
+    text[lead..trail].trim().to_string()
+}
+
+fn floor_char_boundary_back(text: &str, from: usize, chars: usize) -> usize {
+    text[..from]
+        .char_indices()
+        .rev()
+        .take(chars)
+        .last()
+        .map(|(i, _)| i)
+        .unwrap_or(from)
+}
+
+fn ceil_char_boundary_fwd(text: &str, from: usize, chars: usize) -> usize {
+    text[from..]
+        .char_indices()
+        .take(chars + 1)
+        .last()
+        .map(|(i, _)| from + i)
+        .unwrap_or(text.len())
+}
+
+/// Every Thai-preceded parenthetical short enough to be a gloss. The word lists
+/// that used to gate this become the `heuristic` verdict only.
+fn collect_gloss_candidates(translated: &str, out: &mut Vec<SemanticCandidate>) {
     let mut iter = translated.char_indices().peekable();
     while let Some((open_idx, open)) = iter.next() {
         if !matches!(open, '(' | '（') || !has_preceding_thai(translated, open_idx) {
@@ -861,11 +1039,69 @@ fn translated_parenthetical_gloss(translated: &str) -> Option<String> {
             continue;
         };
         let content = translated[content_start..end].trim();
-        if is_latin_original_parenthetical(content) || is_thai_phonetic_parenthetical(content) {
-            return Some(format!("{open}{content}{close}"));
+        if !is_gloss_shaped(content) {
+            continue;
+        }
+        out.push(SemanticCandidate {
+            check: SemanticCheck::Gloss,
+            span: format!("{open}{content}{close}"),
+            context: context_around(translated, open_idx, end + close.len_utf8()),
+            heuristic: is_latin_original_parenthetical(content)
+                || is_thai_phonetic_parenthetical(content),
+        });
+    }
+}
+
+/// Short enough and written in one script — the shape a gloss takes, before any
+/// judgement about what it means.
+fn is_gloss_shaped(content: &str) -> bool {
+    if content.is_empty() || content.chars().count() > 64 {
+        return false;
+    }
+    let all_latin = content
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, ' ' | '-' | '\'' | '&' | '.' | '/'))
+        && content.chars().any(|ch| ch.is_ascii_alphabetic());
+    let all_thai = content
+        .chars()
+        .all(|ch| is_thai_char(ch) || matches!(ch, 'ๆ' | 'ฯ' | '์'))
+        && (2..=24).contains(&content.chars().count());
+    all_latin || all_thai
+}
+
+/// Every `กู`, with the frame that decides it.
+fn collect_self_pronoun_candidates(translated: &str, out: &mut Vec<SemanticCandidate>) {
+    let needle = FORBIDDEN_THAI_SELF_PRONOUN;
+    let mut search_from = 0usize;
+    while let Some(rel) = translated[search_from..].find(needle) {
+        let idx = search_from + rel;
+        let end = idx + needle.len();
+        out.push(SemanticCandidate {
+            check: SemanticCheck::SelfPronoun,
+            span: needle.to_string(),
+            context: context_around(translated, idx, end),
+            heuristic: is_koo_pronoun_frame(&translated[..idx], &translated[end..]),
+        });
+        search_from = end;
+    }
+}
+
+/// Every `วะ`/`ว่ะ`, with the frame that decides it.
+fn collect_casual_particle_candidates(translated: &str, out: &mut Vec<SemanticCandidate>) {
+    for (particle, _) in DISCOURAGED_CASUAL_PARTICLES {
+        let mut search_from = 0usize;
+        while let Some(rel) = translated[search_from..].find(particle) {
+            let idx = search_from + rel;
+            let end = idx + particle.len();
+            out.push(SemanticCandidate {
+                check: SemanticCheck::CasualParticle,
+                span: particle.to_string(),
+                context: context_around(translated, idx, end),
+                heuristic: particle_is_discouraged_at(translated, idx, end, particle),
+            });
+            search_from = end;
         }
     }
-    None
 }
 
 fn has_preceding_thai(text: &str, open_idx: usize) -> bool {
@@ -2223,5 +2459,110 @@ mod tests {
         let cleaned =
             strip_copied_continuity_for_language(TargetLanguage::English, &previous, &raw);
         assert_eq!(cleaned, "He opened the door.");
+    }
+
+    /// Splitting the audit into a mechanical tier plus a decided semantic tier
+    /// must not change what the audit reports when nothing decides the second
+    /// one — the path every run without System One still takes.
+    #[test]
+    fn mechanical_plus_heuristic_semantic_equals_the_original_audit() {
+        let cases = [
+            ("俺が行く。", "กูจะไปเอง"),
+            ("彼はマーケティングの達人だ。", "เขาเป็นกูรูด้านการตลาด"),
+            ("お嬢様は微笑んだ。", "ยัยคุณหนู (โอโจซามะ) ยิ้มให้"),
+            ("陽菜が笑った。", "ฮินะ (Hina) หัวเราะ"),
+            ("うるさいな。", "เสียงดังชะมัดว่ะ"),
+            ("猫が窓辺で眠っている。", "แมวกำลังนอนอยู่ริมหน้าต่าง"),
+        ];
+        for (source, translated) in cases {
+            let mut split = audit_translation_mechanical(
+                TargetLanguage::Thai,
+                source,
+                translated,
+                &[],
+                &[],
+            );
+            let candidates = semantic_candidates(TargetLanguage::Thai, translated);
+            split.extend(
+                semantic_findings(&candidates, |_, c| c.heuristic)
+                    .into_iter()
+                    .filter(|f| !f.advisory)
+                    .map(|f| f.message),
+            );
+            assert_eq!(
+                split,
+                audit_translation_for_language(TargetLanguage::Thai, source, translated, &[], &[]),
+                "gating tier drifted for {translated:?}"
+            );
+
+            let mut split_advisory =
+                advisory_findings_mechanical(TargetLanguage::Thai, source, translated);
+            split_advisory.extend(
+                semantic_findings(&candidates, |_, c| c.heuristic)
+                    .into_iter()
+                    .filter(|f| f.advisory)
+                    .map(|f| f.message),
+            );
+            assert_eq!(
+                split_advisory,
+                advisory_findings_for_language(TargetLanguage::Thai, source, translated),
+                "advisory tier drifted for {translated:?}"
+            );
+        }
+    }
+
+    /// The scan must be strictly wider than the predicates: a judgement can
+    /// reject a candidate, but it can never see one the scan omitted.
+    #[test]
+    fn the_scan_over_finds_what_the_predicates_would_reject() {
+        // A transliteration built from syllables the word list never learned.
+        let unlisted = semantic_candidates(TargetLanguage::Thai, "ยัยคุณหนู (โอโจซามะ) ยิ้มให้");
+        assert_eq!(unlisted.len(), 1);
+        assert_eq!(unlisted[0].check, SemanticCheck::Gloss);
+        assert!(
+            !unlisted[0].heuristic,
+            "the hand-tuned predicate misses this, which is the point of finding it anyway"
+        );
+
+        // A loanword the suffix list already spares stays a candidate too.
+        let loanword = semantic_candidates(TargetLanguage::Thai, "เขาเป็นกูรูด้านการตลาด");
+        assert_eq!(loanword.len(), 1);
+        assert_eq!(loanword[0].check, SemanticCheck::SelfPronoun);
+        assert!(!loanword[0].heuristic);
+
+        // A real pronoun the prefix list misses: `ว่า` is not a listed host, so
+        // `กู` here reads as mid-token and no suffix is even consulted. Context
+        // has to carry that frame or the judgement would be unanswerable too.
+        let framed = semantic_candidates(TargetLanguage::Thai, "เขาบอกว่ากูจะไปเอง");
+        assert_eq!(framed.len(), 1);
+        assert!(framed[0].context.contains("ว่ากูจะ"));
+        assert!(
+            !framed[0].heuristic,
+            "the prefix/suffix lists miss this one, which is why the span is offered anyway"
+        );
+
+        // One the lists do settle, to show the fallback still carries its weight.
+        let listed = semantic_candidates(TargetLanguage::Thai, "กูจะไปเอง");
+        assert!(listed[0].heuristic);
+    }
+
+    #[test]
+    fn english_chunks_raise_no_thai_candidates() {
+        assert!(
+            semantic_candidates(TargetLanguage::English, "He said (Hina) quietly.").is_empty(),
+            "all three checks are Thai-specific, so English must never call out"
+        );
+    }
+
+    #[test]
+    fn at_most_one_finding_per_check() {
+        let text = "กูจะไป กูไม่รู้ กูเอง";
+        let candidates = semantic_candidates(TargetLanguage::Thai, text);
+        assert!(candidates.len() >= 3, "every occurrence is a candidate");
+        assert_eq!(
+            semantic_findings(&candidates, |_, _| true).len(),
+            1,
+            "findings stay at the volume the single-shot predicates produced"
+        );
     }
 }
