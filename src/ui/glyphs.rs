@@ -176,6 +176,25 @@ pub const TOGGLE_OFF: Glyph = Glyph::new("○", "o", 1);
 /// Ellipsis, when content is trimmed.
 pub const ELLIPSIS: Glyph = Glyph::new("…", ".", 1);
 
+/// Left-aligned partial blocks, 1/8 through 8/8 of a cell. A progress bar built
+/// from these resolves eight times finer than one built from whole cells, which
+/// on a 30-column bar is the difference between 3% and 0.4% granularity.
+pub const EIGHTHS: [Glyph; 8] = [
+    Glyph::new("\u{258F}", ".", 1),
+    Glyph::new("\u{258E}", ".", 1),
+    Glyph::new("\u{258D}", ":", 1),
+    Glyph::new("\u{258C}", ":", 1),
+    Glyph::new("\u{258B}", "=", 1),
+    Glyph::new("\u{258A}", "=", 1),
+    Glyph::new("\u{2589}", "#", 1),
+    Glyph::new("\u{2588}", "#", 1),
+];
+
+/// A full cell, the fill for a completed portion of a bar.
+pub const BLOCK_FULL: Glyph = Glyph::new("\u{2588}", "#", 1);
+/// The unfilled remainder of a bar.
+pub const BLOCK_EMPTY: Glyph = Glyph::new("\u{2591}", "-", 1);
+
 // ---------------------------------------------------------------------------
 // Agents
 // ---------------------------------------------------------------------------
@@ -281,10 +300,13 @@ mod tests {
             ("TOGGLE_ON", TOGGLE_ON),
             ("TOGGLE_OFF", TOGGLE_OFF),
             ("ELLIPSIS", ELLIPSIS),
+            ("BLOCK_FULL", BLOCK_FULL),
+            ("BLOCK_EMPTY", BLOCK_EMPTY),
             ("BADGE_ORCHESTRATOR", BADGE_ORCHESTRATOR),
             ("BADGE_TRANSLATOR", BADGE_TRANSLATOR),
             ("BADGE_REVIEWER", BADGE_REVIEWER),
         ];
+        v.extend(EIGHTHS.iter().map(|g| ("EIGHTHS", *g)));
         for (name, set) in [
             ("SPINNER", &SPINNER[..]),
             ("SPINNER_ORCHESTRATOR", &SPINNER_ORCHESTRATOR[..]),

@@ -14,12 +14,15 @@
 // the surface are legitimately unused between those steps. This allow comes off
 // once the last screen is ported — it must not outlive the redesign.
 #![allow(dead_code, unused_imports)]
+pub mod badge;
 pub mod button;
 pub mod ctx;
 pub mod focus;
 pub mod list;
 pub mod modal;
+pub mod progress;
 pub mod style;
+pub mod tabs;
 pub mod tokens;
 pub mod zones;
 
