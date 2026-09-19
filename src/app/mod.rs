@@ -2409,7 +2409,7 @@ impl App {
                 self.shelf
                     .handle_mouse(m, zone, &self.projects, self.cfg.preferred_language)
             }
-            Screen::Project => self.project.handle_mouse(m, self.active.as_ref()),
+            Screen::Project => self.project.handle_mouse(m, zone, self.active.as_ref()),
             Screen::Translate => self.translate.handle_mouse(m),
             Screen::Reader => self.reader.handle_mouse(m),
             Screen::Lexicon => {

@@ -7,11 +7,11 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Block, Borders, ListState, Paragraph};
 
 use crate::model::{Chapter, ChapterKind, ChapterStatus, Project, UsageStats, Volume};
 use crate::theme::{self, Theme, status_glyph};
-use crate::ui::mouse::{MouseGesture, MouseInput, row_index};
+use crate::ui::mouse::{MouseGesture, MouseInput};
 use crate::ui::text::{col_width, pad_to_cols, thai_display_safe, truncate_cols};
 use crate::ui::widgets::{render_line_gauge, status_cell};
 
@@ -325,7 +325,12 @@ impl ProjectScreen {
     /// cursor, like the keyboard does); a click selects a row; a double-click (or a
     /// click on the selected row) opens a chapter or toggles a volume's collapse.
     /// Clicking the right column focuses it (so `h` steps back to the tree).
-    pub fn handle_mouse(&mut self, m: MouseInput, active: Option<&ActiveProject>) -> Action {
+    pub fn handle_mouse(
+        &mut self,
+        m: MouseInput,
+        zone: Option<crate::ui::kit::ZoneId>,
+        active: Option<&ActiveProject>,
+    ) -> Action {
         let Some(active) = active else {
             return Action::None;
         };
@@ -347,7 +352,10 @@ impl ProjectScreen {
                 }
                 self.focus_panel = 0;
                 let rows = self.rows(active);
-                let Some(idx) = row_index(self.tree_area, self.tree.offset(), rows.len(), m.row)
+                // The clicked row comes from the registry the tree wrote while
+                // drawing, rather than being worked back out of the pointer's
+                // row and the scroll offset.
+                let Some(idx) = zone.and_then(|z| z.row_index()).filter(|i| *i < rows.len())
                 else {
                     return Action::None;
                 };
@@ -434,10 +442,9 @@ impl ProjectScreen {
         area: Rect,
         active: Option<&ActiveProject>,
     ) {
-        let theme: &Theme = ui.theme;
-        let f: &mut Frame = ui.frame;
         let Some(active) = active else {
-            empty_state(f, area, theme);
+            let theme: &Theme = ui.theme;
+            empty_state(ui.frame, area, theme);
             return;
         };
 
@@ -447,15 +454,20 @@ impl ProjectScreen {
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(2), Constraint::Min(0)])
             .split(area);
-        self.render_dashboard(f, panes[0], active, theme);
-
         let cols = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
             .split(panes[1]);
-
         self.side_area = cols[1];
-        self.render_tree(f, cols[0], active, theme);
+
+        // The tree draws through the kit; the dashboard and side panel are
+        // still on the old path and take the frame back out afterwards. The
+        // three regions do not overlap, so the order is free.
+        self.render_tree(ui, cols[0], active);
+
+        let theme: &Theme = ui.theme;
+        let f: &mut Frame = ui.frame;
+        self.render_dashboard(f, panes[0], active, theme);
         self.render_side(f, cols[1], active, theme);
     }
 
@@ -541,20 +553,24 @@ impl ProjectScreen {
         render_line_gauge(f, rows[1], ratio, &label, theme);
     }
 
-    fn render_tree(&mut self, f: &mut Frame, area: Rect, active: &ActiveProject, theme: &Theme) {
+    fn render_tree(
+        &mut self,
+        ui: &mut crate::ui::kit::Ui,
+        area: Rect,
+        active: &ActiveProject,
+    ) {
+        use crate::ui::kit::ZoneKind;
+        use crate::ui::kit::card::Card;
+        use crate::ui::kit::list::{self, ListState, Row as KitRow};
+
         let focused = self.focus_panel == 0;
-        let border_color = if focused { theme.accent } else { theme.rule };
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_set(theme::hairline_set())
-            .border_style(Style::default().fg(border_color))
-            .title(Span::styled(
-                " Chapters ",
-                Style::default().fg(theme.ink_soft),
-            ))
-            .style(Style::default().bg(theme.bg_panel));
-        let inner = block.inner(area);
-        f.render_widget(block, area);
+        let inner = Card::new(" Chapters ")
+            .accent(if focused {
+                ui.theme.border_focus
+            } else {
+                ui.theme.rule
+            })
+            .render(ui, area);
         self.tree_area = inner;
 
         let rows = self.rows(active);
@@ -562,33 +578,46 @@ impl ProjectScreen {
         if self.tree.selected().is_none_or(|s| s >= n) {
             self.tree.select(Some(n.saturating_sub(1)));
         }
-        let sel = self.tree.selected().unwrap_or(0);
-        let name_w = inner.width.saturating_sub(40).max(12) as usize;
 
-        let mut items = Vec::new();
-        for (i, row) in rows.iter().enumerate() {
-            items.push(match row {
+        // Built before the list borrows `ui`.
+        let name_w = inner.width.saturating_sub(40).max(12) as usize;
+        let lines: Vec<Line<'static>> = rows
+            .iter()
+            .map(|row| match row {
                 Row::Volume(v) => volume_row(
                     v,
                     self.collapsed.contains(&v.number),
-                    i == sel,
                     inner.width,
-                    theme,
+                    ui.theme,
                 ),
                 Row::Chapter { vol, ch } => chapter_row(
                     ch,
-                    i == sel,
                     self.selected.contains(&(*vol, ch.number)),
                     name_w,
-                    theme,
+                    ui.theme,
                 ),
-            });
-        }
+            })
+            .collect();
 
-        let list = List::new(items).style(Style::default().bg(theme.bg_panel));
-        f.render_stateful_widget(list, inner, &mut self.tree);
-        // The stateful render just updated the offset to keep the selection visible.
-        crate::ui::widgets::render_panel_scrollbar(f, area, n, self.tree.offset(), theme);
+        let mut state = ListState::new();
+        state.select(self.tree.selected());
+        list::render(
+            ui,
+            inner,
+            &mut state,
+            n,
+            list::Opts {
+                rail: true,
+                scrollbar: true,
+                kind: ZoneKind::Row,
+                id_base: 0,
+            },
+            |i| KitRow::new(lines[i].clone()),
+        );
+        // Keep the screen's own offset in step with what was drawn, since the
+        // keyboard paging still reads it.
+        self.tree.select(state.selected());
+        *self.tree.offset_mut() = state.offset();
     }
 
     /// Context + detail card heights: content-sized with a comfortable floor so the
@@ -898,68 +927,41 @@ impl Default for ProjectScreen {
     }
 }
 
-fn volume_row(
-    v: &Volume,
-    collapsed: bool,
-    selected: bool,
-    width: u16,
-    theme: &Theme,
-) -> ListItem<'static> {
+/// A volume row. Selection styling belongs to the list now, so this draws only
+/// what the row says, not what state it is in.
+fn volume_row(v: &Volume, collapsed: bool, width: u16, theme: &Theme) -> Line<'static> {
     let caret = if collapsed { "▸" } else { "▾" };
     let tally = vol_tally(v);
-    let bar = if selected {
-        theme::SELECT_BAR.to_string()
-    } else {
-        " ".to_string()
-    };
-    let row_bg = if selected {
-        theme.accent_bg
-    } else {
-        theme.bg_panel
-    };
     let label = match &v.label {
         Some(l) => format!("Vol.{:02} {}", v.number, thai_display_safe(l)),
         None => format!("Vol.{:02}", v.number),
     };
     let tally_str = format!("●{} ◐{} ○{} ✗{}", tally.0, tally.1, tally.2, tally.3);
-    let used = col_width(&format!(" {bar} {caret} {label}  ")) + col_width(&tally_str);
-    let fill = (width as usize).saturating_sub(used + 2);
+    let used = col_width(&format!("{caret} {label}  ")) + col_width(&tally_str);
+    let fill = (width as usize).saturating_sub(used + 3);
     let dots = "┄".repeat(fill.min(width as usize));
 
-    ListItem::new(Line::from(vec![
-        Span::styled(
-            format!(" {bar} "),
-            Style::default().fg(theme.accent).bg(row_bg),
-        ),
+    Line::from(vec![
         Span::styled(
             format!("{caret} {label} "),
-            Style::default()
-                .fg(theme.ink)
-                .bg(row_bg)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
         ),
-        Span::styled(dots, Style::default().fg(theme.rule).bg(row_bg)),
+        Span::styled(dots, Style::default().fg(theme.rule)),
         Span::styled(
             format!("  {tally_str}"),
-            Style::default().fg(theme.ink_soft).bg(row_bg),
+            Style::default().fg(theme.ink_soft),
         ),
-    ]))
+    ])
 }
 
-fn chapter_row(
-    ch: &Chapter,
-    selected: bool,
-    marked: bool,
-    name_w: usize,
-    theme: &Theme,
-) -> ListItem<'static> {
+/// A chapter row. The mark is the multi-select state, which is the row's own
+/// data; selection and focus styling belong to the list.
+fn chapter_row(ch: &Chapter, marked: bool, name_w: usize, theme: &Theme) -> Line<'static> {
     let cell = status_cell(ch.kind, ch.status, theme);
-    let bar = if selected { theme::SELECT_BAR } else { ' ' };
-    let mark = if marked { '◆' } else { ' ' };
-    let row_bg = if selected {
-        theme.accent_bg
+    let mark = if marked {
+        crate::ui::glyphs::CHECKBOX_ON
     } else {
-        theme.bg_panel
+        crate::ui::glyphs::CHECKBOX_OFF
     };
     let name = pad_to_cols(
         &truncate_cols(&thai_display_safe(&ch.title), name_w),
@@ -975,32 +977,29 @@ fn chapter_row(
         .map(|t| t.format("%H:%M").to_string())
         .unwrap_or_default();
 
-    ListItem::new(Line::from(vec![
+    Line::from(vec![
         Span::styled(
-            format!(" {bar}"),
-            Style::default().fg(theme.accent).bg(row_bg),
+            mark.as_str().to_string(),
+            Style::default().fg(if marked {
+                theme.accent
+            } else {
+                theme.ink_faint
+            }),
         ),
-        Span::styled(
-            mark.to_string(),
-            Style::default().fg(theme.accent).bg(row_bg),
-        ),
-        // status_cell already carries its own fg color; layer the row bg under it.
-        cell.patch_style(Style::default().bg(row_bg)),
+        Span::raw(" "),
+        cell,
         Span::styled(
             format!(" {:03}  ", ch.number),
-            Style::default().fg(theme.ink_faint).bg(row_bg),
+            Style::default().fg(theme.ink_faint),
         ),
-        Span::styled(name, Style::default().fg(theme.ink).bg(row_bg)),
+        Span::styled(name, Style::default().fg(theme.ink)),
         Span::styled(
             format!("{:>5} 句 ", ch.source_segments),
-            Style::default().fg(theme.ink_faint).bg(row_bg),
+            Style::default().fg(theme.ink_faint),
         ),
-        Span::styled(
-            pad_to_cols(status, 10),
-            Style::default().fg(theme.ink_soft).bg(row_bg),
-        ),
-        Span::styled(time, Style::default().fg(theme.ink_faint).bg(row_bg)),
-    ]))
+        Span::styled(pad_to_cols(status, 10), Style::default().fg(theme.ink_soft)),
+        Span::styled(time, Style::default().fg(theme.ink_faint)),
+    ])
 }
 
 fn empty_state(f: &mut Frame, area: Rect, theme: &Theme) {
@@ -1443,18 +1442,23 @@ mod tests {
 
         let active = active_project(); // Vol.01 with chapters 1 & 2
         let mut screen = ProjectScreen::new();
-        crate::ui::kit::ctx::draw_test(100, 30, |ui, area| {
+        let (_, zones) = crate::ui::kit::ctx::draw_test(100, 30, |ui, area| {
             screen.render(ui, area, Some(&active))
         });
-        let ta = screen.tree_area;
+        // Rows: 0 = Vol header, 1 = ch 1, 2 = ch 2. Ask the registry where
+        // row 1 landed rather than deriving it from the tree area again.
+        let rect = zones
+            .rect_of(crate::ui::kit::ZoneId::row(1))
+            .expect("chapter row");
+        let (cx, cy) = (rect.x + 4, rect.y);
+        let zone = zones.at(cx, cy);
 
-        // Rows: 0 = Vol header, 1 = ch 1, 2 = ch 2. Click ch 1.
-        let a = screen.handle_mouse(click(false, ta.x + 4, ta.y + 1), Some(&active));
+        let a = screen.handle_mouse(click(false, cx, cy), zone, Some(&active));
         assert!(matches!(a, Action::None));
         assert_eq!(screen.tree.selected(), Some(1));
 
         // Clicking the selected chapter row opens it.
-        match screen.handle_mouse(click(false, ta.x + 4, ta.y + 1), Some(&active)) {
+        match screen.handle_mouse(click(false, cx, cy), zone, Some(&active)) {
             Action::OpenChapter { chapter } => assert_eq!(chapter, 1),
             other => panic!("expected OpenChapter, got {other:?}"),
         }
@@ -1467,13 +1471,15 @@ mod tests {
 
         let active = two_vol_project(); // active.vol == 1
         let mut screen = ProjectScreen::new();
-        crate::ui::kit::ctx::draw_test(100, 30, |ui, area| {
+        let (_, zones) = crate::ui::kit::ctx::draw_test(100, 30, |ui, area| {
             screen.render(ui, area, Some(&active))
         });
-        let ta = screen.tree_area;
-
-        // Rows: 0 Vol.01, 1 ch1, 2 ch2, 3 Vol.02, 4 ch1, 5 ch2. Click into Vol.02.
-        match screen.handle_mouse(click(false, ta.x + 4, ta.y + 3), Some(&active)) {
+        // Rows: 0 Vol.01, 1 ch1, 2 ch2, 3 Vol.02, 4 ch1, 5 ch2.
+        let rect = zones
+            .rect_of(crate::ui::kit::ZoneId::row(3))
+            .expect("second volume header");
+        let (cx, cy) = (rect.x + 4, rect.y);
+        match screen.handle_mouse(click(false, cx, cy), zones.at(cx, cy), Some(&active)) {
             Action::SetActiveVolume { vol } => assert_eq!(vol, 2),
             other => panic!("expected SetActiveVolume, got {other:?}"),
         }
