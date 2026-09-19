@@ -22,7 +22,7 @@ use crate::ui::mouse::{MouseGesture, MouseInput};
 use crate::ui::text::{col_width, pad_to_cols, truncate_cols, truncate_tail_cols};
 use crate::ui::widgets::render_line_gauge;
 
-use super::action_table::Act;
+use super::action_table::{self, Act};
 use super::{Action, Screen};
 
 #[derive(Clone)]
@@ -91,6 +91,18 @@ pub struct TranslateScreen {
     /// tail, so each streamed append rebuilds but a steady pane reuses the lines.
     preview_cache: crate::ui::markdown::RenderCache,
 }
+
+/// Action ids for this screen's table. Stable within the screen: they are also
+/// the zone index every one of its controls registers under.
+const T_PAUSE: u16 = 0;
+const T_STOP: u16 = 1;
+const T_FOLLOW: u16 = 2;
+const T_AGENT: u16 = 3;
+const T_MOVE_UP: u16 = 4;
+const T_MOVE_DOWN: u16 = 5;
+const T_REMOVE: u16 = 6;
+const T_SORT: u16 = 7;
+const T_OPEN: u16 = 8;
 
 impl TranslateScreen {
     pub fn new() -> Self {
@@ -479,80 +491,20 @@ impl TranslateScreen {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Action {
+        // Commands come from the table; panel focus, scrolling and the queue
+        // cursor are navigation and stay here.
+        let acts = self.actions();
+        match action_table::hit(&acts, &key) {
+            action_table::KeyHit::Run(id) => return self.run(id).unwrap_or(Action::None),
+            action_table::KeyHit::Blocked => return Action::None,
+            action_table::KeyHit::Miss => {}
+        }
         match key.code {
-            KeyCode::Char('p') => Action::PauseRun,
-            KeyCode::Char('s') => Action::show_overlay(super::overlay::Overlay::confirm(
-                "Stop the run?",
-                "The current chunk finishes, then the pipeline halts.".to_string(),
-                Action::StopRun,
-            )),
-            KeyCode::Char('f') => {
-                self.follow = !self.follow;
-                // Leaving follow-mode: resolve the tail sentinel to a real offset.
-                if !self.follow && self.scroll == u16::MAX {
-                    self.scroll = self.last_bottom;
-                }
-                Action::None
-            }
-            KeyCode::Char('c') => {
-                self.active_agent = (self.active_agent + 1) % 3;
-                Action::None
-            }
             KeyCode::Char('g') => {
                 if self.pending_count() > 0 {
                     self.queue_focused = !self.queue_focused;
                 }
                 Action::None
-            }
-            KeyCode::Char('J') => {
-                let pc = self.pending_count();
-                if pc == 0 {
-                    return Action::None;
-                }
-                self.queue_focused = true;
-                let i = self.queue_sel.min(pc - 1);
-                match (i + 1 < pc, self.pending_identity(i)) {
-                    (true, Some((vol, ch))) => {
-                        self.queue_sel = i + 1; // follow the moved item
-                        Action::QueueMoveDown { vol, ch }
-                    }
-                    _ => Action::None,
-                }
-            }
-            KeyCode::Char('K') => {
-                let pc = self.pending_count();
-                if pc == 0 {
-                    return Action::None;
-                }
-                self.queue_focused = true;
-                let i = self.queue_sel.min(pc - 1);
-                match (i > 0, self.pending_identity(i)) {
-                    (true, Some((vol, ch))) => {
-                        self.queue_sel = i - 1;
-                        Action::QueueMoveUp { vol, ch }
-                    }
-                    _ => Action::None,
-                }
-            }
-            KeyCode::Char('S') => {
-                if self.pending_count() == 0 {
-                    return Action::None;
-                }
-                self.queue_focused = true;
-                self.queue_sel = 0;
-                Action::SortQueue
-            }
-            KeyCode::Char('x') => {
-                let pc = self.pending_count();
-                if pc == 0 {
-                    return Action::None;
-                }
-                self.queue_focused = true;
-                let i = self.queue_sel.min(pc - 1);
-                match self.pending_identity(i) {
-                    Some((vol, ch)) => Action::DequeueChapter { vol, ch },
-                    None => Action::None,
-                }
             }
             KeyCode::Esc if self.queue_focused => {
                 self.queue_focused = false;
@@ -570,30 +522,131 @@ impl TranslateScreen {
                 Action::None
             }
             KeyCode::Char('j') | KeyCode::Down => {
-                self.follow = false;
-                if self.scroll == u16::MAX {
-                    self.scroll = self.last_bottom;
-                }
-                self.scroll = self.scroll.saturating_add(1);
+                self.scroll_preview(1);
                 Action::None
             }
             KeyCode::Char('k') | KeyCode::Up => {
-                self.follow = false;
-                if self.scroll == u16::MAX {
-                    self.scroll = self.last_bottom;
-                }
-                self.scroll = self.scroll.saturating_sub(1);
+                self.scroll_preview(-1);
                 Action::None
-            }
-            KeyCode::Enter => {
-                if let Some(ch) = self.current_chapter {
-                    Action::OpenChapter { chapter: ch }
-                } else {
-                    Action::Goto(Screen::Reader)
-                }
             }
             _ => Action::None,
         }
+    }
+
+    /// This screen's commands, availability resolved for this frame.
+    ///
+    /// The one declaration everything else reads: `handle_key` dispatches from
+    /// it, the band under the pipeline draws it as a toolbar, the queue's
+    /// selected row draws its own verbs, and help prints it. See
+    /// [`super::action_table`].
+    pub fn actions(&self) -> Vec<Act> {
+        use action_table::Accel;
+
+        let pc = self.pending_count();
+        let i = self.queue_sel.min(pc.saturating_sub(1));
+        let agent = match self.active_agent {
+            0 => "orchestrator",
+            2 => "reviewer",
+            _ => "translator",
+        };
+        vec![
+            Act::toolbar(T_PAUSE, "pause", Accel::key('p')),
+            Act::toolbar(T_STOP, "stop", Accel::key('s')),
+            Act::toolbar(T_FOLLOW, "follow", Accel::key('f')).toggle(self.follow),
+            Act::toolbar(T_AGENT, "agent", Accel::key('c'))
+                .cycle()
+                .value(agent),
+            Act::row(T_MOVE_UP, "up", Accel::key('K'))
+                .icon("▲")
+                .when(pc > 0 && i > 0),
+            Act::row(T_MOVE_DOWN, "down", Accel::key('J'))
+                .icon("▼")
+                .when(pc > 0 && i + 1 < pc),
+            Act::row(T_REMOVE, "remove", Accel::key('x')).when(pc > 0),
+            Act::menu(T_SORT, "sort queue", Accel::key('S')).when(pc > 0),
+            Act::menu(T_OPEN, "open result", Accel::code(KeyCode::Enter)),
+        ]
+    }
+
+    /// Run the action `id` stands for, whether it was reached by key, by a
+    /// toolbar control, by a queue-row button or from the context menu.
+    ///
+    /// `None` means "no such action here" — the sentinel that makes an
+    /// advertised binding with no handler impossible to write.
+    pub fn run(&mut self, id: u16) -> Option<Action> {
+        let pc = self.pending_count();
+        Some(match id {
+            T_PAUSE => Action::PauseRun,
+            T_STOP => Action::show_overlay(super::overlay::Overlay::confirm(
+                "Stop the run?",
+                "The current chunk finishes, then the pipeline halts.".to_string(),
+                Action::StopRun,
+            )),
+            T_FOLLOW => {
+                self.follow = !self.follow;
+                // Leaving follow-mode: resolve the tail sentinel to a real offset.
+                if !self.follow && self.scroll == u16::MAX {
+                    self.scroll = self.last_bottom;
+                }
+                Action::None
+            }
+            T_AGENT => {
+                self.active_agent = (self.active_agent + 1) % 3;
+                Action::None
+            }
+            T_MOVE_DOWN => {
+                if pc == 0 {
+                    return Some(Action::None);
+                }
+                self.queue_focused = true;
+                let i = self.queue_sel.min(pc - 1);
+                match (i + 1 < pc, self.pending_identity(i)) {
+                    (true, Some((vol, ch))) => {
+                        self.queue_sel = i + 1; // follow the moved item
+                        Action::QueueMoveDown { vol, ch }
+                    }
+                    _ => Action::None,
+                }
+            }
+            T_MOVE_UP => {
+                if pc == 0 {
+                    return Some(Action::None);
+                }
+                self.queue_focused = true;
+                let i = self.queue_sel.min(pc - 1);
+                match (i > 0, self.pending_identity(i)) {
+                    (true, Some((vol, ch))) => {
+                        self.queue_sel = i - 1;
+                        Action::QueueMoveUp { vol, ch }
+                    }
+                    _ => Action::None,
+                }
+            }
+            T_REMOVE => {
+                if pc == 0 {
+                    return Some(Action::None);
+                }
+                self.queue_focused = true;
+                let i = self.queue_sel.min(pc - 1);
+                match self.pending_identity(i) {
+                    Some((vol, ch)) => Action::DequeueChapter { vol, ch },
+                    None => Action::None,
+                }
+            }
+            T_SORT => {
+                if pc == 0 {
+                    return Some(Action::None);
+                }
+                self.queue_focused = true;
+                self.queue_sel = 0;
+                Action::SortQueue
+            }
+            T_OPEN => match self.current_chapter {
+                Some(ch) => Action::OpenChapter { chapter: ch },
+                None => Action::Goto(Screen::Reader),
+            },
+            _ => return None,
+        })
     }
 
     /// Mouse: the wheel scrolls the preview (leaving follow-mode) — or, over the
@@ -652,7 +705,19 @@ impl TranslateScreen {
                 Action::None
             }
             MouseGesture::RightClick => {
-                self.queue_focused = false;
+                // On a queue row the router opens that row's menu straight
+                // after, so the selection moves to it; anywhere else
+                // right-click keeps its back-out meaning.
+                match zone.and_then(|z| z.row_index()) {
+                    Some(idx) => {
+                        self.queue_focused = true;
+                        let pc = self.pending_count();
+                        if pc > 0 {
+                            self.queue_sel = idx.min(pc - 1);
+                        }
+                    }
+                    None => self.queue_focused = false,
+                }
                 Action::None
             }
         }
@@ -690,25 +755,24 @@ impl TranslateScreen {
         area: Rect,
         service_tier: Option<ServiceTier>,
     ) {
-        // A configured tier gets a one-line speed/cost disclaimer between the
-        // pipeline header and the body, so the trade-off is visible mid-run, not
-        // only back in Settings.
-        let rows = if service_tier.is_some() {
-            Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Length(9),
-                    Constraint::Length(1),
-                    Constraint::Min(6),
-                ])
-                .split(area)
-        } else {
-            Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Length(9), Constraint::Min(6)])
-                .split(area)
-        };
-        let body = if service_tier.is_some() { rows[2] } else { rows[1] };
+        // The band under the pipeline header carries the run controls, and the
+        // tier disclaimer shares it when one is configured — the trade-off
+        // stays visible mid-run rather than only back in Settings.
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(9),
+                Constraint::Length(1),
+                Constraint::Min(6),
+            ])
+            .split(area);
+        let band = rows[1];
+        let body = rows[2];
+
+        let acts = self.actions();
+        let toolbar = crate::ui::kit::toolbar::Toolbar::new(&acts)
+            .has_menu(true)
+            .render(ui, Rect { x: band.x + 1, ..band });
 
         // Hide the queue on narrow terminals so the preview stays usable.
         let (preview_col, queue_col) = if !self.queue.is_empty() && body.width >= 56 {
@@ -728,12 +792,28 @@ impl TranslateScreen {
             self.render_queue(ui, col);
         }
 
+        // The queue's selected row carries its own verbs, over the rectangle
+        // the panel registered while drawing it.
+        if queue_col.is_some()
+            && let Some(rect) = ui.zones.rect_of(crate::ui::kit::ZoneId::row(self.queue_sel))
+        {
+            crate::ui::kit::toolbar::RowActions::new(&acts).render(ui, rect);
+        }
+
         let theme: &Theme = ui.theme;
         let frame = ui.frame_count;
         let f: &mut Frame = ui.frame;
         self.render_pipeline(f, rows[0], frame, theme);
         if let Some(tier) = service_tier {
-            self.render_tier_disclaimer(f, rows[1], tier, theme);
+            // Whatever the toolbar left, with a gap; nothing when it took the
+            // row, rather than the two writing over each other.
+            let x = band.x + 1 + toolbar.cols.saturating_add(2);
+            let rest = Rect {
+                x,
+                width: (band.x + band.width).saturating_sub(x),
+                ..band
+            };
+            self.render_tier_disclaimer(f, rest, tier, theme);
         }
         self.render_translation_body(f, preview_col, theme);
     }
@@ -1345,25 +1425,6 @@ impl TranslateScreen {
             ))
             .alignment(Alignment::Right),
         )
-    }
-
-    /// This screen's commands, availability resolved for this frame.
-    ///
-    /// The one declaration everything else reads: `handle_key` dispatches from
-    /// it, the toolbar and the context menu draw from it, and help lists it.
-    /// See [`super::action_table`].
-    pub fn actions(&self) -> Vec<Act> {
-        Vec::new()
-    }
-
-    /// Run the action `id` stands for, whether it was reached by key, by a
-    /// toolbar control, by a row button or from the menu.
-    ///
-    /// `None` means "no such action here" — the sentinel that makes an
-    /// advertised binding with no handler impossible to write.
-    pub fn run(&mut self, id: u16) -> Option<Action> {
-        let _ = id;
-        None
     }
 
     pub fn hints(&self) -> &'static [(&'static str, &'static str)] {

@@ -33,6 +33,8 @@ pub struct Layout {
     pub iconified: bool,
     /// The `⋯` control was drawn.
     pub more: bool,
+    /// Columns claimed, so a caller sharing the row knows where it may write.
+    pub cols: u16,
 }
 
 pub struct Toolbar<'a> {
@@ -84,6 +86,7 @@ impl<'a> Toolbar<'a> {
                 drawn: 0,
                 iconified: false,
                 more: false,
+                cols: 0,
             };
         }
         let row = Rect { height: 1, ..area };
@@ -137,6 +140,7 @@ impl<'a> Toolbar<'a> {
                 height: 1,
             };
             Button::new(ZoneId::action(OVERFLOW_ID), glyphs::ELLIPSIS.as_str()).render(ui, cell);
+            x += more_w + self.gap;
         } else {
             more = false;
         }
@@ -145,6 +149,7 @@ impl<'a> Toolbar<'a> {
             drawn,
             iconified,
             more,
+            cols: x.saturating_sub(row.x),
         }
     }
 }
