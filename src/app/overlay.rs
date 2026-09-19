@@ -33,6 +33,23 @@ pub const DIALOG_CANCEL: u32 = 1;
 pub const DIALOG_CONFIRM: u32 = 2;
 pub const DIALOG_ALTERNATE: u32 = 3;
 
+/// Rank `labels` against `query` with the kit's matcher, best first.
+///
+/// An empty query keeps the caller's own ordering, which for the command bar
+/// is a deliberate arrangement rather than an alphabetical accident.
+fn fuzzy_rank(query: &str, labels: &[&str]) -> Vec<usize> {
+    if query.trim().is_empty() {
+        return (0..labels.len()).collect();
+    }
+    let mut scored: Vec<(i32, usize)> = labels
+        .iter()
+        .enumerate()
+        .filter_map(|(i, l)| crate::ui::kit::picker::score(query, l).map(|(sc, _)| (sc, i)))
+        .collect();
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    scored.into_iter().map(|(_, i)| i).collect()
+}
+
 /// One line of the keybinding reference.
 enum HelpRow {
     Section(&'static str),
@@ -1275,6 +1292,10 @@ impl PaletteState {
                 action: Action::Goto(Screen::Lexicon),
             },
             PaletteItem {
+                label: "Go: Refine",
+                action: Action::Goto(Screen::Refine),
+            },
+            PaletteItem {
                 label: "Settings",
                 action: Action::show_overlay(Overlay::settings_placeholder()),
             },
@@ -1307,18 +1328,14 @@ impl PaletteState {
         }
     }
 
-    /// Indices of items matching the current (case-insensitive substring) query.
+    /// Indices of items matching the current query, best match first.
+    ///
+    /// Subsequence-matched rather than substring, so "gorf" reaches
+    /// "Go: Refine" — which is the difference between the command bar being a
+    /// filter and being something you can actually aim.
     pub fn matches(&self) -> Vec<usize> {
-        if self.query.is_empty() {
-            return (0..self.items.len()).collect();
-        }
-        let q = self.query.to_lowercase();
-        self.items
-            .iter()
-            .enumerate()
-            .filter(|(_, it)| it.label.to_lowercase().contains(&q))
-            .map(|(i, _)| i)
-            .collect()
+        let labels: Vec<&str> = self.items.iter().map(|i| i.label).collect();
+        fuzzy_rank(&self.query, &labels)
     }
 }
 
@@ -1427,18 +1444,10 @@ pub struct ReaderJumpState {
 }
 
 impl ReaderJumpState {
-    /// Indices of items whose label contains the (case-insensitive) query.
+    /// Indices of items matching the current query, best match first.
     pub fn matches(&self) -> Vec<usize> {
-        if self.query.trim().is_empty() {
-            return (0..self.items.len()).collect();
-        }
-        let q = self.query.to_lowercase();
-        self.items
-            .iter()
-            .enumerate()
-            .filter(|(_, it)| it.label.to_lowercase().contains(&q))
-            .map(|(i, _)| i)
-            .collect()
+        let labels: Vec<&str> = self.items.iter().map(|i| i.label.as_str()).collect();
+        fuzzy_rank(&self.query, &labels)
     }
 }
 
@@ -2077,8 +2086,41 @@ impl Overlay {
                 }
                 _ => Action::None,
             },
-            // Help, About and the Log are read-only: their rows do nothing, and
-            // the frame behaviour above already covers closing them.
+            // A picker row: move the selection there, then activate through the
+            // same Enter the keyboard uses. Clicking an already-selected row
+            // activates immediately, since pointing at it twice is a clear
+            // enough statement of intent.
+            Overlay::Palette(st) => match id.kind {
+                ZoneKind::Row if (id.index as usize) < st.matches().len() => {
+                    let already = st.sel == id.index as usize;
+                    st.sel = id.index as usize;
+                    if double || already {
+                        self.handle_key(synth(KeyCode::Enter))
+                    } else {
+                        Action::None
+                    }
+                }
+                _ => Action::None,
+            },
+            Overlay::ReaderJump(st) => match id.kind {
+                ZoneKind::Row if (id.index as usize) < st.matches().len() => {
+                    let already = st.sel == id.index as usize;
+                    st.sel = id.index as usize;
+                    if double || already {
+                        self.handle_key(synth(KeyCode::Enter))
+                    } else {
+                        Action::None
+                    }
+                }
+                _ => Action::None,
+            },
+            Overlay::ReaderNote(_) => match (id.kind, id.index) {
+                (ZoneKind::Button, DIALOG_CONFIRM) => self.handle_key(synth(KeyCode::Enter)),
+                (ZoneKind::Button, DIALOG_CANCEL) => self.handle_key(synth(KeyCode::Esc)),
+                _ => Action::None,
+            },
+            // Help, About, the Log and Reader search are read-only or
+            // single-field: the frame behaviour above already covers them.
             _ => Action::None,
         }
     }
@@ -2097,7 +2139,11 @@ impl Overlay {
             | Overlay::Log(_)
             | Overlay::Modal(_)
             | Overlay::Export(_)
-            | Overlay::Theme(_) => area,
+            | Overlay::Theme(_)
+            | Overlay::Palette(_)
+            | Overlay::ReaderJump(_)
+            | Overlay::ReaderSearch(_)
+            | Overlay::ReaderNote(_) => area,
             Overlay::Welcome(_) => centered_modal(76, 24, area),
             // One size for every wizard step (the modal must not jump around as
             // the user advances); mirrors render_import.
@@ -2106,15 +2152,11 @@ impl Overlay {
             // Must mirror render_settings' centered_modal(72, 26, …) so clicks
             // near the modal's top/bottom hit-test inside it (not as a dismiss).
             Overlay::Settings(_) => centered_modal(72, 26, area),
-            Overlay::Palette(_) => centered_modal(60, 20, area),
             Overlay::Synopsis(_) => centered_modal(76, 24, area),
             Overlay::ProjectTitle(_) => centered_modal(72, 16, area),
             Overlay::Qa(_) => centered_pct(80, 80, area),
-            Overlay::ReaderNote(_) => centered_modal(72, 14, area),
             Overlay::ReaderInspect(_) => centered_pct(82, 80, area),
             Overlay::ReaderEdit(_) => centered_pct(82, 75, area),
-            Overlay::ReaderSearch(_) => centered_modal(64, 7, area),
-            Overlay::ReaderJump(_) => centered_modal(72, 24, area),
         }
     }
 
@@ -3140,6 +3182,10 @@ impl Overlay {
                 | Overlay::Modal(_)
                 | Overlay::Export(_)
                 | Overlay::Theme(_)
+                | Overlay::Palette(_)
+                | Overlay::ReaderJump(_)
+                | Overlay::ReaderSearch(_)
+                | Overlay::ReaderNote(_)
         )
     }
 
@@ -3177,10 +3223,7 @@ impl Overlay {
                 let theme = ui.theme;
                 self.render_settings(ui.frame, area, theme, cfg, st)
             }
-            Overlay::Palette(st) => {
-                let theme = ui.theme;
-                self.render_palette(ui.frame, area, theme, st)
-            }
+            Overlay::Palette(st) => self.render_palette_kit(ui, area, st),
             Overlay::Synopsis(st) => {
                 let theme = ui.theme;
                 self.render_synopsis(ui.frame, area, theme, st)
@@ -3193,10 +3236,7 @@ impl Overlay {
                 let theme = ui.theme;
                 self.render_qa(ui.frame, area, theme, st)
             }
-            Overlay::ReaderNote(st) => {
-                let theme = ui.theme;
-                self.render_reader_note(ui.frame, area, theme, st)
-            }
+            Overlay::ReaderNote(st) => self.render_reader_note_kit(ui, area, st),
             Overlay::ReaderInspect(st) => {
                 let theme = ui.theme;
                 self.render_reader_inspect(ui.frame, area, theme, st)
@@ -3205,14 +3245,8 @@ impl Overlay {
                 let theme = ui.theme;
                 self.render_reader_edit(ui.frame, area, theme, st)
             }
-            Overlay::ReaderSearch(st) => {
-                let theme = ui.theme;
-                self.render_reader_search(ui.frame, area, theme, st)
-            }
-            Overlay::ReaderJump(st) => {
-                let theme = ui.theme;
-                self.render_reader_jump(ui.frame, area, theme, st)
-            }
+            Overlay::ReaderSearch(st) => self.render_reader_search_kit(ui, area, st),
+            Overlay::ReaderJump(st) => self.render_reader_jump_kit(ui, area, st),
         }
     }
 
@@ -3455,6 +3489,209 @@ impl Overlay {
                     ),
                 ]))
             },
+        );
+    }
+
+    /// A query line over a ranked list — the shape the command bar and the
+    /// Reader's jump list both are.
+    ///
+    /// `rows` is already filtered and ranked; this only draws it. Matched
+    /// characters are lifted so it is visible *why* a row ranked where it did.
+    fn render_query_list(
+        &self,
+        ui: &mut crate::ui::kit::Ui,
+        body: Rect,
+        query: &str,
+        cursor: usize,
+        sel: usize,
+        rows: &[(String, Option<String>)],
+    ) {
+        use crate::ui::kit::list::{self, ListState, Row};
+
+        let bg = ui.theme.bg_elevated;
+        let prompt = Style::default()
+            .fg(ui.theme.accent)
+            .bg(bg)
+            .add_modifier(Modifier::BOLD);
+        let typed = Style::default().fg(ui.theme.ink).bg(bg);
+        let caret = Style::default().fg(ui.theme.stream_cursor).bg(bg);
+
+        // Query line.
+        let (before, after) = input::caret_halves(
+            query,
+            cursor,
+            body.width.saturating_sub(4) as usize,
+        );
+        ui.line(
+            crate::ui::kit::ctx::row_at(body, 0),
+            Line::from(vec![
+                Span::styled(
+                    format!("{} ", crate::ui::glyphs::CHEVRON_RIGHT.as_str()),
+                    prompt,
+                ),
+                Span::styled(before, typed),
+                Span::styled(crate::ui::glyphs::ACCENT_RAIL.as_str().to_string(), caret),
+                Span::styled(after, typed),
+            ]),
+            Style::default().bg(bg),
+        );
+
+        let list_area = Rect {
+            y: body.y + 1,
+            height: body.height.saturating_sub(1),
+            ..body
+        };
+        if rows.is_empty() {
+            ui.text(
+                crate::ui::kit::ctx::row_at(list_area, 0),
+                "no matches",
+                Style::default().fg(ui.theme.ink_faint).bg(bg),
+            );
+            return;
+        }
+
+        let hit = Style::default()
+            .fg(ui.theme.accent)
+            .add_modifier(Modifier::BOLD);
+        let plain = Style::default().fg(ui.theme.ink);
+        let dim = Style::default().fg(ui.theme.ink_faint);
+        let owned_query = query.to_string();
+
+        let mut st = ListState::new();
+        st.select(Some(sel.min(rows.len().saturating_sub(1))));
+        list::render(
+            ui,
+            list_area,
+            &mut st,
+            rows.len(),
+            list::Opts {
+                rail: true,
+                scrollbar: true,
+                kind: ZoneKind::Row,
+                id_base: 0,
+            },
+            |i| {
+                let (label, detail) = &rows[i];
+                let positions = crate::ui::kit::picker::score(&owned_query, label)
+                    .map(|(_, p)| p)
+                    .unwrap_or_default();
+                let mut spans: Vec<Span<'static>> = label
+                    .chars()
+                    .enumerate()
+                    .map(|(n, ch)| {
+                        let style = if positions.contains(&n) { hit } else { plain };
+                        Span::styled(ch.to_string(), style)
+                    })
+                    .collect();
+                if let Some(d) = detail {
+                    spans.push(Span::styled(format!("   {d}"), dim));
+                }
+                Row::new(Line::from(spans))
+            },
+        );
+    }
+
+    /// The command bar: every action that has a name, one search away.
+    fn render_palette_kit(&self, ui: &mut crate::ui::kit::Ui, area: Rect, st: &PaletteState) {
+        use crate::ui::kit::modal::{Modal, Sizing};
+
+        let matches = st.matches();
+        let frame = Modal::new("Command bar")
+            .sizing(Sizing::medium())
+            .subtitle(format!("{} of {}", matches.len(), st.items.len()))
+            .render(ui, area);
+
+        let rows: Vec<(String, Option<String>)> = matches
+            .iter()
+            .map(|&i| (st.items[i].label.to_string(), None))
+            .collect();
+        self.render_query_list(ui, frame.body, &st.query, st.cursor, st.sel, &rows);
+    }
+
+    /// The Reader's jump list: chapters, sections and bookmarks together.
+    fn render_reader_jump_kit(
+        &self,
+        ui: &mut crate::ui::kit::Ui,
+        area: Rect,
+        st: &ReaderJumpState,
+    ) {
+        use crate::ui::kit::modal::{Modal, Sizing};
+
+        let matches = st.matches();
+        let frame = Modal::new("Jump to")
+            .sizing(Sizing::medium())
+            .subtitle(truncate_cols(&thai_display_safe(&st.title), 40))
+            .render(ui, area);
+
+        let rows: Vec<(String, Option<String>)> = matches
+            .iter()
+            .map(|&i| {
+                let it = &st.items[i];
+                let kind = match it.kind {
+                    JumpKind::Chapter => "chapter",
+                    JumpKind::Section => "section",
+                    JumpKind::Bookmark => "bookmark",
+                };
+                (
+                    thai_display_safe(&it.label),
+                    Some(format!("{kind} · ch.{:03}", it.chapter)),
+                )
+            })
+            .collect();
+        self.render_query_list(ui, frame.body, &st.query, st.cursor, st.sel, &rows);
+    }
+
+    /// Reader search: one query line, applied to both panes.
+    fn render_reader_search_kit(
+        &self,
+        ui: &mut crate::ui::kit::Ui,
+        area: Rect,
+        st: &ReaderSearchState,
+    ) {
+        use crate::ui::kit::modal::{self, Modal, Sizing};
+
+        let frame = Modal::new("Search")
+            .sizing(Sizing::small())
+            .footer(1)
+            .render(ui, area);
+        self.render_query_list(ui, frame.body, &st.query, st.cursor, 0, &[]);
+        modal::footer_hint(ui, frame.footer, "  ↵ search both panes · Esc cancel");
+    }
+
+    /// A proofreading note, anchored to one translated line.
+    fn render_reader_note_kit(
+        &self,
+        ui: &mut crate::ui::kit::Ui,
+        area: Rect,
+        st: &ReaderNoteState,
+    ) {
+        use crate::ui::kit::button::{Button, ButtonRow};
+        use crate::ui::kit::editor;
+        use crate::ui::kit::modal::{self, Modal, Sizing};
+
+        let frame = Modal::new("Note")
+            .sizing(Sizing::small())
+            .subtitle(format!("ch.{:03} · line {}", st.chapter, st.line))
+            .footer(1)
+            .render(ui, area);
+
+        let lines = editor::wrap(&st.text, frame.body.width);
+        editor::render(
+            ui,
+            frame.body,
+            &editor::View::new(&st.text, &lines).cursor(st.cursor),
+            0,
+        );
+        modal::render_footer(
+            ui,
+            frame.footer,
+            ButtonRow::new(vec![
+                Button::new(ZoneId::button(DIALOG_CANCEL), "Cancel").accel("esc"),
+                Button::new(ZoneId::button(DIALOG_CONFIRM), "Save")
+                    .accel("↵")
+                    .primary()
+                    .disabled(st.text.trim().is_empty()),
+            ]),
         );
     }
 
@@ -3929,97 +4166,6 @@ impl Overlay {
         );
     }
 
-    fn render_reader_note(&self, f: &mut Frame, area: Rect, theme: &Theme, st: &ReaderNoteState) {
-        let modal = centered_modal(72, 14, area);
-        f.render_widget(Clear, modal);
-        let block = self.modal_block("Reader note · proofreading", theme);
-        let inner = block.inner(modal);
-        f.render_widget(block, modal);
-
-        let rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(1), // anchor
-                Constraint::Length(1), // label
-                Constraint::Length(3), // input box
-                Constraint::Length(1), // examples label
-                Constraint::Min(0),    // examples
-            ])
-            .split(inner);
-
-        f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled("  Anchor  ", Style::default().fg(theme.ink_faint)),
-                Span::styled(
-                    format!("ch {:03} · translated line {}", st.chapter, st.line),
-                    Style::default().fg(theme.accent_soft),
-                ),
-            ]))
-            .style(Style::default().bg(theme.bg_panel)),
-            rows[0],
-        );
-
-        f.render_widget(
-            Paragraph::new(Span::styled("  Note", Style::default().fg(theme.ink_soft)))
-                .style(Style::default().bg(theme.bg_panel)),
-            rows[1],
-        );
-
-        let input_block = Block::default()
-            .borders(Borders::ALL)
-            .border_set(theme::hairline_set())
-            .border_style(Style::default().fg(theme.accent_soft))
-            .style(Style::default().bg(theme.bg_inset));
-        let input = if st.text.is_empty() {
-            Line::from(vec![
-                Span::styled(
-                    "awkward phrasing / check honorific / rename skill term / review tone",
-                    Style::default().fg(theme.ink_faint),
-                ),
-                Span::styled("▏", Style::default().fg(theme.stream_cursor)),
-            ])
-        } else {
-            let (before, after) = input::caret_halves(
-                &st.text,
-                st.cursor,
-                rows[2].width.saturating_sub(6) as usize,
-            );
-            Line::from(vec![
-                Span::styled(before, Style::default().fg(theme.ink)),
-                Span::styled("▏", Style::default().fg(theme.stream_cursor)),
-                Span::styled(after, Style::default().fg(theme.ink)),
-            ])
-        };
-        f.render_widget(Paragraph::new(input).block(input_block), indent(rows[2], 2));
-
-        f.render_widget(
-            Paragraph::new(Span::styled(
-                "  Examples",
-                Style::default().fg(theme.ink_faint),
-            ))
-            .style(Style::default().bg(theme.bg_panel)),
-            rows[3],
-        );
-        let examples = vec![
-            Line::from(Span::styled(
-                "  • awkward phrasing      • check honorific",
-                Style::default().fg(theme.ink_soft),
-            )),
-            Line::from(Span::styled(
-                "  • rename skill term     • review tone",
-                Style::default().fg(theme.ink_soft),
-            )),
-            Line::from(Span::styled(
-                "  Enter saves inline; Esc cancels.",
-                Style::default().fg(theme.ink_faint),
-            )),
-        ];
-        f.render_widget(
-            Paragraph::new(examples).style(Style::default().bg(theme.bg_panel)),
-            rows[4],
-        );
-    }
-
     fn render_reader_inspect(
         &self,
         f: &mut Frame,
@@ -4122,158 +4268,6 @@ impl Overlay {
                 .wrap(Wrap { trim: false })
                 .style(Style::default().bg(theme.bg_inset)),
             inner,
-        );
-    }
-
-    fn render_reader_search(
-        &self,
-        f: &mut Frame,
-        area: Rect,
-        theme: &Theme,
-        st: &ReaderSearchState,
-    ) {
-        let modal = centered_modal(64, 7, area);
-        f.render_widget(Clear, modal);
-        let block = self.modal_block("Search (source + translation)", theme);
-        let inner = block.inner(modal);
-        f.render_widget(block, modal);
-
-        let rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(1), // label
-                Constraint::Length(3), // input box
-                Constraint::Min(0),    // hint
-            ])
-            .split(inner);
-
-        f.render_widget(
-            Paragraph::new(Span::styled(
-                "  Find across both panes",
-                Style::default().fg(theme.ink_soft),
-            ))
-            .style(Style::default().bg(theme.bg_panel)),
-            rows[0],
-        );
-
-        let input_block = Block::default()
-            .borders(Borders::ALL)
-            .border_set(theme::hairline_set())
-            .border_style(Style::default().fg(theme.accent_soft))
-            .style(Style::default().bg(theme.bg_inset));
-        let input = if st.query.is_empty() {
-            Line::from(vec![
-                Span::styled(
-                    "聖剣 · a character · a phrase to locate…",
-                    Style::default().fg(theme.ink_faint),
-                ),
-                Span::styled("▏", Style::default().fg(theme.stream_cursor)),
-            ])
-        } else {
-            let (before, after) = input::caret_halves(
-                &st.query,
-                st.cursor,
-                rows[1].width.saturating_sub(6) as usize,
-            );
-            Line::from(vec![
-                Span::styled(before, Style::default().fg(theme.ink)),
-                Span::styled("▏", Style::default().fg(theme.stream_cursor)),
-                Span::styled(after, Style::default().fg(theme.ink)),
-            ])
-        };
-        f.render_widget(Paragraph::new(input).block(input_block), indent(rows[1], 2));
-
-        f.render_widget(
-            Paragraph::new(Span::styled(
-                "  Enter searches; then  >  next  ·  <  prev  ·  Esc clears.",
-                Style::default().fg(theme.ink_faint),
-            ))
-            .style(Style::default().bg(theme.bg_panel)),
-            rows[2],
-        );
-    }
-
-    fn render_reader_jump(&self, f: &mut Frame, area: Rect, theme: &Theme, st: &ReaderJumpState) {
-        let modal = centered_modal(72, 24, area);
-        f.render_widget(Clear, modal);
-        let title = if st.title.is_empty() {
-            "Jump · ไปยัง".to_string()
-        } else {
-            format!("Jump · {}", st.title)
-        };
-        let block = self.modal_block(&title, theme);
-        let inner = block.inner(modal);
-        f.render_widget(block, modal);
-
-        let rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(2), Constraint::Min(0)])
-            .split(inner);
-
-        let (before, after) = input::caret_halves(
-            &st.query,
-            st.cursor,
-            rows[0].width.saturating_sub(5) as usize,
-        );
-        f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled("  / ", Style::default().fg(theme.accent)),
-                Span::styled(before, Style::default().fg(theme.ink)),
-                Span::styled("▏", Style::default().fg(theme.stream_cursor)),
-                Span::styled(after, Style::default().fg(theme.ink)),
-            ]))
-            .style(Style::default().bg(theme.bg_panel)),
-            rows[0],
-        );
-
-        let matches = st.matches();
-        if matches.is_empty() {
-            f.render_widget(
-                Paragraph::new(Span::styled(
-                    "   no matches",
-                    Style::default().fg(theme.ink_faint),
-                ))
-                .style(Style::default().bg(theme.bg_panel)),
-                rows[1],
-            );
-            return;
-        }
-
-        // Window the rows so the selection stays visible (theme/QA pattern).
-        let cap = (rows[1].height as usize).max(1);
-        let sel = st.sel.min(matches.len() - 1);
-        let start = if sel >= cap { sel + 1 - cap } else { 0 };
-        let end = (start + cap).min(matches.len());
-        let width = rows[1].width.saturating_sub(6) as usize;
-
-        let mut lines = Vec::with_capacity(end - start);
-        for (row, &idx) in matches.iter().enumerate().take(end).skip(start) {
-            let item = &st.items[idx];
-            let selected = row == sel;
-            let bar = if selected {
-                theme::SELECT_BAR.to_string()
-            } else {
-                " ".to_string()
-            };
-            let (glyph, glyph_color) = match item.kind {
-                JumpKind::Chapter => ("▣", theme.accent_soft),
-                JumpKind::Section => ("§", theme.ink_soft),
-                JumpKind::Bookmark => ("★", theme.status_warn),
-            };
-            let label_style = if selected {
-                Style::default().fg(theme.ink).bg(theme.accent_bg)
-            } else {
-                Style::default().fg(theme.ink_soft)
-            };
-            lines.push(Line::from(vec![
-                Span::styled(format!(" {bar} "), Style::default().fg(theme.accent)),
-                Span::styled(format!("{glyph} "), Style::default().fg(glyph_color)),
-                Span::styled(truncate_cols(&item.label, width), label_style),
-            ]));
-        }
-        f.render_widget(
-            Paragraph::new(lines).style(Style::default().bg(theme.bg_panel)),
-            rows[1],
         );
     }
 
@@ -5243,78 +5237,6 @@ impl Overlay {
         );
     }
 
-    fn render_palette(&self, f: &mut Frame, area: Rect, theme: &Theme, st: &PaletteState) {
-        let modal = centered_modal(60, 20, area);
-        f.render_widget(Clear, modal);
-        let block = self.modal_block("Command palette", theme);
-        let inner = block.inner(modal);
-        f.render_widget(block, modal);
-
-        let rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(2), Constraint::Min(0)])
-            .split(inner);
-
-        let (before, after) = input::caret_halves(
-            &st.query,
-            st.cursor,
-            rows[0].width.saturating_sub(5) as usize,
-        );
-        f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled("  : ", Style::default().fg(theme.accent)),
-                Span::styled(before, Style::default().fg(theme.ink)),
-                Span::styled("▏", Style::default().fg(theme.stream_cursor)),
-                Span::styled(after, Style::default().fg(theme.ink)),
-            ]))
-            .style(Style::default().bg(theme.bg_panel)),
-            rows[0],
-        );
-
-        let matches = st.matches();
-        if matches.is_empty() {
-            f.render_widget(
-                Paragraph::new(Span::styled(
-                    "   no matches",
-                    Style::default().fg(theme.ink_faint),
-                ))
-                .style(Style::default().bg(theme.bg_panel)),
-                rows[1],
-            );
-            return;
-        }
-
-        // Window the rows so the selection stays visible (theme/jump pattern).
-        let cap = (rows[1].height as usize).max(1);
-        let sel = st.sel.min(matches.len() - 1);
-        let start = if sel >= cap { sel + 1 - cap } else { 0 };
-        let end = (start + cap).min(matches.len());
-
-        let mut lines = Vec::with_capacity(end - start);
-        for (row, &idx) in matches.iter().enumerate().take(end).skip(start) {
-            let selected = row == sel;
-            let bar = if selected {
-                theme::SELECT_BAR.to_string()
-            } else {
-                " ".to_string()
-            };
-            let style = if selected {
-                Style::default().fg(theme.ink).bg(theme.accent_bg)
-            } else {
-                Style::default().fg(theme.ink_soft)
-            };
-            lines.push(Line::from(vec![
-                Span::styled(format!(" {bar} "), Style::default().fg(theme.accent)),
-                Span::styled(st.items[idx].label, style),
-            ]));
-        }
-        f.render_widget(
-            Paragraph::new(lines).style(Style::default().bg(theme.bg_panel)),
-            rows[1],
-        );
-        crate::ui::widgets::render_scrollbar(f, rows[1], matches.len(), start, theme);
-    }
-
     /// Render the QA inbox: a chapter-level summary header over a navigable list of
     /// findings grouped by chapter (each group headed by its issue count). The list
     /// windows so the selected finding stays visible; one line per finding keeps the
@@ -6211,6 +6133,26 @@ mod tests {
             Overlay::confirm("Delete project?", "This cannot be undone.", Action::Quit),
             Overlay::export(2),
             Overlay::theme(ThemeId::default()),
+            Overlay::palette(),
+            Overlay::reader_search(),
+            Overlay::reader_note(3, 12),
+            Overlay::reader_jump(
+                "ある夏の物語".into(),
+                vec![
+                    JumpTarget {
+                        chapter: 1,
+                        line: 1,
+                        label: "第一章 はじまり".into(),
+                        kind: JumpKind::Chapter,
+                    },
+                    JumpTarget {
+                        chapter: 2,
+                        line: 40,
+                        label: "Re-read this bit".into(),
+                        kind: JumpKind::Bookmark,
+                    },
+                ],
+            ),
         ]
     }
 
@@ -6412,6 +6354,58 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn the_command_bar_can_be_aimed_not_just_filtered() {
+        // Subsequence matching is the point: a substring filter cannot get from
+        // an abbreviation to the command it stands for.
+        let mut ov = Overlay::palette();
+        let Overlay::Palette(st) = &mut ov else {
+            unreachable!()
+        };
+        // An abbreviation no substring search could ever resolve.
+        st.query = "twp".into();
+        let hits = st.matches();
+        assert!(!hits.is_empty(), "\"twp\" should reach the whole-project run");
+        assert_eq!(st.items[hits[0]].label, "Translate whole project");
+
+        // Every screen is reachable by name, including the sixth.
+        st.query = "refine".into();
+        let hits = st.matches();
+        assert!(
+            hits.iter().any(|&i| st.items[i].label == "Go: Refine"),
+            "the command bar should be able to reach every tab"
+        );
+
+        // And an empty query keeps the caller's deliberate ordering.
+        st.query.clear();
+        assert_eq!(st.matches(), (0..st.items.len()).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn clicking_a_command_bar_row_runs_that_command() {
+        let mut ov = Overlay::palette();
+        let (_, zones) = render_overlay(&ov, 100, 30);
+        let target = match &ov {
+            Overlay::Palette(st) => st.matches()[2],
+            _ => unreachable!(),
+        };
+        let expected = match &ov {
+            Overlay::Palette(st) => format!("{:?}", st.items[target].action),
+            _ => unreachable!(),
+        };
+        let rect = zones.rect_of(ZoneId::row(2)).expect("row 2");
+        // First click selects, second activates — the same two-step the
+        // keyboard takes with arrows then Enter.
+        let m = |double| MouseInput {
+            gesture: MouseGesture::Click { double },
+            col: rect.x + 2,
+            row: rect.y,
+        };
+        assert!(matches!(ov.handle_mouse_zones(m(false), &zones), Action::None));
+        let got = ov.handle_mouse_zones(m(false), &zones);
+        assert_eq!(format!("{got:?}"), expected);
     }
 
     #[test]
