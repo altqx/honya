@@ -175,7 +175,7 @@ impl Button {
             Variant::Danger => {
                 let mut st = Style::default()
                     .fg(theme.status_failed)
-                    .bg(style::surface(state, theme))
+                    .bg(ui.surface_of(state))
                     .add_modifier(Modifier::BOLD);
                 if state.hovered && !theme.paints_fills() {
                     st = st.add_modifier(Modifier::REVERSED);
@@ -183,7 +183,7 @@ impl Button {
                 st
             }
             Variant::Secondary => {
-                let mut st = style::row(state, theme);
+                let mut st = ui.row_style(state);
                 if state.focused || state.hovered {
                     st = st.fg(theme.ink).add_modifier(Modifier::BOLD);
                 }

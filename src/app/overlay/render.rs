@@ -15,7 +15,7 @@ use crate::model::{AppConfig, LogLevel};
 use crate::theme::ALL_THEMES;
 use crate::ui::input;
 use crate::ui::kit::{ZoneId, ZoneKind};
-use crate::ui::text::{col_width, thai_display_safe, truncate_cols};
+use crate::ui::text::{col_width, pad_to_cols, thai_display_safe, truncate_cols};
 
 use super::*;
 
@@ -412,8 +412,11 @@ impl Overlay {
         use crate::ui::kit::modal::{Modal, Sizing};
 
         let matches = st.matches();
+        // Query line, rule, and one row per match — capped so a long list still
+        // scrolls rather than growing past the terminal.
+        let rows = (matches.len() as u16).clamp(1, 14) + 2 + 4;
         let frame = Modal::new("Command bar")
-            .sizing(Sizing::medium())
+            .sizing(Sizing::medium().fit_height(rows))
             .subtitle(format!("{} of {}", matches.len(), st.items.len()))
             .render(ui, area);
 
@@ -434,8 +437,9 @@ impl Overlay {
         use crate::ui::kit::modal::{Modal, Sizing};
 
         let matches = st.matches();
+        let rows = (matches.len() as u16).clamp(1, 16) + 2 + 4;
         let frame = Modal::new("Jump to")
-            .sizing(Sizing::medium())
+            .sizing(Sizing::medium().fit_height(rows))
             .subtitle(truncate_cols(&thai_display_safe(&st.title), 40))
             .render(ui, area);
 
@@ -517,8 +521,14 @@ impl Overlay {
         use crate::ui::kit::list::{self, ListState, Row};
         use crate::ui::kit::modal::{Modal, Sizing};
 
+        // Five preamble rows, four menu rows, and the frame's own padding.
         let frame = Modal::new("ようこそ · Welcome to honya 本屋")
-            .sizing(Sizing::medium())
+            .sizing(
+                Sizing::medium()
+                    .fit_height(5 + WELCOME_ITEMS as u16 + 4)
+                    // The longest preamble line, so it is not truncated.
+                    .fit_width(64),
+            )
             .render(ui, area);
 
         let bg = ui.theme.bg_elevated;
@@ -1076,8 +1086,6 @@ impl Overlay {
         area: Rect,
         st: &SettingsState,
     ) {
-        use crate::ui::kit::style;
-
         let narrow = area.width < 6;
         for (n, group) in Group::ALL.into_iter().enumerate() {
             let row = crate::ui::kit::ctx::row_at(area, n as u16);
@@ -1086,9 +1094,9 @@ impl Overlay {
             }
             let active = st.tab.group() == group;
             let state = ui.interactive(row, ZoneId::segment(n), active);
-            let base = style::row(state, ui.theme);
+            let base = ui.row_style(state);
             ui.fill(row, base);
-            let (glyph, rail_style) = match style::rail(state, ui.theme) {
+            let (glyph, rail_style) = match ui.rail_of(state) {
                 Some((g, s)) => (g.as_str().to_string(), s),
                 None => (" ".to_string(), base),
             };
@@ -1364,9 +1372,12 @@ impl Overlay {
         } else {
             "New project · นำเข้าไฟล์"
         });
+        // A fixed height, because the frame must not resize as the user
+        // advances — but sized to the tallest step rather than to the terminal,
+        // which left most of the panel empty on every step.
         let frame = Modal::new(&title)
-            .sizing(Sizing::medium())
-            .fixed_height(24)
+            .sizing(Sizing::medium().fit_width(62))
+            .fixed_height(18)
             .footer(1)
             .render(ui, area);
 
@@ -1762,7 +1773,10 @@ impl Overlay {
             |i| {
                 let id = ALL_THEMES[i];
                 Row::new(Line::from(vec![
-                    Span::raw(format!("{:<22}", id.label())),
+                    // Padded by display column, not by character: "Washi 和紙" is
+                    // eight chars but ten columns, so `{:<22}` left it two
+                    // columns wider than its neighbours.
+                    Span::raw(pad_to_cols(id.label(), 22)),
                     Span::styled(id.tone().to_string(), dim),
                 ]))
             },

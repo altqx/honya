@@ -161,7 +161,7 @@ impl<'a> ShortcutsBar<'a> {
         if area.width == 0 || area.height == 0 {
             return;
         }
-        ui.fill(area, Style::default().bg(ui.theme.bg));
+        ui.fill(area, Style::default().bg(ui.surface()));
         let total = area.width as usize;
         let rows = area.height.min(MAX_ROWS);
         let last_budget = total.saturating_sub(self.reserved_cols(total) + 1);
@@ -234,7 +234,7 @@ impl<'a> ShortcutsBar<'a> {
             ui.text(
                 strip(x, row.y, 1),
                 glyphs::ELLIPSIS.as_str().to_string(),
-                style::key_label(ui.theme).bg(ui.theme.bg),
+                style::key_label(ui.theme).bg(ui.surface()),
             );
         }
 
@@ -258,8 +258,8 @@ impl<'a> ShortcutsBar<'a> {
             Some(id) => ui.interactive(rect, id, false),
             None => super::style::State::IDLE,
         };
-        let mut key = style::key_cap(ui.theme).bg(ui.theme.bg);
-        let mut label = style::key_label(ui.theme).bg(ui.theme.bg);
+        let mut key = style::key_cap(ui.theme).bg(ui.surface());
+        let mut label = style::key_label(ui.theme).bg(ui.surface());
         if st.hovered || st.focused {
             key = key.fg(ui.theme.accent);
             label = label.fg(ui.theme.ink_soft);

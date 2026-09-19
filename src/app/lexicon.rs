@@ -1278,6 +1278,31 @@ mod tests {
     use super::*;
     use crate::workspace::{Workspace, characters};
 
+    /// The section strip answers to the pointer, not only to Tab.
+    #[test]
+    fn clicking_a_section_switches_to_it() {
+        let mut s = LexiconScreen::new();
+        assert_eq!(s.sub, SUB_GLOSSARY);
+
+        let (_, zones) =
+            crate::ui::kit::ctx::draw_test(100, 20, |ui, area| s.render(ui, area, None));
+        let rect = zones
+            .rect_of(crate::ui::kit::ZoneId::segment(SUB_CHARACTERS as usize))
+            .expect("the Characters section should register a zone");
+        let (col, row) = (rect.x + 1, rect.y);
+
+        s.handle_mouse(
+            MouseInput {
+                gesture: MouseGesture::Click { double: false },
+                col,
+                row,
+            },
+            zones.at(col, row),
+            None,
+        );
+        assert_eq!(s.sub, SUB_CHARACTERS, "clicking a section must switch to it");
+    }
+
     fn temp_ws(tag: &str) -> (std::path::PathBuf, Workspace) {
         let base = std::env::temp_dir().join(format!("honya_lexicon_{tag}_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);

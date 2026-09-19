@@ -209,7 +209,7 @@ pub fn render(
     // `list::render` draw them too would register every row a second time —
     // and as focusable, which would quietly put disabled fields back in the
     // focus ring.
-    ui.fill(area, Style::default().bg(ui.theme.bg));
+    ui.fill(area, Style::default().bg(ui.surface()));
     let overflowing = fields.len() > area.height as usize;
     let body_w = if overflowing {
         area.width.saturating_sub(1)
@@ -263,12 +263,12 @@ pub fn render_field(
     } else {
         ui.interactive(row, id, selected)
     };
-    let base = style::row(st, ui.theme);
+    let base = ui.row_style(st);
     ui.fill(row, base);
 
     // Rail, then label column, then the value takes the rest.
     let mut x = row.x;
-    let (rail_glyph, rail_style) = match style::rail(st, ui.theme) {
+    let (rail_glyph, rail_style) = match ui.rail_of(st) {
         Some((g, s)) => (g.as_str().to_string(), s),
         None => (" ".to_string(), base),
     };
@@ -289,16 +289,16 @@ pub fn render_field(
     // labels at 80 columns.
     let label_cols = opts.label_cols.min(row.width / 2).max(6);
     let label_style = if st.disabled {
-        Style::default().fg(ui.theme.ink_faint).bg(base.bg.unwrap_or(ui.theme.bg))
+        Style::default().fg(ui.theme.ink_faint).bg(base.bg.unwrap_or(ui.surface()))
     } else if selected || st.focused {
         Style::default()
             .fg(ui.theme.ink)
-            .bg(base.bg.unwrap_or(ui.theme.bg))
+            .bg(base.bg.unwrap_or(ui.surface()))
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default()
             .fg(ui.theme.ink_soft)
-            .bg(base.bg.unwrap_or(ui.theme.bg))
+            .bg(base.bg.unwrap_or(ui.surface()))
     };
     ui.line(
         Rect {
@@ -335,7 +335,7 @@ fn render_value(
     if area.width == 0 {
         return;
     }
-    let bg = base.bg.unwrap_or(ui.theme.bg);
+    let bg = base.bg.unwrap_or(ui.surface());
     let dim = Style::default().fg(ui.theme.ink_faint).bg(bg);
     let normal = Style::default().fg(ui.theme.ink).bg(bg);
 
@@ -450,87 +450,81 @@ fn render_value(
 
 /// `‹ value ›` with both arrows registered, so a stepped value can be changed
 /// by pointing at it rather than only by arrow keys.
-fn render_stepper(
-    ui: &mut Ui,
-    area: Rect,
-    field: &Field,
-    index: usize,
-    st: State,
-    base: Style,
-) {
-    let bg = base.bg.unwrap_or(ui.theme.bg);
+/// The widest a stepper's value column grows.
+///
+/// Bounded rather than filling the row: with the arrows pinned to the far edge
+/// of a wide column, `<` and `>` ended up half a screen apart with a short
+/// value stranded between them, and clicking one meant travelling to it.
+const STEPPER_VALUE_COLS: u16 = 24;
+
+fn render_stepper(ui: &mut Ui, area: Rect, field: &Field, index: usize, st: State, base: Style) {
+    let bg = base.bg.unwrap_or(ui.surface());
     let value = field.display_value();
 
     let (at_min, at_max) = match &field.kind {
         Kind::Number { value, min, max } => (value <= min, value >= max),
-        Kind::Select { options, index } => {
-            // Selects wrap, so neither end is ever a dead stop.
-            let _ = (options, index);
-            (false, false)
-        }
+        // Selects wrap, so neither end is ever a dead stop.
         _ => (false, false),
     };
-
     let arrow_style = |spent: bool| {
         if spent || st.disabled {
-            Style::default().fg(ui.theme.ink_faint).bg(bg).add_modifier(Modifier::DIM)
+            Style::default()
+                .fg(ui.theme.ink_faint)
+                .bg(bg)
+                .add_modifier(Modifier::DIM)
         } else {
             Style::default().fg(ui.theme.accent).bg(bg)
         }
     };
 
-    // Left arrow.
-    let left_rect = Rect {
+    // A fixed-width block so the arrows stay put as the value cycles through
+    // names of different lengths.
+    let block = STEPPER_VALUE_COLS.min(area.width.saturating_sub(2));
+    let shown = truncate_cols(&value, block as usize);
+
+    let left = Rect {
         width: 1,
         ..area
     };
     if !st.disabled && !at_min {
-        ui.zones.push_hit(left_rect, dec_id(index));
+        ui.zones.push_hit(left, dec_id(index));
     }
     ui.line(
-        left_rect,
+        left,
         Line::from(Span::styled("<".to_string(), arrow_style(at_min))),
         base,
     );
 
-    let value_cols = area.width.saturating_sub(2);
-    let value_rect = Rect {
-        x: area.x + 1,
-        width: value_cols,
-        ..area
-    };
-    let shown = truncate_cols(&value, value_cols.saturating_sub(2) as usize);
-    let pad = (value_cols as usize).saturating_sub(col_width(&shown) + 1);
     ui.line(
-        value_rect,
-        Line::from(vec![
-            Span::styled(
-                format!(" {shown}"),
-                Style::default()
-                    .fg(if st.disabled {
-                        ui.theme.ink_faint
-                    } else {
-                        ui.theme.ink
-                    })
-                    .bg(bg),
-            ),
-            Span::styled(" ".repeat(pad), base),
-        ]),
+        Rect {
+            x: area.x + 1,
+            width: block,
+            ..area
+        },
+        Line::from(Span::styled(
+            pad_to_cols(&format!(" {shown}"), block as usize),
+            Style::default()
+                .fg(if st.disabled {
+                    ui.theme.ink_faint
+                } else {
+                    ui.theme.ink
+                })
+                .bg(bg),
+        )),
         base,
     );
 
-    // Right arrow, pinned to the right of the value run.
-    let right_rect = Rect {
-        x: area.x + 1 + value_cols,
+    let right = Rect {
+        x: area.x + 1 + block,
         width: 1,
         ..area
     };
-    if right_rect.x < area.x + area.width {
+    if right.x < area.x + area.width {
         if !st.disabled && !at_max {
-            ui.zones.push_hit(right_rect, inc_id(index));
+            ui.zones.push_hit(right, inc_id(index));
         }
         ui.line(
-            right_rect,
+            right,
             Line::from(Span::styled(">".to_string(), arrow_style(at_max))),
             base,
         );

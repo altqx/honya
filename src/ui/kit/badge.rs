@@ -74,7 +74,7 @@ impl StatusDot {
         } else {
             self.color
         };
-        let mut sty = Style::default().fg(fg).bg(style::surface(st, ui.theme));
+        let mut sty = Style::default().fg(fg).bg(ui.surface_of(st));
         if st.hovered || st.focused {
             sty = sty.add_modifier(Modifier::BOLD);
         }
@@ -155,12 +155,12 @@ impl Chip {
         let base = if self.disabled {
             Style::default()
                 .fg(ui.theme.ink_faint)
-                .bg(ui.theme.bg)
+                .bg(ui.surface())
                 .add_modifier(Modifier::DIM)
         } else if self.on {
             style::filled(ui.theme)
         } else {
-            style::row(st, ui.theme)
+            ui.row_style(st)
         };
 
         let mut spans = vec![Span::styled(" ", base)];
@@ -185,7 +185,7 @@ pub fn badge(ui: &mut Ui, area: Rect, text: &str, color: Color) {
     }
     let st = Style::default()
         .fg(color)
-        .bg(ui.theme.bg)
+        .bg(ui.surface())
         .add_modifier(Modifier::BOLD);
     ui.text(
         Rect {

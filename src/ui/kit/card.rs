@@ -95,7 +95,7 @@ impl<'a> Card<'a> {
             Some(id) => ui.interactive(area, id, self.selected),
             None => State::selected(self.selected),
         };
-        let bg = style::surface(st, ui.theme);
+        let bg = ui.surface_of(st);
         ui.fill(area, Style::default().bg(bg));
 
         let rail_cols = if self.rail { GUTTER } else { 0 };
@@ -220,7 +220,7 @@ impl<'a> Stat<'a> {
         }
         let value_style = Style::default()
             .fg(self.color.unwrap_or(ui.theme.ink))
-            .bg(ui.theme.bg)
+            .bg(ui.surface())
             .add_modifier(Modifier::BOLD);
         ui.text(
             Rect {
@@ -238,7 +238,7 @@ impl<'a> Stat<'a> {
                     ..area
                 },
                 truncate_cols(self.label, area.width as usize),
-                Style::default().fg(ui.theme.ink_faint).bg(ui.theme.bg),
+                Style::default().fg(ui.theme.ink_faint).bg(ui.surface()),
             );
         }
     }
@@ -255,7 +255,7 @@ pub fn rule(ui: &mut Ui, area: Rect) {
             ..area
         },
         glyphs::RULE_H.as_str().repeat(area.width as usize),
-        Style::default().fg(ui.theme.rule).bg(ui.theme.bg),
+        Style::default().fg(ui.theme.rule).bg(ui.surface()),
     );
 }
 

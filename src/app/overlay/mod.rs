@@ -17,7 +17,7 @@ use crate::theme::{ALL_THEMES, Theme};
 use crate::ui::input::{self, EditOpts, Edited};
 use crate::ui::mouse::{MouseGesture, MouseInput};
 use crate::ui::kit::{ZoneId, ZoneKind};
-use crate::ui::text::{pad_to_cols, thai_display_safe, truncate_cols};
+use crate::ui::text::{thai_display_safe, truncate_cols};
 
 use super::qa;
 use super::settings_defs::{self, SField};
@@ -682,6 +682,39 @@ impl Overlay {
                 (ZoneKind::Button, DIALOG_ALTERNATE) => self.handle_key(synth(KeyCode::Tab)),
                 _ => Action::None,
             },
+            // Settings had no arm here at all, so its category rail and every
+            // field row were keyboard-only: the controls were drawn and
+            // registered, but nothing acted on them.
+            Overlay::Settings(st) => match id.kind {
+                ZoneKind::Segment => {
+                    if let Some(tab) = SettingsTab::ALL.get(id.index as usize) {
+                        st.select_tab(*tab);
+                    }
+                    Action::None
+                }
+                ZoneKind::Field => {
+                    st.focus(id.index as u8);
+                    Action::None
+                }
+                // A stepper arrow moves the value under it. The form numbers
+                // its arrows within the group it drew, so the group's first
+                // row is added back to reach the real field.
+                ZoneKind::Button => {
+                    let Some((n, step)) = crate::ui::kit::form::field_of(id) else {
+                        return Action::None;
+                    };
+                    let base = st.tab.group().first_field().unwrap_or(0);
+                    st.focus(base.saturating_add(n as u8));
+                    let up = matches!(step, crate::ui::kit::form::Step::Up);
+                    // Numbers step; selects cycle. Both are drawn with arrows,
+                    // so both have to answer to one.
+                    if !st.step_number(up) {
+                        st.cycle(up);
+                    }
+                    Action::None
+                }
+                _ => Action::None,
+            },
             Overlay::ReaderEdit(_) => match (id.kind, id.index) {
                 (ZoneKind::Button, DIALOG_CONFIRM) => {
                     self.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
@@ -717,7 +750,7 @@ impl Overlay {
                 },
                 _ => Action::None,
             },
-                        Overlay::ReaderNote(_) => match (id.kind, id.index) {
+            Overlay::ReaderNote(_) => match (id.kind, id.index) {
                 (ZoneKind::Button, DIALOG_CONFIRM) => self.handle_key(synth(KeyCode::Enter)),
                 (ZoneKind::Button, DIALOG_CANCEL) => self.handle_key(synth(KeyCode::Esc)),
                 _ => Action::None,
@@ -2365,6 +2398,126 @@ mod tests {
             let after = if read == 0 { st.prepass_extract } else { st.coherence_check };
             assert_ne!(before, after, "{field:?} did not toggle");
         }
+    }
+
+    /// Every control Settings draws can be reached by pointer, not only by Tab.
+    ///
+    /// The rail and the field rows were registered but had no handler, so they
+    /// looked clickable and did nothing.
+    #[test]
+    fn settings_rail_and_rows_answer_to_the_pointer() {
+        let cfg = AppConfig::default();
+        let mut ov = Overlay::settings_with_field(&cfg, 0);
+        let (_, zones) = render_overlay(&ov, 100, 34);
+
+        // The rail entry for a section other than the one open.
+        let target = SettingsTab::ALL
+            .iter()
+            .position(|t| *t == SettingsTab::Pipeline)
+            .expect("pipeline tab");
+        let rect = zones
+            .rect_of(ZoneId::segment(target))
+            .expect("rail entry should be registered");
+        ov.handle_mouse_zones(
+            MouseInput {
+                gesture: MouseGesture::Click { double: false },
+                col: rect.x + 1,
+                row: rect.y,
+            },
+            &zones,
+        );
+        let Overlay::Settings(st) = &ov else {
+            unreachable!()
+        };
+        assert_eq!(st.tab, SettingsTab::Pipeline, "clicking the rail must switch section");
+
+        // And a field row focuses that field.
+        let (_, zones) = render_overlay(&ov, 100, 34);
+        let want = settings_defs::index_of(SField::MaxAttempts);
+        let rect = zones
+            .rect_of(ZoneId::new(ZoneKind::Field, want as u32))
+            .expect("field row should be registered");
+        ov.handle_mouse_zones(
+            MouseInput {
+                gesture: MouseGesture::Click { double: false },
+                col: rect.x + 4,
+                row: rect.y,
+            },
+            &zones,
+        );
+        let Overlay::Settings(st) = &ov else {
+            unreachable!()
+        };
+        assert_eq!(st.field, want, "clicking a row must focus it");
+    }
+
+    /// A stepper arrow changes the value it sits beside.
+    #[test]
+    fn clicking_a_stepper_arrow_changes_that_field() {
+        let cfg = AppConfig::default();
+        let mut ov = Overlay::settings_with_field(&cfg, settings_defs::index_of(SField::MaxAttempts))
+            ;
+        let (_, zones) = render_overlay(&ov, 100, 34);
+        let before = match &ov {
+            Overlay::Settings(st) => st.max_attempts.clone(),
+            _ => unreachable!(),
+        };
+        let group_start = SettingsTab::Pipeline.group().first_field().unwrap_or(0);
+        let n = settings_defs::index_of(SField::MaxAttempts) - group_start;
+        let rect = zones
+            .rect_of(crate::ui::kit::form::inc_id(n as usize))
+            .expect("increment arrow should be registered");
+        ov.handle_mouse_zones(
+            MouseInput {
+                gesture: MouseGesture::Click { double: false },
+                col: rect.x,
+                row: rect.y,
+            },
+            &zones,
+        );
+        let after = match &ov {
+            Overlay::Settings(st) => st.max_attempts.clone(),
+            _ => unreachable!(),
+        };
+        assert_ne!(before, after, "the arrow should have moved the value");
+    }
+
+    /// A CJK theme name must not push its tone column out of line.
+    ///
+    /// `{:<22}` pads by character, and "Washi 和紙" is eight characters but ten
+    /// display columns, so it came out two columns wider than every other row.
+    /// This is the whole reason the column-width helpers exist.
+    #[test]
+    fn theme_rows_align_despite_cjk_names() {
+        let (lines, _) = render_overlay(&Overlay::theme(ThemeId::default()), 100, 30);
+
+        let mut columns: Vec<(&str, usize)> = Vec::new();
+        for id in ALL_THEMES {
+            // A wide glyph occupies two cells, so the reconstruction spells
+            // "和紙" with the continuation cell between its halves; match on the
+            // Latin head of the name, which is enough to find the row.
+            let head = id.label().split_whitespace().next().unwrap_or(id.label());
+            let tone = id.tone();
+            // The captured rows carry the modal border, so the tone is never
+            // last on the line; match on both the name and the tone instead.
+            let Some(line) = lines.iter().find(|l| l.contains(head) && l.contains(tone)) else {
+                continue;
+            };
+            // `rfind` so a tone word inside a name ("Solarized Light") is not
+            // mistaken for the tone column itself.
+            let at = line.rfind(tone).expect("tone present");
+            // Counted in characters, not display columns: a reconstruction has
+            // one entry per terminal cell, so a wide glyph already appears as
+            // two entries and `col_width` would count it twice over.
+            columns.push((id.label(), line[..at].chars().count()));
+        }
+
+        assert!(columns.len() >= 4, "expected several theme rows, got {columns:?}");
+        let first = columns[0].1;
+        assert!(
+            columns.iter().all(|(_, c)| *c == first),
+            "the tone column is ragged across rows: {columns:?}"
+        );
     }
 
     #[test]

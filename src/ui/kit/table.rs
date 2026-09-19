@@ -198,7 +198,7 @@ pub fn render_header(ui: &mut Ui, area: Rect, columns: &[Column], sort: Sort) {
         height: 1,
         ..area
     };
-    ui.fill(row, Style::default().bg(ui.theme.bg));
+    ui.fill(row, Style::default().bg(ui.surface()));
     let cols = layout(columns, row.width);
 
     let mut x = row.x;
@@ -223,7 +223,7 @@ pub fn render_header(ui: &mut Ui, area: Rect, columns: &[Column], sort: Sort) {
             } else {
                 ui.theme.ink_faint
             })
-            .bg(ui.theme.bg)
+            .bg(ui.surface())
             .add_modifier(Modifier::BOLD);
         if st.hovered && col.sortable {
             sty = sty.add_modifier(Modifier::UNDERLINED);
@@ -337,10 +337,7 @@ pub fn header_column(id: ZoneId) -> Option<usize> {
 
 /// Selection styling for a table row, matching the list's.
 pub fn row_style(ui: &Ui, selected: bool, focused: bool) -> Style {
-    style::row(
-        super::style::State::selected(selected).with_focus(focused),
-        ui.theme,
-    )
+    ui.row_style(super::style::State::selected(selected).with_focus(focused))
 }
 
 #[cfg(test)]

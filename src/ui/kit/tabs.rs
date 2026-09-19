@@ -145,7 +145,7 @@ impl<'a> SegmentedControl<'a> {
             height: 1,
             ..area
         };
-        ui.fill(row, Style::default().bg(ui.theme.bg));
+        ui.fill(row, Style::default().bg(ui.surface()));
 
         let detail = self.detail_for(row.width);
         let (marks, badges) = match detail {
@@ -180,10 +180,10 @@ impl<'a> SegmentedControl<'a> {
             } else if seg.disabled {
                 Style::default()
                     .fg(ui.theme.ink_faint)
-                    .bg(ui.theme.bg)
+                    .bg(ui.surface())
                     .add_modifier(Modifier::DIM)
             } else {
-                style::row(st.with_hover(st.hovered), ui.theme)
+                ui.row_style(st.with_hover(st.hovered))
             };
 
             let mut spans = vec![Span::styled(" ", base)];

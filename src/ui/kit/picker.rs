@@ -229,7 +229,7 @@ pub fn render(
                 ..list_rect
             },
             "no matches",
-            Style::default().fg(ui.theme.ink_faint).bg(ui.theme.bg),
+            Style::default().fg(ui.theme.ink_faint).bg(ui.surface()),
         );
         return matches;
     }
@@ -264,7 +264,7 @@ fn render_query(
     placeholder: &str,
     count: usize,
 ) {
-    let bg = ui.theme.bg;
+    let bg = ui.surface();
     ui.fill(rect, Style::default().bg(bg));
     let tally = format!(" {count} ");
     let tally_cols = tally.chars().count() as u16;

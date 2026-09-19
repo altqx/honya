@@ -1101,6 +1101,37 @@ impl SettingsState {
         }
     }
 
+    /// Step the focused numeric row by one, clamped to the range the registry
+    /// declares.
+    ///
+    /// Numeric rows are typed into, so `cycle` leaves them alone — but the form
+    /// draws stepper arrows beside them, and an arrow that does nothing is
+    /// worse than no arrow. Returns false when the focused row is not numeric.
+    pub(super) fn step_number(&mut self, up: bool) -> bool {
+        let Some(def) = settings_defs::at(self.field) else {
+            return false;
+        };
+        let settings_defs::Kind::Number { min, max } = def.kind else {
+            return false;
+        };
+        let Some(slot) = self.text_field_mut() else {
+            return false;
+        };
+        let current = slot.trim().parse::<i64>().unwrap_or(min);
+        let next = if up { current + 1 } else { current - 1 }.clamp(min, max);
+        *slot = next.to_string();
+        true
+    }
+
+    /// Go straight to `tab`, as clicking its rail entry does. Focus lands on
+    /// that section's first row, which is where Tab would leave it too.
+    pub(super) fn select_tab(&mut self, tab: SettingsTab) {
+        self.tab = tab;
+        if let Some((start, _)) = self.tab.field_range() {
+            self.focus(start);
+        }
+    }
+
     pub(super) fn tab_has_fields(&self) -> bool {
         self.tab.field_range().is_some()
     }

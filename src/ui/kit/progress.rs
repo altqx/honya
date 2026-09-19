@@ -37,8 +37,8 @@ pub fn bar(ui: &mut Ui, area: Rect, ratio: f64) {
     let full = total_eighths / 8;
     let remainder = total_eighths % 8;
 
-    let filled = Style::default().fg(ui.theme.accent).bg(ui.theme.bg);
-    let track = Style::default().fg(ui.theme.ink_faint).bg(ui.theme.bg);
+    let filled = Style::default().fg(ui.theme.accent).bg(ui.surface());
+    let track = Style::default().fg(ui.theme.ink_faint).bg(ui.surface());
 
     let mut spans: Vec<Span<'static>> = Vec::with_capacity(3);
     if full > 0 {
@@ -83,7 +83,7 @@ pub fn bar_with_label(ui: &mut Ui, area: Rect, done: usize, total: usize) {
                 ..area
             },
             truncate_cols(label.trim(), area.width as usize),
-            Style::default().fg(ui.theme.ink_soft).bg(ui.theme.bg),
+            Style::default().fg(ui.theme.ink_soft).bg(ui.surface()),
         );
         return;
     }
@@ -104,7 +104,7 @@ pub fn bar_with_label(ui: &mut Ui, area: Rect, done: usize, total: usize) {
             height: 1,
         },
         label,
-        Style::default().fg(ui.theme.ink_soft).bg(ui.theme.bg),
+        Style::default().fg(ui.theme.ink_soft).bg(ui.surface()),
     );
 }
 
@@ -144,10 +144,13 @@ pub fn stepper(ui: &mut Ui, area: Rect, steps: &[Step]) {
         height: 1,
         ..area
     };
-    ui.fill(row, Style::default().bg(ui.theme.bg));
+    ui.fill(row, Style::default().bg(ui.surface()));
 
-    // Each step costs its mark, a space, its label, and a separator.
-    let sep = format!("  {}  ", glyphs::CHEVRON_RIGHT.as_str());
+    // Each step costs its mark, a space, its label, and a separator. The
+    // separator is deliberately tight: at five columns apiece it cost a quarter
+    // of a six-step rail, which pushed the labels out and left a row of bare
+    // marks that say nothing about what each step is.
+    let sep = format!(" {} ", glyphs::CHEVRON_RIGHT.as_str());
     let sep_cols = col_width(&sep) as u16;
     let natural: u16 = steps
         .iter()
@@ -175,9 +178,9 @@ pub fn stepper(ui: &mut Ui, area: Rect, steps: &[Step]) {
                 },
                 Line::from(Span::styled(
                     sep.clone(),
-                    Style::default().fg(ui.theme.ink_faint).bg(ui.theme.bg),
+                    Style::default().fg(ui.theme.ink_faint).bg(ui.surface()),
                 )),
-                Style::default().bg(ui.theme.bg),
+                Style::default().bg(ui.surface()),
             );
             x += w;
             if x >= right {
@@ -185,12 +188,17 @@ pub fn stepper(ui: &mut Ui, area: Rect, steps: &[Step]) {
             }
         }
 
+        // One consistent mark per state. Numbering the required steps read as
+        // broken the moment an optional one sat between them — "2 Name" beside
+        // "4 Volume" looks like a step went missing, when position already says
+        // the order and the label already says what it is.
         let (mark, color) = match step.state {
-            StepState::Done => (glyphs::CHECK.as_str().to_string(), ui.theme.status_done),
-            StepState::Current => (glyphs::MOON_FIRST_QUARTER.as_str().to_string(), ui.theme.accent),
-            StepState::Optional => (glyphs::DOT.as_str().to_string(), ui.theme.ink_faint),
-            StepState::Ahead => ((i + 1).to_string(), ui.theme.ink_faint),
+            StepState::Done => (glyphs::CHECK, ui.theme.status_done),
+            StepState::Current => (glyphs::MOON_FULL, ui.theme.accent),
+            StepState::Optional => (glyphs::DOT, ui.theme.ink_faint),
+            StepState::Ahead => (glyphs::MOON_NEW, ui.theme.ink_faint),
         };
+        let mark = mark.as_str().to_string();
 
         let label = if labels { step.label.as_str() } else { "" };
         let want = col_width(&mark) as u16 + if labels { col_width(label) as u16 + 1 } else { 0 };
@@ -212,7 +220,7 @@ pub fn stepper(ui: &mut Ui, area: Rect, steps: &[Step]) {
 
         let mut sty = Style::default()
             .fg(color)
-            .bg(style::surface(st, ui.theme));
+            .bg(ui.surface_of(st));
         if step.state == StepState::Current {
             sty = sty.add_modifier(Modifier::BOLD);
         }

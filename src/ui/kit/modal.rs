@@ -40,6 +40,12 @@ pub struct Sizing {
     pub max_width: u16,
     /// Rows left clear above and below.
     pub v_margin: u16,
+    /// The tallest this modal grows, whatever the terminal allows.
+    ///
+    /// Without a cap a modal fills the screen minus its margin, so a panel
+    /// holding four menu rows arrived as a mostly-empty box the height of the
+    /// terminal. A dialog should be the size of what it holds.
+    pub max_height: u16,
     /// Columns of padding inside the border.
     pub h_pad: u16,
     /// Rows of padding inside the border.
@@ -54,6 +60,8 @@ impl Sizing {
             min_width: 48,
             max_width: 140,
             v_margin: 3,
+            // Working surfaces genuinely want the room.
+            max_height: u16::MAX,
             h_pad: 2,
             v_pad: 1,
         }
@@ -66,6 +74,7 @@ impl Sizing {
             min_width: 44,
             max_width: 96,
             v_margin: 4,
+            max_height: 26,
             h_pad: 2,
             v_pad: 1,
         }
@@ -78,6 +87,7 @@ impl Sizing {
             min_width: 36,
             max_width: 64,
             v_margin: 6,
+            max_height: 16,
             h_pad: 2,
             v_pad: 1,
         }
@@ -91,6 +101,24 @@ impl Sizing {
             self.h_pad = 1;
             self.v_pad = 0;
         }
+        self
+    }
+
+    /// Widen so `cols` columns of content fit inside the padding and border,
+    /// within what the terminal allows. A panel whose text is known should not
+    /// arrive with that text truncated.
+    pub fn fit_width(mut self, cols: u16) -> Self {
+        let needed = cols + self.h_pad * 2 + 2;
+        self.min_width = self.min_width.max(needed);
+        self.max_width = self.max_width.max(needed);
+        self
+    }
+
+    /// Cap the height at what the content needs, within the preset's own
+    /// maximum. A panel that knows how many rows it holds should not be
+    /// taller than that.
+    pub fn fit_height(mut self, rows: u16) -> Self {
+        self.max_height = self.max_height.min(rows);
         self
     }
 
@@ -113,6 +141,7 @@ impl Sizing {
             .height
             .saturating_sub(self.v_margin.saturating_mul(2))
             .max(3)
+            .min(self.max_height)
             .min(area.height);
         Rect {
             x: area.x + (area.width.saturating_sub(w)) / 2,
@@ -238,6 +267,11 @@ impl<'a> Modal<'a> {
             height: footer_rows,
             ..padded
         };
+        // Everything the caller draws from here sits on the raised surface,
+        // not on the screen behind it. Without this a list fills its rows with
+        // the screen background while the spans on them carry the modal's, and
+        // the mismatch reads as a box around every piece of text.
+        ui.set_surface(ui.theme.bg_elevated);
         Frame { outer, body, footer }
     }
 

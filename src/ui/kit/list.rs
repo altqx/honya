@@ -218,7 +218,7 @@ where
     };
     let win = state.window(body.height, len);
 
-    ui.fill(area, Style::default().bg(ui.theme.bg));
+    ui.fill(area, Style::default().bg(ui.surface()));
 
     let rail_cols: u16 = if opts.rail { 1 } else { 0 };
     for (n, index) in win.clone().enumerate() {
@@ -238,12 +238,12 @@ where
             State::IDLE
         };
 
-        let base = style::row(st, ui.theme);
+        let base = ui.row_style(st);
         ui.fill(row_rect, base);
 
         let mut x = row_rect.x;
         if rail_cols > 0 {
-            let (glyph, rail_style) = match style::rail(st, ui.theme) {
+            let (glyph, rail_style) = match ui.rail_of(st) {
                 Some(r) => (r.0.as_str().to_string(), r.1),
                 None => (" ".to_string(), base),
             };
@@ -307,8 +307,8 @@ pub fn render_scrollbar(ui: &mut Ui, area: Rect, len: usize, offset: usize) {
     // both ends of the track rather than stopping a row short at the bottom.
     let thumb_y = (offset * span + max_off / 2) / max_off;
 
-    let track_style = Style::default().fg(ui.theme.rule).bg(ui.theme.bg);
-    let thumb_style = Style::default().fg(ui.theme.ink_soft).bg(ui.theme.bg);
+    let track_style = Style::default().fg(ui.theme.rule).bg(ui.surface());
+    let thumb_style = Style::default().fg(ui.theme.ink_soft).bg(ui.surface());
     for n in 0..view {
         let on_thumb = n >= thumb_y && n < thumb_y + thumb_h;
         let cell = Rect {

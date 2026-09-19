@@ -87,16 +87,18 @@ impl State {
 /// Precedence is active over selected over hover, because they answer different
 /// questions and the most immediate one wins: "I am pressing this" beats "this
 /// is the current item" beats "my pointer is here".
-pub fn surface(state: State, theme: &Theme) -> Color {
+/// `base` is the container's own background — the screen's, or a modal's
+/// raised surface. An idle control keeps it; the marked states replace it.
+pub fn surface(state: State, theme: &Theme, base: Color) -> Color {
     if !theme.paints_fills() {
-        return theme.bg;
+        return base;
     }
     match state {
-        s if s.disabled => theme.bg,
+        s if s.disabled => base,
         s if s.active => theme.bg_active,
         s if s.selected => theme.accent_bg,
         s if s.hovered => theme.bg_hover,
-        _ => theme.bg,
+        _ => base,
     }
 }
 
@@ -110,8 +112,10 @@ pub fn ink(state: State, theme: &Theme) -> Color {
 }
 
 /// The full style for one row of a list or one control's label.
-pub fn row(state: State, theme: &Theme) -> Style {
-    let mut st = Style::default().fg(ink(state, theme)).bg(surface(state, theme));
+pub fn row(state: State, theme: &Theme, base: Color) -> Style {
+    let mut st = Style::default()
+        .fg(ink(state, theme))
+        .bg(surface(state, theme, base));
     if state.selected || state.focused {
         st = st.add_modifier(Modifier::BOLD);
     }
@@ -131,7 +135,7 @@ pub fn row(state: State, theme: &Theme) -> Style {
 /// The rail is the primary way honya sets a block apart — a box around
 /// everything reads as clutter at this density, and it costs two rows and two
 /// columns of the very space a terminal has least of.
-pub fn rail(state: State, theme: &Theme) -> Option<(Glyph, Style)> {
+pub fn rail(state: State, theme: &Theme, base: Color) -> Option<(Glyph, Style)> {
     let (glyph, color) = match state {
         s if s.disabled => return None,
         s if s.focused => (glyphs::SELECT_BAR, theme.border_focus),
@@ -139,7 +143,7 @@ pub fn rail(state: State, theme: &Theme) -> Option<(Glyph, Style)> {
         s if s.hovered => (glyphs::ACCENT_RAIL_STRONG, theme.accent_soft),
         _ => return None,
     };
-    Some((glyph, Style::default().fg(color).bg(surface(state, theme))))
+    Some((glyph, Style::default().fg(color).bg(surface(state, theme, base))))
 }
 
 /// The border color for a panel in a given state.
@@ -221,15 +225,15 @@ mod tests {
         let both = State::selected(true).with_hover(true);
         let pressed = State::selected(true).with_hover(true).with_active(true);
 
-        assert_eq!(surface(hovered, &t), t.bg_hover);
-        assert_eq!(surface(selected, &t), t.accent_bg);
+        assert_eq!(surface(hovered, &t, t.bg), t.bg_hover);
+        assert_eq!(surface(selected, &t, t.bg), t.accent_bg);
         assert_eq!(
-            surface(both, &t),
+            surface(both, &t, t.bg),
             t.accent_bg,
             "selection outranks hover"
         );
         assert_eq!(
-            surface(pressed, &t),
+            surface(pressed, &t, t.bg),
             t.bg_active,
             "a press outranks everything"
         );
@@ -239,10 +243,10 @@ mod tests {
     fn a_disabled_control_never_lights_up() {
         let t = washi();
         let disabled = State::selected(true).with_hover(true).with_disabled(true);
-        assert_eq!(surface(disabled, &t), t.bg, "no wash");
+        assert_eq!(surface(disabled, &t, t.bg), t.bg, "no wash");
         assert_eq!(ink(disabled, &t), t.ink_faint);
-        assert!(rail(disabled, &t).is_none(), "no rail");
-        assert!(row(disabled, &t).add_modifier.contains(Modifier::DIM));
+        assert!(rail(disabled, &t, t.bg).is_none(), "no rail");
+        assert!(row(disabled, &t, t.bg).add_modifier.contains(Modifier::DIM));
     }
 
     #[test]
@@ -250,28 +254,28 @@ mod tests {
         let t = terminal();
         let hovered = State::IDLE.with_hover(true);
         // There is no wash to use...
-        assert_eq!(surface(hovered, &t), t.bg);
+        assert_eq!(surface(hovered, &t, t.bg), t.bg);
         // ...so the modifier carries it instead.
         assert!(
-            row(hovered, &t).add_modifier.contains(Modifier::REVERSED),
+            row(hovered, &t, t.bg).add_modifier.contains(Modifier::REVERSED),
             "hover would be invisible on a palette that paints no fills"
         );
         // And a palette that does paint fills must not also reverse.
-        assert!(!row(hovered, &washi()).add_modifier.contains(Modifier::REVERSED));
+        assert!(!row(hovered, &washi(), washi().bg).add_modifier.contains(Modifier::REVERSED));
     }
 
     #[test]
     fn focus_and_selection_are_distinguishable_rails() {
         let t = washi();
-        let (_, focused) = rail(State::IDLE.with_focus(true), &t).expect("focus rail");
-        let (_, selected) = rail(State::selected(true), &t).expect("selection rail");
+        let (_, focused) = rail(State::IDLE.with_focus(true), &t, t.bg).expect("focus rail");
+        let (_, selected) = rail(State::selected(true), &t, t.bg).expect("selection rail");
         assert_eq!(focused.fg, Some(t.border_focus));
         assert_eq!(selected.fg, Some(t.accent));
         assert_ne!(
             focused.fg, selected.fg,
             "a focused row must be tellable from a merely selected one"
         );
-        assert!(rail(State::IDLE, &t).is_none(), "idle rows carry no rail");
+        assert!(rail(State::IDLE, &t, t.bg).is_none(), "idle rows carry no rail");
     }
 
     #[test]

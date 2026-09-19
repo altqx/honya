@@ -236,9 +236,9 @@ pub fn render(ui: &mut Ui, area: Rect, view: &View<'_>, id_index: u32) {
         return;
     }
     ui.hit_only(area, ZoneId::new(ZoneKind::TextSurface, id_index));
-    ui.fill(area, Style::default().bg(ui.theme.bg));
+    ui.fill(area, Style::default().bg(ui.surface()));
 
-    let plain = Style::default().fg(ui.theme.ink).bg(ui.theme.bg);
+    let plain = Style::default().fg(ui.theme.ink).bg(ui.surface());
     let picked = Style::default()
         .fg(ui.theme.ink)
         .bg(ui.theme.accent_bg)
@@ -301,7 +301,7 @@ pub fn render(ui: &mut Ui, area: Rect, view: &View<'_>, id_index: u32) {
             },
             Line::from(Span::styled(
                 glyphs::ACCENT_RAIL.as_str().to_string(),
-                Style::default().fg(ui.theme.stream_cursor).bg(ui.theme.bg),
+                Style::default().fg(ui.theme.stream_cursor).bg(ui.surface()),
             )),
             plain,
         );

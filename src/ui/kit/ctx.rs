@@ -30,6 +30,14 @@ pub struct Ui<'a, 'f> {
     hover: Option<ZoneId>,
     /// Animation clock, for spinners.
     pub frame_count: u64,
+    /// The background of the container currently being drawn into.
+    ///
+    /// A control has to know what it sits on. Everything used to assume the
+    /// screen background, which is wrong the moment it is inside a modal — the
+    /// row fills with one colour while the spans on it carry another, and the
+    /// difference shows as a box around every piece of text. A modal sets this
+    /// for its body; nested containers set it in turn.
+    surface: ratatui::style::Color,
 }
 
 impl<'a, 'f> Ui<'a, 'f> {
@@ -50,7 +58,49 @@ impl<'a, 'f> Ui<'a, 'f> {
             focus: focus.get(),
             hover: hover.get(),
             frame_count,
+            surface: theme.bg,
         }
+    }
+
+    /// The background of the container being drawn into.
+    pub fn surface(&self) -> ratatui::style::Color {
+        self.surface
+    }
+
+    /// Draw `body` with `surface` as the container background, restoring the
+    /// previous one afterwards so sibling containers are unaffected.
+    pub fn on_surface<R>(
+        &mut self,
+        surface: ratatui::style::Color,
+        body: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let prev = std::mem::replace(&mut self.surface, surface);
+        let out = body(self);
+        self.surface = prev;
+        out
+    }
+
+    /// Set the container background for everything drawn from here on.
+    ///
+    /// For a container that hands its body rect back rather than taking a
+    /// closure — a modal, say, whose caller draws the contents.
+    pub fn set_surface(&mut self, surface: ratatui::style::Color) {
+        self.surface = surface;
+    }
+
+    /// The background a control in `state` sits on, over this container.
+    pub fn surface_of(&self, state: State) -> ratatui::style::Color {
+        super::style::surface(state, self.theme, self.surface)
+    }
+
+    /// The full style for a row or control label in `state`.
+    pub fn row_style(&self, state: State) -> Style {
+        super::style::row(state, self.theme, self.surface)
+    }
+
+    /// The left rail for a row in `state`, if it has one.
+    pub fn rail_of(&self, state: State) -> Option<(crate::ui::glyphs::Glyph, Style)> {
+        super::style::rail(state, self.theme, self.surface)
     }
 
     pub fn is_focused(&self, id: ZoneId) -> bool {
