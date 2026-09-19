@@ -240,7 +240,7 @@ pub struct ClientSet {
     google: Option<Arc<dyn LlmClient>>,
     cloudflare: Option<Arc<dyn LlmClient>>,
     codex: Option<Arc<dyn LlmClient>>,
-    /// System One review-gate backend. Not an `LlmClient` — a decisions model
+    /// System One decisions backend. Not an `LlmClient` — a decisions model
     /// answers typed questions and cannot serve an agent — so it sits beside the
     /// provider slots rather than in them.
     decisions: Option<Arc<dyn super::decisions::DecisionsBackend>>,
@@ -364,18 +364,19 @@ impl ClientSet {
     }
 }
 
-/// Build the review-gate backend for the configured transport, or `None` when
-/// the gate is off or its transport has no key. A missing key is not an error:
-/// the gate is optional and the pipeline simply falls through to the reviewer.
+/// Build the System One backend for the configured transport, or `None` when
+/// every judgement is off or the transport has no key. A missing key is not an
+/// error: System One is optional and each caller falls back to its
+/// deterministic path.
 fn build_decisions(cfg: &AppConfig) -> Result<Option<Arc<dyn super::decisions::DecisionsBackend>>> {
     use super::decisions::{
         DECISIONS_TIMEOUT, DecisionsClient, OPENROUTER_DECISIONS_URL, TYPESAFE_SYSTEMONE_URL,
     };
 
-    if !cfg.review_gate.mode.is_on() {
+    if !cfg.system_one.any_feature_on() {
         return Ok(None);
     }
-    let (url, key) = match cfg.review_gate.provider {
+    let (url, key) = match cfg.system_one.provider {
         DecisionsProvider::OpenRouter => (
             OPENROUTER_DECISIONS_URL,
             crate::config::resolve_api_key(cfg),

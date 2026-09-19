@@ -2780,7 +2780,7 @@ async fn process_chunk_with_lookahead(
                 let _wait = wd.external_wait();
                 review_gate::try_review(
                     backend.as_ref(),
-                    &ctx.cfg.review_gate,
+                    &ctx.cfg.system_one,
                     ctx.target_language,
                     &chunk.text,
                     &translated,
@@ -5801,9 +5801,10 @@ mod tests {
     fn gate_cfg(mode: crate::model::ReviewGateMode) -> crate::model::AppConfig {
         crate::model::AppConfig {
             max_attempts: 2,
-            review_gate: crate::model::ReviewGate {
-                mode,
-                ..crate::model::ReviewGate::default()
+            system_one: crate::model::SystemOne {
+                enabled: true,
+                review_gate: mode,
+                ..crate::model::SystemOne::default()
             },
             ..crate::model::AppConfig::default()
         }

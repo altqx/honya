@@ -579,42 +579,149 @@ impl ReviewGateMode {
     }
 }
 
-fn default_review_gate_model() -> String {
+fn default_system_one_model() -> String {
     DecisionsProvider::OpenRouter.default_model().to_string()
 }
 
-fn default_review_gate_confidence() -> f64 {
+fn default_system_one_confidence() -> f64 {
     0.8
 }
 
-/// System One (Jev) review-gate settings. Every field defaults, and `AppConfig`
-/// marks the whole struct `#[serde(default)]`, so configs written before the
-/// gate existed keep loading.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ReviewGate {
-    #[serde(default)]
-    pub mode: ReviewGateMode,
-    #[serde(default)]
-    pub provider: DecisionsProvider,
-    #[serde(default = "default_review_gate_model")]
-    pub model: String,
-    /// Confidence an approval must clear to skip the LLM reviewer.
-    #[serde(default = "default_review_gate_confidence")]
-    pub min_confidence: f64,
+/// One independently switchable System One judgement. The review gate is not a
+/// member: it is tri-state (`ReviewGateMode`) and keeps its own row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SystemOneFeature {
+    Audit,
+    Continuity,
+    EntityAlignment,
+    Segmentation,
+    ReferenceScope,
 }
 
-impl Default for ReviewGate {
-    fn default() -> Self {
-        Self {
-            mode: ReviewGateMode::default(),
-            provider: DecisionsProvider::default(),
-            model: default_review_gate_model(),
-            min_confidence: default_review_gate_confidence(),
+impl SystemOneFeature {
+    pub const ALL: [SystemOneFeature; 5] = [
+        SystemOneFeature::Audit,
+        SystemOneFeature::Continuity,
+        SystemOneFeature::EntityAlignment,
+        SystemOneFeature::Segmentation,
+        SystemOneFeature::ReferenceScope,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SystemOneFeature::Audit => "Semantic audit",
+            SystemOneFeature::Continuity => "Continuity echo",
+            SystemOneFeature::EntityAlignment => "Character alignment",
+            SystemOneFeature::Segmentation => "Chapter segmentation",
+            SystemOneFeature::ReferenceScope => "Reference scoping",
+        }
+    }
+
+    pub fn desc(self) -> &'static str {
+        match self {
+            SystemOneFeature::Audit => {
+                "Judges transliteration glosses and pronoun frames instead of matching word lists"
+            }
+            SystemOneFeature::Continuity => {
+                "Catches a reworded echo of the continuity tail, not just a verbatim copy"
+            }
+            SystemOneFeature::EntityAlignment => {
+                "Decides whether two roster entries are the same person before merging"
+            }
+            SystemOneFeature::Segmentation => {
+                "Classifies EPUB spine pages at import instead of per-publisher heuristics"
+            }
+            SystemOneFeature::ReferenceScope => {
+                "Ranks glossary/character entries by relevance when a chunk overflows the cap"
+            }
         }
     }
 }
 
-impl ReviewGate {
+/// System One (Jev) settings: one master switch, one transport, and a toggle per
+/// judgement. `enabled` gates every feature, so turning it off restores the
+/// deterministic code path everywhere in one keystroke.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SystemOne {
+    /// Master switch. Off means no decisions call is ever made, whatever the
+    /// per-feature toggles say.
+    pub enabled: bool,
+    pub provider: DecisionsProvider,
+    pub model: String,
+    /// Confidence a judgement must clear before it is acted on.
+    pub min_confidence: f64,
+    pub review_gate: ReviewGateMode,
+    pub audit: bool,
+    pub continuity: bool,
+    pub entity_alignment: bool,
+    pub segmentation: bool,
+    pub reference_scope: bool,
+}
+
+/// Deserialization shape accepting both the current `system_one` object and the
+/// pre-`system_one` `review_gate` one (which carried `mode` instead of
+/// `review_gate` and knew nothing of the other features).
+#[derive(Deserialize)]
+struct SystemOneWire {
+    enabled: Option<bool>,
+    provider: Option<DecisionsProvider>,
+    model: Option<String>,
+    min_confidence: Option<f64>,
+    review_gate: Option<ReviewGateMode>,
+    /// Legacy name for `review_gate`; its presence identifies the old shape.
+    mode: Option<ReviewGateMode>,
+    audit: Option<bool>,
+    continuity: Option<bool>,
+    entity_alignment: Option<bool>,
+    segmentation: Option<bool>,
+    reference_scope: Option<bool>,
+}
+
+impl<'de> Deserialize<'de> for SystemOne {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        let w = SystemOneWire::deserialize(d)?;
+        // An upgraded config keeps exactly the behaviour it had: the gate as
+        // configured, every judgement added since then off until asked for.
+        let legacy = w.mode.is_some();
+        let review_gate = w.review_gate.or(w.mode).unwrap_or_default();
+        let feature_default = !legacy;
+        Ok(SystemOne {
+            enabled: w
+                .enabled
+                .unwrap_or(if legacy { review_gate.is_on() } else { true }),
+            provider: w.provider.unwrap_or_default(),
+            model: w.model.unwrap_or_else(default_system_one_model),
+            min_confidence: w.min_confidence.unwrap_or_else(default_system_one_confidence),
+            review_gate,
+            audit: w.audit.unwrap_or(feature_default),
+            continuity: w.continuity.unwrap_or(feature_default),
+            entity_alignment: w.entity_alignment.unwrap_or(feature_default),
+            segmentation: w.segmentation.unwrap_or(feature_default),
+            reference_scope: w.reference_scope.unwrap_or(feature_default),
+        })
+    }
+}
+
+impl Default for SystemOne {
+    fn default() -> Self {
+        Self {
+            // Opt-in as a whole, but every feature pre-armed, so one switch
+            // turns the suite on.
+            enabled: false,
+            provider: DecisionsProvider::default(),
+            model: default_system_one_model(),
+            min_confidence: default_system_one_confidence(),
+            review_gate: ReviewGateMode::default(),
+            audit: true,
+            continuity: true,
+            entity_alignment: true,
+            segmentation: true,
+            reference_scope: true,
+        }
+    }
+}
+
+impl SystemOne {
     /// Switch transport, replacing the model id only when it was left at the old
     /// transport's default — the two id namespaces are not interchangeable.
     pub fn switch_provider(&mut self, next: DecisionsProvider) {
@@ -624,10 +731,59 @@ impl ReviewGate {
         self.provider = next;
     }
 
-    /// Clamped to a sane probability; a malformed config must not wedge the gate
-    /// permanently open (0.0) or permanently shut (>1.0).
+    /// Clamped to a sane probability; a malformed config must not wedge a
+    /// judgement permanently open (0.0) or permanently shut (>1.0).
     pub fn confidence_threshold(&self) -> f64 {
         self.min_confidence.clamp(0.0, 1.0)
+    }
+
+    /// The effective gate mode: `Off` whenever the master switch is.
+    pub fn review_gate_mode(&self) -> ReviewGateMode {
+        if self.enabled {
+            self.review_gate
+        } else {
+            ReviewGateMode::Off
+        }
+    }
+
+    /// A feature's own toggle, ignoring the master switch — what Settings shows
+    /// on its row. Use [`SystemOne::feature`] to decide whether to actually run.
+    pub fn armed(&self, f: SystemOneFeature) -> bool {
+        match f {
+            SystemOneFeature::Audit => self.audit,
+            SystemOneFeature::Continuity => self.continuity,
+            SystemOneFeature::EntityAlignment => self.entity_alignment,
+            SystemOneFeature::Segmentation => self.segmentation,
+            SystemOneFeature::ReferenceScope => self.reference_scope,
+        }
+    }
+
+    pub fn feature(&self, f: SystemOneFeature) -> bool {
+        let on = match f {
+            SystemOneFeature::Audit => self.audit,
+            SystemOneFeature::Continuity => self.continuity,
+            SystemOneFeature::EntityAlignment => self.entity_alignment,
+            SystemOneFeature::Segmentation => self.segmentation,
+            SystemOneFeature::ReferenceScope => self.reference_scope,
+        };
+        self.enabled && on
+    }
+
+    pub fn feature_mut(&mut self, f: SystemOneFeature) -> &mut bool {
+        match f {
+            SystemOneFeature::Audit => &mut self.audit,
+            SystemOneFeature::Continuity => &mut self.continuity,
+            SystemOneFeature::EntityAlignment => &mut self.entity_alignment,
+            SystemOneFeature::Segmentation => &mut self.segmentation,
+            SystemOneFeature::ReferenceScope => &mut self.reference_scope,
+        }
+    }
+
+    /// Whether anything at all would call the decisions backend. Building the
+    /// client is pointless otherwise.
+    pub fn any_feature_on(&self) -> bool {
+        self.enabled
+            && (self.review_gate.is_on() || SystemOneFeature::ALL.iter().any(|f| self.feature(*f)))
     }
 }
 
@@ -847,10 +1003,11 @@ pub struct AppConfig {
     /// needed for the TypeSafe transport; the OpenRouter one reuses `api_key`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub typesafe_api_key: Option<String>,
-    /// System One (Jev) review gate. Defaults to off, so an existing config
-    /// loads with today's behaviour unchanged.
-    #[serde(default)]
-    pub review_gate: ReviewGate,
+    /// System One (Jev): the master switch, transport, and a toggle per
+    /// judgement. The `review_gate` alias loads configs written before the other
+    /// judgements existed; those keep the gate they had and nothing more.
+    #[serde(default, alias = "review_gate")]
+    pub system_one: SystemOne,
     /// Active color theme (serde default keeps pre-theme configs loading).
     #[serde(default)]
     pub theme: ThemeId,
@@ -943,7 +1100,7 @@ impl Default for AppConfig {
             cloudflare_account_id: None,
             cloudflare_api_token: None,
             typesafe_api_key: None,
-            review_gate: ReviewGate::default(),
+            system_one: SystemOne::default(),
             theme: ThemeId::default(),
             onboarded: false,
             update_mode: UpdateMode::default(),
@@ -1985,35 +2142,74 @@ mod provider_model_tests {
     }
 
     #[test]
-    fn review_gate_round_trips_and_defaults_to_off() {
-        let g = ReviewGate::default();
-        assert_eq!(g.mode, ReviewGateMode::Off, "the gate must be opt-in");
+    fn system_one_round_trips_and_defaults_to_off() {
+        let g = SystemOne::default();
+        assert!(!g.enabled, "System One must be opt-in as a whole");
+        assert_eq!(g.review_gate, ReviewGateMode::Off);
         assert_eq!(g.provider, DecisionsProvider::OpenRouter);
         assert_eq!(g.model, "typesafe/jev-1.13");
+        assert!(g.audit, "features are pre-armed so one switch turns the suite on");
+        assert!(
+            !g.feature(SystemOneFeature::Audit),
+            "a pre-armed feature stays inert while the master switch is off"
+        );
+        assert!(!g.any_feature_on());
 
         let json = serde_json::to_string(&g).unwrap();
-        let back: ReviewGate = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, g);
+        assert_eq!(serde_json::from_str::<SystemOne>(&json).unwrap(), g);
         assert!(json.contains("\"open-router\""));
 
-        let standalone = ReviewGate {
-            mode: ReviewGateMode::Standalone,
+        let standalone = SystemOne {
+            enabled: true,
+            review_gate: ReviewGateMode::Standalone,
             provider: DecisionsProvider::TypeSafe,
             model: "jev-latest".to_string(),
             min_confidence: 0.65,
+            ..SystemOne::default()
         };
         let json = serde_json::to_string(&standalone).unwrap();
         assert!(json.contains("\"standalone\""));
         assert!(json.contains("\"type-safe\""));
         assert_eq!(
-            serde_json::from_str::<ReviewGate>(&json).unwrap(),
+            serde_json::from_str::<SystemOne>(&json).unwrap(),
             standalone
         );
     }
 
-    /// A config written before the gate existed must still load, with the gate off.
     #[test]
-    fn config_without_review_gate_still_loads() {
+    fn master_switch_gates_every_feature() {
+        let mut s = SystemOne {
+            enabled: true,
+            review_gate: ReviewGateMode::Gate,
+            ..SystemOne::default()
+        };
+        assert!(SystemOneFeature::ALL.iter().all(|f| s.feature(*f)));
+        assert_eq!(s.review_gate_mode(), ReviewGateMode::Gate);
+
+        s.enabled = false;
+        assert!(
+            SystemOneFeature::ALL.iter().all(|f| !s.feature(*f)),
+            "the master switch must override every per-feature toggle"
+        );
+        assert_eq!(s.review_gate_mode(), ReviewGateMode::Off);
+        assert!(!s.any_feature_on());
+    }
+
+    #[test]
+    fn individual_features_toggle_independently() {
+        let mut s = SystemOne {
+            enabled: true,
+            ..SystemOne::default()
+        };
+        *s.feature_mut(SystemOneFeature::Segmentation) = false;
+        assert!(!s.feature(SystemOneFeature::Segmentation));
+        assert!(s.feature(SystemOneFeature::Audit));
+        assert!(s.any_feature_on(), "one feature off must not disarm the rest");
+    }
+
+    /// A config written before System One existed must still load, with it off.
+    #[test]
+    fn config_without_system_one_still_loads() {
         let cfg: AppConfig = serde_json::from_str(
             r#"{"models":{"orchestrator":"a","translator":"b","reviewer":"c"},
                 "max_attempts":3,"chunk_target_tokens":1000,"chunk_hard_cap_tokens":1200,
@@ -2021,17 +2217,57 @@ mod provider_model_tests {
                 "referer":null,"title":null}"#,
         )
         .unwrap();
-        assert_eq!(cfg.review_gate.mode, ReviewGateMode::Off);
-        assert_eq!(cfg.review_gate.model, "typesafe/jev-1.13");
+        assert!(!cfg.system_one.enabled);
+        assert_eq!(cfg.system_one.review_gate, ReviewGateMode::Off);
+        assert_eq!(cfg.system_one.model, "typesafe/jev-1.13");
         assert!(cfg.typesafe_api_key.is_none());
     }
 
-    /// A malformed threshold must not wedge the gate permanently open or shut.
+    /// The pre-`system_one` `review_gate` block keeps its gate and gains nothing
+    /// else — an upgrade must never silently start making extra calls.
+    #[test]
+    fn legacy_review_gate_block_migrates_without_arming_new_features() {
+        let cfg: AppConfig = serde_json::from_str(
+            r#"{"models":{"orchestrator":"a","translator":"b","reviewer":"c"},
+                "max_attempts":3,"chunk_target_tokens":1000,"chunk_hard_cap_tokens":1200,
+                "continuity_sentences":10,"parallel_lookahead":true,
+                "referer":null,"title":null,
+                "review_gate":{"mode":"standalone","provider":"type-safe",
+                               "model":"jev-latest","min_confidence":0.7}}"#,
+        )
+        .unwrap();
+        let s = &cfg.system_one;
+        assert!(s.enabled, "a configured gate stays on across the upgrade");
+        assert_eq!(s.review_gate, ReviewGateMode::Standalone);
+        assert_eq!(s.provider, DecisionsProvider::TypeSafe);
+        assert_eq!(s.model, "jev-latest");
+        assert!((s.min_confidence - 0.7).abs() < 1e-9);
+        assert!(
+            SystemOneFeature::ALL.iter().all(|f| !s.feature(*f)),
+            "judgements added after the config was written must default off"
+        );
+    }
+
+    /// The same legacy block with the gate off must not turn the master switch on.
+    #[test]
+    fn legacy_review_gate_off_stays_entirely_off() {
+        let cfg: AppConfig = serde_json::from_str(
+            r#"{"models":{"orchestrator":"a","translator":"b","reviewer":"c"},
+                "max_attempts":3,"chunk_target_tokens":1000,"chunk_hard_cap_tokens":1200,
+                "continuity_sentences":10,"parallel_lookahead":true,
+                "referer":null,"title":null,"review_gate":{"mode":"off"}}"#,
+        )
+        .unwrap();
+        assert!(!cfg.system_one.enabled);
+        assert!(!cfg.system_one.any_feature_on());
+    }
+
+    /// A malformed threshold must not wedge a judgement permanently open or shut.
     #[test]
     fn confidence_threshold_is_clamped() {
-        let mut g = ReviewGate {
+        let mut g = SystemOne {
             min_confidence: 4.2,
-            ..ReviewGate::default()
+            ..SystemOne::default()
         };
         assert_eq!(g.confidence_threshold(), 1.0);
         g.min_confidence = -1.0;

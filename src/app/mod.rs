@@ -296,8 +296,9 @@ pub enum Action {
         max_chapter_retranslates: u32,
         /// Validate and reuse one speculative next-chunk Translator draft.
         parallel_lookahead: bool,
-        /// System One review-gate settings (boxed: keeps `Action` small).
-        review_gate: Box<crate::model::ReviewGate>,
+        /// System One settings: master switch, transport, per-feature toggles
+        /// (boxed: keeps `Action` small).
+        system_one: Box<crate::model::SystemOne>,
         /// New TypeSafe key (same `Some`/`None` semantics as `openrouter_key`).
         typesafe_key: Option<String>,
     },
@@ -2869,7 +2870,7 @@ impl App {
                 loop_stall_secs,
                 max_chapter_retranslates,
                 parallel_lookahead,
-                review_gate,
+                system_one,
                 typesafe_key,
             } => {
                 self.save_settings(
@@ -2888,7 +2889,7 @@ impl App {
                     loop_stall_secs,
                     max_chapter_retranslates,
                     parallel_lookahead,
-                    *review_gate,
+                    *system_one,
                     typesafe_key,
                 );
             }
@@ -4598,7 +4599,7 @@ impl App {
         loop_stall_secs: u64,
         max_chapter_retranslates: u32,
         parallel_lookahead: bool,
-        review_gate: crate::model::ReviewGate,
+        system_one: crate::model::SystemOne,
         typesafe_key: Option<String>,
     ) {
         let models_changed = self.cfg.models != models;
@@ -4652,9 +4653,9 @@ impl App {
             keys_changed |= next != self.cfg.typesafe_api_key;
             self.cfg.typesafe_api_key = next;
         }
-        let gate_changed = self.cfg.review_gate != review_gate;
-        let gate_mode = review_gate.mode;
-        self.cfg.review_gate = review_gate;
+        let system_one_changed = self.cfg.system_one != system_one;
+        let system_one_summary = describe_system_one(&system_one);
+        self.cfg.system_one = system_one;
         // Propagate the working model set to the active project so an in-flight
         // session's next chapter / refine turn uses the new selection.
         if let Some(active) = self.active.as_mut() {
@@ -4662,7 +4663,7 @@ impl App {
         }
         // Rebuild the active clients so changed keys, providers, or service tier
         // (snapshotted into ClientConfig) take hold without reopening.
-        if (keys_changed || tier_changed || models_changed || gate_changed)
+        if (keys_changed || tier_changed || models_changed || system_one_changed)
             && let Some(active) = self.active.as_mut()
         {
             active.clients = crate::build_clients(&self.cfg).ok();
@@ -4690,11 +4691,8 @@ impl App {
                 ),
             );
         }
-        if gate_changed {
-            self.push_log(
-                LogLevel::Info,
-                format!("review gate → {}", gate_mode.label()),
-            );
+        if system_one_changed {
+            self.push_log(LogLevel::Info, format!("System One → {system_one_summary}"));
         }
         // A channel switch should take effect now, not at the next launch: kick
         // off the same background update pass that runs at startup.
@@ -5332,6 +5330,22 @@ fn refine_session_title(messages: &[crate::llm::Message]) -> String {
 }
 
 // Wire strings are relay protocol values, not display copy.
+/// One-line System One summary for the activity log: the gate mode plus the
+/// judgements actually armed, or `off` when the master switch is down.
+fn describe_system_one(s: &crate::model::SystemOne) -> String {
+    if !s.enabled {
+        return "off".to_string();
+    }
+    let mut parts = vec![format!("gate {}", s.review_gate.label())];
+    parts.extend(
+        crate::model::SystemOneFeature::ALL
+            .into_iter()
+            .filter(|f| s.feature(*f))
+            .map(|f| f.label().to_ascii_lowercase()),
+    );
+    parts.join(" · ")
+}
+
 fn remote_chapter_status(s: ChapterStatus) -> &'static str {
     match s {
         ChapterStatus::Pending => "pending",

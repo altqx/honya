@@ -303,64 +303,73 @@ fn pipeline_tab(ui: &mut egui::Ui, st: &mut SettingsState, pal: &GuiPalette) {
     );
 
     ui.add_space(12.0);
-    section(ui, pal, "Review gate (System One)");
+    section(ui, pal, "System One (Jev)");
     hint(
         ui,
         pal,
-        "Jev answers typed questions instead of writing prose. In gate mode a confident clean pass skips the Reviewer call; in standalone mode it reviews alone and feedback is synthesized from the failing checks.",
+        "Jev answers typed questions instead of writing prose. Each judgement below replaces a hand-tuned heuristic and falls back to it whenever the answer is unusable or unconfident.",
+    );
+    ui.add_space(6.0);
+    ui.checkbox(
+        &mut st.system_one.enabled,
+        "Enable System One (master switch)",
+    );
+    hint(
+        ui,
+        pal,
+        "Off means no typed-judgement call is made, whatever the per-feature toggles say.",
     );
     ui.add_space(6.0);
 
-    egui::Grid::new("review_gate_grid")
-        .num_columns(2)
-        .spacing([16.0, 10.0])
-        .show(ui, |ui| {
-            ui.label(RichText::new("Mode").color(pal.ink));
-            ComboBox::from_id_salt("gate_mode")
-                .selected_text(st.review_gate_mode.label())
-                .width(140.0)
-                .show_ui(ui, |ui| {
-                    for m in GATE_MODES {
-                        ui.selectable_value(&mut st.review_gate_mode, m, m.label());
-                    }
-                });
-            ui.end_row();
+    ui.add_enabled_ui(st.system_one.enabled, |ui| {
+        egui::Grid::new("system_one_grid")
+            .num_columns(2)
+            .spacing([16.0, 10.0])
+            .show(ui, |ui| {
+                ui.label(RichText::new("Review gate").color(pal.ink));
+                ComboBox::from_id_salt("gate_mode")
+                    .selected_text(st.system_one.review_gate.label())
+                    .width(140.0)
+                    .show_ui(ui, |ui| {
+                        for m in GATE_MODES {
+                            ui.selectable_value(&mut st.system_one.review_gate, m, m.label());
+                        }
+                    });
+                ui.end_row();
 
-            ui.label(RichText::new("Transport").color(pal.ink));
-            let current = st.review_gate_provider;
-            let mut next = current;
-            ComboBox::from_id_salt("gate_provider")
-                .selected_text(current.label())
-                .width(140.0)
-                .show_ui(ui, |ui| {
-                    for p in GATE_PROVIDERS {
-                        ui.selectable_value(&mut next, p, p.label());
-                    }
-                });
-            if next != current {
-                // Route through ReviewGate so the model id follows the transport.
-                let mut gate = crate::model::ReviewGate {
-                    mode: st.review_gate_mode,
-                    provider: current,
-                    model: st.review_gate_model.clone(),
-                    min_confidence: 0.0,
-                };
-                gate.switch_provider(next);
-                st.review_gate_provider = gate.provider;
-                st.review_gate_model = gate.model;
-            }
-            ui.end_row();
+                ui.label(RichText::new("Transport").color(pal.ink));
+                let current = st.system_one.provider;
+                let mut next = current;
+                ComboBox::from_id_salt("gate_provider")
+                    .selected_text(current.label())
+                    .width(140.0)
+                    .show_ui(ui, |ui| {
+                        for p in GATE_PROVIDERS {
+                            ui.selectable_value(&mut next, p, p.label());
+                        }
+                    });
+                if next != current {
+                    st.system_one.switch_provider(next);
+                }
+                ui.end_row();
 
-            ui.label(RichText::new("Model").color(pal.ink));
-            ui.add(TextEdit::singleline(&mut st.review_gate_model).desired_width(240.0));
-            ui.end_row();
+                ui.label(RichText::new("Model").color(pal.ink));
+                ui.add(TextEdit::singleline(&mut st.system_one.model).desired_width(240.0));
+                ui.end_row();
 
-            ui.label(RichText::new("Min confidence (%)").color(pal.ink));
-            numeric_edit(ui, &mut st.review_gate_confidence, 80.0);
-            ui.end_row();
-        });
+                ui.label(RichText::new("Min confidence (%)").color(pal.ink));
+                numeric_edit(ui, &mut st.system_one_confidence, 80.0);
+                ui.end_row();
+            });
 
-    if st.review_gate_provider == DecisionsProvider::TypeSafe {
+        ui.add_space(8.0);
+        for feature in crate::model::SystemOneFeature::ALL {
+            ui.checkbox(st.system_one.feature_mut(feature), feature.label());
+            hint(ui, pal, feature.desc());
+        }
+    });
+
+    if st.system_one.provider == DecisionsProvider::TypeSafe {
         ui.add_space(8.0);
         ui.label(RichText::new("TypeSafe API key").color(pal.ink).strong());
         secret_edit(ui, pal, &mut st.typesafe_key, st.typesafe_key_env);
@@ -369,7 +378,7 @@ fn pipeline_tab(ui: &mut egui::Ui, st: &mut SettingsState, pal: &GuiPalette) {
         hint(
             ui,
             pal,
-            "Over OpenRouter the gate reuses your OpenRouter key — no extra credential.",
+            "Over OpenRouter System One reuses your OpenRouter key — no extra credential.",
         );
     }
 }

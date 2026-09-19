@@ -12,9 +12,7 @@
 
 use crate::llm::Usage;
 use crate::llm::decisions::{Answer, DecisionsBackend, DecisionsRequest, Question};
-use crate::model::{
-    ReviewGate, ReviewGateMode, ReviewVerdict, ReviewerOut, TargetLanguage,
-};
+use crate::model::{ReviewGateMode, ReviewVerdict, ReviewerOut, SystemOne, TargetLanguage};
 
 /// Char budget for the serialized state. Jev's window is 32k tokens and the
 /// question set alone costs ~400; CJK runs near one token per char, so this
@@ -179,7 +177,7 @@ fn build_state(
 #[allow(clippy::too_many_arguments)]
 pub async fn try_review(
     backend: &dyn DecisionsBackend,
-    gate: &ReviewGate,
+    system_one: &SystemOne,
     target_language: TargetLanguage,
     source_jp: &str,
     translated: &str,
@@ -187,7 +185,8 @@ pub async fn try_review(
     previous_translation: &[String],
     audit_findings: &[String],
 ) -> Option<GateOutcome> {
-    if !gate.mode.is_on() {
+    let mode = system_one.review_gate_mode();
+    if !mode.is_on() {
         return None;
     }
     // The deterministic audit already forces a reject downstream, and only the
@@ -210,7 +209,7 @@ pub async fn try_review(
 
     let resp = backend
         .decide(&DecisionsRequest {
-            model: gate.model.clone(),
+            model: system_one.model.clone(),
             state,
             questions,
         })
@@ -221,7 +220,7 @@ pub async fn try_review(
     let verdict = resp.answers.get(VERDICT)?;
     let approved_verdict = verdict.as_choice()? == "approve";
     let confidence = verdict.confidence();
-    let threshold = gate.confidence_threshold();
+    let threshold = system_one.confidence_threshold();
 
     // Any axis answered with the wrong primitive makes the whole response
     // unusable — defer rather than guess.
@@ -245,7 +244,7 @@ pub async fn try_review(
         });
     }
 
-    match gate.mode {
+    match mode {
         // Anything short of a confident clean pass goes to the real reviewer.
         ReviewGateMode::Gate | ReviewGateMode::Off => None,
         ReviewGateMode::Standalone => {
@@ -362,23 +361,25 @@ mod tests {
         }
     }
 
-    fn gate(mode: ReviewGateMode) -> ReviewGate {
-        ReviewGate {
-            mode,
+    fn gate(mode: ReviewGateMode) -> SystemOne {
+        SystemOne {
+            enabled: true,
+            review_gate: mode,
             provider: DecisionsProvider::OpenRouter,
             model: "typesafe/jev-1.13".to_string(),
             min_confidence: 0.8,
+            ..SystemOne::default()
         }
     }
 
     async fn run(
         backend: &FakeBackend,
-        gate: &ReviewGate,
+        system_one: &SystemOne,
         audit: &[String],
     ) -> Option<GateOutcome> {
         try_review(
             backend,
-            gate,
+            system_one,
             TargetLanguage::Thai,
             "猫が窓辺で眠っている。",
             "แมวกำลังนอนอยู่ริมหน้าต่าง",
