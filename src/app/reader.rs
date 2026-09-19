@@ -61,47 +61,27 @@ enum StatusHit {
     SearchNext, // >
 }
 
-/// Column-tracking span builder for the status bar: every pushed span advances a
-/// running x offset so a cell's clickable [`Rect`] is `from..x` at the moment it
-/// finishes (same approach as the tab bar's zones).
-struct StatusBar {
-    spans: Vec<Span<'static>>,
-    x: u16,
-    y: u16,
-    zones: Vec<(Rect, StatusHit)>,
-}
+impl StatusHit {
+    const ALL: [StatusHit; 8] = [
+        StatusHit::Sync,
+        StatusHit::Wrap,
+        StatusHit::Mode,
+        StatusHit::Highlight,
+        StatusHit::Notes,
+        StatusHit::NextReview,
+        StatusHit::ToggleDiff,
+        StatusHit::SearchNext,
+    ];
 
-impl StatusBar {
-    fn new(area: Rect) -> Self {
-        Self {
-            spans: Vec::new(),
-            x: area.x,
-            y: area.y,
-            zones: Vec::new(),
-        }
+    /// The zone this control registers under.
+    fn zone(self) -> crate::ui::kit::ZoneId {
+        crate::ui::kit::ZoneId::button(self as u32)
     }
 
-    /// Append a span, returning the column it starts at.
-    fn push(&mut self, s: Span<'static>) -> u16 {
-        let start = self.x;
-        self.x = self
-            .x
-            .saturating_add(crate::ui::text::col_width(s.content.as_ref()) as u16);
-        self.spans.push(s);
-        start
-    }
-
-    /// Register the cell spanning `from` up to the current column as clickable.
-    fn zone(&mut self, from: u16, hit: StatusHit) {
-        self.zones.push((
-            Rect {
-                x: from,
-                y: self.y,
-                width: self.x.saturating_sub(from),
-                height: 1,
-            },
-            hit,
-        ));
+    fn from_zone(id: crate::ui::kit::ZoneId) -> Option<Self> {
+        (id.kind == crate::ui::kit::ZoneKind::Button)
+            .then(|| Self::ALL.get(id.index as usize).copied())
+            .flatten()
     }
 }
 
@@ -154,7 +134,6 @@ pub struct ReaderScreen {
     translation_area: Rect,
     /// Clickable cells of the status bar (sync/wrap/mode/… toggles), refreshed
     /// every frame like the pane rects.
-    status_zones: Vec<(Rect, StatusHit)>,
     /// Bumped whenever the rendered *content* of a pane changes (chapter load, note
     /// edits). Folds into the per-pane cache key so the expensive Markdown parse is
     /// skipped on the 100 ms ticker / pipeline events while reading a static chapter.
@@ -190,7 +169,6 @@ impl ReaderScreen {
             chunk_cfg: (DEFAULT_CHUNK_TARGET, DEFAULT_CHUNK_HARD_CAP),
             ja_area: Rect::default(),
             translation_area: Rect::default(),
-            status_zones: Vec::new(),
             content_rev: 0,
             ja_cache: RefCell::new(crate::ui::markdown::RenderCache::default()),
             translation_cache: RefCell::new(crate::ui::markdown::RenderCache::default()),
@@ -527,17 +505,18 @@ impl ReaderScreen {
     /// move together; when decoupled, only the pane under the pointer scrolls — so
     /// you can read JA and translation at independent positions with the wheel. A click on
     /// a status-bar cell fires its key binding (sync/wrap/mode/…).
-    pub fn handle_mouse(&mut self, m: MouseInput) -> Action {
+    pub fn handle_mouse(
+        &mut self,
+        m: MouseInput,
+        zone: Option<crate::ui::kit::ZoneId>,
+    ) -> Action {
         match m.gesture {
             MouseGesture::ScrollUp => self.scroll_targeted(m.col, -3),
             MouseGesture::ScrollDown => self.scroll_targeted(m.col, 3),
             MouseGesture::Click { .. } => {
-                if let Some((_, hit)) = self
-                    .status_zones
-                    .iter()
-                    .copied()
-                    .find(|(r, _)| m.in_rect(*r))
-                {
+                // Toolbar chips register themselves, so the screen no longer
+                // keeps a parallel list of where each one landed.
+                if let Some(hit) = zone.and_then(StatusHit::from_zone) {
                     self.apply_status_hit(hit);
                 }
             }
@@ -595,15 +574,16 @@ impl ReaderScreen {
     }
 
     pub fn render(&mut self, ui: &mut crate::ui::kit::Ui, area: Rect) {
-        let theme: &Theme = ui.theme;
-        let f: &mut Frame = ui.frame;
         if self.diff_mode {
             if self.compare.is_some() {
-                self.render_diff(f, area, theme);
+                self.render_diff(ui, area);
                 return;
             }
             self.diff_mode = false; // compare went away (e.g. chapter reloaded)
         }
+
+        let theme: &Theme = ui.theme;
+        let f: &mut Frame = ui.frame;
 
         let rows = Layout::default()
             .direction(Direction::Vertical)
@@ -674,7 +654,7 @@ impl ReaderScreen {
             }
         }
 
-        self.render_status(f, rows[1], theme);
+        self.render_status(ui, rows[1]);
     }
 
     fn effective_translation_scroll(&self) -> u16 {
@@ -1035,7 +1015,9 @@ impl ReaderScreen {
     }
 
     /// Rerun diff: archived old translation vs live new translation.
-    fn render_diff(&mut self, f: &mut Frame, area: Rect, theme: &Theme) {
+    fn render_diff(&mut self, ui: &mut crate::ui::kit::Ui, area: Rect) {
+        let theme: &Theme = ui.theme;
+        let f: &mut Frame = ui.frame;
         let Some(cmp) = self.compare.as_ref() else {
             return;
         };
@@ -1066,7 +1048,8 @@ impl ReaderScreen {
             true,
         );
         let exit_zone = self.render_compare_summary(f, rows[1], theme, cmp);
-        self.status_zones = vec![(exit_zone, StatusHit::ToggleDiff)];
+        // The one control the diff view offers, registered like any other.
+        ui.zones.push(exit_zone, StatusHit::ToggleDiff.zone());
     }
 
     /// One pane of the diff: plain prose lines (no Markdown styling, so changed
@@ -1200,112 +1183,117 @@ impl ReaderScreen {
         exit_zone
     }
 
-    fn render_status(&mut self, f: &mut Frame, area: Rect, theme: &Theme) {
-        let faint = Style::default().fg(theme.ink_faint);
-        let on = theme.status_done;
-        let off = theme.ink_faint;
-        let toggle = |state: bool| Style::default().fg(if state { on } else { off });
-        let glyph = |state: bool| if state { "●" } else { "○" };
+    /// The Reader toolbar: toggles as chips, counters as badges.
+    ///
+    /// These were labelled text with hand-tracked column rectangles behind
+    /// them. As chips they look like the controls they always were, and each
+    /// registers itself, so the bar no longer keeps its own parallel list of
+    /// where everything landed.
+    fn render_status(&mut self, ui: &mut crate::ui::kit::Ui, area: Rect) {
+        use crate::ui::kit::badge::Chip;
+
+        ui.fill(area, Style::default().bg(ui.theme.bg));
+        let faint = Style::default().fg(ui.theme.ink_faint).bg(ui.theme.bg);
+        let mut x = area.x + 1;
+        let right = area.x + area.width;
+
+        // An active search leads the bar: it is the most relevant state when set.
+        if let Some(search) = self.search.as_ref() {
+            let label = format!(
+                "“{}” {}/{}",
+                crate::ui::text::truncate_cols(
+                    &crate::ui::text::thai_display_safe(&search.query),
+                    16
+                ),
+                if search.hits.is_empty() { 0 } else { search.sel + 1 },
+                search.hits.len()
+            );
+            let chip = Chip::new(StatusHit::SearchNext.zone(), label, true).plain();
+            let w = chip.width().min(right.saturating_sub(x));
+            chip.render(ui, Rect { x, width: w, height: 1, ..area });
+            x += w + 1;
+        }
+
         let mode = match self.layout_mode {
             MODE_JA => "JA",
             MODE_TRANSLATION => "TR",
             _ => "split",
         };
-
-        // Track columns as spans are laid down so each toggle cell's rectangle is
-        // known exactly for click hit-testing (mirrors the tab bar's approach).
-        let mut bar = StatusBar::new(area);
-
-        // An active search leads the line — it's the most relevant state when set.
-        if let Some(search) = self.search.as_ref() {
-            let pos = if search.hits.is_empty() {
-                0
-            } else {
-                search.sel + 1
-            };
-            let from = bar.push(Span::styled("  search ", faint));
-            bar.push(Span::styled(
-                format!(
-                    "“{}” {}/{}",
-                    crate::ui::text::truncate_cols(
-                        &crate::ui::text::thai_display_safe(&search.query),
-                        16
-                    ),
-                    pos,
-                    search.hits.len()
-                ),
-                Style::default().fg(theme.accent),
-            ));
-            bar.zone(from, StatusHit::SearchNext);
-            bar.push(Span::styled(" · ", faint));
-        } else {
-            bar.push(Span::raw("  "));
-        }
-
-        let from = bar.push(Span::styled("sync ", faint));
-        bar.push(Span::styled(glyph(self.sync), toggle(self.sync)));
-        bar.zone(from, StatusHit::Sync);
-        bar.push(Span::styled(" · ", faint));
-        let from = bar.push(Span::styled("wrap ", faint));
-        bar.push(Span::styled(glyph(self.wrap), toggle(self.wrap)));
-        bar.zone(from, StatusHit::Wrap);
-        bar.push(Span::styled(" · ", faint));
-        let from = bar.push(Span::styled(mode, Style::default().fg(theme.accent_soft)));
-        bar.zone(from, StatusHit::Mode);
-        bar.push(Span::styled(" · ", faint));
-        let from = bar.push(Span::styled("hl ", faint));
-        bar.push(Span::styled(glyph(self.highlight), toggle(self.highlight)));
-        bar.zone(from, StatusHit::Highlight);
-        bar.push(Span::styled(" · ", faint));
-        let from = bar.push(Span::styled("notes ", faint));
-        bar.push(Span::styled(
-            format!(
-                "{} {}",
-                glyph(self.show_annotations),
-                self.annotations.len()
+        let toggles: [(StatusHit, String, bool); 5] = [
+            (StatusHit::Sync, "sync".into(), self.sync),
+            (StatusHit::Wrap, "wrap".into(), self.wrap),
+            (StatusHit::Mode, mode.to_string(), true),
+            (StatusHit::Highlight, "hl".into(), self.highlight),
+            (
+                StatusHit::Notes,
+                format!("notes {}", self.annotations.len()),
+                self.show_annotations,
             ),
-            toggle(self.show_annotations),
-        ));
-        bar.zone(from, StatusHit::Notes);
-        if !self.bookmark_lines.is_empty() {
-            bar.push(Span::styled(" · ", faint));
-            bar.push(Span::styled(
-                format!("★ {}", self.bookmark_lines.len()),
-                Style::default().fg(theme.status_warn),
-            ));
+        ];
+        for (hit, label, on) in toggles {
+            // `Mode` cycles rather than toggling, so it shows its value
+            // instead of an on/off mark.
+            let chip = if matches!(hit, StatusHit::Mode) {
+                Chip::new(hit.zone(), label, false).plain()
+            } else {
+                Chip::new(hit.zone(), label, on)
+            };
+            let want = chip.width();
+            if x + want > right {
+                break;
+            }
+            chip.render(ui, Rect { x, width: want, height: 1, ..area });
+            x += want + 1;
         }
-        if !self.review_lines.is_empty() {
-            bar.push(Span::styled(" · ", faint));
-            let from = bar.push(Span::styled(
-                format!("⚑ {}", self.review_lines.len()),
-                Style::default().fg(theme.status_failed),
-            ));
-            bar.zone(from, StatusHit::NextReview);
-        }
-        if self.compare.is_some() {
-            bar.push(Span::styled(" · ", faint));
-            let from = bar.push(Span::styled("cmp ", faint));
-            bar.push(Span::styled("● d", Style::default().fg(theme.accent_soft)));
-            bar.zone(from, StatusHit::ToggleDiff);
-        }
-        bar.push(Span::styled(" · line ", faint));
-        bar.push(Span::styled(
-            self.current_annotation_line().to_string(),
-            Style::default().fg(theme.accent_soft),
-        ));
-        bar.push(Span::styled(" · ch ", faint));
-        bar.push(Span::styled(
-            format!("{:03}", self.chapter),
-            Style::default()
-                .fg(theme.ink_soft)
-                .add_modifier(Modifier::BOLD),
-        ));
-        self.status_zones = bar.zones;
 
-        f.render_widget(
-            Paragraph::new(Line::from(bar.spans)).style(Style::default().bg(theme.bg)),
-            area,
+        // Counters. Bookmarks are a readout; review flags are somewhere to go.
+        if !self.bookmark_lines.is_empty() && x < right {
+            let text = format!(" ★ {} ", self.bookmark_lines.len());
+            let w = (crate::ui::text::col_width(&text) as u16).min(right - x);
+            ui.text(
+                Rect { x, width: w, height: 1, ..area },
+                text,
+                Style::default().fg(ui.theme.status_warn).bg(ui.theme.bg),
+            );
+            x += w + 1;
+        }
+        if !self.review_lines.is_empty() && x < right {
+            let chip = Chip::new(
+                StatusHit::NextReview.zone(),
+                format!("⚑ {}", self.review_lines.len()),
+                false,
+            )
+            .plain();
+            let w = chip.width().min(right - x);
+            chip.render(ui, Rect { x, width: w, height: 1, ..area });
+            x += w + 1;
+        }
+        if self.compare.is_some() && x < right {
+            let chip = Chip::new(StatusHit::ToggleDiff.zone(), "diff", self.diff_mode);
+            let w = chip.width().min(right - x);
+            chip.render(ui, Rect { x, width: w, height: 1, ..area });
+            x += w + 1;
+        }
+
+        // Position, right-aligned so it does not move as chips come and go.
+        let pos = format!(
+            "line {} · ch {:03}",
+            self.current_annotation_line(),
+            self.chapter
         );
+        let pw = crate::ui::text::col_width(&pos) as u16;
+        if right.saturating_sub(x) > pw + 1 {
+            ui.text(
+                Rect {
+                    x: right - pw - 1,
+                    width: pw,
+                    height: 1,
+                    ..area
+                },
+                pos,
+                faint,
+            );
+        }
     }
 
     pub fn hints(&self) -> &'static [(&'static str, &'static str)] {
@@ -1795,36 +1783,39 @@ mod tests {
     fn clicking_status_bar_toggles_state() {
 
         let mut r = screen_with("raw ja", "translated text");
-        crate::ui::kit::ctx::draw_test(100, 24, |ui, area| r.render(ui, area));
+        let (_, zones) = crate::ui::kit::ctx::draw_test(100, 24, |ui, area| r.render(ui, area));
 
-        let zone_for = |r: &ReaderScreen, hit: StatusHit| {
-            r.status_zones
-                .iter()
-                .copied()
-                .find(|(_, h)| *h == hit)
-                .map(|(rect, _)| rect)
+        // Where each control landed comes from the registry the toolbar wrote
+        // while drawing, not from a copy the screen kept.
+        let zone_for = |hit: StatusHit| {
+            zones
+                .rect_of(hit.zone())
                 .unwrap_or_else(|| panic!("no zone for {hit:?}"))
         };
         let click = |r: &mut ReaderScreen, rect: Rect| {
-            r.handle_mouse(MouseInput {
-                gesture: MouseGesture::Click { double: false },
-                col: rect.x + rect.width / 2,
-                row: rect.y,
-            })
+            let (col, row) = (rect.x + rect.width / 2, rect.y);
+            r.handle_mouse(
+                MouseInput {
+                    gesture: MouseGesture::Click { double: false },
+                    col,
+                    row,
+                },
+                zones.at(col, row),
+            )
         };
 
         assert!(r.sync);
-        let z = zone_for(&r, StatusHit::Sync);
+        let z = zone_for(StatusHit::Sync);
         click(&mut r, z);
         assert!(!r.sync, "clicking the sync cell toggles it off");
 
         assert!(r.wrap);
-        let z = zone_for(&r, StatusHit::Wrap);
+        let z = zone_for(StatusHit::Wrap);
         click(&mut r, z);
         assert!(!r.wrap);
 
         assert_eq!(r.layout_mode, MODE_SPLIT);
-        let z = zone_for(&r, StatusHit::Mode);
+        let z = zone_for(StatusHit::Mode);
         click(&mut r, z);
         assert_eq!(r.layout_mode, MODE_JA, "mode cell cycles the layout");
     }
