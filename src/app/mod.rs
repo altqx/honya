@@ -3,6 +3,7 @@
 //! Layout invariant (see ui::layout::skeleton): header / tabs / rule / body /
 //! toast / footer; the overlay is drawn LAST over a `Clear` so it always wins.
 
+pub mod bindings;
 pub mod lexicon;
 pub mod overlay;
 pub mod project;
@@ -74,6 +75,13 @@ pub enum Action {
     None,
     Quit,
     Goto(Screen),
+    /// Move the keyboard to the next/previous control on this surface.
+    FocusNext,
+    FocusPrev,
+    /// Act on whatever currently holds the keyboard.
+    ActivateFocused,
+    /// Take the keyboard off the current control without closing anything.
+    ClearFocus,
     ImportFile {
         source: PathBuf,
         title: String,
@@ -2452,8 +2460,19 @@ impl App {
             return action;
         }
 
-        // 1) An open overlay gets first refusal (swallows single-letter globals when capturing).
+        // 1) An open overlay gets first refusal (swallows single-letter globals
+        // when capturing) — except for focus traversal, which has to work
+        // inside a modal or its controls are unreachable by keyboard. The few
+        // overlays that bind Tab themselves keep it.
         if !matches!(self.overlay, Overlay::None) {
+            if !self.overlay.uses_tab() && !self.overlay.is_input_capturing() {
+                match k.code {
+                    KeyCode::Tab => return Action::FocusNext,
+                    KeyCode::BackTab => return Action::FocusPrev,
+                    KeyCode::Esc if self.focus.get().is_some() => return Action::ClearFocus,
+                    _ => {}
+                }
+            }
             return self.overlay.handle_key(k);
         }
 
@@ -2483,13 +2502,25 @@ impl App {
                     return Action::Goto(s);
                 }
             }
-            KeyCode::Tab => {
-                // Lexicon owns Tab to cycle its sub-sections; every other screen advances tabs.
-                if matches!(self.screen, Screen::Lexicon) {
-                    return self.route_to_screen(k);
-                }
-                return Action::Goto(self.next_screen());
+            // Tab moves between controls, not between screens. With everything
+            // on screen clickable, "next control" is the more useful thing for
+            // the key nearest the home row to mean; screens moved to `]`/`[`.
+            // Lexicon still owns Tab for its sub-sections.
+            KeyCode::Tab if matches!(self.screen, Screen::Lexicon) => {
+                return self.route_to_screen(k);
             }
+            KeyCode::Tab => return Action::FocusNext,
+            KeyCode::BackTab => return Action::FocusPrev,
+            KeyCode::Char(']') => return Action::Goto(self.next_screen()),
+            KeyCode::Char('[') => return Action::Goto(self.prev_screen()),
+            // Space and Enter act on the focused control, and only then — with
+            // nothing focused they belong to the screen, which is what keeps
+            // Project's Space-to-mark working.
+            KeyCode::Char(' ') | KeyCode::Enter if self.focus.get().is_some() => {
+                return Action::ActivateFocused;
+            }
+            // Esc steps back one rung: off the control first, then the toast.
+            KeyCode::Esc if self.focus.get().is_some() => return Action::ClearFocus,
             KeyCode::Char('?') => return Action::show_overlay(Overlay::Help(0)),
             KeyCode::Char(':') => return Action::show_overlay(Overlay::palette()),
             KeyCode::Char('l')
@@ -2577,6 +2608,25 @@ impl App {
             Action::None => {}
             Action::Quit => {
                 self.running = false;
+            }
+            Action::FocusNext => {
+                self.focus.next(&self.zones);
+            }
+            Action::FocusPrev => {
+                self.focus.prev(&self.zones);
+            }
+            Action::ClearFocus => {
+                self.focus.clear();
+            }
+            Action::ActivateFocused => {
+                // The focused control means the same thing however it is
+                // reached, so this routes through the click handler rather
+                // than restating what each zone does.
+                if let Some(id) = self.focus.get()
+                    && let Some(action) = self.chrome_action(id)
+                {
+                    self.apply(action);
+                }
             }
             Action::Goto(s) => {
                 self.screen = s;
@@ -6541,6 +6591,94 @@ mod mouse_tests {
                 }
             }
         }
+    }
+
+    fn press(app: &mut App, code: KeyCode) {
+        app.on_key(KeyEvent::new(code, KeyModifiers::empty()));
+    }
+
+    /// Tab moves between controls now, not between screens.
+    #[test]
+    fn tab_moves_focus_and_brackets_move_screens() {
+        let mut app = app();
+        render(&mut app, 120, 40);
+        let before = app.screen;
+
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(app.screen, before, "Tab must no longer change screen");
+        assert!(app.focus.get().is_some(), "Tab should enter the focus ring");
+
+        // Screens moved to the bracket keys.
+        press(&mut app, KeyCode::Char(']'));
+        assert_ne!(app.screen, before);
+        press(&mut app, KeyCode::Char('['));
+        assert_eq!(app.screen, before, "and back again");
+    }
+
+    /// Shift-Tab walks the ring the other way.
+    #[test]
+    fn shift_tab_walks_the_ring_backwards() {
+        let mut app = app();
+        render(&mut app, 120, 40);
+        press(&mut app, KeyCode::Tab);
+        let first = app.focus.get().expect("focused");
+        press(&mut app, KeyCode::Tab);
+        assert_ne!(app.focus.get(), Some(first));
+        press(&mut app, KeyCode::BackTab);
+        assert_eq!(app.focus.get(), Some(first), "Shift-Tab returns");
+    }
+
+    /// Space acts on the focused control, and reaches the same place a click
+    /// on it would.
+    #[test]
+    fn space_activates_the_focused_control() {
+        let mut app = app();
+        render(&mut app, 120, 40);
+        // Walk to a specific tab so the expected outcome is known.
+        let target = Screen::Lexicon;
+        for _ in 0..24 {
+            press(&mut app, KeyCode::Tab);
+            if app.focus.get() == Some(crate::ui::kit::ZoneId::tab(target)) {
+                break;
+            }
+        }
+        assert_eq!(app.focus.get(), Some(crate::ui::kit::ZoneId::tab(target)));
+        press(&mut app, KeyCode::Char(' '));
+        assert_eq!(app.screen, target, "Space should do what clicking would");
+    }
+
+    /// With nothing focused, Space still belongs to the screen — which is what
+    /// keeps Project's mark-a-chapter binding working.
+    #[test]
+    fn space_falls_through_to_the_screen_when_nothing_is_focused() {
+        let mut app = app();
+        app.screen = Screen::Project;
+        render(&mut app, 120, 40);
+        assert!(app.focus.get().is_none());
+        // No panic and no navigation: the screen decides.
+        press(&mut app, KeyCode::Char(' '));
+        assert_eq!(app.screen, Screen::Project);
+    }
+
+    /// Esc steps back one rung: off the control before anything else.
+    #[test]
+    fn esc_leaves_the_control_before_it_closes_anything() {
+        let mut app = app();
+        app.overlay = Overlay::Help(0);
+        render(&mut app, 120, 40);
+        press(&mut app, KeyCode::Tab);
+        let focused = app.focus.get();
+        assert!(focused.is_some(), "the modal should be reachable by Tab");
+
+        press(&mut app, KeyCode::Esc);
+        assert!(
+            !matches!(app.overlay, Overlay::None),
+            "the first Esc leaves the control, it does not close the modal"
+        );
+        assert!(app.focus.get().is_none());
+
+        press(&mut app, KeyCode::Esc);
+        assert!(matches!(app.overlay, Overlay::None), "the second closes it");
     }
 
     /// Clicking a tab in the bar switches to that screen; the zones the bar

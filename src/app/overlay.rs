@@ -174,63 +174,23 @@ enum HelpRow {
     Blank,
 }
 
-/// The keybinding reference, as data rather than as pre-formatted lines.
+/// The keybinding reference, built from the binding table.
 ///
-/// Structured so the list component can window it, and so the same table can
-/// later feed the shortcuts bar and the command bar instead of all three
-/// keeping their own copy.
+/// Help used to carry its own copy of every binding. It reads the one table
+/// now, so a key documented in the command bar and a key documented here
+/// cannot disagree.
 fn help_rows() -> Vec<HelpRow> {
-    use HelpRow::{Binding, Blank, Section};
-    vec![
-        Section("Global"),
-        Binding("1–6 / Tab", "switch primary tab"),
-        Binding(": / Ctrl-P / Ctrl-K", "command bar"),
-        Binding("Ctrl-T", "theme picker"),
-        Binding("` / l", "activity log (Project keeps l)"),
-        Binding("?", "this help"),
-        Binding("Esc / Backspace", "close overlay · dismiss toast"),
-        Binding("Ctrl-C", "quit (twice)"),
-        Blank,
-        Section("Mouse"),
-        Binding("click", "tabs, rows, buttons, breadcrumb, tally"),
-        Binding("double-click", "open the row under the pointer"),
-        Binding("wheel", "scroll the pane under the pointer"),
-        Binding("right-click", "back · dismiss"),
-        Blank,
-        Section("Shelf 書架"),
-        Binding("↵", "open project"),
-        Binding("i", "import a source file"),
-        Binding("d / R / r", "delete · rename · rescan"),
-        Blank,
-        Section("Project 棚"),
-        Binding("↵", "read chapter"),
-        Binding("Space", "mark chapter (cross-volume ok)"),
-        Binding("t / a", "translate · queue marked or current"),
-        Binding("T / A", "translate volume · whole project"),
-        Binding("V / i", "add volume · add chapters"),
-        Binding("h / l", "collapse · expand volume, focus panel"),
-        Binding("z / Z", "collapse · expand all volumes"),
-        Binding("x / Q", "export · QA report"),
-        Binding("e / y", "edit title · synopsis"),
-        Blank,
-        Section("Translate 訳"),
-        Binding("p / s", "pause · stop the run"),
-        Binding("J / K", "move queued chapter down · up"),
-        Blank,
-        Section("Reader 読"),
-        Binding("/ ", "search both panes"),
-        Binding("g", "jump to chapter, section or bookmark"),
-        Binding("w / y", "wrap · sync the panes"),
-        Binding("b / n", "bookmark · note this line"),
-        Blank,
-        Section("Lexicon 辞"),
-        Binding("↵ / d", "edit · delete entry"),
-        Binding("/ ", "filter"),
-        Blank,
-        Section("Refine 推"),
-        Binding("Ctrl-R", "new session"),
-        Binding("Ctrl-C", "cancel the in-flight turn"),
-    ]
+    let mut rows = Vec::new();
+    for (n, scope) in super::bindings::SECTIONS.iter().enumerate() {
+        if n > 0 {
+            rows.push(HelpRow::Blank);
+        }
+        rows.push(HelpRow::Section(scope.title()));
+        for b in super::bindings::in_scope(*scope) {
+            rows.push(HelpRow::Binding(b.keys, b.what));
+        }
+    }
+    rows
 }
 
 /// Where a synopsis editor sits in its lifecycle.
@@ -2026,6 +1986,20 @@ impl Overlay {
                 _ => Action::None,
             },
         }
+    }
+
+    /// Whether this overlay binds Tab itself.
+    ///
+    /// Tab is focus traversal everywhere else, but the translate-and-accept
+    /// editors and the import wizard have bound it to "translate this" for
+    /// long enough that taking it away would be the more surprising change.
+    /// Their footers now carry a Translate button too, so the binding is a
+    /// shortcut rather than the only way through.
+    pub fn uses_tab(&self) -> bool {
+        matches!(
+            self,
+            Overlay::Synopsis(_) | Overlay::ProjectTitle(_) | Overlay::Import(_)
+        )
     }
 
     /// Mouse handling for a kit-rendered overlay: clicks resolve from the zone
