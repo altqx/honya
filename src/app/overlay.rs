@@ -18,7 +18,7 @@ use crate::theme::{ALL_THEMES, Theme};
 use crate::ui::input::{self, EditOpts, Edited};
 use crate::ui::mouse::{MouseGesture, MouseInput};
 use crate::ui::kit::{ZoneId, ZoneKind};
-use crate::ui::text::{thai_display_safe, truncate_cols};
+use crate::ui::text::{col_width, pad_to_cols, thai_display_safe, truncate_cols};
 
 use super::qa;
 use super::settings_defs::{self, Group, SField};
@@ -3164,6 +3164,18 @@ impl Overlay {
             .render(ui, area);
 
         let rows = help_rows();
+        // The key column is as wide as the widest key plus a gutter, rather
+        // than a guess: ": / Ctrl-P / Ctrl-K" overran a hardcoded 18 and ran
+        // into its own description.
+        let key_cols = rows
+            .iter()
+            .filter_map(|r| match r {
+                HelpRow::Binding(k, _) => Some(col_width(k)),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(16)
+            + 4;
         let mut st = ListState::new();
         st.scroll_by(off as isize, frame.body.height, rows.len());
         let dim = Style::default().fg(ui.theme.ink_faint);
@@ -3191,7 +3203,7 @@ impl Overlay {
                 }
                 HelpRow::Blank => Row::header(Line::raw("")),
                 HelpRow::Binding(k, what) => Row::header(Line::from(vec![
-                    Span::styled(format!("  {k:<18}"), key),
+                    Span::styled(pad_to_cols(k, key_cols), key),
                     Span::styled(what.to_string(), dim),
                 ])),
             },
