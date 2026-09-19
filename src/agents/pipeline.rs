@@ -17,6 +17,7 @@ use crate::agents::chunk::{Chunk, chunk_chapter};
 use crate::agents::coherence;
 use crate::agents::continuity;
 use crate::agents::prepass;
+use crate::agents::reference_scope;
 use crate::agents::prompts::{build_orchestrator_metadata_msg, orchestrator_system};
 use crate::agents::audit;
 use crate::agents::audit_judge;
@@ -811,6 +812,12 @@ pub struct PipelineCtx {
 }
 
 impl PipelineCtx {
+    /// The System One handle for this run: the decisions backend paired with the
+    /// settings governing it, or `None` when no judgement is available.
+    fn system_one(&self) -> Option<crate::llm::decisions::SystemOneHandle> {
+        crate::llm::decisions::SystemOneHandle::new(self.clients.decisions(), &self.cfg.system_one)
+    }
+
     /// Resolve the live client for an agent's configured provider, or an error
     /// naming the missing provider (the run preflight normally catches this).
     fn client_for(&self, agent: &AgentModel) -> anyhow::Result<Arc<dyn LlmClient>> {
@@ -979,8 +986,7 @@ async fn maybe_run_prepass(ctx: &PipelineCtx, acc: &mut Acc) {
             return;
         }
     };
-    let system_one =
-        crate::llm::decisions::SystemOneHandle::new(ctx.clients.decisions(), &ctx.cfg.system_one);
+    let system_one = ctx.system_one();
     match prepass::run_prepass(
         prepass_client.as_ref(),
         &ctx.models.translator,
@@ -1481,6 +1487,14 @@ const MAX_PROTECTED_TERMS_FOR_ORCH: usize = 40;
 const ORCHESTRATOR_MAX_TOOL_ROUNDS: usize = 32;
 
 fn glossary_terms_for_chunk(ws: &Workspace, chunk_text: &str, max: usize) -> Vec<GlossaryTerm> {
+    let mut terms = glossary_matches(ws, chunk_text);
+    terms.truncate(max);
+    terms
+}
+
+/// Every term the chunk literally uses, untruncated — the cheap, exact recall
+/// pass. Trimming it to the cap is a separate decision.
+fn glossary_matches(ws: &Workspace, chunk_text: &str) -> Vec<GlossaryTerm> {
     let mut terms = glossary::load(ws);
     // Keep only terms the chunk actually uses, so the injected glossary tracks
     // the chunk rather than the whole, ever-growing volume.
@@ -1488,7 +1502,6 @@ fn glossary_terms_for_chunk(ws: &Workspace, chunk_text: &str, max: usize) -> Vec
         let jp = t.jp_term.trim();
         !jp.is_empty() && chunk_text.contains(jp)
     });
-    terms.truncate(max);
     terms
 }
 
@@ -1498,7 +1511,19 @@ fn characters_for_chunk(
     prev_chunk_text: Option<&str>,
     max: usize,
 ) -> Vec<crate::model::Character> {
-    let mut chars = characters::load(ws);
+    let (mut named, _) = character_matches(ws, chunk_text, prev_chunk_text);
+    named.truncate(max);
+    named
+}
+
+/// Split the roster into those the text names and those it does not. The second
+/// half is what a passage carrying someone by pronoun or title looks like to a
+/// string test, and is what `reference_scope` is asked about.
+fn character_matches(
+    ws: &Workspace,
+    chunk_text: &str,
+    prev_chunk_text: Option<&str>,
+) -> (Vec<crate::model::Character>, Vec<crate::model::Character>) {
     let mentions = |c: &crate::model::Character, text: &str| {
         let jp = c.jp_name.trim();
         (!jp.is_empty() && text.contains(jp))
@@ -1509,11 +1534,62 @@ fn characters_for_chunk(
                 .iter()
                 .any(|a| !a.jp.trim().is_empty() && text.contains(a.jp.trim()))
     };
-    chars.retain(|c| {
+    characters::load(ws).into_iter().partition(|c| {
         mentions(c, chunk_text) || prev_chunk_text.is_some_and(|prev| mentions(c, prev))
-    });
-    chars.truncate(max);
-    chars
+    })
+}
+
+/// The reference bundle with the two gaps in the string test closed where a
+/// judgement is available: characters the passage only implies are added, and an
+/// overflowing term list is ordered by relevance before the cap cuts it.
+///
+/// This sits before the Translator call, so it is a round trip on the critical
+/// path — hence the guards: nothing missing and nothing overflowing means no
+/// call, and a `None` answer leaves the string test exactly in charge.
+async fn build_scoped_reference_ctx(
+    ws: &Workspace,
+    chunk_text: &str,
+    prev_chunk_text: Option<&str>,
+    target_language: TargetLanguage,
+    system_one: Option<&crate::llm::decisions::SystemOneHandle>,
+    tx: Option<&EventTx>,
+) -> String {
+    let mut terms = glossary_matches(ws, chunk_text);
+    let (mut named, absent) = character_matches(ws, chunk_text, prev_chunk_text);
+
+    let room_for_more = named.len() < MAX_CHARACTERS_IN_CTX;
+    let overflowing = terms.len() > MAX_GLOSSARY_IN_CTX;
+    if let Some(out) = reference_scope::scope(
+        system_one,
+        chunk_text,
+        if room_for_more { absent.as_slice() } else { &[] },
+        if overflowing { terms.as_slice() } else { &[] },
+    )
+    .await
+    {
+        if let Some(tx) = tx {
+            tx.send(AppEvent::Log {
+                level: LogLevel::Info,
+                msg: out.summary.clone(),
+            });
+        }
+        if overflowing && !out.term_order.is_empty() {
+            terms = out
+                .term_order
+                .iter()
+                .filter_map(|&j| terms.get(j).cloned())
+                .collect();
+        }
+        for id in &out.implied {
+            if let Some(c) = absent.iter().find(|c| &c.id == id) {
+                named.push(c.clone());
+            }
+        }
+    }
+
+    terms.truncate(MAX_GLOSSARY_IN_CTX);
+    named.truncate(MAX_CHARACTERS_IN_CTX);
+    render_reference_ctx(ws, terms, named, target_language)
 }
 
 /// Assemble the reference context bundled into every Translator/Reviewer call:
@@ -1528,10 +1604,28 @@ fn build_reference_ctx(ws: &Workspace, chunk_text: &str, prev_chunk_text: Option
     build_reference_ctx_for_language(ws, chunk_text, prev_chunk_text, TargetLanguage::Thai)
 }
 
+#[cfg(test)]
 fn build_reference_ctx_for_language(
     ws: &Workspace,
     chunk_text: &str,
     prev_chunk_text: Option<&str>,
+    target_language: TargetLanguage,
+) -> String {
+    render_reference_ctx(
+        ws,
+        glossary_terms_for_chunk(ws, chunk_text, MAX_GLOSSARY_IN_CTX),
+        characters_for_chunk(ws, chunk_text, prev_chunk_text, MAX_CHARACTERS_IN_CTX),
+        target_language,
+    )
+}
+
+/// The reference bundle for an already-selected set of terms and characters.
+/// Selection is the caller's job so it can be scoped by judgement or by the
+/// string test alone; rendering is identical either way.
+fn render_reference_ctx(
+    ws: &Workspace,
+    terms: Vec<GlossaryTerm>,
+    chars: Vec<crate::model::Character>,
     target_language: TargetLanguage,
 ) -> String {
     fn section(out: &mut String, open: &str, body: &str, close: &str) {
@@ -1555,10 +1649,7 @@ fn build_reference_ctx_for_language(
     }
 
     let mut s = String::new();
-    let terms = target_glossary_terms(
-        glossary_terms_for_chunk(ws, chunk_text, MAX_GLOSSARY_IN_CTX),
-        target_language,
-    );
+    let terms = target_glossary_terms(terms, target_language);
     let glossary_label = match target_language {
         TargetLanguage::Thai => {
             "<<GLOSSARY: นโยบายคำศัพท์ (hard lock / preferred / forbidden / context)>>"
@@ -1573,10 +1664,7 @@ fn build_reference_ctx_for_language(
         &glossary::render_context_blurb_for_language(&terms, target_language),
         "<<END_GLOSSARY>>",
     );
-    let chars = target_characters(
-        characters_for_chunk(ws, chunk_text, prev_chunk_text, MAX_CHARACTERS_IN_CTX),
-        target_language,
-    );
+    let chars = target_characters(chars, target_language);
     section(
         &mut s,
         match target_language {
@@ -1935,12 +2023,15 @@ async fn fresh_translator_input(
     previous_source: Option<&str>,
     current_pov: Option<&str>,
 ) -> TranslatorInput {
-    let reference_ctx = build_reference_ctx_for_language(
+    let reference_ctx = build_scoped_reference_ctx(
         &ctx.ws,
         &chunk.text,
         previous_source,
         ctx.target_language,
-    );
+        ctx.system_one().as_ref(),
+        Some(&ctx.tx),
+    )
+    .await;
     let previous_translation =
         continuity::last_translated_sentences(&ctx.ws, chapter, ctx.cfg.continuity_sentences).await;
     translator_input(
@@ -2327,12 +2418,15 @@ async fn process_chunk_with_lookahead(
     });
 
     // Context and continuity are stable across this chunk's attempts.
-    let reference_ctx = build_reference_ctx_for_language(
+    let reference_ctx = build_scoped_reference_ctx(
         &ctx.ws,
         &chunk.text,
         prev_chunk_text,
         ctx.target_language,
-    );
+        ctx.system_one().as_ref(),
+        Some(&ctx.tx),
+    )
+    .await;
     let audit_characters = target_characters(
         characters_for_chunk(&ctx.ws, &chunk.text, prev_chunk_text, MAX_CHARACTERS_IN_CTX),
         ctx.target_language,
@@ -3411,10 +3505,7 @@ async fn run_orchestrator_metadata_turn(
         ctx.vol_number(),
         ctx.tx.clone(),
         chapter,
-        crate::llm::decisions::SystemOneHandle::new(
-            ctx.clients.decisions(),
-            &ctx.cfg.system_one,
-        ),
+        ctx.system_one(),
     );
 
     let orch_client = ctx.client_for(&ctx.models.orchestrator)?;
@@ -3448,7 +3539,15 @@ async fn run_coherence_sweep(
     }
     // Scope the reference bundle to the whole chapter source so every character and
     // term the chapter uses is available to the auditor.
-    let reference_ctx = build_reference_ctx_for_language(&ctx.ws, raw, None, ctx.target_language);
+    let reference_ctx = build_scoped_reference_ctx(
+        &ctx.ws,
+        raw,
+        None,
+        ctx.target_language,
+        ctx.system_one().as_ref(),
+        Some(&ctx.tx),
+    )
+    .await;
 
     let coherence_client = match ctx.client_for(&ctx.models.reviewer) {
         Ok(c) => c,
@@ -6324,6 +6423,158 @@ mod tests {
         assert!(
             with.contains("ฮิคาริ"),
             "previous-chunk character carried into scope:\n{with}"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Answers every presence Noul with `present`, so the scoped bundle can be
+    /// compared against the string test on the same roster.
+    struct FakePresence {
+        present: bool,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::llm::decisions::DecisionsBackend for FakePresence {
+        async fn decide(
+            &self,
+            req: &crate::llm::decisions::DecisionsRequest,
+        ) -> crate::llm::client::Result<crate::llm::decisions::DecisionsResponse> {
+            use crate::llm::decisions::{Answer, DecisionsResponse, DecisionsUsage};
+            self.calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(DecisionsResponse {
+                model: "typesafe/jev-1.13".to_string(),
+                answers: req
+                    .questions
+                    .keys()
+                    .map(|k| {
+                        (
+                            k.clone(),
+                            Answer::Noul {
+                                noul: if self.present { 0.95 } else { 0.02 },
+                            },
+                        )
+                    })
+                    .collect(),
+                usage: DecisionsUsage::default(),
+            })
+        }
+    }
+
+    fn presence_handle(present: bool) -> (crate::llm::decisions::SystemOneHandle, std::sync::Arc<FakePresence>) {
+        let backend = std::sync::Arc::new(FakePresence {
+            present,
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let handle = crate::llm::decisions::SystemOneHandle {
+            backend: backend.clone(),
+            config: crate::model::SystemOne {
+                enabled: true,
+                reference_scope: true,
+                ..crate::model::SystemOne::default()
+            },
+        };
+        (handle, backend)
+    }
+
+    /// The gap `contains` cannot close: the chunk carries ひかり only as 彼女,
+    /// and there is no previous chunk to fall back on.
+    #[tokio::test]
+    async fn scoped_ctx_injects_a_character_the_chunk_only_implies() {
+        let (base, ws) = temp_ws("ref_scope_implied");
+        std::fs::create_dir_all(&ws.vol_dir).unwrap();
+        characters::upsert(
+            &ws,
+            crate::model::Character {
+                id: "hikari".into(),
+                jp_name: "ひかり".into(),
+                translated_name: "ฮิคาริ".into(),
+                romaji: None,
+                gender: Some("female".into()),
+                honorific: None,
+                speech_style: Some("สรรพนามตัวเอง: ฉัน".into()),
+                relationships: Vec::new(),
+                aliases: Vec::new(),
+                also_called: Vec::new(),
+                notes: None,
+                first_seen_chapter: None,
+            },
+        )
+        .unwrap();
+
+        let chunk = "そして彼女は歩き出した。";
+        assert!(
+            !build_reference_ctx(&ws, chunk, None).contains("ฮิคาริ"),
+            "precondition: the string test cannot see a pronoun reference"
+        );
+
+        let (handle, backend) = presence_handle(true);
+        let scoped =
+            build_scoped_reference_ctx(&ws, chunk, None, TargetLanguage::Thai, Some(&handle), None)
+                .await;
+        assert!(
+            scoped.contains("ฮิคาริ"),
+            "implied character must reach the Translator:\n{scoped}"
+        );
+        assert_eq!(backend.calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+
+        // A "not present" answer leaves the bundle exactly as the string test had it.
+        let (handle, _) = presence_handle(false);
+        let scoped =
+            build_scoped_reference_ctx(&ws, chunk, None, TargetLanguage::Thai, Some(&handle), None)
+                .await;
+        assert!(!scoped.contains("ฮิคาริ"));
+
+        // No handle at all: the string test is in charge, byte for byte.
+        let unscoped =
+            build_scoped_reference_ctx(&ws, chunk, None, TargetLanguage::Thai, None, None).await;
+        assert_eq!(unscoped, build_reference_ctx(&ws, chunk, None));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Everyone on the roster is already named in the chunk, so there is nothing
+    /// to add and nothing overflowing — the judgement is not worth a round trip.
+    #[tokio::test]
+    async fn scoped_ctx_skips_the_call_when_it_could_not_change_anything() {
+        let (base, ws) = temp_ws("ref_scope_skip");
+        std::fs::create_dir_all(&ws.vol_dir).unwrap();
+        characters::upsert(
+            &ws,
+            crate::model::Character {
+                id: "hikari".into(),
+                jp_name: "ひかり".into(),
+                translated_name: "ฮิคาริ".into(),
+                romaji: None,
+                gender: None,
+                honorific: None,
+                speech_style: None,
+                relationships: Vec::new(),
+                aliases: Vec::new(),
+                also_called: Vec::new(),
+                notes: None,
+                first_seen_chapter: None,
+            },
+        )
+        .unwrap();
+
+        let (handle, backend) = presence_handle(true);
+        let scoped = build_scoped_reference_ctx(
+            &ws,
+            "ひかりは振り返った。",
+            None,
+            TargetLanguage::Thai,
+            Some(&handle),
+            None,
+        )
+        .await;
+        assert!(scoped.contains("ฮิคาริ"));
+        assert_eq!(
+            backend.calls.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "no absent roster member and no overflow means no call"
         );
 
         let _ = std::fs::remove_dir_all(&base);

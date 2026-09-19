@@ -13,6 +13,7 @@ pub mod entity_align;
 pub mod pipeline;
 pub mod prepass;
 pub mod prompts;
+pub mod reference_scope;
 pub mod refine;
 pub mod review_gate;
 pub mod reviewer;
