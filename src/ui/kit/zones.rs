@@ -68,6 +68,29 @@ pub enum ZoneKind {
     Pane,
 }
 
+/// Which count a header tally badge shows. Clicking one is a request to see
+/// those chapters, so the slot has to survive into the click handler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TallySlot {
+    Done,
+    Working,
+    Pending,
+    Failed,
+}
+
+impl TallySlot {
+    pub const ALL: [TallySlot; 4] = [
+        TallySlot::Done,
+        TallySlot::Working,
+        TallySlot::Pending,
+        TallySlot::Failed,
+    ];
+
+    pub fn from_index(i: u32) -> Option<Self> {
+        Self::ALL.get(i as usize).copied()
+    }
+}
+
 /// The address of one interactive rectangle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ZoneId {
@@ -111,6 +134,14 @@ impl ZoneId {
 
     pub const fn hint(index: usize) -> Self {
         Self::new(ZoneKind::Hint, index as u32)
+    }
+
+    pub const fn crumb(index: usize) -> Self {
+        Self::new(ZoneKind::Crumb, index as u32)
+    }
+
+    pub const fn tally(slot: TallySlot) -> Self {
+        Self::new(ZoneKind::Tally, slot as u32)
     }
 
     pub const fn pane(index: u32) -> Self {

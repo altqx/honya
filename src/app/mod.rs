@@ -22,8 +22,6 @@ use ratatui::crossterm::event::{
 };
 use ratatui::layout::Rect;
 use ratatui::style::Style;
-use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
 
 use crate::llm::client::LlmClient;
 use crate::model::{
@@ -34,7 +32,6 @@ use crate::theme::Theme;
 use crate::ui::chrome::{self, StatusTally};
 use crate::ui::layout::{self, Skeleton};
 use crate::ui::mouse::{MouseGesture, MouseInput};
-use crate::ui::text::{thai_display_safe, truncate_cols};
 use crate::workspace::Workspace;
 
 use self::lexicon::LexiconScreen;
@@ -472,13 +469,12 @@ pub struct App {
     /// chapters run sequentially.
     pending_chapter_run: Option<PendingChapterRun>,
     /// Mouse hit-testing state, refreshed every frame in `render`. The skeleton
-    /// gives the header/tabs/body/footer regions; `tab_zones` maps each tab's
-    /// rectangle to its screen; `last_area` is the full frame (for overlay modal
-    /// geometry). `last_click` carries the previous left-press for double-click
+    /// gives the header/tabs/body/footer regions and `last_area` is the full
+    /// frame (for overlay modal geometry); everything finer-grained lives in
+    /// `zones`. `last_click` carries the previous left-press for double-click
     /// detection.
     last_area: Rect,
     last_skeleton: Option<Skeleton>,
-    tab_zones: Vec<(Rect, Screen)>,
     last_click: Option<(std::time::Instant, u16, u16)>,
     quit_armed_at: Option<std::time::Instant>,
     /// Every interactive rectangle drawn last frame. Rebuilt from scratch in
@@ -575,7 +571,6 @@ impl App {
             pending_chapter_run: None,
             last_area: Rect::default(),
             last_skeleton: None,
-            tab_zones: Vec::new(),
             last_click: None,
             quit_armed_at: None,
             zones: crate::ui::kit::Zones::new(),
@@ -2323,30 +2318,65 @@ impl App {
             return self.route_mouse_to_screen(m);
         }
 
-        // 3) Clicking the toast row dismisses it (matches Esc/Backspace).
-        if self.toast.is_some() && m.in_rect(sk.toast) {
-            self.toast = None;
-            return Action::None;
+        // 3) Chrome is answered from the registry, so a click lands on whatever
+        // was actually drawn there rather than on a region guessed from the
+        // skeleton. Anything the chrome does not claim falls through to the
+        // screen below.
+        if let Some(id) = self.zones.at(m.col, m.row)
+            && let Some(action) = self.chrome_action(id)
+        {
+            return action;
         }
 
-        // 4) Tab bar click → switch to that screen.
-        if m.in_rect(sk.tabs) {
-            if let Some((_, screen)) = self.tab_zones.iter().copied().find(|(r, _)| m.in_rect(*r)) {
-                return Action::Goto(screen);
-            }
-            return Action::None;
-        }
-
-        // 5) Breadcrumb / header click → home to the Shelf.
-        if m.is_click() && m.in_rect(sk.header) {
-            return Action::Goto(Screen::Shelf);
-        }
-
-        // 6) Body → the active screen decides (select / activate / focus).
+        // 4) Body → the active screen decides (select / activate / focus).
         if m.in_rect(sk.body) {
             return self.route_mouse_to_screen(m);
         }
         Action::None
+    }
+
+    /// What a click on a chrome zone means, or `None` when the zone is not
+    /// chrome and the screen beneath should answer instead.
+    fn chrome_action(&mut self, id: crate::ui::kit::ZoneId) -> Option<Action> {
+        use crate::ui::kit::{TallySlot, ZoneKind};
+
+        match id.kind {
+            ZoneKind::Tab => chrome::TAB_SCREENS
+                .get(id.index as usize)
+                .copied()
+                .map(Action::Goto),
+            ZoneKind::Crumb => self
+                .crumb_segments()
+                .get(id.index as usize)
+                .map(|c| Action::Goto(c.target)),
+            ZoneKind::Tally => {
+                // A count is a question about which chapters it counts, and the
+                // Project tree is where that question is answered — except for
+                // failures, which have a report of their own.
+                let slot = TallySlot::from_index(id.index)?;
+                if matches!(slot, TallySlot::Failed)
+                    && self.tally().failed > 0
+                    && self.active.is_some()
+                {
+                    Some(Action::show_overlay(Overlay::qa_placeholder()))
+                } else {
+                    Some(Action::Goto(Screen::Project))
+                }
+            }
+            ZoneKind::RemoteChip => Some(Action::show_overlay(Overlay::settings_account())),
+            ZoneKind::ToastBody | ZoneKind::ToastClose => {
+                self.toast = None;
+                Some(Action::None)
+            }
+            ZoneKind::Hint => match id.index as usize {
+                chrome::HELP_HINT => Some(Action::show_overlay(Overlay::Help(0))),
+                // The update is applied by the `honya update` command, so the
+                // badge says what to run rather than pretending to run it.
+                chrome::UPDATE_HINT => Some(Action::None),
+                _ => None,
+            },
+            _ => None,
+        }
     }
 
     fn route_mouse_to_screen(&mut self, m: MouseInput) -> Action {
@@ -2414,8 +2444,12 @@ impl App {
             return self.overlay.handle_key(k);
         }
 
-        // 2) Ctrl-P opens the palette even outside an overlay.
-        if k.modifiers.contains(KeyModifiers::CONTROL) && k.code == KeyCode::Char('p') {
+        // 2) Ctrl-P or Ctrl-K opens the command bar even outside an overlay.
+        // Two bindings because this is the escape hatch for every other
+        // binding: it has to be findable by whichever one a user reaches for.
+        if k.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(k.code, KeyCode::Char('p') | KeyCode::Char('k'))
+        {
             return Action::show_overlay(Overlay::palette());
         }
 
@@ -5052,14 +5086,18 @@ impl App {
     }
 
     pub fn render(&mut self, f: &mut Frame) {
+        use crate::ui::kit::{Metrics, Ui};
+
         let area = f.area();
         let show_toast = self.toast.is_some() || self.quit_armed();
-        let hints = self.hints();
+        let hints = crate::ui::kit::shortcuts::hints_from(self.hints());
+        let update = self.update_available.clone();
+        let installed = self.update_installed.clone();
         let footer_h = chrome::footer_height(
-            hints,
+            &hints,
             area.width,
-            self.update_available.as_deref(),
-            self.update_installed.as_deref(),
+            update.as_deref(),
+            installed.as_deref(),
         );
         let sk: Skeleton = layout::skeleton(area, show_toast, footer_h);
         // Stash this frame's geometry so the next mouse event can hit-test it.
@@ -5069,61 +5107,61 @@ impl App {
         // for as long as the thing it addresses is actually drawn.
         self.zones.clear();
 
-        f.render_widget(
-            Paragraph::new("").style(Style::default().bg(self.theme.bg)),
-            area,
-        );
-
-        let crumb = self.crumb();
+        // Everything the chrome needs, read before the registry is borrowed.
+        let crumbs = self.crumb_segments();
         let tally = self.tally();
-        chrome::render_header(
-            f,
-            sk.header,
-            &crumb,
-            &tally,
-            (self.remote_state, self.remote_watchers),
-            &self.theme,
-        );
+        let remote = (self.remote_state, self.remote_watchers);
+        let screen = self.screen;
+        let run_active = self.run_active;
+        let agent = self.translate.active_agent_role();
+        let frame_count = self.frame;
+        let metrics = Metrics::new(area, false);
+        let quit_armed = self.quit_armed();
+        let toast = self.toast.as_ref().map(|t| (t.level, t.msg.clone()));
 
-        self.tab_zones = chrome::render_tabbar(
-            f,
-            sk.tabs,
-            self.screen,
-            self.run_active,
-            self.translate.active_agent_role(),
-            self.frame,
-            &self.theme,
-        );
-        for (rect, screen) in self.tab_zones.iter().copied() {
-            self.zones.push(rect, crate::ui::kit::ZoneId::tab(screen));
+        {
+            let mut ui = Ui::new(
+                f,
+                &mut self.zones,
+                &self.theme,
+                metrics,
+                &self.focus,
+                self.hover,
+                frame_count,
+            );
+            ui.fill(area, Style::default().bg(ui.theme.bg));
+            chrome::render_header(&mut ui, sk.header, &crumbs, &tally, remote);
+            chrome::render_tabbar(&mut ui, sk.tabs, screen, run_active, agent);
+            chrome::render_rule(&mut ui, sk.rule);
         }
-
-        self.render_rule(f, sk.rule);
 
         self.render_body(f, sk.body);
 
-        if show_toast {
-            if self.quit_armed() {
-                self.render_notice(
-                    f,
+        {
+            let mut ui = Ui::new(
+                f,
+                &mut self.zones,
+                &self.theme,
+                metrics,
+                &self.focus,
+                self.hover,
+                frame_count,
+            );
+            if quit_armed {
+                // Not closable: the prompt is answered, not dismissed.
+                chrome::render_toast(
+                    &mut ui,
                     sk.toast,
                     LogLevel::Warn,
                     "press Ctrl-C again to quit",
-                    "",
+                    false,
                 );
-            } else if let Some(t) = self.toast.as_ref() {
-                self.render_notice(f, sk.toast, t.level, &t.msg, "⌫ dismiss ");
+            } else if let Some((level, msg)) = toast {
+                chrome::render_toast(&mut ui, sk.toast, level, &msg, true);
             }
+            chrome::build_bar(&hints, update.as_deref(), installed.as_deref())
+                .render(&mut ui, sk.footer);
         }
-
-        chrome::render_footer(
-            f,
-            sk.footer,
-            hints,
-            self.update_available.as_deref(),
-            self.update_installed.as_deref(),
-            &self.theme,
-        );
 
         // Overlay last, over a Clear, so it always wins.
         if !matches!(self.overlay, Overlay::None) {
@@ -5168,64 +5206,6 @@ impl App {
         }
     }
 
-    fn render_rule(&self, f: &mut Frame, area: Rect) {
-        if area.height == 0 || area.width == 0 {
-            return;
-        }
-        let rule = "─".repeat(area.width as usize);
-        f.render_widget(
-            Paragraph::new(rule).style(Style::default().fg(self.theme.rule).bg(self.theme.bg)),
-            area,
-        );
-    }
-
-    /// Render a toast or quit prompt above the footer.
-    fn render_notice(&self, f: &mut Frame, area: Rect, level: LogLevel, msg: &str, hint: &str) {
-        if area.height == 0 || area.width == 0 {
-            return;
-        }
-        let (glyph, color) = match level {
-            LogLevel::Trace => ("·", self.theme.ink_faint),
-            LogLevel::Info => ("✓", self.theme.status_done),
-            LogLevel::Warn => ("!", self.theme.status_warn),
-            LogLevel::Error => ("✗", self.theme.status_failed),
-        };
-        let body = truncate_cols(
-            &thai_display_safe(msg),
-            area.width.saturating_sub(14) as usize,
-        );
-        let left = Line::from(vec![
-            Span::raw(" "),
-            Span::styled(glyph, Style::default().fg(color)),
-            Span::raw(" "),
-            Span::styled(body, Style::default().fg(self.theme.ink_soft)),
-        ]);
-        f.render_widget(
-            Paragraph::new(left).style(Style::default().bg(self.theme.bg)),
-            area,
-        );
-        if hint.is_empty() {
-            return;
-        }
-        let hint_w = crate::ui::text::col_width(hint) as u16;
-        if area.width > hint_w {
-            let hint_area = Rect {
-                x: area.x + area.width - hint_w,
-                y: area.y,
-                width: hint_w,
-                height: 1,
-            };
-            f.render_widget(
-                Paragraph::new(Span::styled(
-                    hint,
-                    Style::default().fg(self.theme.ink_faint),
-                ))
-                .style(Style::default().bg(self.theme.bg)),
-                hint_area,
-            );
-        }
-    }
-
     /// Live relay link status + dashboard watcher count (GUI header badge).
     pub(crate) fn remote_status(&self) -> (crate::remote::protocol::RemoteState, u32) {
         (self.remote_state, self.remote_watchers)
@@ -5250,6 +5230,36 @@ impl App {
             }
             (None, _) => "honya 本屋".to_string(),
         }
+    }
+
+    /// The breadcrumb as clickable segments, outermost first. Each names a
+    /// place you can go back to, which a single formatted string could not.
+    pub(crate) fn crumb_segments(&self) -> Vec<chrome::Crumb> {
+        let mut out = vec![chrome::Crumb::new("honya 本屋", Screen::Shelf)];
+        let Some(active) = self.active.as_ref() else {
+            return out;
+        };
+        out.push(chrome::Crumb::new(
+            active.project.title.clone(),
+            Screen::Project,
+        ));
+        if !matches!(self.screen, Screen::Shelf) {
+            let vol = active.active_vol();
+            let label = active
+                .project
+                .volumes
+                .iter()
+                .find(|v| v.number == vol)
+                .and_then(|v| v.label.as_deref());
+            out.push(chrome::Crumb::new(
+                match label {
+                    Some(l) => format!("Vol.{vol:02} {l}"),
+                    None => format!("Vol.{vol:02}"),
+                },
+                Screen::Project,
+            ));
+        }
+        out
     }
 
     pub(crate) fn tally(&self) -> StatusTally {
@@ -6422,17 +6432,13 @@ mod mouse_tests {
         let mut app = app();
         render(&mut app, 120, 40);
 
-        let (shelf_rect, _) = app
-            .tab_zones
-            .iter()
-            .copied()
-            .find(|(_, s)| *s == Screen::Shelf)
+        let shelf_rect = app
+            .zones
+            .rect_of(crate::ui::kit::ZoneId::tab(Screen::Shelf))
             .expect("shelf tab zone");
-        let (lex_rect, _) = app
-            .tab_zones
-            .iter()
-            .copied()
-            .find(|(_, s)| *s == Screen::Lexicon)
+        let lex_rect = app
+            .zones
+            .rect_of(crate::ui::kit::ZoneId::tab(Screen::Lexicon))
             .expect("lexicon tab zone");
 
         assert!(
@@ -6512,11 +6518,9 @@ mod mouse_tests {
             Screen::Shelf,
         ] {
             render(&mut app, 120, 40);
-            let (rect, _) = app
-                .tab_zones
-                .iter()
-                .copied()
-                .find(|(_, s)| *s == target)
+            let rect = app
+                .zones
+                .rect_of(crate::ui::kit::ZoneId::tab(target))
                 .unwrap_or_else(|| panic!("no zone for {target:?}"));
             click(&mut app, rect.x + rect.width / 2, rect.y);
             assert_eq!(app.screen, target);

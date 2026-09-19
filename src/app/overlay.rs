@@ -1742,6 +1742,16 @@ impl Overlay {
         Overlay::settings_at(0)
     }
 
+    /// Settings opened on the Account tab. That tab holds only actions, so no
+    /// field index selects it and `settings_at` cannot reach it.
+    pub fn settings_account() -> Self {
+        let mut ov = Overlay::settings_at(0);
+        if let Overlay::Settings(st) = &mut ov {
+            st.tab = SettingsTab::Account;
+        }
+        ov
+    }
+
     /// Export-volume overlay for `vol` (format checklist → gauge → results).
     pub fn export(vol: u32) -> Self {
         Overlay::Export(ExportState::new(vol))

@@ -36,4 +36,4 @@ pub use ctx::Ui;
 pub use focus::{Focus, Hover};
 pub use style::State;
 pub use tokens::{Breakpoint, Density, Metrics};
-pub use zones::{ZoneId, ZoneKind, Zones};
+pub use zones::{TallySlot, ZoneId, ZoneKind, Zones};

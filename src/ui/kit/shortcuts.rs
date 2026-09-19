@@ -92,10 +92,30 @@ impl<'a> ShortcutsBar<'a> {
         self
     }
 
-    /// Columns the reserved hints claim on the last row.
-    fn reserved_cols(&self) -> usize {
-        self.help.as_ref().map(|h| h.cols()).unwrap_or(0)
-            + self.pinned.as_ref().map(|h| h.cols()).unwrap_or(0)
+    /// The reserved hints that actually fit in `width`, in draw order
+    /// (left to right), so the last one ends up rightmost.
+    ///
+    /// Help outranks the pinned hint. Both are reserved, but when the bar is too
+    /// narrow for both, the universal escape hatch is the one that has to
+    /// survive — a pinned hint names a way back into one modal, whereas help
+    /// names the way out of not knowing anything at all.
+    fn reserved_hints(&self, width: usize) -> Vec<&Hint> {
+        let help = self.help.as_ref();
+        let pinned = self.pinned.as_ref();
+        let cols = |h: Option<&Hint>| h.map(|h| h.cols()).unwrap_or(0);
+
+        if cols(help) + cols(pinned) < width {
+            return pinned.into_iter().chain(help).collect();
+        }
+        if cols(help) < width {
+            return help.into_iter().collect();
+        }
+        Vec::new()
+    }
+
+    /// Columns the reserved hints claim on the last row at `width`.
+    fn reserved_cols(&self, width: usize) -> usize {
+        self.reserved_hints(width).iter().map(|h| h.cols()).sum()
     }
 
     /// How many leading hints fit in `budget` columns.
@@ -119,7 +139,7 @@ impl<'a> ShortcutsBar<'a> {
             return 1;
         }
         let total = width as usize;
-        let last_budget = total.saturating_sub(self.reserved_cols() + 1);
+        let last_budget = total.saturating_sub(self.reserved_cols(total) + 1);
 
         if self.pack(0, last_budget) == self.hints.len() {
             return 1;
@@ -144,7 +164,7 @@ impl<'a> ShortcutsBar<'a> {
         ui.fill(area, Style::default().bg(ui.theme.bg));
         let total = area.width as usize;
         let rows = area.height.min(MAX_ROWS);
-        let last_budget = total.saturating_sub(self.reserved_cols() + 1);
+        let last_budget = total.saturating_sub(self.reserved_cols(total) + 1);
 
         let mut index = 0usize;
         // Every row above the last gets the full width.
@@ -193,7 +213,11 @@ impl<'a> ShortcutsBar<'a> {
         trimmed: bool,
         last: bool,
     ) {
-        let reserved = if last { self.reserved_cols() } else { 0 };
+        let reserved = if last {
+            self.reserved_cols(row.width as usize)
+        } else {
+            0
+        };
         let mut x = row.x + 1;
         let right = row.x + row.width;
 
@@ -218,7 +242,7 @@ impl<'a> ShortcutsBar<'a> {
         // regardless of how much was packed before it.
         if reserved > 0 {
             let mut rx = right.saturating_sub(reserved as u16 - GAP as u16);
-            for h in [self.pinned.as_ref(), self.help.as_ref()].into_iter().flatten() {
+            for h in self.reserved_hints(row.width as usize) {
                 let w = (h.cols() - GAP) as u16;
                 if rx + w > right {
                     break;
@@ -342,11 +366,12 @@ mod tests {
     }
 
     #[test]
-    fn a_pinned_hint_also_survives_every_width() {
-        // Focus parked outside a modal: this names the only way back into it.
+    fn a_pinned_hint_survives_wherever_it_fits() {
+        // Focus parked outside a modal: this names the only way back into it,
+        // so it outranks every ordinary hint.
         let hints = project_hints();
         let pin = Hint::new("tab", "question").id(ZoneId::hint(8888));
-        for w in [24u16, 40, 80, 160] {
+        for w in [30u16, 40, 80, 160] {
             let bar = ShortcutsBar::new(&hints)
                 .help(help_hint())
                 .pinned(Some(pin.clone()));
@@ -357,6 +382,24 @@ mod tests {
                 "at {w} the way back to the modal was trimmed:\n{joined}"
             );
         }
+    }
+
+    #[test]
+    fn help_outranks_a_pinned_hint_when_only_one_can_fit() {
+        // Both are reserved, but a bar too narrow for both keeps the universal
+        // escape hatch rather than the one that names a single modal.
+        let hints = project_hints();
+        let pin = Hint::new("tab", "a rather long question label").id(ZoneId::hint(8888));
+        let bar = ShortcutsBar::new(&hints)
+            .help(help_hint())
+            .pinned(Some(pin));
+        let (lines, zones) = paint(24, &bar);
+        let joined = lines.join("\n");
+        assert!(
+            joined.contains("help"),
+            "help must never be the one sacrificed:\n{joined}"
+        );
+        assert!(zones.contains(ZoneId::hint(9999)));
     }
 
     #[test]
