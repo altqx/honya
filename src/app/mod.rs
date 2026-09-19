@@ -2412,9 +2412,10 @@ impl App {
             Screen::Project => self.project.handle_mouse(m, self.active.as_ref()),
             Screen::Translate => self.translate.handle_mouse(m),
             Screen::Reader => self.reader.handle_mouse(m),
-            Screen::Lexicon => self
-                .lexicon
-                .handle_mouse(m, self.active.as_ref().map(|a| &a.workspace)),
+            Screen::Lexicon => {
+                self.lexicon
+                    .handle_mouse(m, zone, self.active.as_ref().map(|a| &a.workspace))
+            }
             Screen::Refine if self.active.is_none() => Action::None,
             Screen::Refine => self.refine.handle_mouse(m),
         }

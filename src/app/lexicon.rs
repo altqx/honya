@@ -185,7 +185,6 @@ pub struct LexiconScreen {
     searching: bool,
     /// Mouse hit-test rects, refreshed every frame: the section tabs, the table
     /// body, and the whole screen area (for locating the inline edit modal).
-    tab_rects: Vec<(Rect, u8)>,
     table_area: Rect,
     screen_area: Rect,
     /// Memoized Markdown render of STYLE.md, so the Style tab is not re-parsed on
@@ -206,7 +205,6 @@ impl LexiconScreen {
             filter: String::new(),
             filter_cursor: 0,
             searching: false,
-            tab_rects: Vec::new(),
             table_area: Rect::default(),
             screen_area: Rect::default(),
             style_cache: crate::ui::markdown::RenderCache::default(),
@@ -376,7 +374,12 @@ impl LexiconScreen {
     }
 
     /// Mouse handling for tabs, table selection/editing, and edit-field focus.
-    pub fn handle_mouse(&mut self, m: MouseInput, ws: Option<&Workspace>) -> Action {
+    pub fn handle_mouse(
+        &mut self,
+        m: MouseInput,
+        zone: Option<crate::ui::kit::ZoneId>,
+        ws: Option<&Workspace>,
+    ) -> Action {
         if self.editing.is_some() {
             return self.handle_edit_mouse(m);
         }
@@ -398,10 +401,15 @@ impl LexiconScreen {
                 Action::None
             }
             MouseGesture::Click { double } => {
-                // A section tab takes priority over the table below it.
-                if let Some((_, id)) = self.tab_rects.iter().copied().find(|(r, _)| m.in_rect(*r)) {
-                    if id != self.sub {
-                        self.sub = id;
+                // A section tab takes priority over the table below it. The
+                // strip registers its own segments, so nothing here keeps a
+                // second copy of where they landed.
+                if let Some(id) = zone
+                    && id.kind == crate::ui::kit::ZoneKind::Segment
+                {
+                    let next = id.index as u8;
+                    if next != self.sub {
+                        self.sub = next;
                         self.list.select(Some(0));
                         self.style_scroll = 0;
                     }
@@ -613,100 +621,91 @@ impl LexiconScreen {
         area: Rect,
         ws: Option<&Workspace>,
     ) {
+        self.screen_area = area;
+        let header = Rect {
+            height: 1,
+            ..area
+        };
+        let body = Rect {
+            y: area.y + 1,
+            height: area.height.saturating_sub(1),
+            ..area
+        };
+        self.render_header(ui, header, ws);
         let theme: &Theme = ui.theme;
         let f: &mut Frame = ui.frame;
-        self.screen_area = area;
-        let rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(1), Constraint::Min(0)])
-            .split(area);
-
-        self.render_header(f, rows[0], ws, theme);
-        self.render_table(f, rows[1], ws, theme);
+        self.render_table(f, body, ws, theme);
 
         if self.editing.is_some() {
             self.render_edit(f, area, theme);
         }
     }
 
-    fn render_header(&mut self, f: &mut Frame, area: Rect, ws: Option<&Workspace>, theme: &Theme) {
-        let tabs = [
-            ("Glossary", SUB_GLOSSARY),
-            ("Characters", SUB_CHARACTERS),
-            ("Style", SUB_STYLE),
-        ];
-        let mut spans = vec![Span::raw("  ")];
-        let mut x = area.x.saturating_add(2);
-        self.tab_rects.clear();
-        for (label, id) in tabs {
-            let text = if id == self.sub {
-                format!("〔 {label} 〕")
-            } else {
-                format!("  {label}  ")
-            };
-            let w = col_width(&text) as u16;
-            self.tab_rects.push((
-                Rect {
-                    x,
-                    y: area.y,
-                    width: w,
-                    height: 1,
-                },
-                id,
-            ));
-            x = x.saturating_add(w).saturating_add(1); // + trailing space
-            if id == self.sub {
-                spans.push(Span::styled(
-                    text,
-                    Style::default()
-                        .fg(theme.accent)
-                        .add_modifier(Modifier::BOLD),
-                ));
-            } else {
-                spans.push(Span::styled(text, Style::default().fg(theme.ink_faint)));
-            }
-            spans.push(Span::raw(" "));
-        }
-        let count = match (ws, self.sub) {
-            (Some(ws), SUB_GLOSSARY) => format!("{} terms", self.glossary(ws).len()),
-            (Some(ws), SUB_CHARACTERS) => format!("{} characters", self.characters(ws).len()),
-            _ => "—".to_string(),
-        };
-        let faint = Style::default().fg(theme.ink_faint);
-        let mut right_spans: Vec<Span> = Vec::new();
-        if self.searching || !self.filter.is_empty() {
-            right_spans.push(Span::styled("/ filter: ", faint));
-            if self.searching {
-                let (before, after) =
-                    input::caret_halves(&self.filter, self.filter_cursor, usize::MAX);
-                right_spans.push(Span::styled(before, faint));
-                right_spans.push(Span::styled("▏", Style::default().fg(theme.stream_cursor)));
-                right_spans.push(Span::styled(after, faint));
-            } else {
-                right_spans.push(Span::styled(thai_display_safe(&self.filter), faint));
-            }
-            right_spans.push(Span::styled("   ", faint));
-        }
-        right_spans.push(Span::styled(format!("({count})"), faint));
+    /// Section strip on the left, filter and count on the right.
+    fn render_header(
+        &mut self,
+        ui: &mut crate::ui::kit::Ui,
+        area: Rect,
+        ws: Option<&Workspace>,
+    ) {
+        use crate::ui::kit::ZoneKind;
+        use crate::ui::kit::tabs::{Segment, SegmentedControl};
 
-        let left = Line::from(spans);
-        f.render_widget(
-            Paragraph::new(left).style(Style::default().bg(theme.bg)),
-            area,
-        );
-        let rw: u16 = right_spans
+        ui.fill(area, Style::default().bg(ui.theme.bg));
+
+        // The count belongs on the section it counts, so each tab carries its
+        // own rather than one number floating at the far end describing
+        // whichever section happens to be open.
+        let (terms, chars) = match ws {
+            Some(ws) => (self.glossary(ws).len(), self.characters(ws).len()),
+            None => (0, 0),
+        };
+        let segments = [
+            Segment::new("Glossary").badge(terms.to_string()),
+            Segment::new("Characters").badge(chars.to_string()),
+            Segment::new("Style"),
+        ];
+        let strip = Rect {
+            width: area.width / 2,
+            height: 1,
+            ..area
+        };
+        SegmentedControl::new(&segments, self.sub as usize)
+            .ids(ZoneKind::Segment, 0)
+            .render(ui, strip);
+
+        // Filter, right-aligned, only when there is one or it is being typed.
+        if !self.searching && self.filter.is_empty() {
+            return;
+        }
+        let faint = Style::default().fg(ui.theme.ink_faint).bg(ui.theme.bg);
+        let mut spans = vec![Span::styled("/ ", faint)];
+        if self.searching {
+            let (before, after) =
+                input::caret_halves(&self.filter, self.filter_cursor, usize::MAX);
+            spans.push(Span::styled(before, faint));
+            spans.push(Span::styled(
+                crate::ui::glyphs::ACCENT_RAIL.as_str().to_string(),
+                Style::default().fg(ui.theme.stream_cursor).bg(ui.theme.bg),
+            ));
+            spans.push(Span::styled(after, faint));
+        } else {
+            spans.push(Span::styled(thai_display_safe(&self.filter), faint));
+        }
+        let rw: u16 = spans
             .iter()
             .map(|s| col_width(s.content.as_ref()))
             .sum::<usize>() as u16;
         if area.width > rw + 2 {
-            f.render_widget(
-                Paragraph::new(Line::from(right_spans)).style(Style::default().bg(theme.bg)),
+            ui.line(
                 Rect {
                     x: area.x + area.width - rw - 1,
                     y: area.y,
                     width: rw,
                     height: 1,
                 },
+                Line::from(spans),
+                Style::default().bg(ui.theme.bg),
             );
         }
     }
