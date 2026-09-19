@@ -1490,15 +1490,9 @@ mod tests {
         use ratatui::backend::TestBackend;
 
         let mut active = active_project();
+        let vol = active.project.volumes.first_mut().unwrap();
         for i in 3..=40 {
-            active
-                .project
-                .volumes
-                .iter_mut()
-                .next()
-                .unwrap()
-                .chapters
-                .push(chapter(i));
+            vol.chapters.push(chapter(i));
         }
         let mut screen = ProjectScreen::new();
         let theme = crate::model::ThemeId::default().build();
