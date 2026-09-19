@@ -18,6 +18,7 @@ pub mod badge;
 pub mod button;
 pub mod ctx;
 pub mod focus;
+pub mod form;
 pub mod list;
 pub mod modal;
 pub mod progress;
