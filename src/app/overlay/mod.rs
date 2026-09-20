@@ -6,6 +6,7 @@
 use std::path::PathBuf;
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
@@ -531,7 +532,42 @@ impl Overlay {
         let Some(id) = zones.at(m.col, m.row) else {
             return Action::None;
         };
+        // An editor registers a TextSurface as it draws, which made these boxes
+        // look clickable while nothing answered the click. Putting the caret
+        // where the pointer landed is what that zone was registered for.
+        if id.kind == ZoneKind::TextSurface
+            && let Some(rect) = zones.rect_of(id)
+            && self.move_caret_to(id.index, rect, m.col, m.row)
+        {
+            return Action::None;
+        }
         self.zone_action(id, m.is_double())
+    }
+
+    /// Put the caret where a click landed inside an editable text surface.
+    /// False when this overlay has no editor, or the one clicked is read-only.
+    fn move_caret_to(&mut self, index: u32, area: Rect, col: u16, row: u16) -> bool {
+        use crate::ui::kit::editor;
+
+        // Read the text first, then write the caret: two matches rather than
+        // one, so the borrow of the text ends before the cursor is assigned.
+        let text: String = match &*self {
+            Overlay::ReaderNote(st) => st.text.clone(),
+            Overlay::ReaderEdit(st) => st.text.clone(),
+            Overlay::Synopsis(st) if index == 0 => st.syn.raw.clone(),
+            Overlay::Synopsis(st) if st.syn.edit_translation => st.syn.translated_text.clone(),
+            _ => return false,
+        };
+        let lines = editor::wrap(&text, area.width);
+        let at = editor::offset_at(&text, &lines, area, 0, col, row);
+        match self {
+            Overlay::ReaderNote(st) => st.cursor = at,
+            Overlay::ReaderEdit(st) => st.cursor = at,
+            Overlay::Synopsis(st) if index == 0 => st.syn.cursor = at,
+            Overlay::Synopsis(st) => st.syn.translated_cursor = at,
+            _ => return false,
+        }
+        true
     }
 
     /// What a click on `id` means for this overlay.
@@ -2204,6 +2240,41 @@ mod tests {
         // And an empty query keeps the caller's deliberate ordering.
         st.picker.query.clear();
         assert_eq!(st.matches(), (0..st.items.len()).collect::<Vec<_>>());
+    }
+
+    /// An editor registers a TextSurface as it draws, which made these boxes
+    /// look clickable while nothing answered the click. A click now puts the
+    /// caret where the pointer landed.
+    #[test]
+    fn clicking_in_an_editor_moves_the_caret() {
+        let mut ov = Overlay::reader_note(3, 12);
+        let Overlay::ReaderNote(st) = &mut ov else {
+            unreachable!()
+        };
+        st.text = "abcdef".into();
+        st.cursor = 0;
+
+        let (_, zones) = render_overlay(&mut ov, 100, 30);
+        let surface = zones
+            .all()
+            .find(|(_, id)| id.kind == ZoneKind::TextSurface)
+            .map(|(r, _)| r)
+            .expect("the note editor registers a text surface");
+
+        // Four columns into the first line is between the fourth and fifth
+        // character, so the caret lands at offset 4.
+        ov.handle_mouse_zones(
+            MouseInput {
+                gesture: MouseGesture::Click { double: false },
+                col: surface.x + 4,
+                row: surface.y,
+            },
+            &zones,
+        );
+        let Overlay::ReaderNote(st) = &ov else {
+            unreachable!()
+        };
+        assert_eq!(st.cursor, 4, "the click did not reach the caret");
     }
 
     #[test]

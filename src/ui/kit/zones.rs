@@ -14,6 +14,8 @@
 
 use ratatui::layout::Rect;
 
+// Only `ZoneId::tab`, which is test-only, names a screen.
+#[cfg(test)]
 use crate::app::Screen;
 
 /// What an interactive rectangle *is*. Fieldless so [`ZoneId`] stays `Copy` and
@@ -54,12 +56,8 @@ pub enum ZoneKind {
     Segment,
     /// A step in a wizard's stepper; `index` is the step.
     Step,
-    /// A toggle / checkbox; `index` identifies which.
-    Toggle,
     /// A scrollbar thumb; `index` distinguishes panes.
     ScrollThumb,
-    /// A scrollable surface, for wheel routing; `index` distinguishes panes.
-    ScrollSurface,
     /// Editable prose, for click-to-position and drag-select.
     TextSurface,
 
@@ -68,8 +66,6 @@ pub enum ZoneKind {
     Backdrop,
     /// A modal's own frame, so a click inside it is not a dismiss.
     ModalFrame,
-    /// A focusable pane, for click-to-focus; `index` distinguishes panes.
-    Pane,
 }
 
 /// Which count a header tally badge shows. Clicking one is a request to see
@@ -112,16 +108,15 @@ impl ZoneId {
         Self::new(kind, 0)
     }
 
+    /// Only the tests name a tab zone directly; the tab bar registers its own
+    /// as a segmented control.
+    #[cfg(test)]
     pub const fn tab(screen: Screen) -> Self {
         Self::new(ZoneKind::Tab, screen as u32)
     }
 
     pub const fn row(index: usize) -> Self {
         Self::new(ZoneKind::Row, index as u32)
-    }
-
-    pub const fn field(index: usize) -> Self {
-        Self::new(ZoneKind::Field, index as u32)
     }
 
     pub const fn button(index: u32) -> Self {
@@ -151,10 +146,6 @@ impl ZoneId {
 
     pub const fn tally(slot: TallySlot) -> Self {
         Self::new(ZoneKind::Tally, slot as u32)
-    }
-
-    pub const fn pane(index: u32) -> Self {
-        Self::new(ZoneKind::Pane, index)
     }
 
     /// The row index this zone addresses, when it is a row.
@@ -196,6 +187,7 @@ impl Zones {
         self.trap_from = None;
     }
 
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.zones.is_empty()
     }
@@ -251,6 +243,7 @@ impl Zones {
         self.trap_from = Some(self.zones.len());
     }
 
+    #[cfg(test)]
     pub fn is_trapped(&self) -> bool {
         self.trap_from.is_some()
     }
@@ -264,6 +257,7 @@ impl Zones {
     }
 
     /// Every registered id, focusable or not, in registration order.
+    #[cfg(test)]
     pub fn all(&self) -> impl Iterator<Item = (Rect, ZoneId)> + '_ {
         self.zones.iter().map(|z| (z.rect, z.id))
     }
@@ -285,12 +279,12 @@ mod tests {
     #[test]
     fn topmost_registration_wins() {
         let mut z = Zones::new();
-        z.push(r(0, 0, 20, 10), ZoneId::bare(ZoneKind::Pane));
+        z.push(r(0, 0, 20, 10), ZoneId::bare(ZoneKind::ModalFrame));
         z.push(r(5, 5, 4, 1), ZoneId::row(3));
         // Inside the later, smaller rect.
         assert_eq!(z.at(6, 5), Some(ZoneId::row(3)));
         // Inside only the earlier one.
-        assert_eq!(z.at(1, 1), Some(ZoneId::bare(ZoneKind::Pane)));
+        assert_eq!(z.at(1, 1), Some(ZoneId::bare(ZoneKind::ModalFrame)));
         // Outside both.
         assert_eq!(z.at(40, 40), None);
     }
@@ -322,13 +316,13 @@ mod tests {
     fn tab_order_skips_unfocusable_and_keeps_reading_order() {
         let mut z = Zones::new();
         z.push_hit(r(0, 0, 80, 24), ZoneId::bare(ZoneKind::Backdrop));
-        z.push(r(0, 1, 10, 1), ZoneId::field(0));
-        z.push(r(0, 2, 10, 1), ZoneId::field(1));
-        z.push_hit(r(0, 3, 10, 5), ZoneId::bare(ZoneKind::ScrollSurface));
+        z.push(r(0, 1, 10, 1), ZoneId::button(4));
+        z.push(r(0, 2, 10, 1), ZoneId::button(5));
+        z.push_hit(r(0, 3, 10, 5), ZoneId::bare(ZoneKind::Backdrop));
         z.push(r(0, 9, 6, 1), ZoneId::button(0));
 
         let ring: Vec<_> = z.tab_order().collect();
-        assert_eq!(ring, vec![ZoneId::field(0), ZoneId::field(1), ZoneId::button(0)]);
+        assert_eq!(ring, vec![ZoneId::button(4), ZoneId::button(5), ZoneId::button(0)]);
     }
 
     #[test]
@@ -339,13 +333,13 @@ mod tests {
         // The modal opens: everything from here on is the ring.
         z.begin_trap();
         z.push_hit(r(0, 0, 80, 24), ZoneId::bare(ZoneKind::Backdrop));
-        z.push(r(22, 8, 10, 1), ZoneId::field(0));
+        z.push(r(22, 8, 10, 1), ZoneId::button(4));
         z.push(r(22, 9, 10, 1), ZoneId::button(0));
 
         let ring: Vec<_> = z.tab_order().collect();
         assert_eq!(
             ring,
-            vec![ZoneId::field(0), ZoneId::button(0)],
+            vec![ZoneId::button(4), ZoneId::button(0)],
             "the screen rows behind the modal must be unreachable by Tab"
         );
         // The rows stay registered — the trap confines the ring, not the

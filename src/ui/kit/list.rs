@@ -54,6 +54,10 @@ impl ListState {
         self.offset
     }
 
+    /// Whether the view is still pinned to the tail. Nothing in the app reads
+    /// this — the behaviour is what matters — but a test asserting that the
+    /// user has taken over has nothing else to look at.
+    #[cfg(test)]
     pub fn is_following(&self) -> bool {
         self.follow
     }
@@ -77,16 +81,6 @@ impl ListState {
         let cur = self.selected.unwrap_or(0) as isize;
         let next = (cur + delta).clamp(0, len as isize - 1) as usize;
         self.selected = Some(next);
-    }
-
-    pub fn select_first(&mut self, len: usize) {
-        self.follow = false;
-        self.selected = (len > 0).then_some(0);
-    }
-
-    pub fn select_last(&mut self, len: usize) {
-        self.follow = false;
-        self.selected = len.checked_sub(1);
     }
 
     /// Scroll without moving the selection, for the wheel.
@@ -589,8 +583,6 @@ mod tests {
         let mut s = ListState::new();
         s.select(Some(3));
         s.move_by(1, 0);
-        assert_eq!(s.selected(), None);
-        s.select_last(0);
         assert_eq!(s.selected(), None);
     }
 }

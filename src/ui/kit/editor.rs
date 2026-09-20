@@ -31,6 +31,11 @@ pub struct Selection {
     pub head: usize,
 }
 
+// Drag never reaches a screen — `MouseInput::from_event` drops it — so nothing
+// constructs a Selection yet. The rendering below handles one correctly and is
+// tested; deleting it would mean rewriting the span-splitting loop that four
+// overlays draw through, to remove a branch an empty selection already skips.
+#[allow(dead_code)]
 impl Selection {
     pub fn new(at: usize) -> Self {
         Self {
@@ -214,6 +219,7 @@ impl<'a> View<'a> {
         self
     }
 
+    #[allow(dead_code)]
     pub fn selection(mut self, selection: Option<Selection>) -> Self {
         self.selection = selection;
         self

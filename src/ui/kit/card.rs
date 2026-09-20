@@ -56,11 +56,6 @@ impl<'a> Card<'a> {
         }
     }
 
-    /// An untitled block — a rail and padding around whatever the caller draws.
-    pub fn plain() -> Self {
-        Self::default()
-    }
-
     pub fn meta(mut self, meta: impl Into<String>) -> Self {
         self.meta = Some(meta.into());
         self
@@ -68,21 +63,6 @@ impl<'a> Card<'a> {
 
     pub fn accent(mut self, color: ratatui::style::Color) -> Self {
         self.accent = Some(color);
-        self
-    }
-
-    pub fn id(mut self, id: ZoneId) -> Self {
-        self.id = Some(id);
-        self
-    }
-
-    pub fn selected(mut self, yes: bool) -> Self {
-        self.selected = yes;
-        self
-    }
-
-    pub fn no_rail(mut self) -> Self {
-        self.rail = false;
         self
     }
 
@@ -187,63 +167,6 @@ impl<'a> Card<'a> {
     }
 }
 
-/// A single labelled number, for a dashboard strip.
-pub struct Stat<'a> {
-    pub label: &'a str,
-    pub value: String,
-    pub color: Option<ratatui::style::Color>,
-}
-
-impl<'a> Stat<'a> {
-    pub fn new(label: &'a str, value: impl Into<String>) -> Self {
-        Self {
-            label,
-            value: value.into(),
-            color: None,
-        }
-    }
-
-    pub fn color(mut self, c: ratatui::style::Color) -> Self {
-        self.color = Some(c);
-        self
-    }
-
-    pub fn width(&self) -> u16 {
-        col_width(self.label).max(col_width(&self.value)) as u16
-    }
-
-    /// Draw as value over label, two rows. Falls back to one row when there is
-    /// only one to spend, keeping the value, which is the part that changes.
-    pub fn render(&self, ui: &mut Ui, area: Rect) {
-        if area.width == 0 || area.height == 0 {
-            return;
-        }
-        let value_style = Style::default()
-            .fg(self.color.unwrap_or(ui.theme.ink))
-            .bg(ui.surface())
-            .add_modifier(Modifier::BOLD);
-        ui.text(
-            Rect {
-                height: 1,
-                ..area
-            },
-            truncate_cols(&self.value, area.width as usize),
-            value_style,
-        );
-        if area.height > 1 {
-            ui.text(
-                Rect {
-                    y: area.y + 1,
-                    height: 1,
-                    ..area
-                },
-                truncate_cols(self.label, area.width as usize),
-                Style::default().fg(ui.theme.ink_faint).bg(ui.surface()),
-            );
-        }
-    }
-}
-
 /// A full-width hairline, for the rare place a rule earns its row.
 pub fn rule(ui: &mut Ui, area: Rect) {
     if area.width == 0 || area.height == 0 {
@@ -301,7 +224,7 @@ mod tests {
     #[test]
     fn a_card_costs_one_column_of_rail_not_a_whole_border() {
         let (_, _, body) = paint(40, 6, &Focus::new(), |ui, area| {
-            Card::plain().render(ui, area)
+            Card::default().render(ui, area)
         });
         // A bordered panel would lose a row top and bottom; a rail loses none.
         assert_eq!(body.height, 6, "a rail must not cost vertical space");
@@ -318,41 +241,6 @@ mod tests {
         assert!(lines[0].contains("12 done"), "meta missing: {:?}", lines[0]);
         assert_eq!(body.y, 1);
         assert_eq!(body.height, 5);
-    }
-
-    #[test]
-    fn the_rail_reports_state_without_changing_the_layout() {
-        // Whatever the state, the body must land in the same place, or panes
-        // would shift as focus moved between them.
-        let idle = paint(40, 5, &Focus::new(), |ui, area| {
-            Card::new("Tree").render(ui, area)
-        })
-        .2;
-        let mut focus = Focus::new();
-        focus.set(ZoneId::pane(1));
-        let focused = paint(40, 5, &focus, |ui, area| {
-            Card::new("Tree").id(ZoneId::pane(1)).render(ui, area)
-        })
-        .2;
-        assert_eq!(idle, focused, "focus must not reflow the card");
-    }
-
-    #[test]
-    fn a_card_with_an_id_is_clickable_across_its_whole_area() {
-        let (_, zones, _) = paint(40, 5, &Focus::new(), |ui, area| {
-            Card::new("Volume 1").id(ZoneId::row(3)).render(ui, area)
-        });
-        let r = zones.rect_of(ZoneId::row(3)).expect("registered");
-        assert_eq!(r.height, 5, "the whole card is the target, not just its title");
-        assert_eq!(zones.at(20, 3), Some(ZoneId::row(3)));
-    }
-
-    #[test]
-    fn a_card_without_an_id_registers_nothing() {
-        let (_, zones, _) = paint(40, 5, &Focus::new(), |ui, area| {
-            Card::new("Static").render(ui, area)
-        });
-        assert!(zones.is_empty());
     }
 
     #[test]
@@ -386,12 +274,4 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_stat_keeps_its_value_when_there_is_only_one_row() {
-        let (lines, _, _) = paint(10, 1, &Focus::new(), |ui, area| {
-            Stat::new("chapters", "42").render(ui, area);
-            area
-        });
-        assert!(lines[0].contains("42"), "the changing half must survive");
-    }
 }

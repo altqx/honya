@@ -52,11 +52,6 @@ impl Segment {
         self
     }
 
-    pub fn disabled(mut self, yes: bool) -> Self {
-        self.disabled = yes;
-        self
-    }
-
     /// Columns wanted at a given level of detail.
     fn width(&self, marks: bool, badges: bool) -> u16 {
         let mut w = col_width(&self.label) + 2;
@@ -333,20 +328,6 @@ mod tests {
         let (narrow, _) = paint(58, 0, &segments);
         assert!(narrow.contains("Shelf"), "got {narrow:?}");
         assert!(narrow.contains("Refine"), "got {narrow:?}");
-    }
-
-    #[test]
-    fn a_disabled_segment_is_clickable_but_unfocusable() {
-        let segments = vec![
-            Segment::new("Agents"),
-            Segment::new("Account").disabled(true),
-        ];
-        let (_, zones) = paint(40, 0, &segments);
-        assert!(zones.contains(ZoneId::segment(1)));
-        assert!(
-            !zones.tab_order().any(|z| z == ZoneId::segment(1)),
-            "a disabled segment must not take focus"
-        );
     }
 
     #[test]

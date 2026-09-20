@@ -61,11 +61,6 @@ impl<'a> Toolbar<'a> {
         self
     }
 
-    pub fn gap(mut self, gap: u16) -> Self {
-        self.gap = gap;
-        self
-    }
-
     fn items(&self) -> impl Iterator<Item = &Act> {
         self.acts
             .iter()

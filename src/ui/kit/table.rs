@@ -28,20 +28,11 @@ pub enum Width {
     Flex { min: u16, weight: u16 },
 }
 
-/// Which way a column's contents sit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Align {
-    #[default]
-    Left,
-    Right,
-}
-
 /// One column.
 #[derive(Debug, Clone)]
 pub struct Column {
     pub title: String,
     pub width: Width,
-    pub align: Align,
     /// Whether clicking the header sorts by this column.
     pub sortable: bool,
     /// Columns with a lower priority are dropped first when space runs out.
@@ -59,7 +50,6 @@ impl Column {
         Self {
             title: title.into(),
             width,
-            align: Align::Left,
             sortable: true,
             priority: 100,
             tint: None,
@@ -68,16 +58,6 @@ impl Column {
 
     pub fn tint(mut self, color: Color) -> Self {
         self.tint = Some(color);
-        self
-    }
-
-    pub fn align(mut self, align: Align) -> Self {
-        self.align = align;
-        self
-    }
-
-    pub fn fixed_sort(mut self, sortable: bool) -> Self {
-        self.sortable = sortable;
         self
     }
 
@@ -252,13 +232,7 @@ pub fn render_header(ui: &mut Ui, area: Rect, columns: &[Column], sort: Sort) {
         let marker_cols = col_width(marker);
         let title = truncate_cols(&col.title, (w as usize).saturating_sub(marker_cols));
         let text = format!("{title}{marker}");
-        let text = match col.align {
-            Align::Left => pad_to_cols(&text, w as usize),
-            Align::Right => {
-                let pad = (w as usize).saturating_sub(col_width(&text));
-                format!("{}{}", " ".repeat(pad), text)
-            }
-        };
+        let text = pad_to_cols(&text, w as usize);
         ui.line(rect, Line::from(Span::styled(text, sty)), sty);
         x = x.saturating_add(w + CELL_GAP);
     }
@@ -287,7 +261,6 @@ where
         area.width
     };
     let cols = layout(columns, body_w);
-    let aligns: Vec<Align> = cols.iter().map(|&(i, _)| columns[i].align).collect();
     let tints: Vec<Option<Color>> = cols.iter().map(|&(i, _)| columns[i].tint).collect();
 
     list::render(
@@ -310,13 +283,7 @@ where
             for (n, &(ci, w)) in cols.iter().enumerate() {
                 let raw = cells.get(ci).map(String::as_str).unwrap_or("");
                 let text = truncate_cols(raw, w as usize);
-                let text = match aligns[n] {
-                    Align::Left => pad_to_cols(&text, w as usize),
-                    Align::Right => {
-                        let pad = (w as usize).saturating_sub(col_width(&text));
-                        format!("{}{}", " ".repeat(pad), text)
-                    }
-                };
+                let text = pad_to_cols(&text, w as usize);
                 spans.push(match tints[n] {
                     Some(fg) => Span::styled(text, Style::default().fg(fg)),
                     None => Span::raw(text),
@@ -349,11 +316,6 @@ pub fn header_column(id: ZoneId) -> Option<usize> {
     (id.kind == ZoneKind::ColumnHeader).then_some(id.index as usize)
 }
 
-/// Selection styling for a table row, matching the list's.
-pub fn row_style(ui: &Ui, selected: bool, focused: bool) -> Style {
-    ui.row_style(super::style::State::selected(selected).with_focus(focused))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -371,7 +333,7 @@ mod tests {
             Column::new("Reading", Width::Flex { min: 8, weight: 2 }).priority(60),
             Column::new("Translation", Width::Flex { min: 10, weight: 3 }).priority(150),
             Column::new("Role", Width::Fixed(10)).priority(40),
-            Column::new("Seen", Width::Fixed(5)).align(Align::Right).priority(20),
+            Column::new("Seen", Width::Fixed(5)).priority(20),
         ]
     }
 

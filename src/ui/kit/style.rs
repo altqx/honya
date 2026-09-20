@@ -61,6 +61,16 @@ impl State {
         self
     }
 
+    /// No component sets this yet: a press needs a button-up, and that is
+    /// dropped before it becomes a gesture. The theme and `surface` carry the
+    /// pressed state so the precedence is written down once; the test is what
+    /// exercises it.
+    #[cfg(test)]
+    pub fn with_active(mut self, active: bool) -> Self {
+        self.active = active;
+        self
+    }
+
     pub fn with_hover(mut self, hovered: bool) -> Self {
         self.hovered = hovered;
         self
@@ -71,15 +81,6 @@ impl State {
         self
     }
 
-    pub fn with_active(mut self, active: bool) -> Self {
-        self.active = active;
-        self
-    }
-
-    /// Whether anything about this state should be drawn differently from idle.
-    pub fn is_marked(self) -> bool {
-        self.selected || self.focused || self.hovered || self.active || self.disabled
-    }
 }
 
 /// The background a row or control sits on, given its state.
@@ -146,15 +147,6 @@ pub fn rail(state: State, theme: &Theme, base: Color) -> Option<(Glyph, Style)> 
     Some((glyph, Style::default().fg(color).bg(surface(state, theme, base))))
 }
 
-/// The border color for a panel in a given state.
-pub fn border(state: State, theme: &Theme) -> Color {
-    match state {
-        s if s.focused => theme.border_focus,
-        s if s.hovered => theme.accent_soft,
-        _ => theme.rule,
-    }
-}
-
 /// A filled control — the primary button, the active tab's pill.
 pub fn filled(theme: &Theme) -> Style {
     if theme.paints_fills() {
@@ -180,13 +172,6 @@ pub fn key_cap(theme: &Theme) -> Style {
 /// The label beside a key cap.
 pub fn key_label(theme: &Theme) -> Style {
     Style::default().fg(theme.ink_faint)
-}
-
-/// A section heading inside a panel or form.
-pub fn section(theme: &Theme) -> Style {
-    Style::default()
-        .fg(theme.ink_faint)
-        .add_modifier(Modifier::BOLD)
 }
 
 #[cfg(test)]

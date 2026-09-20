@@ -156,16 +156,6 @@ impl<'a, 'f> Ui<'a, 'f> {
     }
 }
 
-/// A horizontal run of cells at `row`, `cols` wide, starting at `x`.
-pub fn strip(x: u16, row: u16, cols: u16) -> Rect {
-    Rect {
-        x,
-        y: row,
-        width: cols,
-        height: 1,
-    }
-}
-
 /// The single row `n` rows down from `area`'s top, full width. Returns an empty
 /// rect once `n` runs past the area rather than drawing outside it.
 pub fn row_at(area: Rect, n: u16) -> Rect {

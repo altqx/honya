@@ -18,7 +18,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear};
 
-use super::button::{Align, ButtonRow};
+use super::button::ButtonRow;
 use super::ctx::Ui;
 use super::style;
 use super::zones::{ZoneId, ZoneKind};
@@ -155,7 +155,10 @@ impl Sizing {
 /// The regions a rendered modal hands back to its caller.
 #[derive(Debug, Clone, Copy)]
 pub struct Frame {
-    /// The full outer rectangle, border included.
+    /// The full outer rectangle, border included. Nothing draws with it — the
+    /// modal has already drawn its own frame — but it completes the geometry
+    /// handed back, and the tests assert the body and footer sit inside it.
+    #[allow(dead_code)]
     pub outer: Rect,
     /// Where the caller draws its content.
     pub body: Rect,
@@ -415,7 +418,7 @@ pub fn render_footer(ui: &mut Ui, footer: Rect, buttons: ButtonRow) {
         ..footer
     };
     ui.fill(row, Style::default().bg(ui.theme.bg_elevated));
-    buttons.align(Align::Right).render(ui, row);
+    buttons.render(ui, row);
 }
 
 /// A dimmed hint line, for the left of a footer.
@@ -620,7 +623,7 @@ mod tests {
                 frame.footer,
                 ButtonRow::new(vec![
                     Button::new(ZoneId::button(0), "Cancel"),
-                    Button::new(ZoneId::button(1), "Delete").danger(),
+                    Button::new(ZoneId::button(1), "Delete"),
                 ]),
             );
         })

@@ -15,9 +15,6 @@ use super::zones::{ZoneId, Zones};
 #[derive(Debug, Default, Clone)]
 pub struct Focus {
     current: Option<ZoneId>,
-    /// Set while focus is parked outside a trap that is still on screen, so the
-    /// shortcuts bar can pin a hint naming the way back.
-    parked: Option<ZoneId>,
 }
 
 impl Focus {
@@ -29,44 +26,15 @@ impl Focus {
         self.current
     }
 
-    /// Whether `id` currently holds the keyboard. Components call this to decide
-    /// whether to draw a focus ring.
-    pub fn is(&self, id: ZoneId) -> bool {
-        self.current == Some(id)
-    }
-
+    /// Nothing in the app moves focus by id — the ring and the pointer do it —
+    /// but a test needs a way to put it somewhere before asserting.
+    #[cfg(test)]
     pub fn set(&mut self, id: ZoneId) {
         self.current = Some(id);
-        self.parked = None;
     }
 
     pub fn clear(&mut self) {
         self.current = None;
-        self.parked = None;
-    }
-
-    /// The zone focus will return to when it is un-parked.
-    pub fn parked(&self) -> Option<ZoneId> {
-        self.parked
-    }
-
-    /// Step focus out of a trap without dismissing it, remembering the way back.
-    /// Esc does this before it closes anything, so a user can scroll the content
-    /// behind a modal while the modal stays on screen.
-    pub fn park(&mut self) {
-        if let Some(cur) = self.current.take() {
-            self.parked = Some(cur);
-        }
-    }
-
-    pub fn unpark(&mut self) {
-        if let Some(back) = self.parked.take() {
-            self.current = Some(back);
-        }
-    }
-
-    pub fn is_parked(&self) -> bool {
-        self.parked.is_some()
     }
 
     /// Move to the next focusable zone, wrapping. With nothing focused this
@@ -97,19 +65,13 @@ impl Focus {
         self.current = Some(ring[next]);
     }
 
-    /// Settle focus against the zones just rendered. A focused zone that no
-    /// longer exists is dropped rather than left dangling; a parked zone that is
-    /// gone releases the park, so Esc does not have a phantom rung to climb.
+    /// Settle focus against the zones just rendered: a focused zone that no
+    /// longer exists is dropped rather than left dangling.
     pub fn reconcile(&mut self, zones: &Zones) {
         if let Some(cur) = self.current
             && !zones.contains(cur)
         {
             self.current = None;
-        }
-        if let Some(p) = self.parked
-            && !zones.contains(p)
-        {
-            self.parked = None;
         }
     }
 }
@@ -124,10 +86,6 @@ pub struct Hover {
 impl Hover {
     pub fn get(self) -> Option<ZoneId> {
         self.current
-    }
-
-    pub fn is(self, id: ZoneId) -> bool {
-        self.current == Some(id)
     }
 
     /// Record the zone under `(col, row)`. Returns true when the hovered zone
@@ -238,32 +196,6 @@ mod tests {
         // And the ring is still enterable afterwards.
         f.next(&row_zones(3));
         assert_eq!(f.get(), Some(ZoneId::row(0)));
-    }
-
-    #[test]
-    fn parking_remembers_the_way_back_and_unparking_restores_it() {
-        let z = row_zones(3);
-        let mut f = Focus::new();
-        f.set(ZoneId::row(1));
-        f.park();
-        assert!(f.is_parked());
-        assert_eq!(f.get(), None, "parked focus is off the ring");
-        assert_eq!(f.parked(), Some(ZoneId::row(1)));
-        f.unpark();
-        assert_eq!(f.get(), Some(ZoneId::row(1)));
-        assert!(!f.is_parked());
-        // Reconcile against live zones leaves a valid restore alone.
-        f.reconcile(&z);
-        assert_eq!(f.get(), Some(ZoneId::row(1)));
-    }
-
-    #[test]
-    fn a_park_whose_target_vanished_releases() {
-        let mut f = Focus::new();
-        f.set(ZoneId::row(7));
-        f.park();
-        f.reconcile(&row_zones(2));
-        assert!(!f.is_parked(), "Esc must not have a phantom rung to climb");
     }
 
     #[test]

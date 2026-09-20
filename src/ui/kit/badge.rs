@@ -178,25 +178,6 @@ impl Chip {
     }
 }
 
-/// An inert label with a tint — a severity tag, an agent name.
-pub fn badge(ui: &mut Ui, area: Rect, text: &str, color: Color) {
-    if area.width == 0 || area.height == 0 {
-        return;
-    }
-    let st = Style::default()
-        .fg(color)
-        .bg(ui.surface())
-        .add_modifier(Modifier::BOLD);
-    ui.text(
-        Rect {
-            height: 1,
-            ..area
-        },
-        text.to_string(),
-        st,
-    );
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

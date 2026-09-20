@@ -45,8 +45,6 @@ pub struct Item {
     pub label: String,
     /// Dimmed text after the label — a group name, a chapter number.
     pub detail: Option<String>,
-    /// The binding this item also has, shown right-aligned.
-    pub accel: Option<String>,
 }
 
 impl Item {
@@ -54,7 +52,6 @@ impl Item {
         Self {
             label: label.into(),
             detail: None,
-            accel: None,
         }
     }
 
@@ -63,10 +60,6 @@ impl Item {
         self
     }
 
-    pub fn accel(mut self, accel: impl Into<String>) -> Self {
-        self.accel = Some(accel.into());
-        self
-    }
 }
 
 /// How well `query` matches `candidate`, and where it matched.
@@ -259,7 +252,7 @@ pub fn render(
         },
         |i| {
             let item = &items[matches[i]];
-            list::Row::new(item_line(styles, item, &query, list_rect.width))
+            list::Row::new(item_line(styles, item, &query))
         },
     );
     matches
@@ -350,8 +343,8 @@ impl RowStyles {
     }
 }
 
-/// One row: label with matched characters lifted, then detail, then accel.
-fn item_line(styles: RowStyles, item: &Item, query: &str, width: u16) -> Line<'static> {
+/// One row: the label with matched characters lifted, then its detail.
+fn item_line(styles: RowStyles, item: &Item, query: &str) -> Line<'static> {
     let RowStyles { hit, plain, dim } = styles;
 
     let positions = score(query, &item.label)
@@ -376,18 +369,6 @@ fn item_line(styles: RowStyles, item: &Item, query: &str, width: u16) -> Line<'s
     if let Some(d) = &item.detail {
         spans.push(Span::styled(format!("  {d}"), dim));
     }
-    if let Some(a) = &item.accel {
-        let used: usize = spans
-            .iter()
-            .map(|s| crate::ui::text::col_width(s.content.as_ref()))
-            .sum();
-        let want = a.chars().count() + 2;
-        if used + want < width as usize {
-            let gap = width as usize - used - want;
-            spans.push(Span::styled(" ".repeat(gap), dim));
-            spans.push(Span::styled(a.clone(), dim));
-        }
-    }
     Line::from(spans)
 }
 
@@ -397,10 +378,10 @@ mod tests {
 
     fn items() -> Vec<Item> {
         vec![
-            Item::new("Open chapter").detail("reader").accel("enter"),
+            Item::new("Open chapter").detail("reader"),
             Item::new("Open project").detail("shelf"),
             Item::new("Close volume"),
-            Item::new("Export volume").detail("project").accel("x"),
+            Item::new("Export volume").detail("project"),
             Item::new("Pause run").detail("translate"),
         ]
     }
@@ -526,7 +507,6 @@ mod tests {
             },
             &item,
             "",
-            40,
         );
         let drawn: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(drawn, "บทที่หนึ่ง", "no character may be dropped");

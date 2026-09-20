@@ -9,10 +9,6 @@ use ratatui::layout::Rect;
 
 /// One column of breathing room. The smallest unit anything indents by.
 pub const GUTTER: u16 = 1;
-/// Inside a panel, between its edge and its content.
-pub const PAD: u16 = 2;
-/// A blank row between sections of a form or card.
-pub const SECTION_GAP: u16 = 1;
 /// Column reserved on the right of a scrollable pane for its scrollbar.
 pub const SCROLLBAR_COLS: u16 = 1;
 
@@ -40,15 +36,6 @@ impl Breakpoint {
         }
     }
 
-    /// How many side-by-side panes this width can carry.
-    pub fn panes(self) -> u8 {
-        match self {
-            Breakpoint::Narrow => 1,
-            Breakpoint::Medium => 2,
-            Breakpoint::Wide => 3,
-        }
-    }
-
     pub fn is_narrow(self) -> bool {
         matches!(self, Breakpoint::Narrow)
     }
@@ -65,12 +52,6 @@ pub enum Density {
 impl Density {
     /// Below this many rows the layout compacts itself without being asked.
     pub const AUTO_COMPACT_MAX_ROWS: u16 = 28;
-    /// The band just above the threshold, where advertising compact mode is
-    /// worth a one-shot tip: below it compacting already happened, above it the
-    /// tip is noise.
-    pub const TIP_BAND_MIN_ROWS: u16 = 29;
-    pub const TIP_BAND_MAX_ROWS: u16 = 34;
-
     /// Resolve the effective density: an explicit opt-in wins, otherwise a short
     /// terminal compacts itself.
     pub fn resolve(forced: bool, height: u16) -> Self {
@@ -81,48 +62,10 @@ impl Density {
         }
     }
 
-    /// True when `height` sits in the band where the compact-mode tip earns its
-    /// place — auto-compact has not kicked in yet, but the screen is small
-    /// enough that the user would benefit.
-    pub fn tip_band_contains(height: u16) -> bool {
-        (Self::TIP_BAND_MIN_ROWS..=Self::TIP_BAND_MAX_ROWS).contains(&height)
-    }
-
     pub fn is_compact(self) -> bool {
         matches!(self, Density::Compact)
     }
 
-    /// Vertical padding at the outer edge of a screen body.
-    pub fn outer_vpad(self) -> u16 {
-        match self {
-            Density::Comfortable => 1,
-            Density::Compact => 0,
-        }
-    }
-
-    /// Horizontal padding at the outer edge of a screen body.
-    pub fn outer_hpad(self) -> u16 {
-        match self {
-            Density::Comfortable => PAD,
-            Density::Compact => GUTTER,
-        }
-    }
-
-    /// A blank row between sections, or none when compact.
-    pub fn section_gap(self) -> u16 {
-        match self {
-            Density::Comfortable => SECTION_GAP,
-            Density::Compact => 0,
-        }
-    }
-
-    /// Rows a card spends on padding, top and bottom combined.
-    pub fn card_vpad(self) -> u16 {
-        match self {
-            Density::Comfortable => 1,
-            Density::Compact => 0,
-        }
-    }
 }
 
 /// Layout metrics for one frame: the width band, the density, and the padding
@@ -149,27 +92,6 @@ impl Metrics {
         self.breakpoint.is_narrow()
     }
 
-    pub fn panes(self) -> u8 {
-        self.breakpoint.panes()
-    }
-
-    /// Inset `area` by the outer padding for this density.
-    pub fn inset_outer(self, area: Rect) -> Rect {
-        inset(area, self.density.outer_hpad(), self.density.outer_vpad())
-    }
-}
-
-/// Shrink `area` by `h` columns on each side and `v` rows top and bottom,
-/// saturating to an empty rect rather than underflowing.
-pub fn inset(area: Rect, h: u16, v: u16) -> Rect {
-    let dx = h.min(area.width / 2);
-    let dy = v.min(area.height / 2);
-    Rect {
-        x: area.x.saturating_add(dx),
-        y: area.y.saturating_add(dy),
-        width: area.width.saturating_sub(dx * 2),
-        height: area.height.saturating_sub(dy * 2),
-    }
 }
 
 #[cfg(test)]
@@ -193,41 +115,4 @@ mod tests {
         assert!(Density::resolve(true, 50).is_compact(), "opt-in overrides");
     }
 
-    #[test]
-    fn the_tip_band_sits_above_auto_compact_not_inside_it() {
-        // Below the threshold compacting already happened, so the tip is moot.
-        assert!(!Density::tip_band_contains(Density::AUTO_COMPACT_MAX_ROWS));
-        assert!(Density::tip_band_contains(Density::TIP_BAND_MIN_ROWS));
-        assert!(Density::tip_band_contains(Density::TIP_BAND_MAX_ROWS));
-        // Well above it, the hint would just be noise.
-        assert!(!Density::tip_band_contains(Density::TIP_BAND_MAX_ROWS + 1));
-    }
-
-    #[test]
-    fn inset_saturates_instead_of_underflowing() {
-        let tiny = Rect {
-            x: 0,
-            y: 0,
-            width: 2,
-            height: 1,
-        };
-        let got = inset(tiny, 10, 10);
-        assert_eq!(got.width, 0);
-        assert_eq!(got.height, 1, "an odd single row cannot be inset away");
-        // And the origin never walks outside the source rect.
-        assert!(got.x >= tiny.x && got.y >= tiny.y);
-    }
-
-    #[test]
-    fn inset_outer_is_symmetric() {
-        let area = Rect {
-            x: 0,
-            y: 0,
-            width: 100,
-            height: 40,
-        };
-        let m = Metrics::new(area, false);
-        let got = m.inset_outer(area);
-        assert_eq!(got.x - area.x, area.x + area.width - (got.x + got.width));
-    }
 }

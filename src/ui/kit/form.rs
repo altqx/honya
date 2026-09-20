@@ -85,26 +85,9 @@ pub enum Kind {
     Toggle {
         on: bool,
     },
-    /// Not editable here; shown with a note saying where it is changed.
-    ReadOnly {
-        value: String,
-        note: Option<String>,
-    },
 }
 
 impl Kind {
-    /// Whether this kind steps through values rather than being typed into.
-    pub fn is_stepped(&self) -> bool {
-        matches!(self, Kind::Number { .. } | Kind::Select { .. })
-    }
-
-    pub fn is_editable(&self) -> bool {
-        match self {
-            Kind::Text { .. } => true,
-            Kind::Secret { from_env, .. } => !from_env,
-            _ => false,
-        }
-    }
 }
 
 /// One row of a form.
@@ -160,7 +143,6 @@ impl Field {
                 options.get(*index).cloned().unwrap_or_default()
             }
             Kind::Toggle { on } => if *on { "on" } else { "off" }.to_string(),
-            Kind::ReadOnly { value, .. } => value.clone(),
         }
     }
 }
@@ -438,13 +420,6 @@ fn render_value(
                 );
             }
         }
-        Kind::ReadOnly { value, note } => {
-            let mut spans = vec![Span::styled(value.clone(), normal)];
-            if let Some(n) = note {
-                spans.push(Span::styled(format!("  {n}"), dim));
-            }
-            ui.line(area, Line::from(spans), base);
-        }
     }
 }
 
@@ -663,7 +638,6 @@ mod tests {
             },
         );
         assert_eq!(f.display_value(), "set by environment");
-        assert!(!f.kind.is_editable(), "config cannot beat an env var");
     }
 
     #[test]

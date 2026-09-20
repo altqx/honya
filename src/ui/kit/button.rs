@@ -23,8 +23,6 @@ pub enum Variant {
     /// Everything else.
     #[default]
     Secondary,
-    /// Destructive. Carries the one red the palette allows.
-    Danger,
     /// Present but not currently available.
     Disabled,
 }
@@ -37,10 +35,6 @@ pub struct Button {
     /// The key that also triggers it, printed on the button itself.
     pub accel: Option<String>,
     pub variant: Variant,
-    /// Claim the full width handed to it rather than only what the label needs.
-    /// Off by default so a click target is never wider than the control a user
-    /// can see.
-    pub stretch: bool,
 }
 
 impl Button {
@@ -50,23 +44,11 @@ impl Button {
             label: label.into(),
             accel: None,
             variant: Variant::Secondary,
-            stretch: false,
         }
-    }
-
-    /// Fill the width given, for menu rows and full-width calls to action.
-    pub fn stretch(mut self) -> Self {
-        self.stretch = true;
-        self
     }
 
     pub fn primary(mut self) -> Self {
         self.variant = Variant::Primary;
-        self
-    }
-
-    pub fn danger(mut self) -> Self {
-        self.variant = Variant::Danger;
         self
     }
 
@@ -92,25 +74,14 @@ impl Button {
         w as u16
     }
 
-    /// The narrowest this button can usefully be drawn: padding plus at least
-    /// one column of label.
-    pub fn min_width(&self) -> u16 {
-        3
-    }
-
     /// Draw into `area` (one row) and register the click target.
     pub fn render(&self, ui: &mut Ui, area: Rect) {
         if area.width == 0 || area.height == 0 {
             return;
         }
-        // A button claims only the columns it draws, unless asked to stretch:
-        // a click target wider than the visible control is a click that fires
-        // something the user was not pointing at.
-        let width = if self.stretch {
-            area.width
-        } else {
-            self.width().min(area.width)
-        };
+        // A button claims only the columns it draws: a click target wider than
+        // the visible control fires something the user was not pointing at.
+        let width = self.width().min(area.width);
         let area = Rect {
             width,
             height: 1,
@@ -172,16 +143,6 @@ impl Button {
                 }
                 st
             }
-            Variant::Danger => {
-                let mut st = Style::default()
-                    .fg(theme.status_failed)
-                    .bg(ui.surface_of(state))
-                    .add_modifier(Modifier::BOLD);
-                if state.hovered && !theme.paints_fills() {
-                    st = st.add_modifier(Modifier::REVERSED);
-                }
-                st
-            }
             Variant::Secondary => {
                 let mut st = ui.row_style(state);
                 if state.focused || state.hovered {
@@ -209,15 +170,6 @@ impl Button {
     }
 }
 
-/// Where a row of buttons sits within its area.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Align {
-    Left,
-    Center,
-    #[default]
-    Right,
-}
-
 /// A row of buttons laid out on one line.
 ///
 /// When the row does not fit, buttons are dropped from the *left* — the primary
@@ -225,7 +177,6 @@ pub enum Align {
 /// worse than losing the way to cancel, which Esc still covers.
 pub struct ButtonRow {
     pub buttons: Vec<Button>,
-    pub align: Align,
     /// Columns between adjacent buttons.
     pub gap: u16,
 }
@@ -234,23 +185,8 @@ impl ButtonRow {
     pub fn new(buttons: Vec<Button>) -> Self {
         Self {
             buttons,
-            align: Align::Right,
             gap: 2,
         }
-    }
-
-    pub fn align(mut self, align: Align) -> Self {
-        self.align = align;
-        self
-    }
-
-    /// Total columns the row wants with every button at full width.
-    pub fn width(&self) -> u16 {
-        if self.buttons.is_empty() {
-            return 0;
-        }
-        let labels: u16 = self.buttons.iter().map(|b| b.width()).sum();
-        labels + self.gap * (self.buttons.len() as u16 - 1)
     }
 
     /// Which buttons fit in `cols`, as a slice of the tail.
@@ -283,11 +219,9 @@ impl ButtonRow {
         let used: u16 = visible.iter().map(|b| b.width()).sum::<u16>()
             + self.gap * (visible.len() as u16 - 1);
         let slack = row.width.saturating_sub(used);
-        let mut x = match self.align {
-            Align::Left => row.x,
-            Align::Center => row.x + slack / 2,
-            Align::Right => row.x + slack,
-        };
+        // Right-aligned: the primary action sits rightmost, which is also the
+        // end the row is measured from when it has to drop buttons.
+        let mut x = row.x + slack;
         for b in &visible {
             let w = b.width().min(row.x + row.width - x);
             b.render(
@@ -359,7 +293,7 @@ mod tests {
 
     #[test]
     fn an_accelerator_is_printed_on_the_button() {
-        let b = Button::new(ZoneId::button(0), "Delete").accel("d").danger();
+        let b = Button::new(ZoneId::button(0), "Delete").accel("d");
         let (text, _) = paint(24, &Focus::new(), Hover::default(), |ui, area| {
             b.render(ui, area);
         });
