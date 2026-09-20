@@ -11,6 +11,7 @@ mod overlays;
 mod screens;
 mod settings;
 mod shell;
+mod tabs;
 mod theme_map;
 mod tree;
 mod widgets;
@@ -64,6 +65,7 @@ pub fn run(app: App, rx: UnboundedReceiver<AppEvent>) -> anyhow::Result<()> {
         tick_every: Duration::from_millis(100),
         nav: GuiNav::default(),
         tree: tree::TreeState::default(),
+        tabs: tabs::Tabs::default(),
         qa: drawer::QaCache::default(),
         layout: shell::Layout::load(),
         applied_theme: None,
@@ -105,6 +107,7 @@ struct GuiApp {
     tick_every: Duration,
     nav: GuiNav,
     tree: tree::TreeState,
+    tabs: tabs::Tabs,
     qa: drawer::QaCache,
     layout: shell::Layout,
     applied_theme: Option<ThemeId>,
@@ -314,6 +317,7 @@ impl eframe::App for GuiApp {
                     .inner_margin(egui::Margin::symmetric(16, 12)),
             )
             .show_inside(ui, |ui| {
+                self.tab_strip(ui, &pal);
                 screens::render_body(ui, &mut self.app, &mut self.nav, &pal);
                 overlays::render(ui, &mut self.app, &pal);
             });
@@ -565,7 +569,7 @@ impl GuiApp {
         let tree_h = (ui.available_height() - 70.0).max(80.0);
         ui.allocate_ui(egui::vec2(ui.available_width(), tree_h), |ui| {
             for action in tree::show(ui, &self.app, &mut self.tree, pal) {
-                self.app.apply(action);
+                self.dispatch(action);
             }
         });
 
@@ -596,6 +600,122 @@ impl GuiApp {
         });
     }
 
+    /// What the app is showing right now, as a tab identity.
+    fn current_tab(&self) -> tabs::TabId {
+        match self.app.screen {
+            Screen::Reader => tabs::TabId::Chapter {
+                vol: self.app.active.as_ref().map(|a| a.vol).unwrap_or(1),
+                ch: self.app.reader.chapter,
+            },
+            Screen::Refine => tabs::TabId::Session(self.app.refine_session_id.clone()),
+            other => tabs::TabId::View(other),
+        }
+    }
+
+    /// Apply an action, and put whatever it opens into a tab.
+    ///
+    /// A chapter or a conversation already open comes forward with the state
+    /// it had — so the action that would reload it is dropped, because
+    /// reloading throws away exactly the scroll position the tab is for.
+    fn dispatch(&mut self, action: Action) {
+        let want = match &action {
+            Action::OpenChapter { chapter }
+            | Action::OpenChapterAt { chapter, .. }
+            | Action::OpenChapterAtChunk { chapter, .. } => Some(tabs::TabId::Chapter {
+                vol: self.app.active.as_ref().map(|a| a.vol).unwrap_or(1),
+                ch: *chapter,
+            }),
+            Action::RefineSwitchSession { id } => Some(tabs::TabId::Session(id.clone())),
+            Action::Goto(screen) => Some(match screen {
+                Screen::Reader | Screen::Refine => self.current_tab(),
+                other => tabs::TabId::View(*other),
+            }),
+            _ => None,
+        };
+        if let Some(id) = want {
+            let title = tabs::title_for(&id, &self.app);
+            let fresh = self.tabs.focus(id, title, &mut self.app);
+            if !fresh && matches!(action, Action::OpenChapter { .. }) {
+                self.app.apply(Action::Goto(Screen::Reader));
+                return;
+            }
+        }
+        self.app.apply(action);
+    }
+
+    fn tab_strip(&mut self, ui: &mut egui::Ui, pal: &GuiPalette) {
+        // Anything that changed the view without going through `dispatch` — a
+        // digit key, a slash command, a recovery dialog — still gets a tab.
+        let current = self.current_tab();
+        let title = tabs::title_for(&current, &self.app);
+        self.tabs.ensure(current, title);
+
+        let mut pick = None;
+        let mut close = None;
+        ui.horizontal(|ui| {
+            for (i, tab) in self.tabs.iter() {
+                let selected = i == self.tabs.active_index();
+                ui.push_id(("tab", i), |ui| {
+                    if ui
+                        .add(egui::Button::selectable(
+                            selected,
+                            RichText::new(&tab.title)
+                                .small()
+                                .color(if selected { pal.ink } else { pal.ink_soft }),
+                        ))
+                        .clicked()
+                    {
+                        pick = Some(i);
+                    }
+                    if selected
+                        && ui
+                            .add(
+                                egui::Button::new(RichText::new("✕").small().color(pal.ink_faint))
+                                    .frame(false),
+                            )
+                            .on_hover_text("close this tab")
+                            .clicked()
+                    {
+                        close = Some(i);
+                    }
+                });
+            }
+        });
+        ui.add_space(4.0);
+
+        if let Some(i) = close {
+            if let Some(id) = self.tabs.close(i, &mut self.app) {
+                self.show_tab(&id);
+            }
+            return;
+        }
+        let picked_id = pick.and_then(|i| self.tabs.iter().nth(i).map(|(_, t)| t.id.clone()));
+        if let Some(id) = picked_id {
+            let title = tabs::title_for(&id, &self.app);
+            let fresh = self.tabs.focus(id.clone(), title, &mut self.app);
+            if fresh {
+                self.show_tab(&id);
+            } else {
+                self.app.apply(Action::Goto(id.view()));
+            }
+        }
+    }
+
+    /// Put the app on what this tab shows.
+    fn show_tab(&mut self, id: &tabs::TabId) {
+        match id {
+            tabs::TabId::View(s) => self.app.apply(Action::Goto(*s)),
+            tabs::TabId::Chapter { vol, ch } => {
+                self.app.apply(Action::SetActiveVolume { vol: *vol });
+                self.app.apply(Action::OpenChapter { chapter: *ch });
+            }
+            tabs::TabId::Session(sid) => {
+                self.app.apply(Action::RefineSwitchSession { id: sid.clone() });
+                self.app.apply(Action::Goto(Screen::Refine));
+            }
+        }
+    }
+
     /// Detail for whatever the tree is pointing at, rather than for whichever
     /// view is showing. The chapter's numbers used to be visible only on the
     /// Project screen, so reading one meant leaving the thing you were reading.
@@ -623,7 +743,7 @@ impl GuiApp {
                 );
             });
         for a in actions {
-            self.app.apply(a);
+            self.dispatch(a);
         }
     }
 
@@ -661,7 +781,7 @@ impl GuiApp {
             &mut actions,
         );
         for a in actions {
-            self.app.apply(a);
+            self.dispatch(a);
         }
     }
 

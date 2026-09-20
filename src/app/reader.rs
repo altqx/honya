@@ -133,6 +133,16 @@ pub struct ReaderScreen {
 }
 
 impl ReaderScreen {
+    #[cfg(test)]
+    pub fn scroll_for_test(&self) -> u16 {
+        self.scroll
+    }
+
+    #[cfg(test)]
+    pub fn set_scroll_for_test(&mut self, scroll: u16) {
+        self.scroll = scroll;
+    }
+
     pub fn new() -> Self {
         Self {
             scroll: 0,
