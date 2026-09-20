@@ -278,6 +278,33 @@ fn pipeline_tab(ui: &mut egui::Ui, st: &mut SettingsState, pal: &GuiPalette) {
             numeric_edit(ui, &mut st.max_chapter_retranslates, 80.0);
             ui.end_row();
 
+            // These six were written on save but had no control, so a
+            // GUI-only user could not change them and was never told they
+            // existed.
+            ui.label(RichText::new("HTTP retry attempts").color(pal.ink));
+            numeric_edit(ui, &mut st.retry_attempts, 80.0);
+            ui.end_row();
+
+            ui.label(RichText::new("Retry cooldown (s)").color(pal.ink));
+            numeric_edit(ui, &mut st.retry_cooldown_secs, 80.0);
+            ui.end_row();
+
+            ui.label(RichText::new("Chunk target tokens").color(pal.ink));
+            numeric_edit(ui, &mut st.chunk_target_tokens, 80.0);
+            ui.end_row();
+
+            ui.label(RichText::new("Chunk hard cap").color(pal.ink));
+            numeric_edit(ui, &mut st.chunk_hard_cap_tokens, 80.0);
+            ui.end_row();
+
+            ui.label(RichText::new("Prepass extract").color(pal.ink));
+            ui.checkbox(&mut st.prepass_extract, "seed the roster before translating");
+            ui.end_row();
+
+            ui.label(RichText::new("Coherence sweep").color(pal.ink));
+            ui.checkbox(&mut st.coherence_check, "re-read the chapter as a whole");
+            ui.end_row();
+
             ui.label(RichText::new("Service tier").color(pal.ink));
             ComboBox::from_id_salt("tier")
                 .selected_text(ServiceTier::label(st.service_tier))
@@ -553,3 +580,61 @@ fn account_tab(
         "PKCE OAuth in your browser; ~/.codex/auth.json is imported automatically when present.",
     );
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::app::settings_defs::{Group, ORDER};
+
+    /// The Pipeline tab silently omitted six settings that `save_action` still
+    /// wrote, so a GUI-only user could never change them and was given no sign
+    /// they existed. This is the ratchet: the source of the form is the
+    /// declaration, so a setting added there has to gain a control here.
+    #[test]
+    fn every_pipeline_setting_has_a_control_in_the_gui() {
+        let source = include_str!("settings.rs");
+        let missing: Vec<&str> = ORDER
+            .iter()
+            .filter(|d| d.group == Group::Pipeline)
+            .filter(|d| !rendered_generically(d.field) && !mentions(source, d.label))
+            .map(|d| d.label)
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "declared but not editable in the GUI: {missing:?}"
+        );
+    }
+
+    /// The per-judgement toggles are drawn by looping `SystemOneFeature::ALL`
+    /// rather than written out, so adding one is covered without anyone
+    /// remembering to — which is the shape every row here should have
+    /// eventually, and why this list is an exception rather than a waiver.
+    fn rendered_generically(field: crate::app::settings_defs::SField) -> bool {
+        use crate::app::settings_defs::SField;
+        matches!(
+            field,
+            SField::FeatAudit
+                | SField::FeatContinuity
+                | SField::FeatEntityAlignment
+                | SField::FeatSegmentation
+                | SField::FeatReferenceScope
+        )
+    }
+
+    /// A control is "there" when the tab names it. Labels are allowed to
+    /// differ in punctuation, so compare on the words.
+    fn mentions(source: &str, label: &str) -> bool {
+        let words: Vec<String> = label
+            .split_whitespace()
+            .map(|w| {
+                w.chars()
+                    .filter(|c| c.is_alphanumeric())
+                    .collect::<String>()
+                    .to_lowercase()
+            })
+            .filter(|w| !w.is_empty())
+            .collect();
+        let hay = source.to_lowercase();
+        words.iter().all(|w| hay.contains(w.as_str()))
+    }
+}
+

@@ -316,9 +316,10 @@ fn log_panel(
 }
 
 fn help_panel(ctx: &Context, pal: &GuiPalette, frame: egui::Frame, actions: &mut Vec<Action>) {
+    use crate::app::overlay::HelpRow;
     modal_window("Help")
         .resizable(true)
-        .default_size([520.0, 400.0])
+        .default_size([560.0, 460.0])
         .frame(frame)
         .show(ctx, |ui| {
             if ui.button("Close").clicked() {
@@ -326,39 +327,29 @@ fn help_panel(ctx: &Context, pal: &GuiPalette, frame: egui::Frame, actions: &mut
             }
             ui.separator();
             ScrollArea::vertical().id_salt("help_scroll").show(ui, |ui| {
-                for (title, body) in [
-                    (
-                        "Navigation",
-                        "Sidebar or keys 1–6 switch screens. Ctrl+P opens the command palette, Ctrl+, opens Settings, Ctrl+Q quits.",
-                    ),
-                    (
-                        "Shelf",
-                        "Open a project, import an EPUB / PDF / HTML / Markdown source, or create the sample project.",
-                    ),
-                    (
-                        "Project",
-                        "Browse volumes and chapters, start translations, edit the synopsis and title, run QA, export deliverables.",
-                    ),
-                    (
-                        "Translate",
-                        "Watch the live pipeline, reorder the chapter queue, pause or stop a run.",
-                    ),
-                    (
-                        "Reader",
-                        "Side-by-side source and translation with search and jump-to-chapter.",
-                    ),
-                    (
-                        "Lexicon",
-                        "Glossary terms, character roster, and the style guide the agents share.",
-                    ),
-                    (
-                        "Refine",
-                        "Chat with the Refine agent to polish existing translations with steering prompts.",
-                    ),
-                ] {
-                    ui.label(RichText::new(title).color(pal.accent).strong());
-                    ui.label(RichText::new(body).color(pal.ink));
-                    ui.add_space(8.0);
+                // Generated from the binding table, like the TUI's. The seven
+                // hardcoded paragraphs this replaces listed five keys and were
+                // already wrong about what the window does.
+                for row in crate::app::overlay::help_rows() {
+                    match row {
+                        HelpRow::Section(title) => {
+                            ui.add_space(8.0);
+                            ui.label(RichText::new(title).color(pal.accent).strong());
+                            ui.add_space(2.0);
+                        }
+                        HelpRow::Binding(keys, what) => {
+                            ui.horizontal(|ui| {
+                                ui.add_sized(
+                                    [110.0, 16.0],
+                                    egui::Label::new(
+                                        RichText::new(keys).color(pal.ink).monospace().small(),
+                                    ),
+                                );
+                                ui.label(RichText::new(what).color(pal.ink_soft).small());
+                            });
+                        }
+                        HelpRow::Blank => ui.add_space(4.0),
+                    }
                 }
             });
         });

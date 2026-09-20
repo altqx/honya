@@ -151,7 +151,7 @@ pub(super) fn qa_rows(report: &qa::QaReport) -> Vec<QaRow> {
 }
 
 /// One line of the keybinding reference.
-pub(super) enum HelpRow {
+pub enum HelpRow {
     Section(&'static str),
     Binding(String, String),
     Blank,
@@ -162,7 +162,7 @@ pub(super) enum HelpRow {
 /// Help used to carry its own copy of every binding. It reads the one table
 /// now, so a key documented in the command bar and a key documented here
 /// cannot disagree.
-pub(super) fn help_rows() -> Vec<HelpRow> {
+pub fn help_rows() -> Vec<HelpRow> {
     let mut rows = Vec::new();
     for (n, scope) in crate::app::bindings::SECTIONS.iter().enumerate() {
         if n > 0 {
