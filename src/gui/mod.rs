@@ -6,6 +6,7 @@
 
 mod commands;
 mod drawer;
+mod focus;
 mod fonts;
 mod inspector;
 mod keys;
@@ -73,6 +74,7 @@ pub fn run(app: App, rx: UnboundedReceiver<AppEvent>) -> anyhow::Result<()> {
         qa: drawer::QaCache::default(),
         layout: shell::Layout::load(),
         bindings: crate::app::keys::Bindings::load(),
+        focus: focus::Focus::default(),
         applied_theme: None,
         fonts_ready: false,
     };
@@ -116,6 +118,7 @@ struct GuiApp {
     qa: drawer::QaCache,
     layout: shell::Layout,
     bindings: crate::app::keys::Bindings,
+    focus: focus::Focus,
     applied_theme: Option<ThemeId>,
     fonts_ready: bool,
 }
@@ -160,6 +163,13 @@ impl eframe::App for GuiApp {
 
         // Global shortcuts that don't fight text fields.
         // Snapshot before the input borrow — digit keys must not steal focus from edits.
+        // Focus follows what is open, whoever closed it. An overlay dismissed
+        // by an action never calls `leave`, and the keyboard would be stranded.
+        self.focus.sync(match &self.app.overlay {
+            Overlay::None => None,
+            Overlay::Palette(_) => Some(focus::Surface::Palette),
+            _ => Some(focus::Surface::Overlay),
+        });
         let text_focused = ctx.text_edit_focused();
         // Collected inside the input borrow and run after it, because running
         // one mutates the screen the table came from.
@@ -191,6 +201,13 @@ impl eframe::App for GuiApp {
                             egui::Key::J => {
                                 let tab = self.layout.drawer_tab;
                                 self.layout.toggle_drawer(tab);
+                                // Opening it is explicit, so it takes the
+                                // keyboard; output arriving in it does not.
+                                self.focus.set(if self.layout.drawer_open {
+                                    focus::Region::Drawer
+                                } else {
+                                    focus::Region::Main
+                                });
                             }
                             egui::Key::Num1 => {
                                 self.layout.sidebar_open = !self.layout.sidebar_open;
@@ -205,8 +222,7 @@ impl eframe::App for GuiApp {
                     // A screen's own commands resolve from the table it
                     // declares them in, so a chord means the same thing here as
                     // it does in the terminal — and a user binding moves both.
-                    if matches!(self.app.overlay, Overlay::None)
-                        && !text_focused
+                    if self.focus.accepts_command_keys(text_focused)
                         && let Some(ev) = keys::to_crossterm(*key, *modifiers)
                     {
                         let mut acts = self.app.screen_actions();
@@ -220,8 +236,11 @@ impl eframe::App for GuiApp {
                             crate::app::action_table::KeyHit::Miss => {}
                         }
                     }
-                    // Digits switch tabs when no overlay / text field is capturing.
-                    if matches!(self.app.overlay, Overlay::None) && !text_focused {
+                    // A digit belongs to whatever surface is open; only when
+                    // none is does it mean "switch to that view".
+                    if !self.focus.digits_belong_to_surface()
+                        && self.focus.accepts_command_keys(text_focused)
+                    {
                         let screen = match key {
                             egui::Key::Num1 => Some(Screen::Shelf),
                             egui::Key::Num2 => Some(Screen::Project),
@@ -328,6 +347,7 @@ impl eframe::App for GuiApp {
                 .frame(shell::panel_frame(&pal))
                 .show_inside(ui, |ui| {
                     self.sidebar(ui, &pal);
+                    claim(ui, &mut self.focus, focus::Region::Tree);
                 });
             self.layout.sidebar_w = shown.response.rect.width();
         }
@@ -340,6 +360,7 @@ impl eframe::App for GuiApp {
                 .frame(shell::panel_frame(&pal))
                 .show_inside(ui, |ui| {
                     self.inspector(ui, &pal);
+                    claim(ui, &mut self.focus, focus::Region::Inspector);
                 });
             self.layout.inspector_w = shown.response.rect.width();
         }
@@ -352,6 +373,7 @@ impl eframe::App for GuiApp {
                 .frame(shell::panel_frame(&pal))
                 .show_inside(ui, |ui| {
                     self.drawer(ui, &pal);
+                    claim(ui, &mut self.focus, focus::Region::Drawer);
                 });
             self.layout.drawer_h = shown.response.rect.height();
         }
@@ -365,8 +387,17 @@ impl eframe::App for GuiApp {
             .show_inside(ui, |ui| {
                 self.tab_strip(ui, &pal);
                 screens::render_body(ui, &mut self.app, &mut self.nav, &pal);
+                claim(ui, &mut self.focus, focus::Region::Main);
                 overlays::render(ui, &mut self.app, &pal);
             });
+        // A caret in any field is the composer as far as key routing cares:
+        // a screen command on a bare letter must not fire into what is being
+        // typed, whichever field it is.
+        if ui.ctx().text_edit_focused() {
+            self.focus.set(focus::Region::Composer);
+        } else if self.focus.region() == focus::Region::Composer {
+            self.focus.set(focus::Region::Main);
+        }
     }
 
     fn on_exit(&mut self) {
@@ -725,6 +756,7 @@ impl GuiApp {
         let mut pick = None;
         let mut close = None;
         let mut command = None;
+        let strip_top = ui.cursor().top();
         ui.horizontal(|ui| {
             for (i, tab) in self.tabs.iter() {
                 let selected = i == self.tabs.active_index();
@@ -760,6 +792,13 @@ impl GuiApp {
             });
         });
         ui.add_space(4.0);
+        if ui.input(|i| i.pointer.any_pressed())
+            && ui
+                .input(|i| i.pointer.interact_pos())
+                .is_some_and(|p| p.y >= strip_top && p.y <= ui.cursor().top())
+        {
+            self.focus.set(focus::Region::Tabs);
+        }
 
         if let Some(id) = command {
             let action = self.app.run_screen_action(id);
@@ -928,6 +967,18 @@ impl GuiApp {
                 });
             },
         );
+    }
+}
+
+/// A click anywhere in a region means the keyboard belongs to it now.
+fn claim(ui: &egui::Ui, focus: &mut focus::Focus, region: focus::Region) {
+    let rect = ui.min_rect();
+    if ui.input(|i| i.pointer.any_pressed())
+        && ui
+            .input(|i| i.pointer.interact_pos())
+            .is_some_and(|p| rect.contains(p))
+    {
+        focus.set(region);
     }
 }
 
