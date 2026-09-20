@@ -8,6 +8,7 @@ mod fonts;
 mod overlays;
 mod screens;
 mod settings;
+mod shell;
 mod theme_map;
 mod widgets;
 
@@ -25,9 +26,12 @@ use self::screens::GuiNav;
 use self::theme_map::GuiPalette;
 
 /// Fixed chrome sizes so the central body never reflows when toast/spinner/tally change.
+/// The workspace regions between them are the user's to drag.
 const MENUBAR_H: f32 = 36.0;
 const FOOTER_H: f32 = 30.0;
-const SIDEBAR_W: f32 = 172.0;
+const SIDEBAR_RANGE: std::ops::RangeInclusive<f32> = 180.0..=460.0;
+const INSPECTOR_RANGE: std::ops::RangeInclusive<f32> = 220.0..=520.0;
+const DRAWER_RANGE: std::ops::RangeInclusive<f32> = 110.0..=520.0;
 
 const NAV: [(Screen, &str, &str); 6] = [
     (Screen::Shelf, "書架", "Shelf"),
@@ -49,12 +53,14 @@ pub fn run(app: App, rx: UnboundedReceiver<AppEvent>) -> anyhow::Result<()> {
         ..Default::default()
     };
 
+    let events: Events = Default::default();
     let gui = GuiApp {
         app,
-        rx,
+        events: events.clone(),
         last_tick: Instant::now(),
         tick_every: Duration::from_millis(100),
         nav: GuiNav::default(),
+        layout: shell::Layout::load(),
         applied_theme: None,
         fonts_ready: false,
     };
@@ -62,8 +68,21 @@ pub fn run(app: App, rx: UnboundedReceiver<AppEvent>) -> anyhow::Result<()> {
     eframe::run_native(
         "honya",
         options,
-        Box::new(|cc| {
+        Box::new(move |cc| {
             fonts::install(&cc.egui_ctx);
+            // Events wake the window instead of waiting for the next poll: the
+            // paint loop used to `try_recv` on a 200 ms timer, so a finished
+            // chapter could sit unread for a fifth of a second.
+            let ctx = cc.egui_ctx.clone();
+            tokio::spawn(async move {
+                let mut rx = rx;
+                while let Some(ev) = rx.recv().await {
+                    if let Ok(mut queue) = events.lock() {
+                        queue.push_back(ev);
+                    }
+                    ctx.request_repaint();
+                }
+            });
             Ok(Box::new(gui))
         }),
     )
@@ -71,12 +90,16 @@ pub fn run(app: App, rx: UnboundedReceiver<AppEvent>) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Events parked by the waker task until the next frame drains them.
+type Events = std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<AppEvent>>>;
+
 struct GuiApp {
     app: App,
-    rx: UnboundedReceiver<AppEvent>,
+    events: Events,
     last_tick: Instant,
     tick_every: Duration,
     nav: GuiNav,
+    layout: shell::Layout,
     applied_theme: Option<ThemeId>,
     fonts_ready: bool,
 }
@@ -100,7 +123,7 @@ impl eframe::App for GuiApp {
             self.fonts_ready = true;
         }
 
-        while let Ok(ev) = self.rx.try_recv() {
+        while let Some(ev) = self.events.lock().ok().and_then(|mut q| q.pop_front()) {
             self.app.on_app_event(ev);
         }
 
@@ -140,6 +163,16 @@ impl eframe::App for GuiApp {
                             }
                             egui::Key::P | egui::Key::K => {
                                 self.app.apply(Action::show_overlay(Overlay::palette()));
+                            }
+                            egui::Key::J => {
+                                let tab = self.layout.drawer_tab;
+                                self.layout.toggle_drawer(tab);
+                            }
+                            egui::Key::Num1 => {
+                                self.layout.sidebar_open = !self.layout.sidebar_open;
+                            }
+                            egui::Key::Num2 => {
+                                self.layout.inspector_open = !self.layout.inspector_open;
                             }
                             _ => {}
                         }
@@ -181,11 +214,13 @@ impl eframe::App for GuiApp {
             return;
         }
 
-        if self.app.run_active || self.app.toast.is_some() {
-            ctx.request_repaint_after(Duration::from_millis(50));
-        } else {
-            ctx.request_repaint_after(Duration::from_millis(200));
-        }
+        // The ticker only has to run as often as something is moving; an event
+        // wakes the window on its own now.
+        let animating = self.app.run_active
+            || self.app.toast.is_some()
+            || self.app.refine.is_in_flight()
+            || self.app.refine.has_running_subagents();
+        ctx.request_repaint_after(Duration::from_millis(if animating { 100 } else { 200 }));
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -219,17 +254,46 @@ impl eframe::App for GuiApp {
                 self.status_bar(ui, &pal);
             });
 
-        egui::Panel::left("honya_sidebar")
-            .exact_size(SIDEBAR_W)
-            .frame(
-                egui::Frame::NONE
-                    .fill(pal.bg_panel)
-                    .stroke(egui::Stroke::new(1.0_f32, pal.rule))
-                    .inner_margin(egui::Margin::symmetric(10, 12)),
-            )
-            .show_inside(ui, |ui| {
-                self.sidebar(ui, &pal);
-            });
+        // The workspace regions, in the order egui claims space: what is left
+        // over is the body. Each remembers the width it was dragged to, and a
+        // window too narrow to hold them all drops them rather than squeezing
+        // the body to nothing.
+        let (show_sidebar, show_inspector) = shell::fit(full.width(), &self.layout);
+        if show_sidebar {
+            let shown = egui::Panel::left("honya_sidebar")
+                .resizable(true)
+                .default_size(self.layout.sidebar_w)
+                .size_range(SIDEBAR_RANGE)
+                .frame(shell::panel_frame(&pal))
+                .show_inside(ui, |ui| {
+                    self.sidebar(ui, &pal);
+                });
+            self.layout.sidebar_w = shown.response.rect.width();
+        }
+
+        if show_inspector {
+            let shown = egui::Panel::right("honya_inspector")
+                .resizable(true)
+                .default_size(self.layout.inspector_w)
+                .size_range(INSPECTOR_RANGE)
+                .frame(shell::panel_frame(&pal))
+                .show_inside(ui, |ui| {
+                    self.inspector(ui, &pal);
+                });
+            self.layout.inspector_w = shown.response.rect.width();
+        }
+
+        if self.layout.drawer_open {
+            let shown = egui::Panel::bottom("honya_drawer")
+                .resizable(true)
+                .default_size(self.layout.drawer_h)
+                .size_range(DRAWER_RANGE)
+                .frame(shell::panel_frame(&pal))
+                .show_inside(ui, |ui| {
+                    self.drawer(ui, &pal);
+                });
+            self.layout.drawer_h = shown.response.rect.height();
+        }
 
         egui::CentralPanel::default()
             .frame(
@@ -244,6 +308,7 @@ impl eframe::App for GuiApp {
     }
 
     fn on_exit(&mut self) {
+        self.layout.save();
         self.app.running = false;
     }
 }
@@ -377,11 +442,21 @@ impl GuiApp {
                     }
                 }
                 ui.separator();
+                let mut layout = self.layout.clone();
+                ui.checkbox(&mut layout.sidebar_open, "Workspace   Ctrl+1");
+                ui.checkbox(&mut layout.inspector_open, "Inspector   Ctrl+2");
+                ui.checkbox(&mut layout.drawer_open, "Drawer   Ctrl+J");
+                ui.separator();
+                for tab in shell::DrawerTab::ALL {
+                    if ui.button(tab.label()).clicked() {
+                        layout.drawer_open = true;
+                        layout.drawer_tab = tab;
+                    }
+                }
+                self.layout = layout;
+                ui.separator();
                 if ui.button("Command palette…   Ctrl+P").clicked() {
                     actions.push(Action::show_overlay(Overlay::palette()));
-                }
-                if ui.button("Activity log…").clicked() {
-                    actions.push(Action::show_overlay(Overlay::Log(0)));
                 }
                 if ui.button("Theme…").clicked() {
                     actions.push(Action::show_overlay(Overlay::theme(self.app.cfg.theme)));
@@ -508,12 +583,81 @@ impl GuiApp {
             }
             ui.add_space(2.0);
             if ui
-                .add_sized([ui.available_width(), 30.0], egui::Button::new("▤  Log"))
+                .add_sized(
+                    [ui.available_width(), 30.0],
+                    egui::Button::new("▤  Activity"),
+                )
                 .clicked()
             {
-                self.app.apply(Action::show_overlay(Overlay::Log(0)));
+                self.layout.toggle_drawer(shell::DrawerTab::Activity);
             }
         });
+    }
+
+    /// Detail for whatever is selected, rather than for whichever screen is
+    /// showing. Filled in as each subject lands; the region exists first so the
+    /// body's width stops moving under the user once it does.
+    fn inspector(&mut self, ui: &mut egui::Ui, pal: &GuiPalette) {
+        shell::pane_header(ui, pal, "INSPECTOR", |ui| {
+            if ui
+                .add(egui::Button::new(RichText::new("✕").small()).frame(false))
+                .on_hover_text("hide the inspector")
+                .clicked()
+            {
+                self.layout.inspector_open = false;
+            }
+        });
+        match self.app.active.as_ref() {
+            None => {
+                ui.label(
+                    RichText::new("Open a project to see its detail here.")
+                        .color(pal.ink_faint)
+                        .small(),
+                );
+            }
+            Some(a) => {
+                ui.label(RichText::new(&a.project.title).color(pal.ink).strong());
+                ui.label(
+                    RichText::new(format!("volume {}", a.vol))
+                        .color(pal.ink_soft)
+                        .small(),
+                );
+            }
+        }
+    }
+
+    /// The panes you keep open beside the work, rather than dialogs that cover
+    /// the thing they are about.
+    fn drawer(&mut self, ui: &mut egui::Ui, pal: &GuiPalette) {
+        let log_len = self.app.log.len() as u32;
+        let running = self.app.refine.running_subagent_count() as u32;
+        let queued = self
+            .app
+            .run_queue
+            .as_ref()
+            .map(|q| q.snapshot().1.len() as u32)
+            .unwrap_or(0);
+        let picked = shell::drawer_tabs(ui, pal, self.layout.drawer_tab, |tab| match tab {
+            shell::DrawerTab::Activity => Some(log_len),
+            shell::DrawerTab::Tasks => Some(running),
+            shell::DrawerTab::Queue => Some(queued),
+            shell::DrawerTab::Qa => None,
+        });
+        if let Some(tab) = picked {
+            self.layout.drawer_tab = tab;
+        }
+        ui.separator();
+        match self.layout.drawer_tab {
+            shell::DrawerTab::Activity => shell::activity_pane(ui, &self.app.log, pal),
+            other => {
+                ui.label(
+                    RichText::new(format!("{} — not wired up yet.", other.label().trim()))
+                        .color(pal.ink_faint)
+                        .italics()
+                        .small(),
+                );
+            }
+        }
     }
 
     fn status_bar(&mut self, ui: &mut egui::Ui, pal: &GuiPalette) {

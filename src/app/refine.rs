@@ -2985,6 +2985,15 @@ impl RefineScreen {
             .unwrap_or_default()
     }
 
+    /// Whether anything is still moving on this screen — a spinner to animate.
+    pub fn has_running_subagents(&self) -> bool {
+        self.running_subagents() > 0
+    }
+
+    pub fn running_subagent_count(&self) -> usize {
+        self.running_subagents()
+    }
+
     fn running_subagents(&self) -> usize {
         self.subagents
             .iter()
