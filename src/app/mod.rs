@@ -562,7 +562,7 @@ pub struct App {
     /// Shared approval/ask_user channel for Refine.
     refine_interact: crate::agents::refine::RefineInteract,
     pub(crate) refine_sessions: Vec<crate::workspace::refine_session::SessionMeta>,
-    refine_session_id: String,
+    pub(crate) refine_session_id: String,
     /// Last Refine-edited chapter `(vol, ch)`, for `/undo` and `/diff`.
     refine_last_edit: Option<(u32, u32)>,
     refine_dirty: bool,

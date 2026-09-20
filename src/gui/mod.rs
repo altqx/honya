@@ -5,11 +5,13 @@
 //! the TUI; not a terminal grid in a window.
 
 mod fonts;
+mod inspector;
 mod overlays;
 mod screens;
 mod settings;
 mod shell;
 mod theme_map;
+mod tree;
 mod widgets;
 
 use std::time::{Duration, Instant};
@@ -60,6 +62,7 @@ pub fn run(app: App, rx: UnboundedReceiver<AppEvent>) -> anyhow::Result<()> {
         last_tick: Instant::now(),
         tick_every: Duration::from_millis(100),
         nav: GuiNav::default(),
+        tree: tree::TreeState::default(),
         layout: shell::Layout::load(),
         applied_theme: None,
         fonts_ready: false,
@@ -99,6 +102,7 @@ struct GuiApp {
     last_tick: Instant,
     tick_every: Duration,
     nav: GuiNav,
+    tree: tree::TreeState,
     layout: shell::Layout,
     applied_theme: Option<ThemeId>,
     fonts_ready: bool,
@@ -109,7 +113,10 @@ impl GuiApp {
     /// is open (preview), else the saved config theme.
     fn effective_theme(&self) -> ThemeId {
         if let Overlay::Theme(st) = &self.app.overlay {
-            ALL_THEMES.get(st.sel).copied().unwrap_or(self.app.cfg.theme)
+            ALL_THEMES
+                .get(st.sel)
+                .copied()
+                .unwrap_or(self.app.cfg.theme)
         } else {
             self.app.cfg.theme
         }
@@ -157,9 +164,11 @@ impl eframe::App for GuiApp {
                                 self.app.apply(Action::Quit);
                             }
                             egui::Key::Comma => {
-                                self.app.apply(Action::show_overlay(
-                                    Overlay::settings_with_field(&self.app.cfg, 0),
-                                ));
+                                self.app
+                                    .apply(Action::show_overlay(Overlay::settings_with_field(
+                                        &self.app.cfg,
+                                        0,
+                                    )));
                             }
                             egui::Key::P | egui::Key::K => {
                                 self.app.apply(Action::show_overlay(Overlay::palette()));
@@ -525,67 +534,57 @@ impl GuiApp {
     }
 
     fn sidebar(&mut self, ui: &mut egui::Ui, pal: &GuiPalette) {
-        let crumb = self.app.crumb();
-        ui.add(
-            egui::Label::new(
-                RichText::new(crumb.trim_start_matches("honya 本屋").trim())
-                    .color(pal.ink_soft)
-                    .small(),
-            )
-            .truncate(),
-        );
-        ui.add_space(10.0);
+        // The view switcher first, compact, so the rest of the region is the
+        // work rather than six buttons that change which screen is showing.
+        ui.horizontal_wrapped(|ui| {
+            for (screen, glyph, label) in NAV {
+                let selected = self.app.screen == screen;
+                let spin = if screen == Screen::Translate && self.app.run_active {
+                    crate::theme::spinner_frame(self.app.frame)
+                } else {
+                    ""
+                };
+                let text = RichText::new(format!("{glyph}{spin}"))
+                    .size(14.0)
+                    .color(if selected { pal.accent } else { pal.ink_soft });
+                if ui
+                    .add(egui::Button::selectable(selected, text))
+                    .on_hover_text(label)
+                    .clicked()
+                {
+                    self.app.apply(Action::Goto(screen));
+                }
+            }
+        });
+        ui.add_space(6.0);
+        ui.separator();
 
-        for (screen, glyph, label) in NAV {
-            let selected = self.app.screen == screen;
-            // Reserve the spinner column so Translate doesn't grow when live.
-            let spin = if screen == Screen::Translate && self.app.run_active {
-                crate::theme::spinner_frame(self.app.frame)
-            } else {
-                " "
-            };
-            let color = if selected { pal.accent } else { pal.ink_soft };
-            let text = RichText::new(format!("{glyph}  {label}  {spin}"))
-                .size(15.0)
-                .color(color);
-            let resp = ui.add_sized(
-                [ui.available_width(), 34.0],
-                egui::Button::selectable(selected, text),
-            );
-            if resp.clicked() {
-                self.app.apply(Action::Goto(screen));
+        let tree_h = (ui.available_height() - 70.0).max(80.0);
+        ui.allocate_ui(egui::vec2(ui.available_width(), tree_h), |ui| {
+            for action in tree::show(ui, &self.app, &mut self.tree, pal) {
+                self.app.apply(action);
             }
-            if selected {
-                let rect = resp.rect;
-                ui.painter().line_segment(
-                    [
-                        egui::pos2(rect.left() + 2.0, rect.top() + 6.0),
-                        egui::pos2(rect.left() + 2.0, rect.bottom() - 6.0),
-                    ],
-                    egui::Stroke::new(2.0_f32, pal.accent),
-                );
-            }
-            ui.add_space(2.0);
-        }
+        });
 
         ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
             if ui
                 .add_sized(
-                    [ui.available_width(), 30.0],
-                    egui::Button::new("⚙  Settings"),
+                    [ui.available_width(), 28.0],
+                    egui::Button::new(RichText::new("⚙  Settings").small()),
                 )
                 .clicked()
             {
-                self.app.apply(Action::show_overlay(Overlay::settings_with_field(
-                    &self.app.cfg,
-                    0,
-                )));
+                self.app
+                    .apply(Action::show_overlay(Overlay::settings_with_field(
+                        &self.app.cfg,
+                        0,
+                    )));
             }
             ui.add_space(2.0);
             if ui
                 .add_sized(
-                    [ui.available_width(), 30.0],
-                    egui::Button::new("▤  Activity"),
+                    [ui.available_width(), 28.0],
+                    egui::Button::new(RichText::new("▤  Activity").small()),
                 )
                 .clicked()
             {
@@ -594,9 +593,9 @@ impl GuiApp {
         });
     }
 
-    /// Detail for whatever is selected, rather than for whichever screen is
-    /// showing. Filled in as each subject lands; the region exists first so the
-    /// body's width stops moving under the user once it does.
+    /// Detail for whatever the tree is pointing at, rather than for whichever
+    /// view is showing. The chapter's numbers used to be visible only on the
+    /// Project screen, so reading one meant leaving the thing you were reading.
     fn inspector(&mut self, ui: &mut egui::Ui, pal: &GuiPalette) {
         shell::pane_header(ui, pal, "INSPECTOR", |ui| {
             if ui
@@ -607,22 +606,21 @@ impl GuiApp {
                 self.layout.inspector_open = false;
             }
         });
-        match self.app.active.as_ref() {
-            None => {
-                ui.label(
-                    RichText::new("Open a project to see its detail here.")
-                        .color(pal.ink_faint)
-                        .small(),
+        let mut actions = Vec::new();
+        egui::ScrollArea::vertical()
+            .id_salt("inspector_body")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                inspector::show(
+                    ui,
+                    &self.app,
+                    self.tree.selection.as_ref(),
+                    pal,
+                    &mut actions,
                 );
-            }
-            Some(a) => {
-                ui.label(RichText::new(&a.project.title).color(pal.ink).strong());
-                ui.label(
-                    RichText::new(format!("volume {}", a.vol))
-                        .color(pal.ink_soft)
-                        .small(),
-                );
-            }
+            });
+        for a in actions {
+            self.app.apply(a);
         }
     }
 
@@ -665,11 +663,9 @@ impl GuiApp {
             egui::vec2(ui.available_width(), ui.available_height()),
             Layout::left_to_right(Align::Center),
             |ui| {
-                ui.label(
-                    RichText::new(format!("honya {}", crate::update::version_string()))
-                        .color(pal.ink_faint)
-                        .small(),
-                );
+                // The breadcrumb reads better down here than above the tree:
+                // the tree shows where you are, this says it in words.
+                ui.label(RichText::new(self.app.crumb()).color(pal.ink_faint).small());
                 // Fixed-width status slot so run/update labels don't shove the toast.
                 let status = if self.app.run_active {
                     "· translating…"

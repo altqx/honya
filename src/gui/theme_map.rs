@@ -43,24 +43,24 @@ impl GuiPalette {
 
     pub fn from_theme(t: &Theme, is_dark: bool) -> Self {
         Self {
-            bg: c(t.bg),
-            bg_panel: c(t.bg_panel),
-            bg_inset: c(t.bg_inset),
-            ink: c(t.ink),
-            ink_soft: c(t.ink_soft),
-            ink_faint: c(t.ink_faint),
-            rule: c(t.rule),
-            accent: c(t.accent),
-            accent_soft: c(t.accent_soft),
-            accent_bg: c(t.accent_bg),
-            status_pending: c(t.status_pending),
-            status_working: c(t.status_working),
-            status_done: c(t.status_done),
-            status_failed: c(t.status_failed),
-            status_warn: c(t.status_warn),
-            status_image: c(t.status_image),
-            ja_text: c(t.ja_text),
-            translated_text: c(t.translated_text),
+            bg: color(t.bg),
+            bg_panel: color(t.bg_panel),
+            bg_inset: color(t.bg_inset),
+            ink: color(t.ink),
+            ink_soft: color(t.ink_soft),
+            ink_faint: color(t.ink_faint),
+            rule: color(t.rule),
+            accent: color(t.accent),
+            accent_soft: color(t.accent_soft),
+            accent_bg: color(t.accent_bg),
+            status_pending: color(t.status_pending),
+            status_working: color(t.status_working),
+            status_done: color(t.status_done),
+            status_failed: color(t.status_failed),
+            status_warn: color(t.status_warn),
+            status_image: color(t.status_image),
+            ja_text: color(t.ja_text),
+            translated_text: color(t.translated_text),
             is_dark,
         }
     }
@@ -179,7 +179,9 @@ fn widget_visuals(
     }
 }
 
-fn c(color: RatColor) -> Color32 {
+/// A ratatui colour as an egui one. Shared so a pane that reads a theme slot
+/// straight from `crate::theme` paints the same colour the palette would.
+pub fn color(color: RatColor) -> Color32 {
     match color {
         RatColor::Rgb(r, g, b) => Color32::from_rgb(r, g, b),
         RatColor::Reset => Color32::from_rgb(232, 228, 220),

@@ -184,12 +184,19 @@ fn shelf(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
 
     scroll_y("shelf_list").show(ui, |ui| {
         for (i, p) in projects.iter().enumerate() {
-            let selected = nav.shelf_sel == i;
-            let busy = foreign.iter().any(|d| {
-                crate::workspace::session::same_project_dir(d.as_path(), p.dir.as_path())
+            // Keyed by the project, not by where it landed: egui flags a widget
+            // whose id changes at a rect it already drew, and in a debug build
+            // it draws a red box round it.
+            ui.push_id(("project_card", p.id.as_str()), |ui| {
+                let selected = nav.shelf_sel == i;
+                let busy = foreign.iter().any(|d| {
+                    crate::workspace::session::same_project_dir(d.as_path(), p.dir.as_path())
+                });
+                project_card(ui, app, p, selected, busy, pal, |sel| {
+                    nav.shelf_sel = sel.unwrap_or(i)
+                });
+                ui.add_space(8.0);
             });
-            project_card(ui, app, p, selected, busy, pal, |sel| nav.shelf_sel = sel.unwrap_or(i));
-            ui.add_space(8.0);
         }
     });
 }
@@ -427,30 +434,34 @@ fn project(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
                     }
                     ui.indent(format!("vol_{}", vol.number), |ui| {
                         for ch in &vol.chapters {
-                            let selected = nav.project_sel == Some((vol.number, ch.number));
-                            let (glyph, color) = status_chip(ch, pal);
-                            let label = format!(
-                                "{}  ch {:03}  {}",
-                                glyph,
-                                ch.number,
-                                if ch.title.is_empty() {
-                                    "—"
-                                } else {
-                                    &ch.title
+                            // Keyed by the chapter: deleting one moves every
+                            // row below it into a rect that row already drew,
+                            // and egui red-boxes a widget whose id changed
+                            // under it.
+                            ui.push_id(("chapter", vol.number, ch.number), |ui| {
+                                let selected =
+                                    nav.project_sel == Some((vol.number, ch.number));
+                                let (glyph, color) = status_chip(ch, pal);
+                                let label = format!(
+                                    "{}  ch {:03}  {}",
+                                    glyph,
+                                    ch.number,
+                                    if ch.title.is_empty() { "—" } else { &ch.title }
+                                );
+                                let response = ui.selectable_label(
+                                    selected,
+                                    RichText::new(label)
+                                        .color(if selected { pal.ink } else { color }),
+                                );
+                                if response.clicked() {
+                                    nav.project_sel = Some((vol.number, ch.number));
+                                    nav.project_vol = Some(vol.number);
+                                    app.apply(Action::SetActiveVolume { vol: vol.number });
                                 }
-                            );
-                            let response = ui.selectable_label(
-                                selected,
-                                RichText::new(label).color(if selected { pal.ink } else { color }),
-                            );
-                            if response.clicked() {
-                                nav.project_sel = Some((vol.number, ch.number));
-                                nav.project_vol = Some(vol.number);
-                                app.apply(Action::SetActiveVolume { vol: vol.number });
-                            }
-                            if response.double_clicked() {
-                                app.apply(Action::OpenChapter { chapter: ch.number });
-                            }
+                                if response.double_clicked() {
+                                    app.apply(Action::OpenChapter { chapter: ch.number });
+                                }
+                            });
                         }
                     });
                     ui.add_space(4.0);
@@ -829,6 +840,9 @@ fn translate(ui: &mut Ui, app: &mut App, pal: &GuiPalette) {
                     ui.label(RichText::new("empty").color(pal.ink_faint).small());
                 }
                 for row in &queue {
+                    // Keyed by the chapter: the queue reorders under the
+                    // pointer as ▲▼ move rows and as chapters finish.
+                    let _row = ui.push_id(("queue", row.vol, row.number), |ui| {
                     ui.horizontal(|ui| {
                         let mark = if row.running { "▶" } else { "·" };
                         ui.add(
@@ -868,6 +882,7 @@ fn translate(ui: &mut Ui, app: &mut App, pal: &GuiPalette) {
                                 }
                             });
                         }
+                    });
                     });
                 }
             });
@@ -1256,11 +1271,16 @@ fn refine(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
                 .width(200.0)
                 .show_ui(ui, |ui| {
                     for s in &sessions {
-                        let label = format!("{}  ·  {} msgs", s.title, s.message_count);
-                        if ui.selectable_label(s.id == active_id, label).clicked() {
-                            nav.refine_input.clear();
-                            app.apply(Action::RefineSwitchSession { id: s.id.clone() });
-                        }
+                        // Keyed by the conversation: renaming or deleting one
+                        // shifts the rest into rects they did not draw.
+                        ui.push_id(("session", s.id.as_str()), |ui| {
+                            let label =
+                                format!("{}  ·  {} msgs", s.title, s.message_count);
+                            if ui.selectable_label(s.id == active_id, label).clicked() {
+                                nav.refine_input.clear();
+                                app.apply(Action::RefineSwitchSession { id: s.id.clone() });
+                            }
+                        });
                     }
                 });
         });

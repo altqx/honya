@@ -47,6 +47,26 @@ const THAI_CANDIDATES: &[&str] = &[
     "C:\\Windows\\Fonts\\LeelawadeeUI.ttf",
 ];
 
+/// Geometric shapes, arrows and the dingbats the interface is built from —
+/// `▾ ▸ ⌕ ✗ ◇ ▤ ≡ ⚑`. A UI sans often has none of them, and a missing glyph is
+/// a tofu box in a place the eye reads as a control.
+const SYMBOL_CANDIDATES: &[&str] = &[
+    "/usr/share/fonts/noto/NotoSansSymbols2-Regular.ttf",
+    "/usr/share/fonts/truetype/noto/NotoSansSymbols2-Regular.ttf",
+    "/usr/share/fonts/TTF/NotoSansSymbols2-Regular.ttf",
+    "/usr/share/fonts/noto/NotoSansSymbols-Regular.ttf",
+    "/usr/share/fonts/truetype/noto/NotoSansSymbols-Regular.ttf",
+    // DejaVu carries most of the Geometric Shapes block and is nearly always
+    // present when Noto's symbol faces are not.
+    "/usr/share/fonts/TTF/DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+    "/System/Library/Fonts/Apple Symbols.ttf",
+    "/Library/Fonts/Arial Unicode.ttf",
+    "C:\\Windows\\Fonts\\seguisym.ttf",
+    "C:\\Windows\\Fonts\\arialuni.ttf",
+];
+
 const MONO_CANDIDATES: &[&str] = &[
     "/usr/share/fonts/Adwaita/AdwaitaMono-Regular.ttf",
     "/usr/share/fonts/noto/NotoSansMono-Regular.ttf",
@@ -68,17 +88,41 @@ pub fn install(ctx: &egui::Context) {
     }
     if let Some(data) = load_first(CJK_CANDIDATES) {
         fonts.font_data.insert("honya_cjk".into(), Arc::new(data));
-        insert_after(&mut fonts, FontFamily::Proportional, "honya_cjk", "honya_sans");
+        insert_after(
+            &mut fonts,
+            FontFamily::Proportional,
+            "honya_cjk",
+            "honya_sans",
+        );
         prepend(&mut fonts, FontFamily::Monospace, "honya_cjk");
     }
     if let Some(data) = load_first(THAI_CANDIDATES) {
         fonts.font_data.insert("honya_thai".into(), Arc::new(data));
-        insert_after(&mut fonts, FontFamily::Proportional, "honya_thai", "honya_cjk");
+        insert_after(
+            &mut fonts,
+            FontFamily::Proportional,
+            "honya_thai",
+            "honya_cjk",
+        );
         insert_after(&mut fonts, FontFamily::Monospace, "honya_thai", "honya_cjk");
     }
     if let Some(data) = load_first(MONO_CANDIDATES) {
         fonts.font_data.insert("honya_mono".into(), Arc::new(data));
         prepend(&mut fonts, FontFamily::Monospace, "honya_mono");
+    }
+    // Last in both families: it is only ever reached for a codepoint the text
+    // faces do not have, which is exactly what a fallback is for.
+    if let Some(data) = load_first(SYMBOL_CANDIDATES) {
+        fonts
+            .font_data
+            .insert("honya_symbols".into(), Arc::new(data));
+        for family in [FontFamily::Proportional, FontFamily::Monospace] {
+            fonts
+                .families
+                .entry(family)
+                .or_default()
+                .push("honya_symbols".to_owned());
+        }
     }
 
     ctx.set_fonts(fonts);
@@ -105,6 +149,10 @@ fn prepend(fonts: &mut FontDefinitions, family: FontFamily, name: &str) {
 fn insert_after(fonts: &mut FontDefinitions, family: FontFamily, name: &str, after: &str) {
     let entry = fonts.families.entry(family).or_default();
     entry.retain(|n| n != name);
-    let idx = entry.iter().position(|n| n == after).map(|i| i + 1).unwrap_or(0);
+    let idx = entry
+        .iter()
+        .position(|n| n == after)
+        .map(|i| i + 1)
+        .unwrap_or(0);
     entry.insert(idx, name.to_owned());
 }
