@@ -218,7 +218,63 @@ fn shelf(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
                 ui.add_space(8.0);
             });
         }
+
+        // Loose source files, which the window never listed at all — the TUI
+        // shows them below a rule and they are the other half of what a shelf
+        // holds.
+        let loose = app.shelf.unimported().to_vec();
+        if !loose.is_empty() {
+            ui.add_space(4.0);
+            ui.separator();
+            ui.label(
+                RichText::new(format!("{} importable file(s) here", loose.len()))
+                    .color(pal.ink_faint)
+                    .small(),
+            );
+            ui.add_space(4.0);
+            for (path, size) in &loose {
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                ui.push_id(("loose", name.as_str()), |ui| {
+                    inset_frame(pal).show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("＋").color(pal.ink_faint).small());
+                            ui.label(RichText::new(&name).color(pal.ink).small());
+                            ui.label(
+                                RichText::new(fmt_bytes(*size))
+                                    .color(pal.ink_faint)
+                                    .small(),
+                            );
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if ui.small_button("Import").clicked() {
+                                    let projects = app.projects.clone();
+                                    let language = app.cfg.preferred_language;
+                                    app.apply(Action::show_overlay(Overlay::import(
+                                        vec![(path.clone(), *size)],
+                                        &projects,
+                                        language,
+                                    )));
+                                }
+                            });
+                        });
+                    });
+                });
+                ui.add_space(4.0);
+            }
+        }
     });
+}
+
+fn fmt_bytes(bytes: u64) -> String {
+    const MB: f64 = 1024.0 * 1024.0;
+    if bytes as f64 >= MB {
+        format!("{:.1} MB", bytes as f64 / MB)
+    } else {
+        format!("{} KB", (bytes / 1024).max(1))
+    }
 }
 
 fn project_card(
@@ -587,6 +643,41 @@ fn project(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
             }
         });
     });
+}
+
+/// The Reader's own status line: what the search found, how many bookmarks and
+/// review flags this chapter carries. None of it was visible in the window.
+fn reader_status(ui: &mut Ui, app: &App, pal: &GuiPalette) {
+    let search = app.reader.search_status();
+    let bookmarks = app.reader.bookmark_count();
+    let flags = app.reader.review_count();
+    if search.is_none() && bookmarks == 0 && flags == 0 {
+        return;
+    }
+    ui.horizontal(|ui| {
+        if let Some((query, hit, total)) = search {
+            ui.label(
+                RichText::new(format!("“{query}”  {hit}/{total}"))
+                    .color(pal.accent)
+                    .small(),
+            );
+        }
+        if bookmarks > 0 {
+            ui.label(
+                RichText::new(format!("★ {bookmarks}"))
+                    .color(pal.ink_soft)
+                    .small(),
+            );
+        }
+        if flags > 0 {
+            ui.label(
+                RichText::new(format!("⚑ {flags} need review"))
+                    .color(pal.status_warn)
+                    .small(),
+            );
+        }
+    });
+    ui.add_space(4.0);
 }
 
 fn vol_label(vol: &Volume) -> String {
@@ -1067,23 +1158,37 @@ fn reader(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
         return;
     }
 
+    // What the mode cycle asked for. The GUI was permanently 50/50, so `o`
+    // toggled something nothing could see.
+    let show_ja = app.reader.shows_source();
+    let show_tr = app.reader.shows_translation();
+    reader_status(ui, app, pal);
+
     let body_h = ui.available_height();
     let th = &app.theme;
-    ui.columns(2, |cols| {
+    let panes = usize::from(show_ja) + usize::from(show_tr);
+    ui.columns(panes.max(1), |cols| {
         for c in cols.iter_mut() {
             c.set_min_height(body_h);
             c.set_max_height(body_h);
         }
-        card_fill(&mut cols[0], pal, |ui| {
-            ui.label(RichText::new("原文  Source").color(pal.ink_soft).strong());
-            ui.add_space(4.0);
-            scroll_y("reader_ja").show(ui, |ui| {
-                // Rendered rather than printed: ruby, image links and review
-                // banners used to arrive as literal markdown.
-                super::markdown::show(ui, &mut nav.md_ja, &ja, th, pal.ja_text);
+        let mut next = 0;
+        if show_ja {
+            card_fill(&mut cols[next], pal, |ui| {
+                ui.label(RichText::new("原文  Source").color(pal.ink_soft).strong());
+                ui.add_space(4.0);
+                scroll_y("reader_ja").show(ui, |ui| {
+                    // Rendered rather than printed: ruby, image links and review
+                    // banners used to arrive as literal markdown.
+                    super::markdown::show(ui, &mut nav.md_ja, &ja, th, pal.ja_text);
+                });
             });
-        });
-        card_fill(&mut cols[1], pal, |ui| {
+            next += 1;
+        }
+        if !show_tr {
+            return;
+        }
+        card_fill(&mut cols[next], pal, |ui| {
             ui.label(RichText::new("翻訳  Translation").color(pal.ink_soft).strong());
             ui.add_space(4.0);
             scroll_y("reader_tr").show(ui, |ui| {

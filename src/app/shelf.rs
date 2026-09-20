@@ -72,6 +72,11 @@ impl ShelfScreen {
         projects.len()
     }
 
+    /// Source files sitting in the shelf that are not part of a project yet.
+    pub fn unimported(&self) -> &[(PathBuf, u64)] {
+        &self.unimported
+    }
+
     fn import_files(&self) -> Vec<(PathBuf, u64)> {
         self.unimported.clone()
     }

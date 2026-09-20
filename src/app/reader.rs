@@ -539,6 +539,31 @@ impl ReaderScreen {
     }
 
     /// The chapter currently loaded (0 = none), for the App's jump-overlay builder.
+    /// Which panes are showing: what `A_MODE` cycles. A caller that draws its
+    /// own panes has to ask, or the toggle changes nothing it can see.
+    pub fn shows_source(&self) -> bool {
+        self.layout_mode != MODE_TRANSLATION
+    }
+
+    pub fn shows_translation(&self) -> bool {
+        self.layout_mode != MODE_JA
+    }
+
+    /// The active search, as `(query, hit, total)`.
+    pub fn search_status(&self) -> Option<(&str, usize, usize)> {
+        self.search
+            .as_ref()
+            .map(|s| (s.query.as_str(), s.sel + 1, s.hits.len()))
+    }
+
+    pub fn bookmark_count(&self) -> usize {
+        self.bookmark_lines.len()
+    }
+
+    pub fn review_count(&self) -> usize {
+        self.review_lines.len()
+    }
+
     pub fn current_chapter(&self) -> u32 {
         self.chapter
     }
