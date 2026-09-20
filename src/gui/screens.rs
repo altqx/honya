@@ -56,6 +56,11 @@ pub struct GuiNav {
     /// One per transcript block. A single cache would thrash between them, and
     /// a streamed delta would re-parse every message above it.
     md_blocks: Vec<super::markdown::MarkdownCache>,
+    /// Caret offset in the composer, so `/` and `@` know which token to
+    /// complete. egui owns the text; this is only where the caret was.
+    refine_cursor: usize,
+    /// Which completion row is highlighted.
+    refine_completion: usize,
     /// Avoid re-parsing GLOSSARY/CHARACTERS/STYLE every egui frame.
     lexicon_cache: LexiconCache,
 }
@@ -1555,8 +1560,10 @@ fn refine(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
                             let streaming = b.streaming;
                             let kind = b.kind.clone();
                             let mut toggle = false;
+                            let mut take = false;
+                            let chosen = app.refine.selected_block() == Some(i);
 
-                            ui.push_id(("block", b.id), |ui| match &kind {
+                            let shown = ui.push_id(("block", b.id), |ui| match &kind {
                                 BlockKind::User => {
                                     ui.with_layout(Layout::top_down(Align::Max), |ui| {
                                         inset_frame(pal).show(ui, |ui| {
@@ -1694,6 +1701,23 @@ fn refine(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
                                 }
                             });
                             let _ = role;
+                            // A click anywhere in a block selects it, which is
+                            // what ⌃B copies — the window had no block cursor,
+                            // so that command had nothing to act on.
+                            if shown.response.interact(egui::Sense::click()).clicked() {
+                                take = true;
+                            }
+                            if chosen {
+                                ui.painter().rect_stroke(
+                                    shown.response.rect.expand(2.0),
+                                    4.0,
+                                    egui::Stroke::new(1.0_f32, pal.accent),
+                                    egui::StrokeKind::Outside,
+                                );
+                            }
+                            if take {
+                                app.refine.select_block(Some(i));
+                            }
                             if toggle && let Some(b) = app.refine.blocks.get_mut(i) {
                                 b.toggle();
                             }
@@ -1845,17 +1869,64 @@ fn refine(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
     // Send — it used to double as "Answer" and quietly steal the message.
     ui.horizontal(|ui| {
         let send_w = 90.0;
-        let field = ui.add_sized(
-            [ui.available_width() - send_w - 8.0, 80.0],
-            TextEdit::multiline(&mut nav.refine_input)
-                .hint_text("Message the Refine agent…  (@ch3, @vol2 to scope · ⇧↵ for a new line)")
-                .desired_rows(3),
-        );
+        let out = TextEdit::multiline(&mut nav.refine_input)
+            .hint_text("Message the Refine agent…  (@ch3, @vol2 to scope · ⇧↵ for a new line)")
+            .desired_rows(3)
+            .show(ui);
+        let field = out.response;
+        // egui owns the text; we only need to know where the caret is, so the
+        // same completion lists the terminal offers can be offered here.
+        if let Some(range) = out.cursor_range {
+            nav.refine_cursor = range.primary.index.min(nav.refine_input.len());
+        }
+        // What `/` and `@` offer for the token under the caret — the same
+        // lists the terminal offers, from the same function. The window had no
+        // completion at all: typing `/model` just sent it as prose.
+        let project = app.active.as_ref().map(|a| &a.project);
+        let offers = if field.has_focus() {
+            crate::app::refine::completions(&nav.refine_input, nav.refine_cursor, project)
+        } else {
+            Vec::new()
+        };
+        let completing = !offers.is_empty();
+        if completing {
+            nav.refine_completion = nav.refine_completion.min(offers.len() - 1);
+        } else {
+            nav.refine_completion = 0;
+        }
+
         // Enter sends, Shift-Enter breaks the line. Send used to be
         // button-only: the field had no key handling at all, so Enter simply
         // inserted a newline and there was no way to send from the keyboard.
-        let mut send = field.lost_focus()
-            && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
+        // While a completion is up, Enter and Tab take it instead.
+        let (enter, tab, step) = ui.input(|i| {
+            (
+                i.key_pressed(egui::Key::Enter) && !i.modifiers.shift,
+                i.key_pressed(egui::Key::Tab),
+                i.key_pressed(egui::Key::ArrowDown) as isize
+                    - i.key_pressed(egui::Key::ArrowUp) as isize,
+            )
+        });
+        let mut send = field.lost_focus() && enter && !completing;
+        if completing {
+            if step != 0 {
+                let last = offers.len() - 1;
+                nav.refine_completion =
+                    (nav.refine_completion as isize + step).clamp(0, last as isize) as usize;
+            }
+            let mut accepted = (enter || tab)
+                .then(|| offers[nav.refine_completion].insert.clone());
+            completion_popup(ui, &offers, nav.refine_completion, pal, &mut accepted);
+            if let Some(insert) = accepted {
+                crate::app::refine::accept_completion(
+                    &mut nav.refine_input,
+                    &mut nav.refine_cursor,
+                    &insert,
+                );
+                nav.refine_completion = 0;
+                field.request_focus();
+            }
+        }
         ui.vertical(|ui| {
             let can_send = !nav.refine_input.trim().is_empty();
             if in_flight {
@@ -1873,6 +1944,7 @@ fn refine(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
             if send && can_send {
                 let text = nav.refine_input.trim().to_string();
                 nav.refine_input.clear();
+                nav.refine_cursor = 0;
                 app.apply(Action::RefineSubmit { text });
                 field.request_focus();
             }
@@ -1943,6 +2015,41 @@ fn lexicon_form_modal(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPal
             }
         }
     }
+}
+
+/// The completion list, floating above the composer.
+fn completion_popup(
+    ui: &mut Ui,
+    offers: &[crate::app::refine::Completion],
+    sel: usize,
+    pal: &GuiPalette,
+    accepted: &mut Option<String>,
+) {
+    let anchor = ui.min_rect();
+    egui::Area::new(egui::Id::new("refine_completions"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(egui::pos2(anchor.left(), anchor.top() - 8.0))
+        .pivot(egui::Align2::LEFT_BOTTOM)
+        .show(ui.ctx(), |ui| {
+            inset_frame(pal).show(ui, |ui| {
+                ui.set_max_width(420.0);
+                for (i, c) in offers.iter().take(10).enumerate() {
+                    if ui
+                        .selectable_label(i == sel, RichText::new(&c.label).small())
+                        .clicked()
+                    {
+                        *accepted = Some(c.insert.clone());
+                    }
+                }
+                if offers.len() > 10 {
+                    ui.label(
+                        RichText::new(format!("… {} more", offers.len() - 10))
+                            .color(pal.ink_faint)
+                            .small(),
+                    );
+                }
+            });
+        });
 }
 
 fn empty_state(ui: &mut Ui, pal: &GuiPalette, title: &str, body: &str) {

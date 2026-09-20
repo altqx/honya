@@ -180,6 +180,71 @@ fn ask_record(s: &AskSession, answer: &str) -> String {
     out
 }
 
+/// One completion offered for the token under the caret.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Completion {
+    /// What replaces the token.
+    pub insert: String,
+    /// What the row reads as — the insert plus what it means.
+    pub label: String,
+}
+
+/// Where the token under the caret starts, and what it is.
+fn token_at(input: &str, cursor: usize) -> (usize, &str) {
+    let c = input::clamp_cursor(input, cursor);
+    let start = input[..c]
+        .rfind(char::is_whitespace)
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    (start, &input[start..c])
+}
+
+/// What `/` and `@` offer for this buffer and caret.
+///
+/// A free function so a front end with its own text field gets the same
+/// completions from the same lists, rather than a second copy of them: `/` at
+/// the start of the line is a command, `@` anywhere is a chapter, a volume or
+/// a piece of reference data.
+pub fn completions(input: &str, cursor: usize, project: Option<&Project>) -> Vec<Completion> {
+    let (start, token) = token_at(input, cursor);
+    if let Some(q) = token.strip_prefix('@') {
+        return mention_candidates(project, q)
+            .into_iter()
+            .map(|c| Completion {
+                insert: c.insert,
+                label: c.label,
+            })
+            .collect();
+    }
+    if start == 0 && token.starts_with('/') {
+        return SLASH_COMMANDS
+            .iter()
+            .filter(|(name, _)| name.starts_with(token))
+            .map(|(name, what)| Completion {
+                insert: (*name).to_string(),
+                label: format!("{name}  —  {what}"),
+            })
+            .collect();
+    }
+    Vec::new()
+}
+
+/// Replace the token under the caret with `insert`, leaving the caret after it.
+pub fn accept_completion(input: &mut String, cursor: &mut usize, insert: &str) {
+    let (start, _) = token_at(input, *cursor);
+    let c = input::clamp_cursor(input, *cursor);
+    // A separating space, unless there already is one: completing mid-line
+    // should not leave a double space behind the caret.
+    let spaced = input[c..].starts_with(char::is_whitespace);
+    let replacement = if spaced {
+        insert.to_string()
+    } else {
+        format!("{insert} ")
+    };
+    input.replace_range(start..c, &replacement);
+    *cursor = start + replacement.len();
+}
+
 /// Read-only view of a blocking refine prompt, for the GUI's prompt card.
 #[derive(Debug, Clone)]
 pub struct PendingPromptView {
@@ -1719,6 +1784,16 @@ impl RefineScreen {
         for b in &mut self.blocks {
             b.set_open(any_closed);
         }
+    }
+
+    /// Which block the cursor is on. `⌃B` copies it, and a front end that
+    /// draws its own transcript has to be able to say where a click landed.
+    pub fn selected_block(&self) -> Option<usize> {
+        self.selected
+    }
+
+    pub fn select_block(&mut self, index: Option<usize>) {
+        self.selected = index.filter(|i| *i < self.blocks.len());
     }
 
     fn copy_selected(&self) -> Option<String> {
@@ -4426,6 +4501,47 @@ mod tests {
             (2500, 500),
             "session total persists across turns"
         );
+    }
+
+    #[test]
+    fn a_slash_completes_only_at_the_start_of_the_line() {
+        let offers = completions("/mod", 4, None);
+        assert!(
+            offers.iter().any(|c| c.insert == "/model"),
+            "{offers:?}"
+        );
+        // Mid-line a slash is a slash, not a command.
+        assert!(completions("tighten /mod", 12, None).is_empty());
+    }
+
+    #[test]
+    fn an_at_completes_the_reference_data_anywhere_in_the_line() {
+        let offers = completions("also check @gloss", 17, None);
+        assert!(
+            offers.iter().any(|c| c.insert == "@glossary"),
+            "{offers:?}"
+        );
+    }
+
+    #[test]
+    fn nothing_is_offered_for_an_ordinary_word() {
+        assert!(completions("tighten the prose", 17, None).is_empty());
+        assert!(completions("", 0, None).is_empty());
+    }
+
+    #[test]
+    fn accepting_replaces_the_token_and_leaves_the_caret_after_it() {
+        let mut input = "also check @gloss".to_string();
+        let mut cursor = input.len();
+        accept_completion(&mut input, &mut cursor, "@glossary");
+        assert_eq!(input, "also check @glossary ");
+        assert_eq!(cursor, input.len());
+
+        // ...and only that token: what follows the caret is untouched.
+        let mut input = "@ch and more".to_string();
+        let mut cursor = 3;
+        accept_completion(&mut input, &mut cursor, "@characters");
+        assert_eq!(input, "@characters and more");
     }
 
     #[test]
