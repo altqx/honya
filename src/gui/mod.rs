@@ -72,6 +72,7 @@ pub fn run(app: App, rx: UnboundedReceiver<AppEvent>) -> anyhow::Result<()> {
         tree: tree::TreeState::default(),
         tabs: tabs::Tabs::default(),
         qa: drawer::QaCache::default(),
+        context: inspector::ContextCache::default(),
         layout: shell::Layout::load(),
         bindings: crate::app::keys::Bindings::load(),
         focus: focus::Focus::default(),
@@ -117,6 +118,7 @@ struct GuiApp {
     tree: tree::TreeState,
     tabs: tabs::Tabs,
     qa: drawer::QaCache,
+    context: inspector::ContextCache,
     layout: shell::Layout,
     bindings: crate::app::keys::Bindings,
     focus: focus::Focus,
@@ -882,6 +884,7 @@ impl GuiApp {
                     ui,
                     &self.app,
                     self.tree.selection.as_ref(),
+                    &mut self.context,
                     pal,
                     &mut actions,
                 );

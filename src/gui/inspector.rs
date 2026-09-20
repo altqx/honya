@@ -66,6 +66,7 @@ pub fn show(
     ui: &mut Ui,
     app: &App,
     selection: Option<&Selection>,
+    cache: &mut ContextCache,
     pal: &GuiPalette,
     actions: &mut Vec<Action>,
 ) {
@@ -83,6 +84,7 @@ pub fn show(
         .cloned()
         .unwrap_or(Selection::Project(active.project.id.clone()));
 
+    let is_session = matches!(selection, Selection::Session(_));
     match selection {
         Selection::Project(_) => project_detail(ui, &active.project, pal),
         Selection::Volume { vol } => {
@@ -105,10 +107,102 @@ pub fn show(
         }
         Selection::Session(id) => session_detail(ui, app, &id, pal),
     }
+    // Always last: the reference data is about the project whatever is
+    // selected inside it.
+    if !is_session {
+        context_panel(ui, app, cache, pal);
+    }
 }
 
 fn missing(ui: &mut Ui, pal: &GuiPalette, why: &str) {
     ui.label(RichText::new(why).color(pal.ink_faint).italics().small());
+}
+
+/// Counts read off the reference files, kept between frames: the inspector
+/// redraws on every animation tick and these are four file parses.
+#[derive(Default)]
+pub struct ContextCache {
+    root: std::path::PathBuf,
+    taken_at_frame: u64,
+    characters: usize,
+    terms: usize,
+    has_style: bool,
+}
+
+const REFRESH_FRAMES: u64 = 20;
+
+impl ContextCache {
+    fn get(&mut self, app: &App) -> (usize, usize, bool) {
+        if let Some(active) = app.active.as_ref() {
+            let moved = self.root != active.project.dir;
+            let stale = app.frame.saturating_sub(self.taken_at_frame) >= REFRESH_FRAMES;
+            if moved || stale {
+                let ws = &active.workspace;
+                self.root = active.project.dir.clone();
+                self.taken_at_frame = app.frame;
+                self.characters = crate::workspace::characters::load(ws).len();
+                self.terms = crate::workspace::glossary::load(ws).len();
+                self.has_style = std::fs::read_to_string(ws.style_md())
+                    .map(|s| !s.trim().is_empty())
+                    .unwrap_or(false);
+            }
+        }
+        (self.characters, self.terms, self.has_style)
+    }
+}
+
+/// What the TUI calls 文脈: whether the reference data the agents read is
+/// actually there, and what the project has cost. It lived on one screen.
+fn context_panel(ui: &mut Ui, app: &App, cache: &mut ContextCache, pal: &GuiPalette) {
+    let (characters, terms, has_style) = cache.get(app);
+    ui.add_space(10.0);
+    ui.label(RichText::new("文脈  CONTEXT").color(pal.ink_faint).small().strong());
+    ui.add_space(4.0);
+    for (label, state) in [
+        ("CHARACTERS", format!("{characters} entries")),
+        ("GLOSSARY", format!("{terms} terms")),
+        (
+            "STYLE",
+            if has_style { "present" } else { "empty" }.to_string(),
+        ),
+    ] {
+        ui.horizontal(|ui| {
+            let ok = !state.starts_with('0') && state != "empty";
+            ui.label(
+                RichText::new(if ok { "●" } else { "○" })
+                    .color(if ok { pal.status_done } else { pal.ink_faint })
+                    .monospace()
+                    .small(),
+            );
+            ui.add_sized(
+                [92.0, 16.0],
+                egui::Label::new(RichText::new(label).color(pal.ink_soft).small()),
+            );
+            ui.label(RichText::new(state).color(pal.ink).small());
+        });
+    }
+
+    if let Some(active) = app.active.as_ref() {
+        let mut cost = 0.0_f64;
+        let mut tokens = 0_u32;
+        for v in &active.project.volumes {
+            for c in &v.chapters {
+                cost += c.usage.cost_usd;
+                tokens = tokens.saturating_add(
+                    c.usage.tokens.total.max(c.usage.tokens.prompt + c.usage.tokens.completion),
+                );
+            }
+        }
+        if tokens > 0 || cost > 0.0 {
+            ui.add_space(6.0);
+            row(
+                ui,
+                pal,
+                "Σ project",
+                format!("${cost:.4} · {} tokens", fmt_count(tokens)),
+            );
+        }
+    }
 }
 
 fn project_detail(ui: &mut Ui, p: &Project, pal: &GuiPalette) {

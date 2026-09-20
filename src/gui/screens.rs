@@ -72,6 +72,9 @@ pub struct GuiNav {
     /// The source pane's scroll offset, mirrored into the translation pane
     /// while the two are synced.
     reader_offset: f32,
+    /// Volumes the user has folded by hand; absent means the default, which is
+    /// that the active volume is open and the rest are not.
+    project_folds: std::collections::HashMap<u32, bool>,
     /// Caret offset in the composer, so `/` and `@` know which token to
     /// complete. egui owns the text; this is only where the caret was.
     refine_cursor: usize,
@@ -495,19 +498,46 @@ fn project(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
                 for vol in &project.volumes {
                     let vol_selected = nav.project_vol == Some(vol.number)
                         || (nav.project_sel.is_some_and(|(v, _)| v == vol.number));
-                    let header = vol_label(vol);
-                    let response = ui.selectable_label(
-                        vol_selected && nav.project_sel.is_none(),
-                        RichText::new(header).color(if vol.number == active_vol {
-                            pal.accent
-                        } else {
-                            pal.ink
-                        }),
-                    );
-                    if response.clicked() {
-                        nav.project_vol = Some(vol.number);
-                        nav.project_sel = None;
-                        app.apply(Action::SetActiveVolume { vol: vol.number });
+                    // Folded unless it is the volume being worked on: a
+                    // project with eight volumes buried the one you wanted,
+                    // and the tree was always fully expanded.
+                    let open = nav
+                        .project_folds
+                        .get(&vol.number)
+                        .copied()
+                        .unwrap_or(vol.number == active_vol);
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new(if open { "▾" } else { "▸" })
+                                        .color(pal.ink_faint)
+                                        .small(),
+                                )
+                                .frame(false),
+                            )
+                            .clicked()
+                        {
+                            nav.project_folds.insert(vol.number, !open);
+                        }
+                        let header = vol_label(vol);
+                        let response = ui.selectable_label(
+                            vol_selected && nav.project_sel.is_none(),
+                            RichText::new(header).color(if vol.number == active_vol {
+                                pal.accent
+                            } else {
+                                pal.ink
+                            }),
+                        );
+                        if response.clicked() {
+                            nav.project_vol = Some(vol.number);
+                            nav.project_sel = None;
+                            app.apply(Action::SetActiveVolume { vol: vol.number });
+                        }
+                    });
+                    if !open {
+                        ui.add_space(2.0);
+                        continue;
                     }
                     ui.indent(format!("vol_{}", vol.number), |ui| {
                         for ch in &vol.chapters {
