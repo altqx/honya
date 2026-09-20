@@ -1978,13 +1978,30 @@ pub enum AppEvent {
         summary: String,
         diff: String,
     },
-    /// Blocking `ask_user` prompt.
+    /// Blocking `ask_user` prompt: one card, however many questions the agent
+    /// put in the one call.
     RefineDecisionRequest {
         id: u64,
-        question: String,
-        options: Vec<String>,
+        questions: Vec<RefineQuestion>,
     },
     RefineRequest(RefineRequest),
+}
+
+/// One question on an `ask_user` card.
+///
+/// Declared here rather than beside the tool, because the tool's deserialiser
+/// and the UI that answers it have to agree on the shape, and agreeing once is
+/// the only way they stay agreed.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
+pub struct RefineQuestion {
+    pub question: String,
+    /// Offered choices. Empty means the answer is free text — but the box is
+    /// there either way, so an offered option is never the only way to answer.
+    #[serde(default)]
+    pub options: Vec<String>,
+    /// Several answers allowed. The agent opts in; the card toggles with Space.
+    #[serde(default)]
+    pub multiple: bool,
 }
 
 /// Heavier Refine operations routed back through `App`.

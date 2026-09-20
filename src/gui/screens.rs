@@ -12,7 +12,7 @@ use crate::model::{Chapter, ChapterKind, ChapterStatus, PlanStepStatus, Project,
 use crate::theme;
 
 use super::theme_map::{GuiPalette, card_fill, card_frame, inset_frame};
-use super::widgets::{hint, primary_button};
+use super::widgets::primary_button;
 
 /// Vertical scroller that always reserves its bar — avoids content width jiggle
 /// when scrolling becomes necessary (or on hover with floating bars).
@@ -43,6 +43,9 @@ pub struct GuiNav {
     pub rescan_requested: bool,
     /// Draft text in the Refine input box (App's RefineScreen input is TUI-only).
     pub refine_input: String,
+    /// Draft answers to the open `ask_user` card, one per question, keyed by
+    /// prompt id so a second card cannot inherit the first one's typing.
+    refine_answers: (u64, Vec<String>),
     /// Avoid re-parsing GLOSSARY/CHARACTERS/STYLE every egui frame.
     lexicon_cache: LexiconCache,
 }
@@ -1359,6 +1362,11 @@ fn refine(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
     ui.add_space(4.0);
 
     if let Some(prompt) = pending {
+        // Each card gets its own drafts: the id changes, so a second question
+        // cannot arrive pre-filled with what was typed at the first.
+        if nav.refine_answers.0 != prompt.id {
+            nav.refine_answers = (prompt.id, vec![String::new(); prompt.questions.len()]);
+        }
         egui::Frame::NONE
             .fill(pal.bg_inset)
             .stroke(egui::Stroke::new(1.0_f32, pal.status_warn))
@@ -1366,19 +1374,19 @@ fn refine(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
             .inner_margin(egui::Margin::symmetric(10, 8))
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
-                ui.label(RichText::new(&prompt.question).color(pal.ink).strong());
-                if !prompt.detail.is_empty() {
-                    scroll_y("refine_diff").max_height(60.0).show(ui, |ui| {
-                        ui.label(
-                            RichText::new(&prompt.detail)
-                                .color(pal.ink_soft)
-                                .monospace()
-                                .small(),
-                        );
-                    });
-                }
-                ui.horizontal(|ui| {
-                    if prompt.is_approval {
+                if prompt.is_approval {
+                    ui.label(RichText::new(&prompt.question).color(pal.ink).strong());
+                    if !prompt.detail.is_empty() {
+                        scroll_y("refine_diff").max_height(60.0).show(ui, |ui| {
+                            ui.label(
+                                RichText::new(&prompt.detail)
+                                    .color(pal.ink_soft)
+                                    .monospace()
+                                    .small(),
+                            );
+                        });
+                    }
+                    ui.horizontal(|ui| {
                         if primary_button(ui, pal, "Approve").clicked() {
                             app.apply(Action::RefineRespondInteraction {
                                 id: prompt.id,
@@ -1391,29 +1399,76 @@ fn refine(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
                                 answer: String::new(),
                             });
                         }
-                    } else if prompt.options.is_empty() {
-                        hint(ui, pal, "Answer in the input box below and press Send.");
-                    } else {
-                        for opt in &prompt.options {
-                            if ui.button(opt).clicked() {
-                                app.apply(Action::RefineRespondInteraction {
-                                    id: prompt.id,
-                                    answer: opt.clone(),
-                                });
-                            }
+                    });
+                    return;
+                }
+                scroll_y("refine_questions").max_height(220.0).show(ui, |ui| {
+                    for (i, q) in prompt.questions.iter().enumerate() {
+                        if i > 0 {
+                            ui.add_space(6.0);
                         }
+                        let counter = if prompt.questions.len() > 1 {
+                            format!("{}/{}  ", i + 1, prompt.questions.len())
+                        } else {
+                            String::new()
+                        };
+                        ui.label(
+                            RichText::new(format!("{counter}{}", q.question))
+                                .color(pal.ink)
+                                .strong(),
+                        );
+                        ui.horizontal_wrapped(|ui| {
+                            for opt in &q.options {
+                                let picked = nav.refine_answers.1.get(i) == Some(opt);
+                                if ui.selectable_label(picked, opt).clicked()
+                                    && let Some(slot) = nav.refine_answers.1.get_mut(i)
+                                {
+                                    *slot = opt.clone();
+                                }
+                            }
+                        });
+                        if let Some(slot) = nav.refine_answers.1.get_mut(i) {
+                            ui.add(
+                                TextEdit::singleline(slot)
+                                    .hint_text("or type your own answer")
+                                    .desired_width(f32::INFINITY),
+                            );
+                        }
+                    }
+                });
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    let any = nav.refine_answers.1.iter().any(|a| !a.trim().is_empty());
+                    if ui
+                        .add_enabled_ui(any, |ui| primary_button(ui, pal, "Send answers"))
+                        .inner
+                        .clicked()
+                        && any
+                    {
+                        let answers: Vec<String> = nav
+                            .refine_answers
+                            .1
+                            .iter()
+                            .map(|a| a.trim().to_string())
+                            .collect();
+                        app.apply(Action::RefineRespondInteraction {
+                            id: prompt.id,
+                            answer: serde_json::to_string(&answers).unwrap_or_default(),
+                        });
+                    }
+                    if ui.button("Dismiss").clicked() {
+                        app.apply(Action::RefineRespondInteraction {
+                            id: prompt.id,
+                            answer: String::new(),
+                        });
                     }
                 });
             });
         ui.add_space(4.0);
     }
 
-    // Input strip.
-    let free_text_prompt = app
-        .refine
-        .pending_prompt()
-        .map(|p| !p.is_approval && p.options.is_empty())
-        .unwrap_or(false);
+    // Input strip. The card above owns answering now, so Send is only ever
+    // Send — it used to double as "Answer" and quietly steal the message.
     ui.horizontal(|ui| {
         let send_w = 90.0;
         ui.add_sized(
@@ -1424,30 +1479,19 @@ fn refine(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
         );
         ui.vertical(|ui| {
             let can_send = !nav.refine_input.trim().is_empty();
-            if in_flight && !free_text_prompt {
+            if in_flight {
                 if ui.add_sized([send_w, 38.0], egui::Button::new("Cancel")).clicked() {
                     app.apply(Action::RefineCancel);
                 }
             } else if ui
-                .add_enabled_ui(can_send, |ui| {
-                    primary_button(ui, pal, if free_text_prompt { "Answer" } else { "Send" })
-                })
+                .add_enabled_ui(can_send, |ui| primary_button(ui, pal, "Send"))
                 .inner
                 .clicked()
                 && can_send
             {
                 let text = nav.refine_input.trim().to_string();
                 nav.refine_input.clear();
-                if free_text_prompt {
-                    if let Some(p) = app.refine.pending_prompt() {
-                        app.apply(Action::RefineRespondInteraction {
-                            id: p.id,
-                            answer: text,
-                        });
-                    }
-                } else {
-                    app.apply(Action::RefineSubmit { text });
-                }
+                app.apply(Action::RefineSubmit { text });
             }
         });
     });

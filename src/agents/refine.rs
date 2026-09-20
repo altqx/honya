@@ -23,7 +23,7 @@ use crate::llm::{
 };
 use crate::model::{
     AppEvent, Character, ContinuityNote, EventTx, GlossaryTerm, LogLevel, PlanStep, RefineRequest,
-    RefineSubagentStatus, Relationship, StyleExample, TermPolicy, ToolResult,
+    RefineQuestion, RefineSubagentStatus, Relationship, StyleExample, TermPolicy, ToolResult,
 };
 use crate::workspace::{Workspace, characters, glossary, style, translation, volume};
 
@@ -300,11 +300,18 @@ pub fn refine_tools_schema() -> serde_json::Value {
         }},
         {"type":"function","function":{
             "name":"ask_user",
-            "description":"Ask the user a question and wait for their answer when a decision is genuinely theirs to make and you cannot resolve it from the project or sensible defaults (e.g. choosing between two valid Thai renderings, or confirming a risky bulk change). Provide options for a multiple-choice decision, or omit them for a free-text answer. Use sparingly — prefer acting on a reasonable default and saying so.",
-            "parameters":{"type":"object","additionalProperties":false,"required":["question"],
+            "description":"Ask the user one or more questions and wait for their answers, when a decision is genuinely theirs to make and you cannot resolve it from the project or sensible defaults (e.g. choosing between two valid Thai renderings, or confirming a risky bulk change). Put EVERY related question in ONE call via `questions` — they are shown together as a single card the user moves through, so asking one at a time costs them a round trip each. `options` are offered as choices; the user can always type something else instead, so offering options never narrows the answer. Set `multiple` when several answers may apply. Use sparingly — prefer acting on a reasonable default and saying so.",
+            "parameters":{"type":"object","additionalProperties":false,
                 "properties":{
-                    "question":{"type":"string","description":"The question to put to the user."},
-                    "options":{"type":"array","items":{"type":"string"},"description":"Optional choices; the user picks one."}
+                    "questions":{"type":"array","description":"The questions to put to the user, asked together.","items":{
+                        "type":"object","additionalProperties":false,"required":["question"],
+                        "properties":{
+                            "question":{"type":"string","description":"The question to put to the user."},
+                            "options":{"type":"array","items":{"type":"string"},"description":"Offered choices; the user may still answer freely."},
+                            "multiple":{"type":"boolean","description":"Several of the options may apply."}
+                        }}},
+                    "question":{"type":"string","description":"Shorthand for a single question; ignored when `questions` is given."},
+                    "options":{"type":"array","items":{"type":"string"},"description":"Offered choices for the shorthand form."}
                 }}
         }}
     ])
@@ -701,6 +708,7 @@ Autonomy:
 - keep working until done; use update_plan for multi-step work; delegate with `task` only for large independent disjoint scopes
 - after interruption/cancel, call list_interrupted_subagents then resume_subagent before redoing delegated work
 - use ask_user sparingly when the choice is genuinely the user's; otherwise act on a safe default and say so
+- when you do ask, put every related question in ONE ask_user call: they are shown together as one card, so asking one at a time costs the user a round trip each
 
 Success criteria:
 - gather real SOURCE_JP / translation / CHARACTERS / GLOSSARY / STYLE evidence before editing; issue independent reads together
@@ -3078,33 +3086,41 @@ impl RefineTools {
         rx.await.unwrap_or_default() == "approve"
     }
 
-    async fn request_decision(&self, question: String, options: Vec<String>) -> String {
+    async fn request_decision(&self, questions: Vec<RefineQuestion>) -> String {
         let (id, rx) = self.interact.open();
-        self.tx.send(AppEvent::RefineDecisionRequest {
-            id,
-            question,
-            options,
-        });
+        self.tx
+            .send(AppEvent::RefineDecisionRequest { id, questions });
         rx.await.unwrap_or_default()
     }
 
     async fn run_ask_user(&self, arguments_json: &str) -> ToolResult {
-        #[derive(serde::Deserialize)]
-        struct Args {
-            question: String,
-            #[serde(default)]
-            options: Vec<String>,
-        }
-        let a: Args = match serde_json::from_str(arguments_json) {
-            Ok(a) => a,
-            Err(e) => return ToolResult::err(format!("bad ask_user args: {e}")),
+        let questions = match parse_ask_user(arguments_json) {
+            Ok(q) => q,
+            Err(e) => return ToolResult::err(e),
         };
-        let answer = self.request_decision(a.question, a.options).await;
-        if answer.is_empty() {
-            ToolResult::err("the user dismissed the question without answering")
-        } else {
-            ToolResult::ok(format!("user answered: {answer}"))
+        let single = questions.len() == 1;
+        let raw = self.request_decision(questions.clone()).await;
+        let answers = decode_answers(&raw, questions.len());
+        if answers.iter().all(|a| a.trim().is_empty()) {
+            return ToolResult::err("the user dismissed the question without answering");
         }
+        // A model reads prose, so the array the UI sends back is formatted here
+        // rather than handed over raw. One question keeps the old flat line, so
+        // nothing that already worked reads differently.
+        if single {
+            return ToolResult::ok(format!("user answered: {}", answers[0].trim()));
+        }
+        let mut out = String::from("user answered:");
+        for (i, q) in questions.iter().enumerate() {
+            let a = answers.get(i).map(|s| s.trim()).unwrap_or("");
+            out.push_str(&format!(
+                "\n{}. {}\n   → {}",
+                i + 1,
+                q.question.trim(),
+                if a.is_empty() { "(skipped)" } else { a }
+            ));
+        }
+        ToolResult::ok(out)
     }
 
     fn list_interrupted_subagents(&self) -> ToolResult {
@@ -3393,6 +3409,49 @@ impl ToolExecutor for RefineTools {
         self.execute(&call.function.name, &call.function.arguments)
             .await
     }
+}
+
+/// `questions` when the model sent it, else the one-question shorthand.
+///
+/// The schema carries no top-level `required`, so both shapes validate on the
+/// wire and the choice is made here — which is what keeps a model that still
+/// sends the old shape working.
+fn parse_ask_user(arguments_json: &str) -> std::result::Result<Vec<RefineQuestion>, String> {
+    #[derive(serde::Deserialize)]
+    struct Args {
+        #[serde(default)]
+        questions: Vec<RefineQuestion>,
+        #[serde(default)]
+        question: String,
+        #[serde(default)]
+        options: Vec<String>,
+    }
+    let a: Args =
+        serde_json::from_str(arguments_json).map_err(|e| format!("bad ask_user args: {e}"))?;
+    let mut questions = a.questions;
+    questions.retain(|q| !q.question.trim().is_empty());
+    if questions.is_empty() && !a.question.trim().is_empty() {
+        questions.push(RefineQuestion {
+            question: a.question,
+            options: a.options,
+            multiple: false,
+        });
+    }
+    if questions.is_empty() {
+        return Err("ask_user needs at least one question".to_string());
+    }
+    Ok(questions)
+}
+
+/// The card answers with a JSON array, one entry per question in order.
+///
+/// Anything that is not that array is taken as one free-text answer, which is
+/// what a dismissal (the empty string) and any older reply both are.
+fn decode_answers(raw: &str, n: usize) -> Vec<String> {
+    let mut out =
+        serde_json::from_str::<Vec<String>>(raw).unwrap_or_else(|_| vec![raw.to_string()]);
+    out.resize(n, String::new());
+    out
 }
 
 #[cfg(test)]
@@ -5306,5 +5365,50 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Both wire shapes reach the same card, so a model that still sends the
+    /// one-question form keeps working while the batched form is the one the
+    /// tool description asks for.
+    #[test]
+    fn ask_user_accepts_the_batch_and_the_single_question_shorthand() {
+        let batch = parse_ask_user(
+            r#"{"questions":[
+                {"question":"Which rendering?","options":["a","b"]},
+                {"question":"Which chapters?","options":["1","2"],"multiple":true}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(batch.len(), 2);
+        assert!(batch[1].multiple);
+        assert!(!batch[0].multiple, "multiple is opt-in per question");
+
+        let single = parse_ask_user(r#"{"question":"Which rendering?","options":["a"]}"#).unwrap();
+        assert_eq!(single.len(), 1);
+        assert_eq!(single[0].options, vec!["a".to_string()]);
+
+        // `questions` wins, and a blank entry is not a question.
+        let mixed = parse_ask_user(
+            r#"{"question":"ignored","questions":[{"question":"real"},{"question":"  "}]}"#,
+        )
+        .unwrap();
+        assert_eq!(mixed.len(), 1);
+        assert_eq!(mixed[0].question, "real");
+
+        assert!(parse_ask_user(r#"{"questions":[]}"#).is_err());
+    }
+
+    /// The card replies with an array; anything else is one free-text answer,
+    /// which is what a dismissal and an older reply both are.
+    #[test]
+    fn answers_decode_from_the_array_and_fall_back_to_one_string() {
+        assert_eq!(decode_answers(r#"["a","b"]"#, 2), vec!["a", "b"]);
+        assert_eq!(decode_answers("plain", 1), vec!["plain"]);
+        assert_eq!(decode_answers("", 2), vec!["", ""], "a dismissal stays empty");
+        assert_eq!(
+            decode_answers(r#"["only"]"#, 3),
+            vec!["only", "", ""],
+            "a short reply is padded, never panics"
+        );
     }
 }

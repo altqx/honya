@@ -11,7 +11,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
 use crate::llm::{Message, Role};
-use crate::model::{AppEvent, PlanStep, PlanStepStatus, Project, RefineSubagentStatus};
+use crate::model::{
+    AppEvent, PlanStep, PlanStepStatus, Project, RefineQuestion, RefineSubagentStatus,
+};
 use crate::theme::{self, Theme};
 use crate::ui::input::{self, EditOpts, Edited};
 use crate::ui::mouse::{MouseGesture, MouseInput};
@@ -200,6 +202,19 @@ impl Turn {
     }
 }
 
+/// One transcript line per question, with what it was answered.
+fn ask_record(s: &AskSession, answer: &str) -> String {
+    if answer.is_empty() {
+        return "ask_user — dismissed without answering".to_string();
+    }
+    let mut out = String::from("ask_user — answered");
+    for (item, value) in s.items.iter().zip(s.values()) {
+        let value = if value.is_empty() { "(skipped)" } else { &value };
+        out.push_str(&format!("\n· {} → {}", item.question.trim(), value));
+    }
+    out
+}
+
 /// Rebuild display turns from stored messages, skipping raw tool results.
 pub fn display_turns(messages: &[Message]) -> Vec<Turn> {
     let mut turns = Vec::new();
@@ -257,11 +272,13 @@ fn is_compacted_summary(content: &str) -> bool {
 #[derive(Debug, Clone)]
 pub struct PendingPromptView {
     pub id: u64,
+    /// The first question, kept so a caller that only ever showed one still
+    /// compiles and still shows something true.
     pub question: String,
     /// Diff text for approval prompts (empty otherwise).
     pub detail: String,
-    /// Choice buttons; empty = free-text answer expected.
-    pub options: Vec<String>,
+    /// Every question on the card, in order. Empty for an approval.
+    pub questions: Vec<RefineQuestion>,
     pub is_approval: bool,
 }
 
@@ -272,13 +289,149 @@ enum RefinePending {
         id: u64,
         summary: String,
         diff: String,
+        scroll: usize,
     },
-    Decision {
-        id: u64,
-        question: String,
-        options: Vec<String>,
-        selected: usize,
-    },
+    Ask(AskSession),
+}
+
+impl RefinePending {
+    fn id(&self) -> u64 {
+        match self {
+            RefinePending::Approval { id, .. } => *id,
+            RefinePending::Ask(s) => s.id,
+        }
+    }
+}
+
+/// One `ask_user` card: every question the agent asked in that one call, and
+/// what has been answered so far.
+#[derive(Debug, Clone)]
+struct AskSession {
+    id: u64,
+    items: Vec<RefineQuestion>,
+    answers: Vec<Answer>,
+    /// Which question the card is showing.
+    at: usize,
+    /// Which rung of the answer list has the keyboard. `options.len()` is the
+    /// free-text box, which is always the last rung.
+    row: usize,
+    /// Esc was pressed with something typed; a second Esc discards.
+    confirm_dismiss: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+struct Answer {
+    text: String,
+    cursor: usize,
+    /// Chosen options. A `Vec` because multi-select is per question; a single
+    /// answer holds at most one.
+    picked: Vec<usize>,
+}
+
+impl AskSession {
+    /// The only constructor, so `answers` cannot drift from `items`.
+    fn new(id: u64, items: Vec<RefineQuestion>) -> Self {
+        let answers = vec![Answer::default(); items.len()];
+        let mut s = Self {
+            id,
+            items,
+            answers,
+            at: 0,
+            row: 0,
+            confirm_dismiss: false,
+        };
+        s.row = s.default_row();
+        s
+    }
+
+    fn item(&self) -> &RefineQuestion {
+        &self.items[self.at.min(self.items.len() - 1)]
+    }
+
+    /// The box's rung: after the options, always reachable.
+    fn box_row(&self) -> usize {
+        self.item().options.len()
+    }
+
+    /// Where the keyboard lands on arriving at a question: the first option —
+    /// which is the box itself when the question offers none.
+    fn default_row(&self) -> usize {
+        0
+    }
+
+    fn answer(&self) -> &Answer {
+        &self.answers[self.at.min(self.answers.len() - 1)]
+    }
+
+    fn answer_mut(&mut self) -> &mut Answer {
+        let at = self.at.min(self.answers.len() - 1);
+        &mut self.answers[at]
+    }
+
+    /// One rule for "options and a box, always": what was typed wins, because
+    /// typing it is the more specific act.
+    fn value_of(item: &RefineQuestion, answer: &Answer) -> String {
+        if !answer.text.trim().is_empty() {
+            return answer.text.trim().to_string();
+        }
+        answer
+            .picked
+            .iter()
+            .filter_map(|i| item.options.get(*i))
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    fn values(&self) -> Vec<String> {
+        self.items
+            .iter()
+            .zip(&self.answers)
+            .map(|(item, a)| Self::value_of(item, a))
+            .collect()
+    }
+
+    fn is_dirty(&self) -> bool {
+        self.answers
+            .iter()
+            .any(|a| !a.text.trim().is_empty() || !a.picked.is_empty())
+    }
+
+    /// Enter on an option is a commitment about that option, so it replaces
+    /// what was typed. Moving the selection never does — that would let a
+    /// mis-arrow destroy a sentence.
+    fn commit_row(&mut self) {
+        let row = self.row;
+        let multiple = self.item().multiple;
+        let options = self.item().options.len();
+        if row >= options {
+            return;
+        }
+        let a = self.answer_mut();
+        if multiple {
+            match a.picked.iter().position(|p| *p == row) {
+                Some(i) => {
+                    a.picked.remove(i);
+                }
+                None => a.picked.push(row),
+            }
+            a.picked.sort_unstable();
+        } else {
+            a.picked = vec![row];
+        }
+        a.text.clear();
+        a.cursor = 0;
+    }
+
+    fn go_to(&mut self, at: usize) {
+        self.at = at.min(self.items.len().saturating_sub(1));
+        self.row = self.default_row();
+        self.confirm_dismiss = false;
+    }
+
+    fn is_last(&self) -> bool {
+        self.at + 1 >= self.items.len()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -306,7 +459,9 @@ pub struct RefineScreen {
     sessions: Vec<SessionMeta>,
     picker: Option<usize>,
     active_session: String,
-    pending: Option<RefinePending>,
+    /// A queue, not a slot: two sub-agents can each raise a question, and the
+    /// second used to overwrite the first and strand its oneshot for good.
+    pending: std::collections::VecDeque<RefinePending>,
     approval_mode: crate::agents::refine::ApprovalMode,
     plan: Vec<PlanStep>,
     subagents: Vec<SubagentRun>,
@@ -361,7 +516,7 @@ impl RefineScreen {
             sessions: Vec::new(),
             picker: None,
             active_session: String::new(),
-            pending: None,
+            pending: std::collections::VecDeque::new(),
             approval_mode: crate::agents::refine::ApprovalMode::default(),
             plan: Vec::new(),
             subagents: Vec::new(),
@@ -385,7 +540,7 @@ impl RefineScreen {
 
     /// Consulted by `App::screen_is_capturing()` to suppress single-letter globals.
     pub fn is_capturing(&self) -> bool {
-        self.focused || self.picker.is_some()
+        self.focused || self.picker.is_some() || !self.pending.is_empty()
     }
 
     pub fn approval_mode(&self) -> crate::agents::refine::ApprovalMode {
@@ -405,24 +560,25 @@ impl RefineScreen {
     /// Empty `options` means a free-text answer; `is_approval` prompts carry a
     /// diff and answer with `"approve"` / `""` (reject).
     pub fn pending_prompt(&self) -> Option<PendingPromptView> {
-        self.pending.as_ref().map(|p| match p {
-            RefinePending::Approval { id, summary, diff } => PendingPromptView {
+        self.pending.front().map(|p| match p {
+            RefinePending::Approval {
+                id, summary, diff, ..
+            } => PendingPromptView {
                 id: *id,
                 question: summary.clone(),
                 detail: diff.clone(),
-                options: Vec::new(),
+                questions: Vec::new(),
                 is_approval: true,
             },
-            RefinePending::Decision {
-                id,
-                question,
-                options,
-                ..
-            } => PendingPromptView {
-                id: *id,
-                question: question.clone(),
+            RefinePending::Ask(s) => PendingPromptView {
+                id: s.id,
+                question: s
+                    .items
+                    .first()
+                    .map(|q| q.question.clone())
+                    .unwrap_or_default(),
                 detail: String::new(),
-                options: options.clone(),
+                questions: s.items.clone(),
                 is_approval: false,
             },
         })
@@ -517,7 +673,7 @@ impl RefineScreen {
     }
 
     pub fn cancel(&mut self) {
-        self.pending = None;
+        self.pending.clear();
         for run in &mut self.subagents {
             if run.status == RefineSubagentStatus::Running {
                 run.status = RefineSubagentStatus::Canceled;
@@ -528,68 +684,173 @@ impl RefineScreen {
         self.finish_turn();
     }
 
-    fn handle_pending_key(&mut self, key: KeyEvent) -> Action {
-        let Some(pending) = self.pending.clone() else {
+    /// The card answers to the pointer too: an option is a row the list
+    /// registered while drawing it, so nothing here recomputes where one went.
+    fn handle_pending_mouse(
+        &mut self,
+        m: MouseInput,
+        zone: Option<crate::ui::kit::ZoneId>,
+    ) -> Action {
+        use crate::ui::kit::ZoneKind;
+
+        if matches!(self.pending.front(), Some(RefinePending::Approval { .. })) {
+            return match m.gesture {
+                MouseGesture::ScrollUp => self.scroll_approval(-3),
+                MouseGesture::ScrollDown => self.scroll_approval(3),
+                _ => Action::None,
+            };
+        }
+        let Some(RefinePending::Ask(s)) = self.pending.front_mut() else {
             return Action::None;
         };
-        let respond = |me: &mut Self, id: u64, answer: String| {
-            me.pending = None;
-            me.follow = true;
-            Action::RefineRespondInteraction { id, answer }
-        };
-        match pending {
-            RefinePending::Approval { id, .. } => match key.code {
-                KeyCode::Enter | KeyCode::Char('y') => respond(self, id, "approve".to_string()),
-                KeyCode::Esc | KeyCode::Char('r') | KeyCode::Char('n') => {
-                    respond(self, id, String::new())
+        match m.gesture {
+            MouseGesture::ScrollUp => s.row = s.row.saturating_sub(1),
+            MouseGesture::ScrollDown => s.row = (s.row + 1).min(s.box_row()),
+            MouseGesture::RightClick => {}
+            MouseGesture::Click { .. } => match zone.map(|z| (z.kind, z.index)) {
+                Some((ZoneKind::Row, i)) if (i as usize) < s.box_row() => {
+                    s.row = i as usize;
+                    s.commit_row();
                 }
-                _ => Action::None,
+                Some((ZoneKind::TextSurface, _)) => s.row = s.box_row(),
+                _ => {}
             },
-            RefinePending::Decision {
-                id,
-                options,
-                selected,
-                ..
-            } => {
-                if options.is_empty() {
-                    match key.code {
-                        KeyCode::Enter => {
-                            let answer = self.input.trim().to_string();
-                            if answer.is_empty() {
-                                return Action::None;
-                            }
-                            self.input.clear();
-                            self.cursor = 0;
-                            respond(self, id, answer)
-                        }
-                        KeyCode::Esc => respond(self, id, String::new()),
-                        _ => Action::None,
-                    }
-                } else {
-                    match key.code {
-                        KeyCode::Up => {
-                            if let Some(RefinePending::Decision { selected, .. }) =
-                                self.pending.as_mut()
-                            {
-                                *selected = selected.saturating_sub(1);
-                            }
-                            Action::None
-                        }
-                        KeyCode::Down => {
-                            if let Some(RefinePending::Decision { selected, .. }) =
-                                self.pending.as_mut()
-                            {
-                                *selected = (*selected + 1).min(options.len() - 1);
-                            }
-                            Action::None
-                        }
-                        KeyCode::Enter => respond(self, id, options[selected].clone()),
-                        KeyCode::Esc => respond(self, id, String::new()),
-                        _ => Action::None,
+        }
+        Action::None
+    }
+
+    /// Hand the answer back to the agent and take the card down.
+    ///
+    /// The card is gone once it is answered, so what was asked and what was
+    /// decided is left in the transcript — a decision is part of the
+    /// conversation, not a dialog that happened to it.
+    fn resolve_front(&mut self, id: u64, answer: String) -> Action {
+        if let Some(RefinePending::Ask(s)) = self.pending.front() {
+            let record = ask_record(s, &answer);
+            self.conversation.push(Turn::tool(record));
+        }
+        self.pending.pop_front();
+        self.follow = true;
+        Action::RefineRespondInteraction { id, answer }
+    }
+
+    fn handle_pending_key(&mut self, key: KeyEvent) -> Action {
+        let Some(front) = self.pending.front() else {
+            return Action::None;
+        };
+        let id = front.id();
+        if matches!(front, RefinePending::Approval { .. }) {
+            return match key.code {
+                KeyCode::Enter | KeyCode::Char('y') => self.resolve_front(id, "approve".to_string()),
+                KeyCode::Esc | KeyCode::Char('r') | KeyCode::Char('n') => {
+                    self.resolve_front(id, String::new())
+                }
+                KeyCode::Up | KeyCode::Char('k') => self.scroll_approval(-1),
+                KeyCode::Down | KeyCode::Char('j') => self.scroll_approval(1),
+                KeyCode::PageUp => self.scroll_approval(-10),
+                KeyCode::PageDown => self.scroll_approval(10),
+                _ => Action::None,
+            };
+        }
+        let done = match self.pending.front_mut() {
+            Some(RefinePending::Ask(s)) => Self::fold_ask_key(s, key),
+            _ => None,
+        };
+        match done {
+            Some(answer) => self.resolve_front(id, answer),
+            None => Action::None,
+        }
+    }
+
+    fn scroll_approval(&mut self, delta: isize) -> Action {
+        if let Some(RefinePending::Approval { scroll, .. }) = self.pending.front_mut() {
+            *scroll = scroll.saturating_add_signed(delta);
+        }
+        Action::None
+    }
+
+    /// Fold one key into the card. `Some` is the reply to send; an empty reply
+    /// is a dismissal, which is what the agent already treats it as.
+    ///
+    /// Only keys that cannot be typed navigate. That is the whole point of the
+    /// card: the box is always live, so a letter is always a letter — there is
+    /// no mode to notice being in. The caret keeps Home/End and the word-wise
+    /// Ctrl-arrows; bare ←/→ move between questions instead.
+    fn fold_ask_key(s: &mut AskSession, key: KeyEvent) -> Option<String> {
+        use ratatui::crossterm::event::KeyModifiers;
+
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if ctrl && key.code == KeyCode::Char('s') {
+            return Some(serde_json::to_string(&s.values()).unwrap_or_default());
+        }
+        if key.code != KeyCode::Esc {
+            s.confirm_dismiss = false;
+        }
+        match key.code {
+            KeyCode::Esc => {
+                // Losing a typed answer to a stray Esc is worse than pressing
+                // it twice, and a second Esc is cheaper than a dialog over a
+                // card that deliberately is not one.
+                if s.is_dirty() && !s.confirm_dismiss {
+                    s.confirm_dismiss = true;
+                    return None;
+                }
+                return Some(String::new());
+            }
+            KeyCode::Up => {
+                s.row = s.row.saturating_sub(1);
+                return None;
+            }
+            KeyCode::Down => {
+                s.row = (s.row + 1).min(s.box_row());
+                return None;
+            }
+            KeyCode::Left | KeyCode::BackTab if !ctrl => {
+                let at = s.at.saturating_sub(1);
+                s.go_to(at);
+                return None;
+            }
+            KeyCode::Right | KeyCode::Tab if !ctrl => {
+                let at = s.at + 1;
+                s.go_to(at);
+                return None;
+            }
+            KeyCode::Enter => {
+                let on_option = s.row < s.box_row();
+                let multiple = s.item().multiple;
+                if on_option {
+                    s.commit_row();
+                    // Several answers may apply, so Enter accumulates instead
+                    // of moving on; the user leaves when they are done.
+                    if multiple {
+                        return None;
                     }
                 }
+                if s.is_last() {
+                    return Some(serde_json::to_string(&s.values()).unwrap_or_default());
+                }
+                let at = s.at + 1;
+                s.go_to(at);
+                return None;
             }
+            _ => {}
         }
+
+        let box_row = s.box_row();
+        let a = s.answer_mut();
+        let mut text = std::mem::take(&mut a.text);
+        let mut cursor = a.cursor.min(text.len());
+        let edited = input::handle(&mut text, &mut cursor, key, EditOpts::default());
+        a.text = text;
+        a.cursor = cursor;
+        if edited == Edited::Changed {
+            a.picked.clear();
+            // Typing moves the keyboard onto the box, so what Enter will do is
+            // visible before it is pressed — and arrowing back up to an option
+            // stays an explicit choice to use that option instead.
+            s.row = box_row;
+        }
+        None
     }
 
     pub fn handle_key(&mut self, key: KeyEvent, project: Option<&Project>) -> Action {
@@ -603,13 +864,11 @@ impl RefineScreen {
         if let Some(sel) = self.picker {
             return self.handle_picker_key(key, sel);
         }
-        if let Some(pending) = &self.pending {
-            // Free-text decisions use the input; approvals and choices capture all keys.
-            let free_text =
-                matches!(pending, RefinePending::Decision { options, .. } if options.is_empty());
-            if !free_text || matches!(key.code, KeyCode::Enter | KeyCode::Esc) {
-                return self.handle_pending_key(key);
-            }
+        // Unconditional: a free-text answer used to fall through to the chat
+        // input and the action table, so a typed answer landed in the wrong
+        // buffer and a `/` opened the command popup over a blocking question.
+        if !self.pending.is_empty() {
+            return self.handle_pending_key(key);
         }
         // Commands come from the table, ahead of the input, so a chord the
         // screen declares is never eaten by the field being typed into.
@@ -738,6 +997,9 @@ impl RefineScreen {
     ) -> Action {
         if let Some(sel) = self.picker {
             return self.handle_picker_mouse(m, sel);
+        }
+        if !self.pending.is_empty() {
+            return self.handle_pending_mouse(m, zone);
         }
         if !matches!(self.popup, Popup::None) {
             match m.gesture {
@@ -1040,24 +1302,17 @@ impl RefineScreen {
                 self.follow = true;
             }
             AppEvent::RefineApprovalRequest { id, summary, diff } => {
-                self.pending = Some(RefinePending::Approval {
+                self.pending.push_back(RefinePending::Approval {
                     id: *id,
                     summary: summary.clone(),
                     diff: diff.clone(),
+                    scroll: 0,
                 });
                 self.follow = true;
             }
-            AppEvent::RefineDecisionRequest {
-                id,
-                question,
-                options,
-            } => {
-                self.pending = Some(RefinePending::Decision {
-                    id: *id,
-                    question: question.clone(),
-                    options: options.clone(),
-                    selected: 0,
-                });
+            AppEvent::RefineDecisionRequest { id, questions } => {
+                self.pending
+                    .push_back(RefinePending::Ask(AskSession::new(*id, questions.clone())));
                 self.follow = true;
             }
             AppEvent::RefineToolInvoked { tool, summary } => {
@@ -1253,7 +1508,7 @@ impl RefineScreen {
 
         // While the session picker or an approval prompt is up, the keyboard
         // belongs to it. The controls grey out rather than vanishing.
-        let live = has_project && self.picker.is_none() && self.pending.is_none();
+        let live = has_project && self.picker.is_none() && self.pending.is_empty();
         let mode = match self.approval_mode {
             ApprovalMode::Auto => "auto",
             ApprovalMode::Ask => "ask",
@@ -1333,7 +1588,11 @@ impl RefineScreen {
         let input_h = 3;
         let status = self.status_line(frame, theme);
 
+        let card_h = self.ask_card_height(area);
         let mut constraints = vec![Constraint::Min(3)];
+        if card_h > 0 {
+            constraints.push(Constraint::Length(card_h));
+        }
         if !self.plan.is_empty() {
             let plan_h = (self.plan.len() as u16 + 2).clamp(4, 10);
             constraints.push(Constraint::Length(plan_h));
@@ -1365,6 +1624,12 @@ impl RefineScreen {
             },
         );
 
+        let mut next = 1;
+        if card_h > 0 {
+            self.render_ask_card(ui, rows[next]);
+            next += 1;
+        }
+
         // Disjoint field borrows: the frame to draw into, the registry to
         // record interactive rects in.
         let zones: &mut crate::ui::kit::Zones = ui.zones;
@@ -1372,7 +1637,6 @@ impl RefineScreen {
 
         self.render_transcript(f, rows[0], frame, theme);
         let input_row = rows[rows.len() - 1];
-        let mut next = 1;
         if !self.plan.is_empty() {
             self.render_plan(f, rows[next], theme);
             next += 1;
@@ -1397,93 +1661,53 @@ impl RefineScreen {
         self.render_input(f, input_row, theme);
         if self.picker.is_some() {
             self.render_session_picker(f, area, theme);
-        } else if self.pending.is_some() {
-            self.render_pending(f, area, theme);
-        } else {
+        } else if matches!(self.pending.front(), Some(RefinePending::Approval { .. })) {
+            self.render_approval(f, area, theme);
+        } else if self.pending.is_empty() {
             self.render_popup(f, zones, area, input_row.y, theme);
         }
     }
 
-    fn render_pending(&self, f: &mut Frame, area: Rect, theme: &Theme) {
-        let Some(pending) = &self.pending else {
+    /// The approval gate stays a modal: it is a yes/no over an edit that is
+    /// already written, and a hard edge is the point. The question card is not,
+    /// because the conversation is what the question is about.
+    fn render_approval(&self, f: &mut Frame, area: Rect, theme: &Theme) {
+        let Some(RefinePending::Approval {
+            summary,
+            diff,
+            scroll,
+            ..
+        }) = self.pending.front()
+        else {
             return;
         };
-        let mut lines: Vec<Line> = Vec::new();
-        let (title, hint) = match pending {
-            RefinePending::Approval { summary, diff, .. } => {
-                lines.push(Line::from(Span::styled(
-                    summary.clone(),
-                    Style::default()
-                        .fg(theme.accent)
-                        .add_modifier(Modifier::BOLD),
-                )));
-                lines.push(Line::raw(""));
-                for l in diff.lines().take(20) {
-                    let color = if l.starts_with('+') {
-                        theme.status_done
-                    } else if l.starts_with('-') {
-                        theme.status_failed
-                    } else {
-                        theme.ink_soft
-                    };
-                    lines.push(Line::from(Span::styled(
-                        l.to_string(),
-                        Style::default().fg(color),
-                    )));
-                }
-                ("Approve edit?", "↵ accept   ·   r / Esc reject")
-            }
-            RefinePending::Decision {
-                question,
-                options,
-                selected,
-                ..
-            } => {
-                lines.push(Line::from(Span::styled(
-                    question.clone(),
-                    Style::default()
-                        .fg(theme.accent)
-                        .add_modifier(Modifier::BOLD),
-                )));
-                lines.push(Line::raw(""));
-                if options.is_empty() {
-                    lines.push(Line::from(Span::styled(
-                        "type your answer below, then ↵",
-                        Style::default().fg(theme.ink_soft),
-                    )));
-                } else {
-                    for (i, opt) in options.iter().enumerate() {
-                        let marker = if i == *selected { "▸ " } else { "  " };
-                        let style = if i == *selected {
-                            Style::default()
-                                .fg(theme.accent)
-                                .add_modifier(Modifier::BOLD)
-                        } else {
-                            Style::default().fg(theme.ink)
-                        };
-                        lines.push(Line::from(Span::styled(format!("{marker}{opt}"), style)));
-                    }
-                }
-                (
-                    "The agent needs a decision",
-                    if options.is_empty() {
-                        "↵ submit   ·   Esc cancel"
-                    } else {
-                        "↑↓ select   ·   ↵ choose   ·   Esc cancel"
-                    },
-                )
-            }
-        };
-        lines.push(Line::raw(""));
-        lines.push(Line::from(Span::styled(
-            hint.to_string(),
-            Style::default().fg(theme.ink_faint),
-        )));
+        let mut lines: Vec<Line> = vec![
+            Line::from(Span::styled(
+                summary.clone(),
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::raw(""),
+        ];
+        for l in diff.lines() {
+            let color = if l.starts_with('+') {
+                theme.status_done
+            } else if l.starts_with('-') {
+                theme.status_failed
+            } else {
+                theme.ink_soft
+            };
+            lines.push(Line::from(Span::styled(
+                l.to_string(),
+                Style::default().fg(color),
+            )));
+        }
 
         let w = area.width.min(72);
-        let h = (lines.len() as u16 + 2)
+        let h = (lines.len() as u16 + 4)
             .min(area.height.saturating_sub(2))
-            .max(5);
+            .max(7);
         let modal = Rect {
             x: area.x + (area.width.saturating_sub(w)) / 2,
             y: area.y + (area.height.saturating_sub(h)) / 2,
@@ -1494,11 +1718,200 @@ impl RefineScreen {
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(theme.accent))
-            .title(format!(" {title} "))
+            .title(" Approve edit? ")
             .style(Style::default().bg(theme.bg_panel));
         let inner = block.inner(modal);
         f.render_widget(block, modal);
-        f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+
+        let hint_row = Rect {
+            y: inner.y + inner.height.saturating_sub(1),
+            height: 1,
+            ..inner
+        };
+        let body = Rect {
+            height: inner.height.saturating_sub(1),
+            ..inner
+        };
+        // The diff scrolls now rather than stopping at twenty lines, so what is
+        // being approved can actually be read before approving it.
+        let max = (lines.len() as u16).saturating_sub(body.height);
+        f.render_widget(
+            Paragraph::new(lines)
+                .wrap(Wrap { trim: false })
+                .scroll(((*scroll as u16).min(max), 0)),
+            body,
+        );
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "↵ accept   ·   r / Esc reject   ·   ↑↓ scroll",
+                Style::default().fg(theme.ink_faint),
+            ))),
+            hint_row,
+        );
+    }
+
+    /// Rows the question card takes out of the chat column.
+    ///
+    /// It is laid out beside the transcript rather than over it: the card is
+    /// where the conversation has got to, so covering the conversation with it
+    /// would hide exactly the context the question is about.
+    fn ask_card_height(&self, area: Rect) -> u16 {
+        let Some(RefinePending::Ask(s)) = self.pending.front() else {
+            return 0;
+        };
+        let width = area.width.saturating_sub(8).max(8);
+        let prompt = crate::ui::kit::editor::wrap(&s.item().question, width).len() as u16;
+        let options = (s.item().options.len() as u16).min(6);
+        let want = 1 + prompt.clamp(1, 4) + options + 2;
+        want.min(area.height.saturating_sub(8).max(5))
+    }
+
+    fn render_ask_card(&self, ui: &mut crate::ui::kit::Ui, area: Rect) {
+        use crate::ui::kit::card::Card;
+        use crate::ui::kit::list::{self, ListState, Row};
+        use crate::ui::kit::{ZoneId, ZoneKind};
+
+        let Some(RefinePending::Ask(s)) = self.pending.front() else {
+            return;
+        };
+        if area.height == 0 {
+            return;
+        }
+        let item = s.item();
+        let answer = s.answer();
+        let accent = ui.theme.accent;
+        let ink = ui.theme.ink;
+        let soft = ui.theme.ink_soft;
+        let faint = ui.theme.ink_faint;
+
+        let meta = if s.items.len() > 1 {
+            format!("{}/{}  ← →", s.at + 1, s.items.len())
+        } else {
+            String::new()
+        };
+        let mut card = Card::new("The agent needs a decision").accent(accent);
+        if !meta.is_empty() {
+            card.meta = Some(meta);
+        }
+        let body = card.render(ui, area);
+        if body.height == 0 {
+            return;
+        }
+
+        let prompt_lines = crate::ui::kit::editor::wrap(&item.question, body.width);
+        let prompt_h = (prompt_lines.len() as u16).min(body.height.saturating_sub(2)).max(1);
+        for (n, range) in prompt_lines.iter().take(prompt_h as usize).enumerate() {
+            ui.text(
+                Rect {
+                    y: body.y + n as u16,
+                    height: 1,
+                    ..body
+                },
+                item.question[range.clone()].to_string(),
+                Style::default().fg(ink).add_modifier(Modifier::BOLD),
+            );
+        }
+
+        let rest = Rect {
+            y: body.y + prompt_h,
+            height: body.height.saturating_sub(prompt_h),
+            ..body
+        };
+        if rest.height < 2 {
+            return;
+        }
+        // The hint owns the last row, the box the one above it, and whatever is
+        // left goes to the options — which window themselves.
+        let hint_row = Rect {
+            y: rest.y + rest.height - 1,
+            height: 1,
+            ..rest
+        };
+        let box_row = Rect {
+            y: hint_row.y.saturating_sub(1),
+            height: 1,
+            ..rest
+        };
+        let opts_area = Rect {
+            height: rest.height.saturating_sub(2),
+            ..rest
+        };
+
+        if !item.options.is_empty() && opts_area.height > 0 {
+            let mut state = ListState::new();
+            if s.row < item.options.len() {
+                state.select(Some(s.row));
+            }
+            let picked = answer.picked.clone();
+            let options = item.options.clone();
+            let multiple = item.multiple;
+            list::render(
+                ui,
+                opts_area,
+                &mut state,
+                options.len(),
+                list::Opts::default(),
+                |i| {
+                    let mark = if picked.contains(&i) {
+                        if multiple { "[x] " } else { "◉ " }
+                    } else if multiple {
+                        "[ ] "
+                    } else {
+                        "○ "
+                    };
+                    Row::new(Line::from(vec![
+                        Span::styled(mark.to_string(), Style::default().fg(accent)),
+                        Span::styled(options[i].clone(), Style::default().fg(ink)),
+                    ]))
+                },
+            );
+        }
+
+        let on_box = s.row >= item.options.len();
+        let st = ui.interactive(box_row, ZoneId::new(ZoneKind::TextSurface, 0), on_box);
+        let bg = ui.surface_of(st);
+        ui.fill(box_row, Style::default().bg(bg));
+        let width = box_row.width.saturating_sub(2) as usize;
+        let mut spans = vec![Span::styled(
+            "› ".to_string(),
+            Style::default().fg(if on_box { accent } else { faint }).bg(bg),
+        )];
+        if answer.text.is_empty() && !on_box {
+            spans.push(Span::styled(
+                truncate_cols("or type your own answer", width),
+                Style::default().fg(faint).bg(bg),
+            ));
+        } else {
+            let (before, after) = input::caret_halves(&answer.text, answer.cursor, width);
+            spans.push(Span::styled(before, Style::default().fg(ink).bg(bg)));
+            if on_box {
+                spans.push(Span::styled(
+                    "▏".to_string(),
+                    Style::default().fg(ui.theme.stream_cursor).bg(bg),
+                ));
+            }
+            spans.push(Span::styled(after, Style::default().fg(ink).bg(bg)));
+        }
+        ui.line(box_row, Line::from(spans), Style::default().bg(bg));
+
+        let hint = if s.confirm_dismiss {
+            "Esc again to dismiss without answering".to_string()
+        } else {
+            let enter = if item.multiple {
+                "↵ toggle"
+            } else if s.is_last() {
+                "↵ submit"
+            } else {
+                "↵ next"
+            };
+            let nav = if s.items.len() > 1 { " · ←→ question" } else { "" };
+            format!("↑↓ choose · type to answer{nav} · {enter} · ^s send · Esc dismiss")
+        };
+        ui.text(
+            hint_row,
+            truncate_cols(&hint, hint_row.width as usize),
+            Style::default().fg(soft),
+        );
     }
 
     fn render_status(&self, f: &mut Frame, area: Rect, line: Line<'static>, theme: &Theme) {
@@ -2892,5 +3305,223 @@ mod tests {
         assert_eq!(s.input, "fix @glossary ");
         assert_eq!(s.cursor, s.input.len());
         assert!(matches!(s.popup, Popup::None));
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::from(code)
+    }
+
+    fn typed(c: char) -> KeyEvent {
+        KeyEvent::from(KeyCode::Char(c))
+    }
+
+    fn ask(questions: Vec<RefineQuestion>) -> AppEvent {
+        AppEvent::RefineDecisionRequest { id: 7, questions }
+    }
+
+    fn q(text: &str, options: &[&str]) -> RefineQuestion {
+        RefineQuestion {
+            question: text.to_string(),
+            options: options.iter().map(|s| s.to_string()).collect(),
+            multiple: false,
+        }
+    }
+
+    /// The fall-through this replaced: a free-text answer used to be typed into
+    /// the shared chat buffer, so it survived the card and went to the agent as
+    /// the next message.
+    #[test]
+    fn typing_an_answer_never_reaches_the_chat_input() {
+        let mut s = RefineScreen::new();
+        s.on_app_event(&ask(vec![q("Which rendering?", &[])]));
+        for c in "ทาคาฮาชิ".chars() {
+            s.handle_key(typed(c), None);
+        }
+        assert!(s.input.is_empty(), "the chat buffer must stay untouched");
+        let Some(RefinePending::Ask(sess)) = s.pending.front() else {
+            panic!("the card should still be up");
+        };
+        assert_eq!(sess.answer().text, "ทาคาฮาชิ");
+    }
+
+    /// `/` used to open the slash-command popup over a blocking question,
+    /// because the key gate only claimed Enter and Esc.
+    #[test]
+    fn a_slash_does_not_open_the_command_popup_while_a_question_is_up() {
+        let mut s = RefineScreen::new();
+        s.on_app_event(&ask(vec![q("Which rendering?", &[])]));
+        s.handle_key(typed('/'), None);
+        assert!(
+            matches!(s.popup, Popup::None),
+            "a blocking question owns the keyboard"
+        );
+        assert!(s.is_capturing(), "and says so, so globals stay suppressed");
+    }
+
+    /// Several questions in one call are one card, and the reply carries every
+    /// answer in order — which is the whole reason the agent is told to batch.
+    #[test]
+    fn every_question_in_one_call_is_asked_and_answered_in_order() {
+        let mut s = RefineScreen::new();
+        s.on_app_event(&ask(vec![
+            q("Rendering for 高橋?", &["ทาคาฮาชิ", "ทากาฮาชิ"]),
+            q("Keep the honorific?", &["yes", "no"]),
+        ]));
+
+        // First question: pick the second option, which advances.
+        s.handle_key(key(KeyCode::Down), None);
+        assert!(matches!(s.handle_key(key(KeyCode::Enter), None), Action::None));
+        // Second question: type instead of picking.
+        for c in "only for elders".chars() {
+            s.handle_key(typed(c), None);
+        }
+        let action = s.handle_key(key(KeyCode::Enter), None);
+        let Action::RefineRespondInteraction { id, answer } = action else {
+            panic!("the last question should submit, got {action:?}");
+        };
+        assert_eq!(id, 7);
+        assert_eq!(
+            serde_json::from_str::<Vec<String>>(&answer).unwrap(),
+            vec!["ทากาฮาชิ".to_string(), "only for elders".to_string()]
+        );
+        assert!(s.pending.is_empty(), "the card goes when it is answered");
+    }
+
+    /// ←→ revisit an earlier question instead of a separate review step.
+    #[test]
+    fn arrows_revisit_an_earlier_question_without_losing_its_answer() {
+        let mut s = RefineScreen::new();
+        s.on_app_event(&ask(vec![q("One?", &["a", "b"]), q("Two?", &["c", "d"])]));
+        s.handle_key(key(KeyCode::Enter), None);
+        s.handle_key(key(KeyCode::Left), None);
+
+        let Some(RefinePending::Ask(sess)) = s.pending.front() else {
+            panic!("card gone");
+        };
+        assert_eq!(sess.at, 0, "← should go back a question");
+        assert_eq!(sess.answers[0].picked, vec![0], "and keep what was answered");
+    }
+
+    /// Two sub-agents can each raise a question. The second used to overwrite
+    /// the first, stranding a oneshot the agent was still awaiting.
+    #[test]
+    fn a_second_request_does_not_orphan_the_first() {
+        let mut s = RefineScreen::new();
+        s.on_app_event(&ask(vec![q("First?", &[])]));
+        s.on_app_event(&AppEvent::RefineDecisionRequest {
+            id: 8,
+            questions: vec![q("Second?", &[])],
+        });
+        assert_eq!(s.pending.len(), 2);
+
+        for c in "one".chars() {
+            s.handle_key(typed(c), None);
+        }
+        let first = s.handle_key(key(KeyCode::Enter), None);
+        assert!(
+            matches!(first, Action::RefineRespondInteraction { id: 7, .. }),
+            "the front card answers first, got {first:?}"
+        );
+        assert_eq!(s.pending.len(), 1, "the queued one is still there");
+        let Some(RefinePending::Ask(sess)) = s.pending.front() else {
+            panic!("card gone");
+        };
+        assert_eq!(sess.id, 8);
+        assert!(
+            sess.answer().text.is_empty(),
+            "and did not inherit the first card's typing"
+        );
+    }
+
+    /// Dismissal is still an empty reply, which is what the agent reads as one.
+    #[test]
+    fn esc_dismisses_and_confirms_first_when_something_was_typed() {
+        let mut s = RefineScreen::new();
+        s.on_app_event(&ask(vec![q("Which?", &[])]));
+        assert!(
+            matches!(s.handle_key(key(KeyCode::Esc), None), Action::RefineRespondInteraction { answer, .. } if answer.is_empty()),
+            "an untouched card goes on the first Esc"
+        );
+
+        s.on_app_event(&ask(vec![q("Which?", &[])]));
+        s.handle_key(typed('x'), None);
+        assert!(
+            matches!(s.handle_key(key(KeyCode::Esc), None), Action::None),
+            "a typed answer is not thrown away by one keystroke"
+        );
+        assert!(matches!(
+            s.handle_key(key(KeyCode::Esc), None),
+            Action::RefineRespondInteraction { .. }
+        ));
+    }
+
+    /// A question that offers options can still be answered in prose, and what
+    /// was typed wins — typing it is the more specific act.
+    #[test]
+    fn a_typed_answer_beats_a_picked_option() {
+        let mut s = RefineScreen::new();
+        s.on_app_event(&ask(vec![q("Which?", &["a", "b"])]));
+        s.handle_key(key(KeyCode::Down), None);
+        s.handle_key(key(KeyCode::Down), None);
+        for c in "neither".chars() {
+            s.handle_key(typed(c), None);
+        }
+        let Action::RefineRespondInteraction { answer, .. } = s.handle_key(key(KeyCode::Enter), None)
+        else {
+            panic!("should submit");
+        };
+        assert_eq!(
+            serde_json::from_str::<Vec<String>>(&answer).unwrap(),
+            vec!["neither".to_string()]
+        );
+    }
+
+    /// The agent opts into several answers, and then Enter accumulates rather
+    /// than moving on — otherwise the second pick is unreachable.
+    #[test]
+    fn a_multiple_choice_question_accumulates_picks() {
+        let mut s = RefineScreen::new();
+        s.on_app_event(&ask(vec![RefineQuestion {
+            question: "Which chapters?".into(),
+            options: vec!["1".into(), "2".into(), "3".into()],
+            multiple: true,
+        }]));
+        s.handle_key(key(KeyCode::Enter), None);
+        s.handle_key(key(KeyCode::Down), None);
+        s.handle_key(key(KeyCode::Down), None);
+        s.handle_key(key(KeyCode::Enter), None);
+
+        let Some(RefinePending::Ask(sess)) = s.pending.front() else {
+            panic!("a multi-select card must not submit on the first Enter");
+        };
+        assert_eq!(sess.answers[0].picked, vec![0, 2]);
+        let Action::RefineRespondInteraction { answer, .. } =
+            s.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL), None)
+        else {
+            panic!("^s should send");
+        };
+        assert_eq!(
+            serde_json::from_str::<Vec<String>>(&answer).unwrap(),
+            vec!["1, 3".to_string()]
+        );
+    }
+
+    /// The diff used to stop at twenty lines with no way to see the rest, which
+    /// is a poor basis for approving an edit.
+    #[test]
+    fn a_long_diff_scrolls_rather_than_truncating() {
+        let mut s = RefineScreen::new();
+        let diff = (0..60).map(|i| format!("+line {i}")).collect::<Vec<_>>().join("\n");
+        s.on_app_event(&AppEvent::RefineApprovalRequest {
+            id: 3,
+            summary: "rewrite ch.3".into(),
+            diff,
+        });
+        s.handle_key(key(KeyCode::Down), None);
+        s.handle_key(key(KeyCode::PageDown), None);
+        let Some(RefinePending::Approval { scroll, .. }) = s.pending.front() else {
+            panic!("approval gone");
+        };
+        assert_eq!(*scroll, 11, "the diff scrolls");
     }
 }
