@@ -1201,7 +1201,7 @@ fn refine(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
         .refine
         .blocks
         .iter()
-        .map(|b| (b.role(), b.to_markdown(), b.streaming))
+        .map(|b| (b.role(), b.text(), b.streaming))
         .collect();
 
     toolbar_row(ui, |ui| {
