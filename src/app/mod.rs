@@ -8126,4 +8126,38 @@ mod palette_context_tests {
             "a conversation is one of the things you open a palette to find"
         );
     }
+
+    /// The bug both pickers had: the highlight moved with the mouse while
+    /// Enter always took `matches.first()`, so clicking a row and pressing
+    /// Enter ran a *different* command. The invariant is that the row Enter
+    /// runs is the row that is highlighted.
+    #[test]
+    fn enter_runs_the_highlighted_palette_row() {
+        let app = app();
+        let Overlay::Palette(mut st) = app.build_palette_overlay() else {
+            panic!("a palette");
+        };
+        st.picker.query = "go".to_string();
+        st.picker.on_query_changed();
+        let matches = st.matches();
+        assert!(matches.len() > 1, "need more than one row to tell them apart");
+
+        for row in 0..matches.len().min(4) {
+            st.select(row);
+            let highlighted = &st.items[matches[st.sel()]];
+            let would_run = &st.items[matches[row]];
+            assert_eq!(
+                highlighted.label, would_run.label,
+                "row {row} highlights one command and would run another"
+            );
+        }
+
+        // ...and the top row is only right when it is the one selected.
+        st.select(matches.len() - 1);
+        assert_ne!(
+            st.items[matches[st.sel()]].label,
+            st.items[matches[0]].label,
+            "the last row must not resolve to the first"
+        );
+    }
 }

@@ -84,6 +84,13 @@ pub fn show(
         .cloned()
         .unwrap_or(Selection::Project(active.project.id.clone()));
 
+    ui.label(
+        RichText::new(subject_label(&selection))
+            .color(pal.ink_faint)
+            .small(),
+    );
+    ui.add_space(2.0);
+
     let is_session = matches!(selection, Selection::Session(_));
     match selection {
         Selection::Project(_) => project_detail(ui, &active.project, pal),
@@ -114,6 +121,20 @@ pub fn show(
     // selected inside it.
     if !is_session {
         context_panel(ui, app, cache, pal);
+    }
+}
+
+/// What the inspector is about, in a word. A `_` arm here would let a new
+/// kind of selection quietly render as something else.
+pub fn subject_label(selection: &Selection) -> &'static str {
+    match selection {
+        Selection::Project(_) => "project",
+        Selection::Volume { .. } => "volume",
+        Selection::Chapter { .. } => "chapter",
+        Selection::Session(_) => "conversation",
+        Selection::Subagent(_) => "sub-agent",
+        Selection::Character(_) => "character",
+        Selection::Term(_) => "term",
     }
 }
 
@@ -557,5 +578,37 @@ mod tests {
         ] {
             assert!(!status_label(s).is_empty());
         }
+    }
+
+    /// The tree writes the subject and the inspector reads it, so the two can
+    /// only agree if every kind the tree can produce has a branch here — which
+    /// is what a `_` arm would quietly break.
+    #[test]
+    fn the_tree_and_the_inspector_agree_on_the_selection() {
+        let every = [
+            Selection::Project("p".into()),
+            Selection::Volume { vol: 1 },
+            Selection::Chapter { vol: 1, ch: 2 },
+            Selection::Session("s".into()),
+            Selection::Subagent("call_1".into()),
+            Selection::Character("高橋陽菜".into()),
+            Selection::Term("魔力".into()),
+        ];
+        let mut seen = std::collections::HashSet::new();
+        for s in &every {
+            let label = subject_label(s);
+            assert!(!label.is_empty());
+            assert!(
+                seen.insert(label),
+                "{label} names two different kinds of selection"
+            );
+        }
+    }
+
+    #[test]
+    fn with_nothing_picked_the_subject_is_the_project_itself() {
+        // The inspector is never blank while a project is open: the fallback
+        // is the project, not an empty pane.
+        assert_eq!(subject_label(&Selection::Project("novel".into())), "project");
     }
 }

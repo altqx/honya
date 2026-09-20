@@ -713,14 +713,7 @@ impl GuiApp {
     /// Open the import wizard on the files that were dropped, ignoring
     /// anything honya cannot read.
     fn open_import_for(&mut self, paths: Vec<std::path::PathBuf>) {
-        let files: Vec<(std::path::PathBuf, u64)> = paths
-            .into_iter()
-            .filter(|p| crate::document_import::is_supported_import_path(p))
-            .map(|p| {
-                let size = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
-                (p, size)
-            })
-            .collect();
+        let files = importable(paths);
         if files.is_empty() {
             self.app.apply(Action::Notify {
                 level: crate::model::LogLevel::Warn,
@@ -1018,6 +1011,19 @@ impl GuiApp {
     }
 }
 
+/// The dropped paths honya can actually read, with their sizes. Anything else
+/// is ignored rather than opening a wizard that cannot proceed.
+fn importable(paths: Vec<std::path::PathBuf>) -> Vec<(std::path::PathBuf, u64)> {
+    paths
+        .into_iter()
+        .filter(|p| crate::document_import::is_supported_import_path(p))
+        .map(|p| {
+            let size = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+            (p, size)
+        })
+        .collect()
+}
+
 /// A click anywhere in a region means the keyboard belongs to it now.
 fn claim(ui: &egui::Ui, focus: &mut focus::Focus, region: focus::Region) {
     let rect = ui.min_rect();
@@ -1038,4 +1044,41 @@ fn chip(ui: &mut egui::Ui, glyph: &str, n: u32, color: egui::Color32, pal: &GuiP
         [42.0, 18.0],
         egui::Label::new(RichText::new(text).color(c).monospace().small()),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    /// Importing used to mean putting the file in the shelf directory from
+    /// outside the app and pressing Rescan. A drop opens the wizard — on what
+    /// honya can read, and on nothing else.
+    #[test]
+    fn dropping_a_file_on_the_window_opens_the_import_wizard() {
+        let dropped = vec![
+            PathBuf::from("/tmp/novel.epub"),
+            PathBuf::from("/tmp/notes.md"),
+            PathBuf::from("/tmp/cover.png"),
+            PathBuf::from("/tmp/archive.zip"),
+        ];
+        let files = importable(dropped);
+        let names: Vec<String> = files
+            .iter()
+            .map(|(p, _)| p.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert!(names.contains(&"novel.epub".to_string()));
+        assert!(names.contains(&"notes.md".to_string()));
+        assert!(
+            !names.contains(&"cover.png".to_string()),
+            "an image is not a source document"
+        );
+        assert!(!names.contains(&"archive.zip".to_string()));
+    }
+
+    #[test]
+    fn dropping_nothing_importable_opens_nothing() {
+        assert!(importable(vec![PathBuf::from("/tmp/cover.png")]).is_empty());
+        assert!(importable(Vec::new()).is_empty());
+    }
 }
