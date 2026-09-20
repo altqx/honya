@@ -594,6 +594,9 @@ pub struct RefineCtx {
     pub session_id: String,
     pub interact: RefineInteract,
     pub steering: Arc<Mutex<VecDeque<UserTurn>>>,
+    /// Shared with `App` so the tasks pane can cancel one child without
+    /// waiting for the turn to end — the same shape as `RunControl`.
+    pub registry: SubagentRegistry,
 }
 
 /// Chapter-edit approval policy cycled by Ctrl+Tab.
@@ -757,7 +760,7 @@ pub(crate) fn refine_tools_vec() -> Vec<Tool> {
 
 /// Owns the live chat thread so multi-turn history persists.
 pub async fn run_refine_agent(ctx: RefineCtx, mut rx: UnboundedReceiver<RefineControl>) {
-    let registry = SubagentRegistry::default();
+    let registry = ctx.registry.clone();
     let tools = RefineTools::for_ctx(&ctx, registry.clone());
     let mut req = ChatRequest::new(
         ctx.model.model.clone(),
@@ -1041,6 +1044,18 @@ async fn drive_subagent(run: SubagentRun) -> ToolResult {
     registry.finish(&event_id, status, json);
     emit_subagent_terminal(&tx, &event_id, status, summary);
     result
+}
+
+/// A line of a child's own conversation, so its block can be opened and read.
+/// Silent for the root agent, whose transcript is the screen.
+fn emit_subagent_turn(tx: &EventTx, parent_path: &str, text: String) {
+    if parent_path.is_empty() || text.trim().is_empty() {
+        return;
+    }
+    tx.send(AppEvent::RefineSubagentTurn {
+        id: parent_path.to_string(),
+        text,
+    });
 }
 
 fn emit_subagent_activity(tx: &EventTx, parent_path: &str, _task_depth: usize, activity: String) {
@@ -1632,6 +1647,20 @@ async fn run_compacting_tool_loop(
 
         let choice = resp.choices.first().ok_or(LlmError::EmptyChoices)?;
         let tool_calls: Vec<ToolCall> = choice.message.tool_calls.clone().unwrap_or_default();
+        if let Some(text) = choice.message.content.as_deref() {
+            emit_subagent_turn(tx, parent_path, text.trim().to_string());
+        }
+        for call in &tool_calls {
+            emit_subagent_turn(
+                tx,
+                parent_path,
+                format!(
+                    "· {} {}",
+                    call.function.name,
+                    summarize_args(&call.function.arguments)
+                ),
+            );
+        }
 
         if tool_calls.is_empty() {
             if choice

@@ -441,6 +441,17 @@ pub struct RefineScreen {
     /// render while the picker is open, for click hit-testing.
     picker_area: Rect,
     picker_start: usize,
+    /// The tasks pane's selection while it is open. Like the session picker,
+    /// it owns the keyboard while it is up, which is what makes bare letters
+    /// safe there and nowhere else on this screen.
+    tasks: Option<usize>,
+    tasks_hide_done: bool,
+    tasks_area: Rect,
+    tasks_start: usize,
+    /// A sub-agent's own transcript, opened full-frame. Read-only: the way to
+    /// talk to a child is the agent's `message_subagent`, not this.
+    child: Option<String>,
+    child_scroll: u16,
     /// Slash/mention popup list geometry, refreshed on render while open.
     popup_area: Rect,
     popup_offset: usize,
@@ -461,6 +472,7 @@ const R_COMPACT: u16 = 3;
 const R_EXPORT: u16 = 4;
 const R_UNDO: u16 = 5;
 const R_COPY: u16 = 6;
+const R_TASKS: u16 = 7;
 
 impl RefineScreen {
     pub fn new() -> Self {
@@ -497,6 +509,12 @@ impl RefineScreen {
             input_area: Rect::default(),
             picker_area: Rect::default(),
             picker_start: 0,
+            tasks: None,
+            tasks_hide_done: false,
+            tasks_area: Rect::default(),
+            tasks_start: 0,
+            child: None,
+            child_scroll: 0,
             popup_area: Rect::default(),
             popup_offset: 0,
         }
@@ -521,8 +539,13 @@ impl RefineScreen {
     }
 
     /// Consulted by `App::screen_is_capturing()` to suppress single-letter globals.
+    /// True when a pane that owns the whole keyboard is up.
+    pub fn owns_keyboard(&self) -> bool {
+        self.child.is_some() || self.tasks.is_some()
+    }
+
     pub fn is_capturing(&self) -> bool {
-        self.focused || self.picker.is_some() || !self.pending.is_empty()
+        self.focused || self.picker.is_some() || !self.pending.is_empty() || self.owns_keyboard()
     }
 
     pub fn approval_mode(&self) -> crate::agents::refine::ApprovalMode {
@@ -845,6 +868,14 @@ impl RefineScreen {
             return Action::RefineCancel;
         }
 
+        // Each of these owns the keyboard while it is up, which is what makes
+        // bare letters safe inside them and nowhere else on this screen.
+        if self.child.is_some() {
+            return self.handle_child_key(key);
+        }
+        if let Some(sel) = self.tasks {
+            return self.handle_tasks_key(key, sel);
+        }
         if let Some(sel) = self.picker {
             return self.handle_picker_key(key, sel);
         }
@@ -876,6 +907,21 @@ impl RefineScreen {
         if !self.focused {
             let shift = key.modifiers.contains(KeyModifiers::SHIFT);
             match key.code {
+                KeyCode::Enter
+                    if self
+                        .selected
+                        .and_then(|i| self.blocks.get(i))
+                        .and_then(|b| b.subagent_id())
+                        .is_some() =>
+                {
+                    self.child = self
+                        .selected
+                        .and_then(|i| self.blocks.get(i))
+                        .and_then(|b| b.subagent_id())
+                        .map(str::to_string);
+                    self.child_scroll = 0;
+                    return Action::None;
+                }
                 KeyCode::Char(_) | KeyCode::Enter => self.focused = true,
                 KeyCode::Up if shift => {
                     self.jump_turn(-1);
@@ -1039,6 +1085,38 @@ impl RefineScreen {
         m: MouseInput,
         zone: Option<crate::ui::kit::ZoneId>,
     ) -> Action {
+        if self.child.is_some() {
+            match m.gesture {
+                MouseGesture::ScrollUp => {
+                    self.child_scroll = self.child_scroll.saturating_sub(3)
+                }
+                MouseGesture::ScrollDown => {
+                    self.child_scroll = self.child_scroll.saturating_add(3)
+                }
+                MouseGesture::RightClick => self.child = None,
+                _ => {}
+            }
+            return Action::None;
+        }
+        if let Some(sel) = self.tasks {
+            let rows = self.task_rows();
+            match m.gesture {
+                MouseGesture::ScrollUp => self.tasks = Some(sel.saturating_sub(1)),
+                MouseGesture::ScrollDown => {
+                    self.tasks = Some((sel + 1).min(rows.len().saturating_sub(1)))
+                }
+                MouseGesture::RightClick => self.tasks = None,
+                MouseGesture::Click { .. } if m.in_rect(self.tasks_area) => {
+                    if let Some(i) = zone.and_then(|z| z.row_index())
+                        && i < rows.len()
+                    {
+                        self.tasks = Some(i);
+                    }
+                }
+                MouseGesture::Click { .. } => self.tasks = None,
+            }
+            return Action::None;
+        }
         if let Some(sel) = self.picker {
             return self.handle_picker_mouse(m, sel);
         }
@@ -1713,6 +1791,9 @@ impl RefineScreen {
             Act::menu(R_UNDO, "undo last chapter edit", Accel::ctrl('u')).when(live),
             Act::menu(R_COPY, "copy selected block", Accel::ctrl('b'))
                 .when(live && self.selected.is_some()),
+            Act::menu(R_TASKS, "sub-agent tasks", Accel::ctrl('g'))
+                .count(self.running_subagents() as u32)
+                .when(has_project),
         ]
     }
 
@@ -1735,12 +1816,30 @@ impl RefineScreen {
             R_COPY => Action::RefineCopyBlock {
                 text: self.copy_selected()?,
             },
+            R_TASKS => {
+                self.toggle_tasks();
+                return None;
+            }
             _ => return None,
         })
     }
 
     pub fn hints(&self) -> &'static [(&'static str, &'static str)] {
-        if self.picker.is_some() {
+        if self.child.is_some() {
+            &[
+                ("↑↓", "scroll"),
+                ("⌃C", "stop it"),
+                ("q", "close"),
+            ]
+        } else if self.tasks.is_some() {
+            &[
+                ("↑↓", "select"),
+                ("↵", "open"),
+                ("x", "stop"),
+                ("h", "hide done"),
+                ("esc", "close"),
+            ]
+        } else if self.picker.is_some() {
             &[
                 ("↑↓", "select"),
                 ("↵", "open"),
@@ -1855,7 +1954,11 @@ impl RefineScreen {
             );
         }
         self.render_input(f, input_row, theme);
-        if self.picker.is_some() {
+        if let Some(id) = self.child.clone() {
+            self.render_child(f, area, &id, theme);
+        } else if self.tasks.is_some() {
+            self.render_tasks(f, zones, area, frame, theme);
+        } else if self.picker.is_some() {
             self.render_session_picker(f, area, theme);
         } else if matches!(self.pending.front(), Some(RefinePending::Approval { .. })) {
             self.render_approval(f, area, theme);
@@ -2293,6 +2396,200 @@ impl RefineScreen {
         );
     }
 
+    /// Every run this session started, with what it is allowed to do, what it
+    /// costs and what it is doing — the things you need before deciding to
+    /// stop one.
+    fn render_tasks(
+        &mut self,
+        f: &mut Frame,
+        zones: &mut crate::ui::kit::Zones,
+        area: Rect,
+        frame: u64,
+        theme: &Theme,
+    ) {
+        let Some(sel) = self.tasks else { return };
+        let rows = self.task_rows();
+        let running = self.running_subagents();
+        let title = if self.tasks_hide_done {
+            format!(" ◇ tasks · {running} running · hiding done ")
+        } else {
+            format!(" ◇ tasks · {running} running ")
+        };
+        let panel = Block::default()
+            .borders(Borders::ALL)
+            .border_set(theme::hairline_set())
+            .border_style(Style::default().fg(theme.accent))
+            .title(Span::styled(title, Style::default().fg(theme.ink_soft)))
+            .style(Style::default().bg(theme.bg_inset));
+        let w = area.width.min(78);
+        let h = area.height.min((rows.len() as u16).saturating_add(4).max(6));
+        let modal = Rect {
+            x: area.x + (area.width.saturating_sub(w)) / 2,
+            y: area.y + (area.height.saturating_sub(h)) / 2,
+            width: w,
+            height: h,
+        };
+        let inner = panel.inner(modal);
+        f.render_widget(Clear, modal);
+        f.render_widget(panel, modal);
+        self.tasks_area = inner;
+        if inner.width == 0 || inner.height < 2 {
+            return;
+        }
+
+        let list_h = inner.height - 1;
+        self.tasks_start = popup_window_start(rows.len(), sel, list_h as usize);
+        let cols = inner.width as usize;
+        for (n, idx) in rows
+            .iter()
+            .skip(self.tasks_start)
+            .take(list_h as usize)
+            .enumerate()
+        {
+            let run = &self.subagents[*idx];
+            let (mark, style) = match run.status {
+                RefineSubagentStatus::Running => (
+                    theme::refine_spinner_frame(frame),
+                    Style::default().fg(theme.accent),
+                ),
+                RefineSubagentStatus::Succeeded => ("✓", Style::default().fg(theme.status_done)),
+                RefineSubagentStatus::Failed => ("!", Style::default().fg(theme.status_failed)),
+                RefineSubagentStatus::Canceled => ("×", Style::default().fg(theme.ink_faint)),
+            };
+            let chosen = self.tasks_start + n == sel;
+            let style = if chosen {
+                style.add_modifier(Modifier::BOLD).bg(theme.bg_panel)
+            } else {
+                style
+            };
+            let detail = if run.activity.trim().is_empty() {
+                run.summary.trim()
+            } else {
+                run.activity.trim()
+            };
+            let line = format!(
+                "{} {mark} {} · {} · {} · {}  {}",
+                if chosen { "▌" } else { " " },
+                truncate_cols(run.title.trim(), 26),
+                if run.role.is_empty() { "—" } else { &run.role },
+                short_model(&run.model),
+                fmt_elapsed(run.elapsed()),
+                truncate_cols(detail, 24),
+            );
+            let rect = Rect {
+                y: inner.y + n as u16,
+                height: 1,
+                ..inner
+            };
+            zones.push(
+                rect,
+                crate::ui::kit::ZoneId::new(
+                    crate::ui::kit::ZoneKind::Row,
+                    (self.tasks_start + n) as u32,
+                ),
+            );
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(truncate_cols(&line, cols), style))),
+                rect,
+            );
+        }
+
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                truncate_cols(
+                    "↑↓ select · ↵ open · x stop · h hide done · esc close",
+                    cols,
+                ),
+                Style::default().fg(theme.ink_faint),
+            ))),
+            Rect {
+                y: inner.y + inner.height - 1,
+                height: 1,
+                ..inner
+            },
+        );
+    }
+
+    /// One sub-agent's own conversation, full frame and read-only. The way to
+    /// talk to a child is the agent's `message_subagent`; a panel that looked
+    /// like a chat but could not send would be a worse lie than no panel.
+    fn render_child(&mut self, f: &mut Frame, area: Rect, id: &str, theme: &Theme) {
+        let run = self.subagents.iter().find(|r| r.id == id);
+        let (title, status, elapsed) = match run {
+            Some(r) => (
+                r.title.clone(),
+                match r.status {
+                    RefineSubagentStatus::Running => "running",
+                    RefineSubagentStatus::Succeeded => "done",
+                    RefineSubagentStatus::Failed => "failed",
+                    RefineSubagentStatus::Canceled => "cancelled",
+                },
+                fmt_elapsed(r.elapsed()),
+            ),
+            None => (id.to_string(), "gone", String::new()),
+        };
+        let tags = run
+            .map(|r| format!("{} · {}", r.role, short_model(&r.model)))
+            .unwrap_or_default();
+        let panel = Block::default()
+            .borders(Borders::ALL)
+            .border_set(theme::hairline_set())
+            .border_style(Style::default().fg(theme.accent))
+            .title(Span::styled(
+                format!(" ⟩ {} · {tags} · {status} {elapsed} ", truncate_cols(&title, 40)),
+                Style::default().fg(theme.ink_soft),
+            ))
+            .style(Style::default().bg(theme.bg_panel));
+        let inner = panel.inner(area);
+        f.render_widget(Clear, area);
+        f.render_widget(panel, area);
+        if inner.width == 0 || inner.height < 2 {
+            return;
+        }
+
+        let body = Rect {
+            height: inner.height - 1,
+            ..inner
+        };
+        let text = self.child_transcript(id);
+        let lines: Vec<Line> = if text.trim().is_empty() {
+            vec![Line::from(Span::styled(
+                "nothing reported yet",
+                Style::default().fg(theme.ink_faint),
+            ))]
+        } else {
+            text.lines()
+                .map(|l| {
+                    Line::from(Span::styled(
+                        l.to_string(),
+                        Style::default().fg(theme.translated_text),
+                    ))
+                })
+                .collect()
+        };
+        let total = wrapped_line_count(&lines, body.width as usize);
+        let max = total.saturating_sub(body.height);
+        self.child_scroll = self.child_scroll.min(max);
+        f.render_widget(
+            Paragraph::new(lines)
+                .wrap(Wrap { trim: false })
+                .scroll((self.child_scroll, 0))
+                .style(Style::default().bg(theme.bg_panel)),
+            body,
+        );
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "↑↓ scroll · ⌃C stop this sub-agent · q close",
+                Style::default().fg(theme.ink_faint),
+            ))),
+            Rect {
+                y: inner.y + inner.height - 1,
+                height: 1,
+                ..inner
+            },
+        );
+    }
+
     fn render_no_project(&self, f: &mut Frame, area: Rect, theme: &Theme) {
         let block = Block::default()
             .borders(Borders::ALL)
@@ -2585,6 +2882,107 @@ impl RefineScreen {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn toggle_tasks(&mut self) {
+        self.tasks = match self.tasks {
+            Some(_) => None,
+            None => Some(0),
+        };
+        self.tasks_start = 0;
+    }
+
+    /// The rows the pane is showing, newest first, as indices into
+    /// `subagents` — so a selection survives the hide-completed toggle
+    /// meaning something different.
+    fn task_rows(&self) -> Vec<usize> {
+        self.subagents
+            .iter()
+            .enumerate()
+            .rev()
+            .filter(|(_, r)| {
+                !self.tasks_hide_done || r.status == RefineSubagentStatus::Running
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    fn handle_tasks_key(&mut self, key: KeyEvent, sel: usize) -> Action {
+        let rows = self.task_rows();
+        let last = rows.len().saturating_sub(1);
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.tasks = Some(sel.saturating_sub(1));
+                Action::None
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.tasks = Some((sel + 1).min(last));
+                Action::None
+            }
+            KeyCode::Char('h') => {
+                self.tasks_hide_done = !self.tasks_hide_done;
+                self.tasks = Some(0);
+                Action::None
+            }
+            KeyCode::Enter => {
+                if let Some(run) = rows.get(sel).and_then(|i| self.subagents.get(*i)) {
+                    self.child = Some(run.id.clone());
+                    self.child_scroll = 0;
+                    self.tasks = None;
+                }
+                Action::None
+            }
+            KeyCode::Char('x') | KeyCode::Delete => rows
+                .get(sel)
+                .and_then(|i| self.subagents.get(*i))
+                .filter(|r| r.status == RefineSubagentStatus::Running)
+                .map(|r| Action::RefineCancelSubagent { id: r.id.clone() })
+                .unwrap_or(Action::None),
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.tasks = None;
+                Action::None
+            }
+            _ => Action::None,
+        }
+    }
+
+    fn handle_child_key(&mut self, key: KeyEvent) -> Action {
+        let id = self.child.clone().unwrap_or_default();
+        match key.code {
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                Action::RefineCancelSubagent { id }
+            }
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.child = None;
+                Action::None
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.child_scroll = self.child_scroll.saturating_sub(1);
+                Action::None
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.child_scroll = self.child_scroll.saturating_add(1);
+                Action::None
+            }
+            KeyCode::PageUp => {
+                self.child_scroll = self.child_scroll.saturating_sub(10);
+                Action::None
+            }
+            KeyCode::PageDown => {
+                self.child_scroll = self.child_scroll.saturating_add(10);
+                Action::None
+            }
+            _ => Action::None,
+        }
+    }
+
+    /// The child's own conversation, as it has reached us so far.
+    fn child_transcript(&self, id: &str) -> String {
+        self.blocks
+            .iter()
+            .find(|b| b.subagent_id() == Some(id))
+            .map(|b| b.detail.clone())
+            .unwrap_or_default()
     }
 
     fn running_subagents(&self) -> usize {
@@ -3520,6 +3918,132 @@ mod tests {
                 .iter()
                 .map(|b| b.body.clone())
                 .collect::<Vec<_>>()
+        );
+    }
+
+    fn with_runs() -> RefineScreen {
+        let mut s = RefineScreen::new();
+        for (n, (title, status)) in [
+            ("sweep ch12", RefineSubagentStatus::Running),
+            ("glossary pass", RefineSubagentStatus::Succeeded),
+            ("synopsis", RefineSubagentStatus::Running),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = format!("call_{n}");
+            s.on_app_event(&AppEvent::RefineSubagentStarted {
+                id: id.clone(),
+                depth: 0,
+                title: title.to_string(),
+                role: "explore".to_string(),
+                model: "openrouter/gemini".to_string(),
+                background: true,
+            });
+            if status != RefineSubagentStatus::Running {
+                s.on_app_event(&AppEvent::RefineSubagentFinished {
+                    id,
+                    status,
+                    summary: "done".to_string(),
+                });
+            }
+        }
+        s
+    }
+
+    #[test]
+    fn the_tasks_pane_owns_the_keyboard_while_it_is_up() {
+        let mut s = with_runs();
+        assert!(!s.owns_keyboard());
+        s.toggle_tasks();
+        assert!(s.owns_keyboard());
+        // ...so its single letters are not the screen's globals.
+        assert!(s.is_capturing());
+
+        // Newest first, so the selection starts on the most recent run.
+        assert_eq!(s.task_rows(), vec![2, 1, 0]);
+        s.handle_key(key(KeyCode::Down), None);
+        assert_eq!(s.tasks, Some(1));
+        s.handle_key(typed('j'), None);
+        assert_eq!(s.tasks, Some(2));
+        s.handle_key(typed('j'), None);
+        assert_eq!(s.tasks, Some(2), "the list stops rather than wrapping");
+
+        s.handle_key(key(KeyCode::Esc), None);
+        assert!(s.tasks.is_none());
+        assert!(!s.owns_keyboard());
+    }
+
+    #[test]
+    fn hiding_completed_runs_leaves_the_running_ones() {
+        let mut s = with_runs();
+        s.toggle_tasks();
+        s.handle_key(typed('h'), None);
+        assert!(s.tasks_hide_done);
+        assert_eq!(s.task_rows(), vec![2, 0], "only the running two");
+        assert_eq!(s.tasks, Some(0), "and the selection is valid again");
+        s.handle_key(typed('h'), None);
+        assert_eq!(s.task_rows(), vec![2, 1, 0]);
+    }
+
+    #[test]
+    fn stopping_from_the_tasks_pane_targets_that_one_run() {
+        let mut s = with_runs();
+        s.toggle_tasks();
+        // Row 0 is `call_2`, which is running.
+        match s.handle_key(typed('x'), None) {
+            Action::RefineCancelSubagent { id } => assert_eq!(id, "call_2"),
+            other => panic!("expected a cancel, got {other:?}"),
+        }
+        // Row 1 is `call_1`, which already finished — nothing to stop.
+        s.tasks = Some(1);
+        assert!(matches!(s.handle_key(typed('x'), None), Action::None));
+    }
+
+    #[test]
+    fn enter_on_a_subagent_block_opens_its_transcript() {
+        let mut s = with_runs();
+        s.on_app_event(&AppEvent::RefineSubagentTurn {
+            id: "call_0".to_string(),
+            text: "· read_chapter {\"ch\":12}".to_string(),
+        });
+        let i = s
+            .blocks
+            .iter()
+            .position(|b| b.subagent_id() == Some("call_0"))
+            .expect("a sub-agent gets a block in the conversation");
+
+        s.focused = false;
+        s.selected = Some(i);
+        s.handle_key(key(KeyCode::Enter), None);
+        assert_eq!(s.child.as_deref(), Some("call_0"));
+        assert!(s.child_transcript("call_0").contains("read_chapter"));
+        assert!(s.owns_keyboard());
+
+        // Read-only, and ⌃C stops that child rather than the turn.
+        match s.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL), None) {
+            Action::RefineCancelSubagent { id } => assert_eq!(id, "call_0"),
+            other => panic!("expected a cancel, got {other:?}"),
+        }
+        s.handle_key(typed('q'), None);
+        assert!(s.child.is_none());
+    }
+
+    #[test]
+    fn a_child_transcript_is_capped_and_says_it_was() {
+        let mut s = with_runs();
+        for n in 0..(CHILD_TRANSCRIPT_CAP + 50) {
+            s.on_app_event(&AppEvent::RefineSubagentTurn {
+                id: "call_0".to_string(),
+                text: format!("line {n}"),
+            });
+        }
+        let kept = s.child_transcript("call_0");
+        assert!(kept.lines().count() <= CHILD_TRANSCRIPT_CAP + 1);
+        assert!(kept.contains("earlier line(s) dropped"), "{}", &kept[..80]);
+        assert!(
+            kept.contains(&format!("line {}", CHILD_TRANSCRIPT_CAP + 49)),
+            "the newest line is the one worth keeping"
         );
     }
 

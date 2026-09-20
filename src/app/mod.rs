@@ -214,6 +214,9 @@ pub enum Action {
     /// Put one transcript block on the clipboard. OSC-52 gives no success
     /// signal, so the toast is the only confirmation there is.
     RefineCopyBlock { text: String },
+    /// Stop one running sub-agent. It stops at its next round boundary and
+    /// keeps its checkpoint, so the work can be resumed.
+    RefineCancelSubagent { id: String },
     ReaderCopy {
         text: String,
         lines: usize,
@@ -553,6 +556,9 @@ pub struct App {
     refine_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::agents::refine::RefineControl>>,
     refine_cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
     refine_steering: Option<Arc<Mutex<VecDeque<crate::agents::refine::UserTurn>>>>,
+    /// Every sub-agent the live Refine session has started. Shared with the
+    /// agent task, so cancelling one from the tasks pane reaches it mid-turn.
+    refine_subagents: crate::agents::subagent::SubagentRegistry,
     /// Shared approval/ask_user channel for Refine.
     refine_interact: crate::agents::refine::RefineInteract,
     pub(crate) refine_sessions: Vec<crate::workspace::refine_session::SessionMeta>,
@@ -639,6 +645,7 @@ impl App {
             refine_cancel: None,
             refine_steering: None,
             refine_interact: crate::agents::refine::RefineInteract::default(),
+            refine_subagents: crate::agents::subagent::SubagentRegistry::default(),
             refine_sessions: Vec::new(),
             refine_session_id: String::new(),
             refine_last_edit: None,
@@ -1287,6 +1294,7 @@ impl App {
         };
         let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let steering = Arc::new(Mutex::new(VecDeque::new()));
+        let registry = crate::agents::subagent::SubagentRegistry::default();
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let ctx_max = crate::agents::refine::model_max_context(&refine_model.model);
         let ctx = crate::agents::refine::RefineCtx {
@@ -1300,6 +1308,7 @@ impl App {
             session_id: self.refine_session_id.clone(),
             interact: self.refine_interact.clone(),
             steering: steering.clone(),
+            registry: registry.clone(),
         };
         tokio::spawn(async move {
             crate::agents::refine::run_refine_agent(ctx, rx).await;
@@ -1308,6 +1317,7 @@ impl App {
         self.refine_tx = Some(tx);
         self.refine_cancel = Some(cancel);
         self.refine_steering = Some(steering);
+        self.refine_subagents = registry;
         true
     }
 
@@ -3412,6 +3422,13 @@ impl App {
             }
             Action::OpenAuthUrl => self.open_auth_url(),
             Action::CopyAuthCode => self.copy_auth_code(),
+            Action::RefineCancelSubagent { id } => {
+                if self.refine_subagents.cancel(&id) {
+                    self.toast = Some(Toast::info(format!("stopping sub-agent · {id}")));
+                } else {
+                    self.toast = Some(Toast::warn("that sub-agent is not running"));
+                }
+            }
             Action::RefineCopyBlock { text } => {
                 match crate::remote::copy_to_clipboard(&text) {
                     Ok(()) => self.toast = Some(Toast::info("copied block".to_string())),
