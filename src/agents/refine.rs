@@ -4144,6 +4144,122 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Records what each request carried, so a test can see what the child was
+    /// actually told rather than only that a tool returned true.
+    struct RecordingClient {
+        gate: Arc<tokio::sync::Semaphore>,
+        responses: Mutex<VecDeque<crate::llm::ChatResponse>>,
+        seen: Mutex<Vec<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl LlmClient for RecordingClient {
+        async fn chat(&self, req: &ChatRequest) -> LlmResult<crate::llm::ChatResponse> {
+            let permit = self.gate.acquire().await.map_err(|_| LlmError::Canceled)?;
+            permit.forget();
+            self.seen.lock().unwrap().push(
+                req.messages
+                    .iter()
+                    .filter(|m| m.role == Role::User)
+                    .filter_map(|m| m.content.clone())
+                    .collect(),
+            );
+            let next = self.responses.lock().unwrap().pop_front();
+            Ok(next.unwrap_or_else(|| stop_turn("done")))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_steer_message_reaches_a_running_child() {
+        let root = temp_root("bgsteer");
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let client = Arc::new(RecordingClient {
+            gate: gate.clone(),
+            responses: Mutex::new(VecDeque::from(vec![
+                tool_call_turn("read_chapter", r#"{"ch":1}"#),
+                stop_turn("done"),
+            ])),
+            seen: Mutex::new(Vec::new()),
+        });
+        let tools = gated_tools(&root, client.clone());
+        tools
+            .execute("task", r#"{"description":"sweep","background":true}"#)
+            .await
+            .unwrap();
+        settle().await;
+
+        // Sent while the child is parked in its first call.
+        let out = tools
+            .execute(
+                "message_subagent",
+                r#"{"id":"direct","message":"also check chapter 4","delivery":"steer"}"#,
+            )
+            .await
+            .unwrap();
+        assert!(out.contains(r#""ok":true"#), "{out}");
+
+        gate.add_permits(2);
+        assert!(wait_until(|| tools.registry.live() == 0).await);
+
+        let seen = client.seen.lock().unwrap().clone();
+        assert!(seen.len() >= 2, "the child should have had a second round: {seen:?}");
+        assert!(
+            !seen[0].iter().any(|m| m.contains("chapter 4")),
+            "the first round was already in flight: {:?}",
+            seen[0]
+        );
+        assert!(
+            seen[1]
+                .iter()
+                .any(|m| m.contains("Message from the parent agent")
+                    && m.contains("also check chapter 4")),
+            "the second round should carry it, labelled: {:?}",
+            seen[1]
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn switching_session_cancels_every_background_child() {
+        let root = temp_root("bgswitch");
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let registry = SubagentRegistry::default();
+        // Two runs, as if two background children were already going.
+        let a = registry.register("call_a");
+        let b = registry.register("call_b");
+
+        let (ctrl_tx, ctrl_rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = RefineCtx {
+            client: Arc::new(ScriptedClient {
+                responses: Mutex::new(VecDeque::new()),
+            }),
+            root: root.clone(),
+            default_vol: 1,
+            model: crate::model::AgentModel::openrouter("m"),
+            target_language: crate::model::TargetLanguage::Thai,
+            tx: EventTx(tx),
+            cancel: Arc::new(AtomicBool::new(false)),
+            session_id: "one".to_string(),
+            interact: RefineInteract::default(),
+            steering: empty_steering(),
+            registry: registry.clone(),
+        };
+        let agent = tokio::spawn(run_refine_agent(ctx, ctrl_rx));
+
+        ctrl_tx
+            .send(RefineControl::SwitchSession("two".to_string()))
+            .unwrap();
+        assert!(
+            wait_until(|| a.cancel.load(Ordering::Relaxed) && b.cancel.load(Ordering::Relaxed))
+                .await,
+            "leaving a session must not leave its children running"
+        );
+
+        ctrl_tx.send(RefineControl::Shutdown).unwrap();
+        let _ = agent.await;
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[tokio::test]
     async fn collecting_an_id_that_was_never_started_says_so() {
         let root = temp_root("bgunknown");
