@@ -2711,7 +2711,7 @@ impl App {
     }
 
     /// Run one of the active screen's actions, however it was reached.
-    fn run_screen_action(&mut self, id: u16) -> Action {
+    pub(crate) fn run_screen_action(&mut self, id: u16) -> Action {
         let ran = match self.screen {
             Screen::Shelf => {
                 let projects = std::mem::take(&mut self.projects);

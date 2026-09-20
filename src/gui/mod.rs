@@ -4,6 +4,7 @@
 //! dialogs — over the same `App` state, Action funnel, and theme palettes as
 //! the TUI; not a terminal grid in a window.
 
+mod commands;
 mod drawer;
 mod fonts;
 mod inspector;
@@ -652,6 +653,7 @@ impl GuiApp {
 
         let mut pick = None;
         let mut close = None;
+        let mut command = None;
         ui.horizontal(|ui| {
             for (i, tab) in self.tabs.iter() {
                 let selected = i == self.tabs.active_index();
@@ -680,8 +682,19 @@ impl GuiApp {
                     }
                 });
             }
+            // Every command the screen declares, with the key that runs it, so
+            // nothing a screen has is unreachable from the window.
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                command = commands::menu(ui, &self.app, pal);
+            });
         });
         ui.add_space(4.0);
+
+        if let Some(id) = command {
+            let action = self.app.run_screen_action(id);
+            self.dispatch(action);
+            return;
+        }
 
         if let Some(i) = close {
             if let Some(id) = self.tabs.close(i, &mut self.app) {

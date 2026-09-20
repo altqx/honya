@@ -120,7 +120,7 @@ fn hand_written() -> Vec<Binding> {
 /// A screen's commands, as it declares them. Availability is irrelevant here —
 /// help documents what a screen *has*, not what happens to be reachable right
 /// now — so each table is read from a screen in its default state.
-fn screen_commands(screen: Screen) -> Vec<Act> {
+pub fn commands_for(screen: Screen) -> Vec<Act> {
     match screen {
         Screen::Shelf => super::shelf::ShelfScreen::new().actions(&[]),
         Screen::Project => super::project::ProjectScreen::default().actions(None),
@@ -147,7 +147,7 @@ pub fn bindings() -> &'static [Binding] {
     ALL.get_or_init(|| {
         let mut all = hand_written();
         for screen in crate::ui::chrome::TAB_SCREENS {
-            for act in screen_commands(screen) {
+            for act in commands_for(screen) {
                 all.push(Binding {
                     keys: act.accel.shown(),
                     what: documented(&act),
@@ -211,7 +211,7 @@ mod tests {
     #[test]
     fn help_prints_exactly_what_each_screen_declares() {
         for screen in crate::ui::chrome::TAB_SCREENS {
-            let declared: Vec<String> = screen_commands(screen)
+            let declared: Vec<String> = commands_for(screen)
                 .iter()
                 .map(|a| format!("{} {}", a.accel.shown(), documented(a)))
                 .collect();
