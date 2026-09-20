@@ -23,6 +23,19 @@ fn scroll_y(id: &'static str) -> ScrollArea {
         .scroll_bar_visibility(ScrollBarVisibility::AlwaysVisible)
 }
 
+/// A Reader pane. Unwrapped lines run off the edge, so the pane scrolls both
+/// ways rather than folding them.
+fn reader_scroll(id: &'static str, wrap: bool) -> ScrollArea {
+    let area = ScrollArea::new([!wrap, true])
+        .id_salt(id)
+        .auto_shrink([false, false]);
+    if wrap {
+        area.scroll_bar_visibility(ScrollBarVisibility::AlwaysVisible)
+    } else {
+        area
+    }
+}
+
 /// Fixed-height toolbar row so action buttons can't reflow the body below.
 fn toolbar_row(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
     ui.allocate_ui_with_layout(
@@ -56,6 +69,9 @@ pub struct GuiNav {
     /// One per transcript block. A single cache would thrash between them, and
     /// a streamed delta would re-parse every message above it.
     md_blocks: Vec<super::markdown::MarkdownCache>,
+    /// The source pane's scroll offset, mirrored into the translation pane
+    /// while the two are synced.
+    reader_offset: f32,
     /// Caret offset in the composer, so `/` and `@` know which token to
     /// complete. egui owns the text; this is only where the caret was.
     refine_cursor: usize,
@@ -1181,6 +1197,13 @@ fn reader(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
     let show_tr = app.reader.shows_translation();
     reader_status(ui, app, pal);
 
+    // Wrap, sync and highlight all changed nothing in the window: the panes
+    // wrapped unconditionally, scrolled independently, and tinted nothing.
+    let wrap = app.reader.is_wrapped();
+    let synced = app.reader.is_synced();
+    let (hl_ja, hl_tr) = app.reader.highlights();
+    let (hl_ja, hl_tr) = (hl_ja.to_vec(), hl_tr.to_vec());
+
     let body_h = ui.available_height();
     let th = &app.theme;
     let panes = usize::from(show_ja) + usize::from(show_tr);
@@ -1194,11 +1217,25 @@ fn reader(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
             card_fill(&mut cols[next], pal, |ui| {
                 ui.label(RichText::new("原文  Source").color(pal.ink_soft).strong());
                 ui.add_space(4.0);
-                scroll_y("reader_ja").show(ui, |ui| {
+                let out = reader_scroll("reader_ja", wrap).show(ui, |ui| {
                     // Rendered rather than printed: ruby, image links and review
                     // banners used to arrive as literal markdown.
-                    super::markdown::show(ui, &mut nav.md_ja, &ja, th, pal.ja_text);
+                    super::markdown::show_with(
+                        ui,
+                        &mut nav.md_ja,
+                        &ja,
+                        th,
+                        pal.ja_text,
+                        &super::markdown::Options {
+                            wrap,
+                            highlight: &hl_ja,
+                            tint: Some(pal.accent),
+                        },
+                    );
                 });
+                if synced {
+                    nav.reader_offset = out.state.offset.y;
+                }
             });
             next += 1;
         }
@@ -1208,7 +1245,13 @@ fn reader(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
         card_fill(&mut cols[next], pal, |ui| {
             ui.label(RichText::new("翻訳  Translation").color(pal.ink_soft).strong());
             ui.add_space(4.0);
-            scroll_y("reader_tr").show(ui, |ui| {
+            let mut tr = reader_scroll("reader_tr", wrap);
+            // Synced panes share one offset, which is what the sync toggle is
+            // for: reading a translation against its source line by line.
+            if synced {
+                tr = tr.vertical_scroll_offset(nav.reader_offset);
+            }
+            tr.show(ui, |ui| {
                 if translated.is_empty() {
                     ui.label(
                         RichText::new("Not translated yet.")
@@ -1216,12 +1259,17 @@ fn reader(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
                             .italics(),
                     );
                 } else {
-                    super::markdown::show(
+                    super::markdown::show_with(
                         ui,
                         &mut nav.md_translated,
                         &translated,
                         th,
                         pal.translated_text,
+                        &super::markdown::Options {
+                            wrap,
+                            highlight: &hl_tr,
+                            tint: Some(pal.accent),
+                        },
                     );
                 }
             });

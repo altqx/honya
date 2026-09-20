@@ -558,6 +558,25 @@ impl ReaderScreen {
         })
     }
 
+    /// Whether the two panes scroll together: what `A_SYNC` toggles.
+    pub fn is_synced(&self) -> bool {
+        self.sync
+    }
+
+    /// Whether long lines wrap or run off the edge: what `A_WRAP` toggles.
+    pub fn is_wrapped(&self) -> bool {
+        self.wrap
+    }
+
+    /// Glossary and character surfaces present in this chapter, tinted when
+    /// `A_HILITE` is on. Empty when it is off, so a caller need not ask twice.
+    pub fn highlights(&self) -> (&[String], &[String]) {
+        if !self.highlight {
+            return (&[], &[]);
+        }
+        (&self.hl_ja, &self.translated_highlights)
+    }
+
     /// Which panes are showing: what `A_MODE` cycles. A caller that draws its
     /// own panes has to ask, or the toggle changes nothing it can see.
     pub fn shows_source(&self) -> bool {

@@ -57,10 +57,110 @@ impl MarkdownCache {
 
 /// Draw `md` as honya renders it, wrapping to the available width.
 pub fn show(ui: &mut Ui, cache: &mut MarkdownCache, md: &str, theme: &Theme, base: Color32) {
+    show_with(
+        ui,
+        cache,
+        md,
+        theme,
+        base,
+        &Options {
+            wrap: true,
+            ..Default::default()
+        },
+    );
+}
+
+/// How a pane wants its document drawn.
+#[derive(Default)]
+pub struct Options<'a> {
+    /// False lets long lines run off the edge instead of folding — what the
+    /// Reader's wrap toggle asks for.
+    pub wrap: bool,
+    /// Surfaces to tint wherever they appear, for the glossary highlight.
+    pub highlight: &'a [String],
+    pub tint: Option<Color32>,
+}
+
+pub fn show_with(
+    ui: &mut Ui,
+    cache: &mut MarkdownCache,
+    md: &str,
+    theme: &Theme,
+    base: Color32,
+    opts: &Options<'_>,
+) {
     let font = TextStyle::Body.resolve(ui.style());
     let mut job = cache.job(md, theme, base, font).clone();
-    job.wrap.max_width = ui.available_width();
+    job.wrap.max_width = if opts.wrap {
+        ui.available_width()
+    } else {
+        f32::INFINITY
+    };
+    if let Some(tint) = opts.tint
+        && !opts.highlight.is_empty()
+    {
+        tint_terms(&mut job, opts.highlight, tint);
+    }
     ui.label(job);
+}
+
+/// Recolour every occurrence of `terms` in an already-laid-out job.
+///
+/// Splitting sections rather than re-parsing: the document's own styling is
+/// whatever the markdown said, and a highlight is a second opinion about the
+/// same characters.
+fn tint_terms(job: &mut LayoutJob, terms: &[String], tint: Color32) {
+    let text = job.text.clone();
+    let mut cuts: Vec<(usize, usize)> = Vec::new();
+    for term in terms {
+        if term.is_empty() {
+            continue;
+        }
+        let mut from = 0;
+        while let Some(at) = text[from..].find(term.as_str()) {
+            let start = from + at;
+            cuts.push((start, start + term.len()));
+            from = start + term.len();
+        }
+    }
+    if cuts.is_empty() {
+        return;
+    }
+    cuts.sort_unstable();
+    let mut out = LayoutJob {
+        text: String::new(),
+        wrap: job.wrap.clone(),
+        ..Default::default()
+    };
+    let mut cut = cuts.into_iter().peekable();
+    for section in &job.sections {
+        let (mut at, end) = (section.byte_range.start, section.byte_range.end);
+        while at < end {
+            // Skip any hit that ended before this section begins.
+            while cut.peek().is_some_and(|(_, e)| *e <= at) {
+                cut.next();
+            }
+            let next = cut.peek().copied();
+            match next {
+                Some((s, e)) if s <= at => {
+                    let stop = e.min(end);
+                    let mut fmt = section.format.clone();
+                    fmt.color = tint;
+                    out.append(&text[at..stop], 0.0, fmt);
+                    at = stop;
+                }
+                Some((s, _)) if s < end => {
+                    out.append(&text[at..s], 0.0, section.format.clone());
+                    at = s;
+                }
+                _ => {
+                    out.append(&text[at..end], 0.0, section.format.clone());
+                    at = end;
+                }
+            }
+        }
+    }
+    *job = out;
 }
 
 fn to_job(lines: &[Line<'static>], base: Color32, font: FontId) -> LayoutJob {
@@ -183,5 +283,48 @@ mod tests {
             job.text
         );
         assert!(job.text.contains("bold"));
+    }
+
+    #[test]
+    fn a_highlighted_term_is_recoloured_without_losing_the_rest() {
+        let base = Color32::WHITE;
+        let tint = Color32::from_rgb(9, 9, 9);
+        let font = FontId::proportional(14.0);
+        let mut job = to_job(&[Line::raw("the 先輩 smiled at the 先輩")], base, font);
+        let before = job.text.clone();
+
+        tint_terms(&mut job, &["先輩".to_string()], tint);
+        assert_eq!(job.text, before, "tinting must not change the text");
+
+        let tinted: String = job
+            .sections
+            .iter()
+            .filter(|s| s.format.color == tint)
+            .map(|s| job.text[s.byte_range.clone()].to_string())
+            .collect();
+        assert_eq!(tinted, "先輩先輩", "both occurrences, and only those");
+    }
+
+    #[test]
+    fn tinting_a_term_that_is_not_there_changes_nothing() {
+        let mut job = to_job(
+            &[Line::raw("nothing to see")],
+            Color32::WHITE,
+            FontId::proportional(14.0),
+        );
+        let before = job.sections.len();
+        tint_terms(&mut job, &["先輩".to_string()], Color32::RED);
+        assert_eq!(job.sections.len(), before);
+    }
+
+    #[test]
+    fn an_empty_term_does_not_match_everywhere() {
+        let mut job = to_job(
+            &[Line::raw("abc")],
+            Color32::WHITE,
+            FontId::proportional(14.0),
+        );
+        tint_terms(&mut job, &[String::new()], Color32::RED);
+        assert_eq!(job.text, "abc");
     }
 }
