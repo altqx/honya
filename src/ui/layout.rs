@@ -58,15 +58,3 @@ pub fn centered_modal(w: u16, h: u16, area: Rect) -> Rect {
         .areas(horiz);
     out
 }
-
-/// A percentage-sized rectangle centered inside `area`; `pct_w`/`pct_h` are
-/// 0–100 and values above 100 simply fill the axis.
-pub fn centered_pct(pct_w: u16, pct_h: u16, area: Rect) -> Rect {
-    let [horiz] = Layout::horizontal([Constraint::Percentage(pct_w)])
-        .flex(Flex::Center)
-        .areas(area);
-    let [out] = Layout::vertical([Constraint::Percentage(pct_h)])
-        .flex(Flex::Center)
-        .areas(horiz);
-    out
-}

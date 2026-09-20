@@ -18,6 +18,7 @@ use crate::ui::mouse::{MouseGesture, MouseInput};
 use crate::ui::text::truncate_cols;
 use crate::workspace::refine_session::SessionMeta;
 
+use super::action_table::{self, Act};
 use super::Action;
 use super::overlay::Overlay;
 
@@ -335,6 +336,15 @@ impl Default for RefineScreen {
     }
 }
 
+/// Action ids for this screen's table. Stable within the screen: they are also
+/// the zone index every one of its controls registers under.
+const R_NEW: u16 = 0;
+const R_SESSIONS: u16 = 1;
+const R_APPROVAL: u16 = 2;
+const R_COMPACT: u16 = 3;
+const R_EXPORT: u16 = 4;
+const R_UNDO: u16 = 5;
+
 impl RefineScreen {
     pub fn new() -> Self {
         Self {
@@ -601,13 +611,17 @@ impl RefineScreen {
                 return self.handle_pending_key(key);
             }
         }
+        // Commands come from the table, ahead of the input, so a chord the
+        // screen declares is never eaten by the field being typed into.
+        let acts = self.acts(project.is_some());
+        match action_table::hit(&acts, &key) {
+            action_table::KeyHit::Run(id) => return self.run_action(id).unwrap_or(Action::None),
+            action_table::KeyHit::Blocked => return Action::None,
+            action_table::KeyHit::Miss => {}
+        }
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('r') {
             self.expanded = !self.expanded;
             return Action::None;
-        }
-        // Ctrl+Tab cycles always-approve → ask → auto.
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Tab {
-            return Action::RefineCycleApprovalMode;
         }
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::End {
             self.jump_bottom();
@@ -717,7 +731,11 @@ impl RefineScreen {
     /// the list, click selects / opens, right-click closes); while a slash/mention
     /// popup is open the wheel moves its selection and a click on a row accepts
     /// it. Otherwise the wheel scrolls the transcript and a click focuses input.
-    pub fn handle_mouse(&mut self, m: MouseInput) -> Action {
+    pub fn handle_mouse(
+        &mut self,
+        m: MouseInput,
+        zone: Option<crate::ui::kit::ZoneId>,
+    ) -> Action {
         if let Some(sel) = self.picker {
             return self.handle_picker_mouse(m, sel);
         }
@@ -732,8 +750,11 @@ impl RefineScreen {
                     return Action::None;
                 }
                 MouseGesture::Click { .. } if m.in_rect(self.popup_area) => {
-                    let idx = self.popup_offset + (m.row - self.popup_area.y) as usize;
-                    if self.popup_select(idx) {
+                    // The entry's index comes from the registry rather than
+                    // from the popup origin plus the scroll offset.
+                    if let Some(idx) = zone.and_then(|z| z.row_index())
+                        && self.popup_select(idx)
+                    {
                         self.accept_popup();
                     }
                     return Action::None;
@@ -1215,6 +1236,64 @@ impl RefineScreen {
         }
     }
 
+    /// This screen's commands, availability resolved for this frame.
+    ///
+    /// Every accelerator here is a chord: the input field owns the plain keys,
+    /// so a single-letter binding would be swallowed the moment the transcript
+    /// has focus. See [`super::action_table`].
+    pub fn actions(&self, project: Option<&Project>) -> Vec<Act> {
+        self.acts(project.is_some())
+    }
+
+    /// The table, from the one thing its availability turns on. `render` knows
+    /// only whether a project is open, not which one.
+    fn acts(&self, has_project: bool) -> Vec<Act> {
+        use action_table::Accel;
+        use crate::agents::refine::ApprovalMode;
+
+        // While the session picker or an approval prompt is up, the keyboard
+        // belongs to it. The controls grey out rather than vanishing.
+        let live = has_project && self.picker.is_none() && self.pending.is_none();
+        let mode = match self.approval_mode {
+            ApprovalMode::Auto => "auto",
+            ApprovalMode::Ask => "ask",
+            ApprovalMode::Always => "always",
+        };
+        vec![
+            Act::toolbar(R_NEW, "new", Accel::ctrl('n')).when(live),
+            Act::toolbar(R_SESSIONS, "sessions", Accel::ctrl('o'))
+                .count(self.sessions.len() as u32)
+                .when(live),
+            Act::toolbar(R_APPROVAL, "approve", Accel::ctrl_code(KeyCode::Tab))
+                .cycle()
+                .value(mode)
+                .when(live),
+            Act::menu(R_COMPACT, "compact conversation", Accel::ctrl('y')).when(live),
+            Act::menu(R_EXPORT, "export to markdown", Accel::ctrl('e')).when(live),
+            Act::menu(R_UNDO, "undo last chapter edit", Accel::ctrl('u')).when(live),
+        ]
+    }
+
+    /// Run the action `id` stands for, however it was reached. `None` means
+    /// no such action here.
+    pub fn run(&mut self, id: u16, project: Option<&Project>) -> Option<Action> {
+        let _ = project;
+        self.run_action(id)
+    }
+
+    fn run_action(&mut self, id: u16) -> Option<Action> {
+        Some(match id {
+            R_NEW => Action::RefineNewSession,
+            R_SESSIONS => Action::RefineOpenSessions,
+            // Cycles always-approve → ask → auto.
+            R_APPROVAL => Action::RefineCycleApprovalMode,
+            R_COMPACT => Action::RefineCompact,
+            R_EXPORT => Action::RefineExport,
+            R_UNDO => Action::RefineUndo,
+            _ => return None,
+        })
+    }
+
     pub fn hints(&self) -> &'static [(&'static str, &'static str)] {
         if self.picker.is_some() {
             &[
@@ -1225,40 +1304,29 @@ impl RefineScreen {
                 ("esc", "close"),
             ]
         } else if self.in_flight {
-            &[
-                ("⌃C", "interrupt"),
-                ("⌃End", "bottom"),
-                ("⌃R", "details"),
-                ("↑↓", "scroll"),
-            ]
+            &[("⌃C", "interrupt"), ("⌃End", "bottom"), ("↑↓", "scroll")]
         } else if self.focused {
             &[
                 ("↵", "send"),
                 ("@", "mention"),
                 ("/", "cmd"),
-                ("⌃End", "bottom"),
-                ("⌃R", "details"),
                 ("esc", "unfocus"),
             ]
         } else {
-            &[
-                ("type", "focus"),
-                ("⌃End", "bottom"),
-                ("↑↓", "scroll"),
-                ("⌃R", "details"),
-            ]
+            &[("type", "focus"), ("↑↓", "scroll"), ("⌃End", "bottom")]
         }
     }
 
     pub fn render(
         &mut self,
-        f: &mut Frame,
+        ui: &mut crate::ui::kit::Ui,
         area: Rect,
-        frame: u64,
         has_project: bool,
-        theme: &Theme,
     ) {
+        let theme: &Theme = ui.theme;
+        let frame = ui.frame_count;
         if !has_project {
+            let f: &mut Frame = ui.frame;
             self.render_no_project(f, area, theme);
             return;
         }
@@ -1274,15 +1342,33 @@ impl RefineScreen {
             let subagent_h = (self.subagents.len() as u16 + 2).clamp(3, 7);
             constraints.push(Constraint::Length(subagent_h));
         }
-        if status.is_some() {
-            constraints.push(Constraint::Length(1));
-        }
+        // The status band is always there now: it is where this screen's
+        // controls live, and a row that comes and go with the status line
+        // would take them with it.
+        constraints.push(Constraint::Length(1));
         constraints.push(Constraint::Length(input_h));
 
         let rows = Layout::default()
             .direction(Direction::Vertical)
             .constraints(constraints)
             .split(area);
+        let band = rows[rows.len() - 2];
+
+        let acts = self.acts(has_project);
+        let toolbar = crate::ui::kit::toolbar::Toolbar::new(&acts).has_menu(true).render(
+            ui,
+            Rect {
+                x: band.x + 1,
+                width: band.width.saturating_sub(2),
+                height: 1,
+                ..band
+            },
+        );
+
+        // Disjoint field borrows: the frame to draw into, the registry to
+        // record interactive rects in.
+        let zones: &mut crate::ui::kit::Zones = ui.zones;
+        let f: &mut Frame = ui.frame;
 
         self.render_transcript(f, rows[0], frame, theme);
         let input_row = rows[rows.len() - 1];
@@ -1293,10 +1379,20 @@ impl RefineScreen {
         }
         if !self.subagents.is_empty() {
             self.render_subagents(f, rows[next], frame, theme);
-            next += 1;
         }
         if let Some(status) = status {
-            self.render_status(f, rows[next], status, theme);
+            // Whatever the toolbar left of the band, right of it.
+            let x = band.x + 1 + toolbar.cols.saturating_add(2);
+            self.render_status(
+                f,
+                Rect {
+                    x,
+                    width: (band.x + band.width).saturating_sub(x),
+                    ..band
+                },
+                status,
+                theme,
+            );
         }
         self.render_input(f, input_row, theme);
         if self.picker.is_some() {
@@ -1304,7 +1400,7 @@ impl RefineScreen {
         } else if self.pending.is_some() {
             self.render_pending(f, area, theme);
         } else {
-            self.render_popup(f, area, input_row.y, theme);
+            self.render_popup(f, zones, area, input_row.y, theme);
         }
     }
 
@@ -1951,7 +2047,16 @@ impl RefineScreen {
         );
     }
 
-    fn render_popup(&mut self, f: &mut Frame, body: Rect, input_top: u16, theme: &Theme) {
+    fn render_popup(
+        &mut self,
+        f: &mut Frame,
+        zones: &mut crate::ui::kit::Zones,
+        body: Rect,
+        input_top: u16,
+        theme: &Theme,
+    ) {
+        use crate::ui::kit::{ZoneId, ZoneKind};
+
         let rows: Vec<(String, bool)> = match &self.popup {
             Popup::None => return,
             Popup::Mention { items, sel } => items
@@ -1997,26 +2102,38 @@ impl RefineScreen {
         self.popup_area = inner;
         self.popup_offset = offset;
 
+        // Each visible entry registers its own index, so a click resolves from
+        // the registry rather than from the popup origin plus the scroll
+        // offset — the arithmetic that has to be kept in step by hand.
         let label_w = inner.width as usize;
-        let lines: Vec<Line> = rows
-            .iter()
-            .skip(offset)
-            .take(max_rows)
-            .map(|(label, selected)| {
-                let style = if *selected {
-                    Style::default()
-                        .fg(theme.accent)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(theme.ink_soft)
-                };
-                Line::from(Span::styled(truncate_cols(label, label_w), style))
-            })
-            .collect();
-        f.render_widget(
-            Paragraph::new(lines).style(Style::default().bg(theme.bg_inset)),
-            inner,
-        );
+        for (n, (label, selected)) in rows.iter().skip(offset).take(max_rows).enumerate() {
+            let rect = Rect {
+                x: inner.x,
+                y: inner.y + n as u16,
+                width: inner.width,
+                height: 1,
+            };
+            if rect.y >= inner.y + inner.height {
+                break;
+            }
+            zones.push(rect, ZoneId::new(ZoneKind::Row, (offset + n) as u32));
+            let style = if *selected {
+                Style::default()
+                    .fg(theme.accent)
+                    .bg(theme.bg_inset)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.ink_soft).bg(theme.bg_inset)
+            };
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    truncate_cols(label, label_w),
+                    style,
+                )))
+                .style(Style::default().bg(theme.bg_inset)),
+                rect,
+            );
+        }
     }
 }
 
@@ -2347,17 +2464,20 @@ mod tests {
         };
 
         // Wheel walks the selection.
-        s.handle_mouse(MouseInput {
-            gesture: MouseGesture::ScrollDown,
-            col: 0,
-            row: 0,
-        });
+        s.handle_mouse(
+            MouseInput {
+                gesture: MouseGesture::ScrollDown,
+                col: 0,
+                row: 0,
+            },
+            None,
+        );
         assert_eq!(s.picker, Some(1));
 
         // Click row 0 selects it; a second click opens that session.
-        assert!(matches!(s.handle_mouse(click(12, 5)), Action::None));
+        assert!(matches!(s.handle_mouse(click(12, 5), None), Action::None));
         assert_eq!(s.picker, Some(0));
-        match s.handle_mouse(click(12, 5)) {
+        match s.handle_mouse(click(12, 5), None) {
             Action::RefineSwitchSession { id } => assert_eq!(id, "a"),
             other => panic!("expected switch to a, got {other:?}"),
         }
@@ -2365,11 +2485,14 @@ mod tests {
 
         // Right-click closes without switching.
         s.open_picker(sessions, "a".to_string());
-        s.handle_mouse(MouseInput {
-            gesture: MouseGesture::RightClick,
-            col: 0,
-            row: 0,
-        });
+        s.handle_mouse(
+            MouseInput {
+                gesture: MouseGesture::RightClick,
+                col: 0,
+                row: 0,
+            },
+            None,
+        );
         assert!(!s.picker_open());
     }
 

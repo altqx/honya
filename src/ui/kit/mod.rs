@@ -1,0 +1,35 @@
+//! The component kit: everything a screen or overlay composes itself from.
+//!
+//! One rule holds the kit together — **a component draws and registers its
+//! interactive rectangles in the same call**. Every component therefore takes
+//! `&mut Zones` alongside the `Frame` and `Rect` it draws into. Nothing here
+//! owns app state; components are given what they need and hand back what was
+//! clicked via [`zones::ZoneId`].
+//!
+//! Width is always measured with [`crate::ui::text`] helpers, never
+//! `String::len`, so CJK and Thai lay out correctly.
+
+pub mod badge;
+pub mod button;
+pub mod card;
+pub mod ctx;
+pub mod editor;
+pub mod focus;
+pub mod form;
+pub mod list;
+pub mod menu;
+pub mod modal;
+pub mod picker;
+pub mod progress;
+pub mod shortcuts;
+pub mod style;
+pub mod table;
+pub mod tabs;
+pub mod tokens;
+pub mod toolbar;
+pub mod zones;
+
+pub use ctx::Ui;
+pub use focus::{Focus, Hover};
+pub use tokens::Metrics;
+pub use zones::{TallySlot, ZoneId, ZoneKind, Zones};

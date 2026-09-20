@@ -83,17 +83,6 @@ pub fn hit(rect: Rect, col: u16, row: u16) -> bool {
         && row < rect.y.saturating_add(rect.height)
 }
 
-/// Map a click `row` inside a list of uniform 1-line rows to its item index,
-/// honoring the widget's scroll `offset`. `None` when the row is outside `area`
-/// or past the last item.
-pub fn row_index(area: Rect, offset: usize, len: usize, row: u16) -> Option<usize> {
-    if row < area.y || row >= area.y.saturating_add(area.height) {
-        return None;
-    }
-    let idx = offset + (row - area.y) as usize;
-    (idx < len).then_some(idx)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -126,22 +115,6 @@ mod tests {
         assert!(!hit(r, 3, 5), "y past the bottom edge misses");
         assert!(!hit(r, 1, 3), "x left of the rect misses");
         assert!(!hit(rect(0, 0, 0, 5), 0, 0), "zero-width never hits");
-    }
-
-    #[test]
-    fn row_index_accounts_for_offset_and_length() {
-        let area = rect(0, 5, 10, 4); // 4 visible rows starting at y=5
-        // Offset 0: row 5 → item 0, row 8 → item 3.
-        assert_eq!(row_index(area, 0, 20, 5), Some(0));
-        assert_eq!(row_index(area, 0, 20, 8), Some(3));
-        // Scrolled down by 2: the top visible row is item 2.
-        assert_eq!(row_index(area, 2, 20, 5), Some(2));
-        assert_eq!(row_index(area, 2, 20, 8), Some(5));
-        // Past the last item (len 3) → None even though the cell is in-area.
-        assert_eq!(row_index(area, 0, 3, 8), None);
-        // Outside the area entirely → None.
-        assert_eq!(row_index(area, 0, 20, 4), None);
-        assert_eq!(row_index(area, 0, 20, 9), None);
     }
 
     #[test]

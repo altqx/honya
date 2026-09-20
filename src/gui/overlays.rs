@@ -9,7 +9,7 @@ use egui::{Align, Color32, Context, Layout, RichText, ScrollArea, TextEdit, Ui, 
 use crate::app::overlay::{
     Dialog, ExportState, ImageSourceState, ImportState, JumpKind, Overlay, PaletteState, QaState,
     ReaderEditState, ReaderInspectState, ReaderJumpState, ReaderNoteState, ReaderSearchState,
-    SETTINGS_KEY_FIELD, SynPhase, SynopsisEditState, SynopsisState, TitleEditState, WelcomeState,
+    ImportStep, SETTINGS_KEY_FIELD, SynPhase, SynopsisEditState, SynopsisState, TitleEditState, WelcomeState,
     prettify_stem,
 };
 use crate::app::qa::QaKind;
@@ -477,7 +477,7 @@ fn fmt_size(bytes: u64) -> String {
 fn import_action(st: &mut ImportState, with_synopsis: bool) -> Action {
     let source = st.selected_file().cloned().unwrap_or_default();
     let title = st.name.trim().to_string();
-    st.step = 5;
+    st.step = ImportStep::Importing;
     st.progress = Some((0, 0, "starting".to_string()));
     Action::ImportFile {
         source,
@@ -525,12 +525,16 @@ fn import_wizard(
             &["Source", "Name", "Title", "Volume", "Synopsis", "Import"]
         };
         let current = match (st.step, st.lock_name, st.append_to.is_some()) {
-            (0, _, _) => 0,
+            (ImportStep::Pick, _, _) => 0,
             (_, _, true) => 1,
-            (3, true, _) => 1,
-            (4, true, _) => 2,
+            (ImportStep::Volume, true, _) => 1,
+            (ImportStep::Synopsis, true, _) => 2,
             (_, true, _) => 3,
-            (s, false, _) => (s as usize).min(steps.len() - 1),
+            (s, false, _) => ImportStep::ALL
+                .iter()
+                .position(|x| *x == s)
+                .unwrap_or(0)
+                .min(steps.len() - 1),
         };
         ui.horizontal(|ui| {
             for (i, s) in steps.iter().enumerate() {
@@ -544,12 +548,12 @@ fn import_wizard(
         ui.separator();
 
         match st.step {
-            0 => import_step_pick(ui, st, pal, actions),
-            1 => import_step_name(ui, st, pal),
-            2 => import_step_title(ui, st, pal, actions),
-            3 => import_step_volume(ui, st, pal),
-            4 => import_step_synopsis(ui, st, pal, actions),
-            _ => {
+            ImportStep::Pick => import_step_pick(ui, st, pal, actions),
+            ImportStep::Name => import_step_name(ui, st, pal),
+            ImportStep::Title => import_step_title(ui, st, pal, actions),
+            ImportStep::Volume => import_step_volume(ui, st, pal),
+            ImportStep::Synopsis => import_step_synopsis(ui, st, pal, actions),
+            ImportStep::Importing => {
                 let (done, total, label) = st.progress.clone().unwrap_or((0, 0, "…".into()));
                 ui.label(RichText::new("Importing — chapters land as they're cleansed.").color(pal.ink));
                 let frac = if total > 0 { done as f32 / total as f32 } else { 0.0 };
@@ -634,7 +638,7 @@ fn import_step_pick(ui: &mut Ui, st: &mut ImportState, pal: &GuiPalette, actions
                         }
                     }
                     st.name_cursor = st.name.len();
-                    st.step = if st.lock_name { 3 } else { 1 };
+                    st.step = if st.lock_name { ImportStep::Volume } else { ImportStep::Name };
                 }
             }
         });
@@ -665,7 +669,7 @@ fn import_step_name(ui: &mut Ui, st: &mut ImportState, pal: &GuiPalette) {
     ui.add_space(8.0);
     ui.horizontal(|ui| {
         if ui.button("Back").clicked() {
-            st.step = 0;
+            st.step = ImportStep::Pick;
             st.note = None;
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -679,7 +683,7 @@ fn import_step_name(ui: &mut Ui, st: &mut ImportState, pal: &GuiPalette) {
                     if st.title_syn.raw != raw {
                         st.title_syn = SynopsisState::new_title(raw, String::new());
                     }
-                    st.step = 2;
+                    st.step = ImportStep::Title;
                 }
             }
         });
@@ -703,12 +707,12 @@ fn import_step_title(ui: &mut Ui, st: &mut ImportState, pal: &GuiPalette, action
     ui.add_space(8.0);
     ui.horizontal(|ui| {
         if ui.button("Back").clicked() {
-            st.step = 1;
+            st.step = ImportStep::Name;
             st.name_cursor = st.name.len();
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if primary_button(ui, pal, "Continue").clicked() {
-                st.step = 3;
+                st.step = ImportStep::Volume;
                 st.suggest_volume();
             }
         });
@@ -738,11 +742,11 @@ fn import_step_volume(ui: &mut Ui, st: &mut ImportState, pal: &GuiPalette) {
     ui.add_space(8.0);
     ui.horizontal(|ui| {
         if ui.button("Back").clicked() {
-            st.step = if st.lock_name { 0 } else { 2 };
+            st.step = if st.lock_name { ImportStep::Pick } else { ImportStep::Title };
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if primary_button(ui, pal, "Continue").clicked() {
-                st.step = 4;
+                st.step = ImportStep::Synopsis;
             }
         });
     });
@@ -773,7 +777,7 @@ fn import_step_synopsis(
     ui.add_space(8.0);
     ui.horizontal(|ui| {
         if ui.button("Back").clicked() {
-            st.step = 3;
+            st.step = ImportStep::Volume;
         }
         if ui.button("Skip synopsis").clicked() {
             let a = import_action(st, false);
@@ -1019,13 +1023,13 @@ fn palette(
         .show(ctx, |ui| {
             ui.set_width(420.0);
             let resp = ui.add(
-                TextEdit::singleline(&mut st.query)
+                TextEdit::singleline(&mut st.picker.query)
                     .hint_text("Type a command…")
                     .desired_width(f32::INFINITY),
             );
             resp.request_focus();
             if resp.changed() {
-                st.sel = 0;
+                st.picker.on_query_changed();
             }
             let matches = st.matches();
             // The palette is modal, so a bare Enter can only mean "run the top match".
@@ -1037,7 +1041,7 @@ fn palette(
                 .show(ui, |ui| {
                     for (row, &i) in matches.iter().enumerate() {
                         let item = &st.items[i];
-                        if ui.selectable_label(row == st.sel, item.label).clicked() {
+                        if ui.selectable_label(row == st.sel(), item.label).clicked() {
                             actions.push(Action::CloseOverlay);
                             actions.push(item.action.clone());
                         }
@@ -1315,13 +1319,13 @@ fn reader_jump(
         .show(ctx, |ui| {
             ui.set_width(460.0);
             let resp = ui.add(
-                TextEdit::singleline(&mut st.query)
+                TextEdit::singleline(&mut st.picker.query)
                     .hint_text("Filter chapters · sections · bookmarks…")
                     .desired_width(f32::INFINITY),
             );
             resp.request_focus();
             if resp.changed() {
-                st.sel = 0;
+                st.picker.on_query_changed();
             }
             ui.add_space(4.0);
             let matches = st.matches();
@@ -1346,7 +1350,7 @@ fn reader_jump(
                             JumpKind::Bookmark => "◈",
                         };
                         if ui
-                            .selectable_label(row == st.sel, format!("{glyph}  {}", item.label))
+                            .selectable_label(row == st.sel(), format!("{glyph}  {}", item.label))
                             .clicked()
                         {
                             actions.push(Action::CloseOverlay);

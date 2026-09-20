@@ -238,6 +238,12 @@ fn theme_picker_preview_commit_and_revert() {
 
     let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
+    // `App::new` builds its theme at the terminal's detected depth, and at Mono
+    // — an unset `TERM`, or `NO_COLOR` — every palette collapses to
+    // `Color::Reset`, so the colour assertions below would compare Reset to
+    // Reset. The quantizer has its own tests; this one is about the picker.
+    crate::theme::pin_terminal_depth(crate::theme::quantize::ColorDepth::TrueColor);
+
     // Redirect config writes away from the real user config.
     let tmp = std::env::temp_dir().join(format!("honya-test-cfg-{}", std::process::id()));
     unsafe {

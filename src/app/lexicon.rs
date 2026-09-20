@@ -7,15 +7,18 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 use crate::model::{AltName, Character, GlossaryTerm, TermPolicy};
 use crate::theme::{self, Theme};
 use crate::ui::input::{self, EditOpts, Edited};
+use crate::ui::kit::list::ListState;
+use crate::ui::kit::table::{self, Column, Width};
 use crate::ui::mouse::{MouseGesture, MouseInput};
 use crate::ui::text::{col_width, pad_to_cols, thai_display_safe, truncate_cols};
 use crate::workspace::Workspace;
 
+use super::action_table::{self, Act};
 use super::Action;
 use super::overlay::Overlay;
 
@@ -185,7 +188,6 @@ pub struct LexiconScreen {
     searching: bool,
     /// Mouse hit-test rects, refreshed every frame: the section tabs, the table
     /// body, and the whole screen area (for locating the inline edit modal).
-    tab_rects: Vec<(Rect, u8)>,
     table_area: Rect,
     screen_area: Rect,
     /// Memoized Markdown render of STYLE.md, so the Style tab is not re-parsed on
@@ -193,7 +195,17 @@ pub struct LexiconScreen {
     style_cache: crate::ui::markdown::RenderCache,
     /// Vertical scroll offset of the Style tab (clamped to content in render).
     style_scroll: u16,
+    /// Sort order per tabular section, indexed by `self.sub`. Style has no
+    /// table, so its slot is never read.
+    sort: [table::Sort; 2],
 }
+
+/// Action ids for this screen's table. Stable within the screen: they are also
+/// the zone index every one of its controls registers under.
+const L_NEW: u16 = 0;
+const L_SEARCH: u16 = 1;
+const L_EDIT: u16 = 2;
+const L_DELETE: u16 = 3;
 
 impl LexiconScreen {
     pub fn new() -> Self {
@@ -206,11 +218,11 @@ impl LexiconScreen {
             filter: String::new(),
             filter_cursor: 0,
             searching: false,
-            tab_rects: Vec::new(),
             table_area: Rect::default(),
             screen_area: Rect::default(),
             style_cache: crate::ui::markdown::RenderCache::default(),
             style_scroll: 0,
+            sort: [table::Sort::default(); 2],
         }
     }
 
@@ -231,7 +243,7 @@ impl LexiconScreen {
 
     fn glossary(&self, ws: &Workspace) -> Vec<GlossaryTerm> {
         let all = crate::workspace::glossary::load(ws);
-        if self.filter.is_empty() {
+        let mut rows = if self.filter.is_empty() {
             all
         } else {
             let q = self.filter.to_lowercase();
@@ -256,19 +268,23 @@ impl LexiconScreen {
                             .contains(&q)
                 })
                 .collect()
-        }
+        };
+        sort_rows(&mut rows, self.sort[SUB_GLOSSARY as usize], glossary_cells);
+        rows
     }
 
     fn characters(&self, ws: &Workspace) -> Vec<Character> {
         let all = crate::workspace::characters::load(ws);
-        if self.filter.is_empty() {
+        let mut rows = if self.filter.is_empty() {
             all
         } else {
             let q = self.filter.to_lowercase();
             all.into_iter()
                 .filter(|c| character_matches_filter(c, &q))
                 .collect()
-        }
+        };
+        sort_rows(&mut rows, self.sort[SUB_CHARACTERS as usize], character_cells);
+        rows
     }
 
     pub fn handle_key(&mut self, key: KeyEvent, ws: Option<&Workspace>) -> Action {
@@ -296,6 +312,16 @@ impl LexiconScreen {
                 _ => {}
             }
             return Action::None;
+        }
+
+        // Commands come from the table; only navigation is left below. Tab is
+        // the documented exception — it is a reserved global everywhere else,
+        // and the Lexicon keeps it for its sections.
+        let acts = self.actions(ws);
+        match action_table::hit(&acts, &key) {
+            action_table::KeyHit::Run(id) => return self.run(id, ws).unwrap_or(Action::None),
+            action_table::KeyHit::Blocked => return Action::None,
+            action_table::KeyHit::Miss => {}
         }
 
         match key.code {
@@ -343,40 +369,17 @@ impl LexiconScreen {
                 self.style_scroll = u16::MAX; // clamped to content in render_style
                 Action::None
             }
-            KeyCode::Char('/') => {
-                self.searching = true;
-                self.filter.clear();
-                self.filter_cursor = 0;
-                Action::None
-            }
-            KeyCode::Char('n') => {
-                if ws.is_some() {
-                    self.editing = Some(match self.sub {
-                        SUB_CHARACTERS => EditForm::new_character(None),
-                        SUB_STYLE => EditForm {
-                            kind: SUB_STYLE,
-                            id: None,
-                            fields: vec![("Style note", String::new())],
-                            field: 0,
-                            cursor: 0,
-                            is_new: true,
-                        },
-                        _ => EditForm::new_glossary(None),
-                    });
-                }
-                Action::None
-            }
-            KeyCode::Enter | KeyCode::Char('e') => {
-                self.begin_edit(ws);
-                Action::None
-            }
-            KeyCode::Char('d') => self.begin_delete(ws),
             _ => Action::None,
         }
     }
 
     /// Mouse handling for tabs, table selection/editing, and edit-field focus.
-    pub fn handle_mouse(&mut self, m: MouseInput, ws: Option<&Workspace>) -> Action {
+    pub fn handle_mouse(
+        &mut self,
+        m: MouseInput,
+        zone: Option<crate::ui::kit::ZoneId>,
+        ws: Option<&Workspace>,
+    ) -> Action {
         if self.editing.is_some() {
             return self.handle_edit_mouse(m);
         }
@@ -398,28 +401,36 @@ impl LexiconScreen {
                 Action::None
             }
             MouseGesture::Click { double } => {
-                // A section tab takes priority over the table below it.
-                if let Some((_, id)) = self.tab_rects.iter().copied().find(|(r, _)| m.in_rect(*r)) {
-                    if id != self.sub {
-                        self.sub = id;
+                // A section tab takes priority over the table below it. The
+                // strip registers its own segments, so nothing here keeps a
+                // second copy of where they landed.
+                if let Some(id) = zone
+                    && id.kind == crate::ui::kit::ZoneKind::Segment
+                {
+                    let next = id.index as u8;
+                    if next != self.sub {
+                        self.sub = next;
                         self.list.select(Some(0));
                         self.style_scroll = 0;
                     }
                     return Action::None;
                 }
-                // Style has no selectable rows; only the tabs are interactive.
-                if self.sub == SUB_STYLE || !m.in_rect(self.table_area) {
+                // A header sorts by its column; clicking the column already
+                // sorted flips the direction.
+                if let Some(col) = zone.and_then(table::header_column) {
+                    let slot = self.sub as usize;
+                    if let Some(sort) = self.sort.get_mut(slot) {
+                        *sort = sort.toggled(col);
+                        self.list.select(Some(0));
+                    }
                     return Action::None;
                 }
-                let len = self.current_len(ws);
-                // Row 0 of the table is the column header; data starts one below.
-                if m.row <= self.table_area.y {
+                // The clicked row comes from the registry the table wrote while
+                // drawing, so there is no column arithmetic here to fall out of
+                // step with it. Style has no selectable rows and registers none.
+                let Some(idx) = zone.and_then(|z| z.row_index()) else {
                     return Action::None;
-                }
-                let idx = (m.row - self.table_area.y - 1) as usize + self.list.offset();
-                if idx >= len {
-                    return Action::None;
-                }
+                };
                 let already = self.list.selected() == Some(idx);
                 self.list.select(Some(idx));
                 if double || already {
@@ -427,7 +438,14 @@ impl LexiconScreen {
                 }
                 Action::None
             }
-            MouseGesture::RightClick => Action::None,
+            // The router opens this row's menu straight after, so the selection
+            // has to be on the row the menu is about.
+            MouseGesture::RightClick => {
+                if let Some(idx) = zone.and_then(|z| z.row_index()) {
+                    self.list.select(Some(idx));
+                }
+                Action::None
+            }
         }
     }
 
@@ -607,309 +625,237 @@ impl LexiconScreen {
         self.list.select(Some(next));
     }
 
-    pub fn render(&mut self, f: &mut Frame, area: Rect, ws: Option<&Workspace>, theme: &Theme) {
+    pub fn render(
+        &mut self,
+        ui: &mut crate::ui::kit::Ui,
+        area: Rect,
+        ws: Option<&Workspace>,
+    ) {
         self.screen_area = area;
-        let rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(1), Constraint::Min(0)])
-            .split(area);
+        let header = Rect {
+            height: 1,
+            ..area
+        };
+        let body = Rect {
+            y: area.y + 1,
+            height: area.height.saturating_sub(1),
+            ..area
+        };
+        let acts = self.actions(ws);
+        self.render_header(ui, header, ws, &acts);
+        self.render_table(ui, body, ws);
 
-        self.render_header(f, rows[0], ws, theme);
-        self.render_table(f, rows[1], ws, theme);
+        // The selected row's own verbs, over the right end of the row the table
+        // registered while drawing it.
+        if let Some(sel) = self.list.selected()
+            && let Some(rect) = ui.zones.rect_of(crate::ui::kit::ZoneId::row(sel))
+        {
+            crate::ui::kit::toolbar::RowActions::new(&acts).render(ui, rect);
+        }
 
+        let theme: &Theme = ui.theme;
+        let f: &mut Frame = ui.frame;
         if self.editing.is_some() {
             self.render_edit(f, area, theme);
         }
     }
 
-    fn render_header(&mut self, f: &mut Frame, area: Rect, ws: Option<&Workspace>, theme: &Theme) {
-        let tabs = [
-            ("Glossary", SUB_GLOSSARY),
-            ("Characters", SUB_CHARACTERS),
-            ("Style", SUB_STYLE),
-        ];
-        let mut spans = vec![Span::raw("  ")];
-        let mut x = area.x.saturating_add(2);
-        self.tab_rects.clear();
-        for (label, id) in tabs {
-            let text = if id == self.sub {
-                format!("〔 {label} 〕")
-            } else {
-                format!("  {label}  ")
-            };
-            let w = col_width(&text) as u16;
-            self.tab_rects.push((
-                Rect {
-                    x,
-                    y: area.y,
-                    width: w,
-                    height: 1,
-                },
-                id,
-            ));
-            x = x.saturating_add(w).saturating_add(1); // + trailing space
-            if id == self.sub {
-                spans.push(Span::styled(
-                    text,
-                    Style::default()
-                        .fg(theme.accent)
-                        .add_modifier(Modifier::BOLD),
-                ));
-            } else {
-                spans.push(Span::styled(text, Style::default().fg(theme.ink_faint)));
-            }
-            spans.push(Span::raw(" "));
-        }
-        let count = match (ws, self.sub) {
-            (Some(ws), SUB_GLOSSARY) => format!("{} terms", self.glossary(ws).len()),
-            (Some(ws), SUB_CHARACTERS) => format!("{} characters", self.characters(ws).len()),
-            _ => "—".to_string(),
-        };
-        let faint = Style::default().fg(theme.ink_faint);
-        let mut right_spans: Vec<Span> = Vec::new();
-        if self.searching || !self.filter.is_empty() {
-            right_spans.push(Span::styled("/ filter: ", faint));
-            if self.searching {
-                let (before, after) =
-                    input::caret_halves(&self.filter, self.filter_cursor, usize::MAX);
-                right_spans.push(Span::styled(before, faint));
-                right_spans.push(Span::styled("▏", Style::default().fg(theme.stream_cursor)));
-                right_spans.push(Span::styled(after, faint));
-            } else {
-                right_spans.push(Span::styled(thai_display_safe(&self.filter), faint));
-            }
-            right_spans.push(Span::styled("   ", faint));
-        }
-        right_spans.push(Span::styled(format!("({count})"), faint));
+    /// Section strip on the left, filter and count on the right.
+    fn render_header(
+        &mut self,
+        ui: &mut crate::ui::kit::Ui,
+        area: Rect,
+        ws: Option<&Workspace>,
+        acts: &[Act],
+    ) {
+        use crate::ui::kit::ZoneKind;
+        use crate::ui::kit::tabs::{Segment, SegmentedControl};
+        use crate::ui::kit::toolbar::Toolbar;
 
-        let left = Line::from(spans);
-        f.render_widget(
-            Paragraph::new(left).style(Style::default().bg(theme.bg)),
-            area,
+        ui.fill(area, Style::default().bg(ui.theme.bg));
+
+        // The count belongs on the section it counts, so each tab carries its
+        // own rather than one number floating at the far end describing
+        // whichever section happens to be open.
+        let (terms, chars) = match ws {
+            Some(ws) => (self.glossary(ws).len(), self.characters(ws).len()),
+            None => (0, 0),
+        };
+        let segments = [
+            Segment::new("Glossary").badge(terms.to_string()),
+            Segment::new("Characters").badge(chars.to_string()),
+            Segment::new("Style"),
+        ];
+        let strip = Rect {
+            width: area.width / 2,
+            height: 1,
+            ..area
+        };
+        SegmentedControl::new(&segments, self.sub as usize)
+            .ids(ZoneKind::Segment, 0)
+            .render(ui, strip);
+
+        // Filter, right-aligned, only when there is one or it is being typed.
+        // Measured before the toolbar so the two share the free half rather
+        // than drawing over each other.
+        let faint = Style::default().fg(ui.theme.ink_faint).bg(ui.theme.bg);
+        let showing_filter = self.searching || !self.filter.is_empty();
+        let filter_cols = if showing_filter {
+            col_width(&thai_display_safe(&self.filter)) as u16 + 3
+        } else {
+            0
+        };
+        let toolbar_x = area.x + strip.width + 1;
+        let toolbar_w = (area.x + area.width)
+            .saturating_sub(toolbar_x)
+            .saturating_sub(filter_cols + 1);
+        Toolbar::new(acts).render(
+            ui,
+            Rect {
+                x: toolbar_x,
+                y: area.y,
+                width: toolbar_w,
+                height: 1,
+            },
         );
-        let rw: u16 = right_spans
+
+        if !showing_filter {
+            return;
+        }
+        let mut spans = vec![Span::styled("/ ", faint)];
+        if self.searching {
+            let (before, after) =
+                input::caret_halves(&self.filter, self.filter_cursor, usize::MAX);
+            spans.push(Span::styled(before, faint));
+            spans.push(Span::styled(
+                crate::ui::glyphs::ACCENT_RAIL.as_str().to_string(),
+                Style::default().fg(ui.theme.stream_cursor).bg(ui.theme.bg),
+            ));
+            spans.push(Span::styled(after, faint));
+        } else {
+            spans.push(Span::styled(thai_display_safe(&self.filter), faint));
+        }
+        let rw: u16 = spans
             .iter()
             .map(|s| col_width(s.content.as_ref()))
             .sum::<usize>() as u16;
         if area.width > rw + 2 {
-            f.render_widget(
-                Paragraph::new(Line::from(right_spans)).style(Style::default().bg(theme.bg)),
+            ui.line(
                 Rect {
                     x: area.x + area.width - rw - 1,
                     y: area.y,
                     width: rw,
                     height: 1,
                 },
+                Line::from(spans),
+                Style::default().bg(ui.theme.bg),
             );
         }
     }
 
-    fn render_table(&mut self, f: &mut Frame, area: Rect, ws: Option<&Workspace>, theme: &Theme) {
+    fn render_table(&mut self, ui: &mut crate::ui::kit::Ui, area: Rect, ws: Option<&Workspace>) {
+        let theme: &Theme = ui.theme;
+        let panel = theme.bg_panel;
         let block = Block::default()
             .borders(Borders::ALL)
             .border_set(theme::hairline_set())
             .border_style(Style::default().fg(theme.rule))
-            .style(Style::default().bg(theme.bg_panel));
+            .style(Style::default().bg(panel));
         let inner = block.inner(area);
-        f.render_widget(block, area);
+        ui.frame.render_widget(block, area);
         self.table_area = inner;
 
         let Some(ws) = ws else {
-            f.render_widget(
-                Paragraph::new(Span::styled(
-                    "  Open a project (Shelf → ↵) to edit its lexicon.",
-                    Style::default().fg(theme.ink_faint),
-                ))
-                .style(Style::default().bg(theme.bg_panel)),
-                inner,
+            let faint = Style::default().fg(ui.theme.ink_faint).bg(panel);
+            ui.text(
+                crate::ui::kit::ctx::row_at(inner, 0),
+                "  Open a project (Shelf → ↵) to edit its lexicon.",
+                faint,
             );
             return;
         };
 
-        match self.sub {
-            SUB_GLOSSARY => self.render_glossary_table(f, inner, ws, theme),
-            SUB_CHARACTERS => self.render_characters_table(f, inner, ws, theme),
-            _ => self.render_style(f, inner, ws, theme),
-        }
+        // Everything below sits on the panel, not the screen behind it.
+        ui.on_surface(panel, |ui| match self.sub {
+            SUB_GLOSSARY => self.render_glossary_table(ui, inner, ws),
+            SUB_CHARACTERS => self.render_characters_table(ui, inner, ws),
+            _ => {
+                let theme: &Theme = ui.theme;
+                let f: &mut Frame = ui.frame;
+                self.render_style(f, inner, ws, theme);
+            }
+        });
     }
 
-    fn render_glossary_table(&mut self, f: &mut Frame, area: Rect, ws: &Workspace, theme: &Theme) {
-        let terms = self.glossary(ws);
-        if self.list.selected().is_none_or(|s| s >= terms.len()) {
-            self.list.select(Some(terms.len().saturating_sub(1)));
-        }
-        let sel = self.list.selected().unwrap_or(0);
-
-        let head = Line::from(Span::styled(
-            format!(
-                "   {} {} {} {} {}  Notes",
-                pad_to_cols("JP term", 12),
-                pad_to_cols("Target term", 16),
-                pad_to_cols("Cat", 8),
-                pad_to_cols("Policy", 10),
-                "DNT"
-            ),
-            Style::default().fg(theme.ink_faint),
-        ));
-
+    /// Split a table area into its header row and its body.
+    fn table_rows(area: Rect) -> (Rect, Rect) {
         let rows = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(1), Constraint::Min(0)])
             .split(area);
-        f.render_widget(
-            Paragraph::new(head).style(Style::default().bg(theme.bg_panel)),
-            rows[0],
-        );
+        (rows[0], rows[1])
+    }
 
-        let mut items: Vec<ListItem> = Vec::new();
-        let gloss_w = area.width.saturating_sub(63).max(8) as usize;
-        for (i, t) in terms.iter().enumerate() {
-            let selected = i == sel;
-            let bar = if selected { theme::SELECT_BAR } else { ' ' };
-            let bg = if selected {
-                theme.accent_bg
-            } else {
-                theme.bg_panel
-            };
-            let policy = policy_short(crate::workspace::glossary::effective_policy(t));
-            let dnt = if t.do_not_translate.unwrap_or(false) {
-                "✓"
-            } else {
-                "·"
-            };
-            items.push(ListItem::new(Line::from(vec![
-                Span::styled(format!(" {bar} "), Style::default().fg(theme.accent).bg(bg)),
-                Span::styled(
-                    pad_to_cols(&t.jp_term, 12),
-                    Style::default().fg(theme.ink).bg(bg),
-                ),
-                Span::styled(" ", Style::default().bg(bg)),
-                Span::styled(
-                    pad_to_cols(&thai_display_safe(&t.translated_term), 16),
-                    Style::default().fg(theme.translated_text).bg(bg),
-                ),
-                Span::styled(" ", Style::default().bg(bg)),
-                Span::styled(
-                    pad_to_cols(&thai_display_safe(t.category.as_deref().unwrap_or("—")), 8),
-                    Style::default().fg(theme.ink_soft).bg(bg),
-                ),
-                Span::styled(
-                    pad_to_cols(policy, 10),
-                    Style::default().fg(theme.ink_faint).bg(bg),
-                ),
-                Span::styled(" ", Style::default().bg(bg)),
-                Span::styled(
-                    format!(" {dnt}   "),
-                    Style::default().fg(theme.ink_faint).bg(bg),
-                ),
-                Span::styled(
-                    truncate_cols(&thai_display_safe(&term_note(t)), gloss_w),
-                    Style::default().fg(theme.ink_soft).bg(bg),
-                ),
-            ])));
+    /// Draw one of the two tables: header, then body, then the empty-state line
+    /// when there is nothing to show.
+    fn render_rows<T>(
+        &mut self,
+        ui: &mut crate::ui::kit::Ui,
+        area: Rect,
+        columns: &[Column],
+        rows: &[T],
+        cells: fn(&T) -> Vec<String>,
+        empty: &str,
+    ) {
+        let sort = self.sort[self.sub as usize];
+        let (head, body) = Self::table_rows(area);
+        table::render_header(ui, head, columns, sort);
+
+        if rows.is_empty() {
+            let faint = Style::default().fg(ui.theme.ink_faint).bg(ui.surface());
+            ui.text(crate::ui::kit::ctx::row_at(body, 0), empty, faint);
+            return;
         }
-        if terms.is_empty() {
-            items.push(ListItem::new(Line::from(Span::styled(
-                "   (no terms yet — n to add)",
-                Style::default().fg(theme.ink_faint),
-            ))));
+        table::render_body(ui, body, &mut self.list, columns, rows.len(), |i| {
+            cells(&rows[i])
+        });
+    }
+
+    fn render_glossary_table(&mut self, ui: &mut crate::ui::kit::Ui, area: Rect, ws: &Workspace) {
+        let terms = self.glossary(ws);
+        if self.list.selected().is_none_or(|s| s >= terms.len()) {
+            self.list.select(Some(terms.len().saturating_sub(1)));
         }
-        f.render_stateful_widget(
-            List::new(items).style(Style::default().bg(theme.bg_panel)),
-            rows[1],
-            &mut self.list,
+        let columns = glossary_columns(ui.theme);
+        self.render_rows(
+            ui,
+            area,
+            &columns,
+            &terms,
+            glossary_cells,
+            "  (no terms yet — n to add)",
         );
-        Self::scrollbar(f, rows[1], terms.len(), self.list.offset(), theme);
     }
 
     fn render_characters_table(
         &mut self,
-        f: &mut Frame,
+        ui: &mut crate::ui::kit::Ui,
         area: Rect,
         ws: &Workspace,
-        theme: &Theme,
     ) {
         let chars = self.characters(ws);
         if self.list.selected().is_none_or(|s| s >= chars.len()) {
             self.list.select(Some(chars.len().saturating_sub(1)));
         }
-        let sel = self.list.selected().unwrap_or(0);
-        let cols = character_columns(area.width);
-
-        let mut head = format!(
-            "   {} {}",
-            pad_to_cols("JP name", cols.jp),
-            pad_to_cols("Target name", cols.translated)
+        let columns = character_table_columns(ui.theme);
+        self.render_rows(
+            ui,
+            area,
+            &columns,
+            &chars,
+            character_cells,
+            "  (no characters yet — n to add)",
         );
-        if cols.gender > 0 {
-            head.push(' ');
-            head.push_str(&pad_to_cols("Gender", cols.gender));
-        }
-        if cols.extra > 0 {
-            head.push_str("  ");
-            head.push_str(&pad_to_cols("Names / Notes", cols.extra));
-        }
-        let head = Line::from(Span::styled(head, Style::default().fg(theme.ink_faint)));
-        let rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(1), Constraint::Min(0)])
-            .split(area);
-        f.render_widget(
-            Paragraph::new(head).style(Style::default().bg(theme.bg_panel)),
-            rows[0],
-        );
-        let mut items: Vec<ListItem> = Vec::new();
-        for (i, c) in chars.iter().enumerate() {
-            let selected = i == sel;
-            let bar = if selected { theme::SELECT_BAR } else { ' ' };
-            let bg = if selected {
-                theme.accent_bg
-            } else {
-                theme.bg_panel
-            };
-            let mut spans = vec![
-                Span::styled(format!(" {bar} "), Style::default().fg(theme.accent).bg(bg)),
-                Span::styled(
-                    pad_to_cols(&c.jp_name, cols.jp),
-                    Style::default().fg(theme.ink).bg(bg),
-                ),
-                Span::styled(" ", Style::default().bg(bg)),
-                Span::styled(
-                    pad_to_cols(&thai_display_safe(&c.translated_name), cols.translated),
-                    Style::default().fg(theme.translated_text).bg(bg),
-                ),
-            ];
-            if cols.gender > 0 {
-                spans.push(Span::styled(" ", Style::default().bg(bg)));
-                spans.push(Span::styled(
-                    pad_to_cols(
-                        &thai_display_safe(c.gender.as_deref().unwrap_or("—")),
-                        cols.gender,
-                    ),
-                    Style::default().fg(theme.ink_soft).bg(bg),
-                ));
-            }
-            if cols.extra > 0 {
-                spans.push(Span::styled("  ", Style::default().bg(bg)));
-                spans.push(Span::styled(
-                    truncate_cols(&thai_display_safe(&character_extra(c)), cols.extra),
-                    Style::default().fg(theme.ink_soft).bg(bg),
-                ));
-            }
-            items.push(ListItem::new(Line::from(spans)));
-        }
-        if chars.is_empty() {
-            items.push(ListItem::new(Line::from(Span::styled(
-                "   (no characters yet — n to add)",
-                Style::default().fg(theme.ink_faint),
-            ))));
-        }
-        f.render_stateful_widget(
-            List::new(items).style(Style::default().bg(theme.bg_panel)),
-            rows[1],
-            &mut self.list,
-        );
-        Self::scrollbar(f, rows[1], chars.len(), self.list.offset(), theme);
     }
 
     fn render_style(&mut self, f: &mut Frame, area: Rect, ws: &Workspace, theme: &Theme) {
@@ -1022,72 +968,148 @@ impl LexiconScreen {
         );
     }
 
+    /// This screen's commands, availability resolved for this frame.
+    ///
+    /// Everything greys out while a form or the filter holds the keyboard —
+    /// those keys belong to the field being typed into — rather than the
+    /// toolbar vanishing and the header changing shape mid-word.
+    pub fn actions(&self, ws: Option<&Workspace>) -> Vec<Act> {
+        use action_table::Accel;
+
+        let live = ws.is_some() && !self.is_capturing();
+        let has_ws = live;
+        // Style is prose, not a list: it has no row to edit or delete.
+        let on_row = live && self.sub != SUB_STYLE && self.current_len(ws) > 0;
+        vec![
+            Act::toolbar(L_NEW, "new", Accel::key('n')).when(has_ws),
+            Act::toolbar(L_SEARCH, "search", Accel::key('/')).when(!self.is_capturing()),
+            Act::row(
+                L_EDIT,
+                "edit",
+                Accel::code(KeyCode::Enter).or(KeyCode::Char('e')),
+            )
+            .when(on_row),
+            Act::row(L_DELETE, "delete", Accel::key('d')).when(on_row),
+        ]
+    }
+
+    /// Run the action `id` stands for, however it was reached. `None` means
+    /// no such action here.
+    pub fn run(&mut self, id: u16, ws: Option<&Workspace>) -> Option<Action> {
+        Some(match id {
+            L_NEW => {
+                if ws.is_some() {
+                    self.editing = Some(match self.sub {
+                        SUB_CHARACTERS => EditForm::new_character(None),
+                        SUB_STYLE => EditForm {
+                            kind: SUB_STYLE,
+                            id: None,
+                            fields: vec![("Style note", String::new())],
+                            field: 0,
+                            cursor: 0,
+                            is_new: true,
+                        },
+                        _ => EditForm::new_glossary(None),
+                    });
+                }
+                Action::None
+            }
+            L_SEARCH => {
+                self.searching = true;
+                self.filter.clear();
+                self.filter_cursor = 0;
+                Action::None
+            }
+            L_EDIT => {
+                self.begin_edit(ws);
+                Action::None
+            }
+            L_DELETE => self.begin_delete(ws),
+            _ => return None,
+        })
+    }
+
+    /// Navigation only, except inside a form — where the keys genuinely have
+    /// no control, because the form is the control.
     pub fn hints(&self) -> &'static [(&'static str, &'static str)] {
         if self.editing.is_some() {
             return &[("↵", "save"), ("Tab", "field"), ("Esc", "cancel")];
         }
-        &[
-            ("↵", "edit"),
-            ("n", "new"),
-            ("d", "del"),
-            ("/", "search"),
-            ("Tab", "section"),
-        ]
+        &[("Tab", "section"), ("↑↓", "move")]
     }
 }
 
-impl Default for LexiconScreen {
-    fn default() -> Self {
-        Self::new()
-    }
+/// The glossary's columns. Width, priority and ink are declared once here
+/// rather than re-derived by the renderer, so what happens at 60 columns is a
+/// property of this table and not of whoever wrote that particular loop.
+fn glossary_columns(theme: &Theme) -> Vec<Column> {
+    vec![
+        Column::new("JP term", Width::Flex { min: 8, weight: 2 })
+            .priority(200)
+            .tint(theme.ink),
+        Column::new("Target term", Width::Flex { min: 10, weight: 2 })
+            .priority(190)
+            .tint(theme.translated_text),
+        Column::new("Cat", Width::Fixed(8)).priority(60),
+        Column::new("Policy", Width::Fixed(10)).priority(50),
+        Column::new("DNT", Width::Fixed(3)).priority(40),
+        Column::new("Notes", Width::Flex { min: 8, weight: 3 }).priority(30),
+    ]
 }
 
-#[derive(Debug, Clone, Copy)]
-struct CharacterColumns {
-    jp: usize,
-    translated: usize,
-    gender: usize,
-    extra: usize,
-}
-
-fn character_columns(width: u16) -> CharacterColumns {
-    let total = width as usize;
-    let mut jp = if total >= 78 {
-        20
-    } else if total >= 48 {
-        14
-    } else {
-        10.min(total.saturating_sub(5).max(4))
-    };
-    let mut gender = if total >= 68 { 8 } else { 0 };
-    // Width of the leading bar + JP name + Gender — everything before the translation.
-    let base = |jp: usize, gender: usize| 3 + jp + 1 + if gender > 0 { 1 + gender } else { 0 };
-    while total < base(jp, gender) + 9 {
-        if gender > 0 {
-            gender = 0;
-        } else if jp > 4 {
-            jp -= 1;
+fn glossary_cells(t: &GlossaryTerm) -> Vec<String> {
+    vec![
+        t.jp_term.clone(),
+        thai_display_safe(&t.translated_term),
+        thai_display_safe(t.category.as_deref().unwrap_or("—")),
+        policy_short(crate::workspace::glossary::effective_policy(t)).to_string(),
+        if t.do_not_translate.unwrap_or(false) {
+            "✓".into()
         } else {
-            break;
-        }
-    }
-    // Wide pane: "Names / Notes" soaks up the leftover width and the translation stays a
-    // readable fixed width. Narrow pane (no room for notes): translation absorbs the
-    // slack so the table still fills the pane with no dead space.
-    let thai_fixed = if total >= 48 { 20 } else { 12 };
-    let leftover = total.saturating_sub(base(jp, gender) + thai_fixed + 2);
-    let (translated, extra) = if leftover >= 18 {
-        (thai_fixed, leftover)
-    } else {
-        (total.saturating_sub(base(jp, gender)).max(1), 0)
-    };
-    CharacterColumns {
-        jp,
-        translated,
-        gender,
-        extra,
-    }
+            "·".into()
+        },
+        thai_display_safe(&term_note(t)),
+    ]
 }
+
+fn character_table_columns(theme: &Theme) -> Vec<Column> {
+    vec![
+        Column::new("JP name", Width::Flex { min: 8, weight: 2 })
+            .priority(200)
+            .tint(theme.ink),
+        Column::new("Target name", Width::Flex { min: 10, weight: 2 })
+            .priority(190)
+            .tint(theme.translated_text),
+        Column::new("Gender", Width::Fixed(8)).priority(60),
+        Column::new("Names / Notes", Width::Flex { min: 10, weight: 3 }).priority(30),
+    ]
+}
+
+fn character_cells(c: &Character) -> Vec<String> {
+    vec![
+        c.jp_name.clone(),
+        thai_display_safe(&c.translated_name),
+        thai_display_safe(c.gender.as_deref().unwrap_or("—")),
+        thai_display_safe(&character_extra(c)),
+    ]
+}
+
+/// Order `rows` by the same text the table shows, so what a header click sorts
+/// by is what the column under it displays.
+fn sort_rows<T>(rows: &mut [T], sort: table::Sort, cells: fn(&T) -> Vec<String>) {
+    rows.sort_by(|a, b| {
+        let key = |v: &T| {
+            cells(v)
+                .get(sort.column)
+                .cloned()
+                .unwrap_or_default()
+                .to_lowercase()
+        };
+        let ord = key(a).cmp(&key(b));
+        if sort.descending { ord.reverse() } else { ord }
+    });
+}
+
 
 fn character_matches_filter(c: &Character, q: &str) -> bool {
     let fields = [
@@ -1272,12 +1294,45 @@ mod tests {
     use super::*;
     use crate::workspace::{Workspace, characters};
 
+    /// The section strip answers to the pointer, not only to Tab.
+    #[test]
+    fn clicking_a_section_switches_to_it() {
+        let mut s = LexiconScreen::new();
+        assert_eq!(s.sub, SUB_GLOSSARY);
+
+        let (_, zones) =
+            crate::ui::kit::ctx::draw_test(100, 20, |ui, area| s.render(ui, area, None));
+        let rect = zones
+            .rect_of(crate::ui::kit::ZoneId::segment(SUB_CHARACTERS as usize))
+            .expect("the Characters section should register a zone");
+        let (col, row) = (rect.x + 1, rect.y);
+
+        s.handle_mouse(
+            MouseInput {
+                gesture: MouseGesture::Click { double: false },
+                col,
+                row,
+            },
+            zones.at(col, row),
+            None,
+        );
+        assert_eq!(s.sub, SUB_CHARACTERS, "clicking a section must switch to it");
+    }
+
     fn temp_ws(tag: &str) -> (std::path::PathBuf, Workspace) {
         let base = std::env::temp_dir().join(format!("honya_lexicon_{tag}_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
         let ws = Workspace::new(base.clone(), 1);
         (base, ws)
+    }
+
+    fn character_named(jp: &str, translated: &str) -> Character {
+        Character {
+            jp_name: jp.into(),
+            translated_name: translated.into(),
+            ..character()
+        }
     }
 
     fn character() -> Character {
@@ -1301,30 +1356,56 @@ mod tests {
         }
     }
 
+    /// The property the bespoke width function used to guard, now a property of
+    /// the column declaration: whatever the pane width, the columns fill it
+    /// exactly, and the flexible Names/Notes column is the one that grows.
     #[test]
     fn character_columns_fill_width_no_dead_space() {
-        let used = |c: &CharacterColumns| {
-            3 + c.jp
-                + 1
-                + c.translated
-                + if c.gender > 0 { 1 + c.gender } else { 0 }
-                + if c.extra > 0 { 2 + c.extra } else { 0 }
+        let theme = crate::model::ThemeId::default().build();
+        let columns = character_table_columns(&theme);
+        for w in [10u16, 30, 47, 67, 80, 200, 1900] {
+            let cols = table::layout(&columns, w);
+            let used: u16 = cols.iter().map(|&(_, cw)| cw).sum::<u16>()
+                + cols.len().saturating_sub(1) as u16;
+            assert_eq!(used, w, "columns should fill width {w} exactly");
+        }
+        // Wide panes spend their slack on Names/Notes, not on the name columns.
+        let wide = table::layout(&columns, 200);
+        let width_of = |i: usize| wide.iter().find(|&&(c, _)| c == i).map(|&(_, w)| w);
+        assert!(
+            width_of(3) > width_of(1),
+            "Names/Notes should be the flexible column: {wide:?}"
+        );
+    }
+
+    /// Sorting is by the same text the column shows, so a header click orders
+    /// the rows the way the thing under it reads.
+    #[test]
+    fn a_header_sorts_by_what_its_column_displays() {
+        let mut rows = vec![
+            character_named("清水圭", "ชิมิซุ"),
+            character_named("安藤", "อันโด"),
+            character_named("村上", "มุราคามิ"),
+        ];
+        let names = |rows: &[Character]| -> Vec<String> {
+            rows.iter().map(|c| c.jp_name.clone()).collect()
         };
-        // Wide panes fill the full width via the flexible Names/Notes column.
-        for w in [200u16, 1900] {
-            let c = character_columns(w);
-            assert_eq!(used(&c), w as usize, "columns should fill width {w}");
-            assert!(
-                c.extra > c.translated,
-                "Names/Notes should be the flexible column"
-            );
-        }
-        // Every width fills the pane without overflowing (translation absorbs slack
-        // when there is no room for a notes column).
-        for w in [10u16, 30, 47, 67, 80] {
-            let c = character_columns(w);
-            assert_eq!(used(&c), w as usize, "no dead space at width {w}");
-        }
+
+        sort_rows(&mut rows, table::Sort::default(), character_cells);
+        let mut sorted = names(&rows);
+        sorted.sort();
+        assert_eq!(names(&rows), sorted, "ascending by the JP name column");
+
+        sort_rows(
+            &mut rows,
+            table::Sort {
+                column: 0,
+                descending: true,
+            },
+            character_cells,
+        );
+        sorted.reverse();
+        assert_eq!(names(&rows), sorted, "clicking again flips the direction");
     }
 
     #[test]

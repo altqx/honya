@@ -7,15 +7,16 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Block, Borders, ListState, Paragraph};
 
 use crate::model::{Chapter, ChapterKind, ChapterStatus, Project, UsageStats, Volume};
 use crate::theme::{self, Theme, status_glyph};
-use crate::ui::mouse::{MouseGesture, MouseInput, row_index};
+use crate::ui::mouse::{MouseGesture, MouseInput};
 use crate::ui::text::{col_width, pad_to_cols, thai_display_safe, truncate_cols};
 use crate::ui::widgets::{render_line_gauge, status_cell};
 
 use super::overlay::Overlay;
+use super::action_table::{self, Act};
 use super::{Action, ActiveProject};
 
 /// A flattened tree row: either a volume header or a chapter.
@@ -44,6 +45,22 @@ pub struct ProjectScreen {
     tree_area: Rect,
     side_area: Rect,
 }
+
+/// Action ids for this screen's table. Stable within the screen: they are also
+/// the zone index every one of its controls registers under.
+const P_TRANSLATE_VOL: u16 = 0;
+const P_EXPORT: u16 = 1;
+const P_ADD_VOLUME: u16 = 2;
+const P_READ: u16 = 3;
+const P_QUEUE: u16 = 4;
+const P_MARK: u16 = 5;
+const P_DELETE: u16 = 6;
+const P_TRANSLATE_ALL: u16 = 7;
+const P_ADD_CHAPTERS: u16 = 8;
+const P_IMAGES: u16 = 9;
+const P_TITLE: u16 = 10;
+const P_SYNOPSIS: u16 = 11;
+const P_QA: u16 = 12;
 
 impl ProjectScreen {
     pub fn new() -> Self {
@@ -163,61 +180,156 @@ impl ProjectScreen {
         let rows = self.rows(active);
         let n = rows.len();
         let sel = self.tree.selected().unwrap_or(0).min(n.saturating_sub(1));
+        drop(rows);
 
-        let action = match key.code {
-            KeyCode::Up | KeyCode::Char('k') => {
-                let next = if sel == 0 {
-                    n.saturating_sub(1)
-                } else {
-                    sel - 1
-                };
-                self.tree.select(Some(next));
-                Action::None
+        // Commands come from the table; what is left here is navigation —
+        // moving the cursor, stepping between the panels, folding volumes.
+        let acts = self.actions(Some(active));
+        let action = match action_table::hit(&acts, &key) {
+            action_table::KeyHit::Run(id) => {
+                self.run(id, Some(active)).unwrap_or(Action::None)
             }
-            KeyCode::Down | KeyCode::Char('j') => {
-                let next = if n == 0 { 0 } else { (sel + 1) % n };
-                self.tree.select(Some(next));
-                Action::None
-            }
-            KeyCode::Char('h') | KeyCode::Left => {
-                if self.focus_panel == 1 {
-                    self.focus_panel = 0;
-                } else if let Some(vol) = self.selected_volume(active) {
-                    self.collapsed.insert(vol);
+            action_table::KeyHit::Blocked => Action::None,
+            action_table::KeyHit::Miss => match key.code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    let next = if sel == 0 {
+                        n.saturating_sub(1)
+                    } else {
+                        sel - 1
+                    };
+                    self.tree.select(Some(next));
+                    Action::None
                 }
-                Action::None
-            }
-            KeyCode::Char('l') | KeyCode::Right => {
-                if let Some(Row::Volume(v)) = rows.get(sel) {
-                    self.collapsed.remove(&v.number);
-                } else {
-                    self.focus_panel = 1;
+                KeyCode::Down | KeyCode::Char('j') => {
+                    let next = if n == 0 { 0 } else { (sel + 1) % n };
+                    self.tree.select(Some(next));
+                    Action::None
                 }
-                Action::None
-            }
-            KeyCode::Enter => {
+                KeyCode::Char('h') | KeyCode::Left => {
+                    if self.focus_panel == 1 {
+                        self.focus_panel = 0;
+                    } else if let Some(vol) = self.selected_volume(active) {
+                        self.collapsed.insert(vol);
+                    }
+                    Action::None
+                }
+                KeyCode::Char('l') | KeyCode::Right => {
+                    if let Some(vol) = self.selected_volume_row(active) {
+                        self.collapsed.remove(&vol);
+                    } else {
+                        self.focus_panel = 1;
+                    }
+                    Action::None
+                }
+                KeyCode::Char('z') => {
+                    self.collapse_all_volumes(active);
+                    Action::None
+                }
+                KeyCode::Char('Z') => {
+                    self.expand_all_volumes();
+                    Action::None
+                }
+                _ => Action::None,
+            },
+        };
+
+        // Auto-follow volume changes when navigation lands without another action.
+        if matches!(action, Action::None)
+            && let Some(v) = self.selected_volume(active)
+            && v != active.vol
+        {
+            return Action::SetActiveVolume { vol: v };
+        }
+        action
+    }
+
+    /// The volume number when the cursor is on a volume *header* row, as
+    /// opposed to on a chapter inside one.
+    fn selected_volume_row(&self, active: &ActiveProject) -> Option<u32> {
+        let rows = self.rows(active);
+        let sel = self.tree.selected().unwrap_or(0);
+        match rows.get(sel) {
+            Some(Row::Volume(v)) => Some(v.number),
+            _ => None,
+        }
+    }
+
+    /// This screen's commands, availability resolved for this frame. Drawn as
+    /// the band under the dashboard and the selected tree row's verbs.
+    pub fn actions(&self, active: Option<&ActiveProject>) -> Vec<Act> {
+        use action_table::Accel;
+
+        // With no project open nothing is available, but the table is still
+        // the table: help and the command bar read the screen's commands from
+        // here, and a list that disappeared with the project would document
+        // nothing.
+        let live = active.is_some();
+        let on_volume_row = active.is_some_and(|a| self.selected_volume_row(a).is_some());
+        let on_chapter = active.is_some_and(|a| self.selected_chapter_id(a).is_some());
+        let marked = active.map_or(0, |a| self.marked_ids(a).len());
+        let deletable = on_chapter
+            || active.is_some_and(|a| {
+                let vol = self.selected_volume(a).unwrap_or(a.vol);
+                !self.marked_chapters_in_vol(vol).is_empty()
+            });
+
+        vec![
+            Act::toolbar(P_TRANSLATE_VOL, "translate vol", Accel::key('T')).when(live),
+            Act::toolbar(P_EXPORT, "export", Accel::key('x')).when(live),
+            Act::toolbar(P_ADD_VOLUME, "add volume", Accel::key('V')).when(live),
+            Act::row(P_READ, "read", Accel::code(KeyCode::Enter))
+                .when(on_chapter || on_volume_row),
+            Act::row(
+                P_QUEUE,
+                "queue",
+                Accel::key('t').or(KeyCode::Char('a')),
+            )
+            .when(on_chapter || marked > 0),
+            Act::row(P_MARK, "mark", Accel::key(' ')).when(on_chapter),
+            Act::row(P_DELETE, "delete", Accel::key('d')).when(deletable),
+            Act::menu(P_TRANSLATE_ALL, "translate whole project", Accel::key('A')).when(live),
+            Act::menu(P_ADD_CHAPTERS, "add chapters", Accel::key('i')).when(live),
+            Act::menu(P_IMAGES, "refresh images", Accel::key('M')).when(live),
+            Act::menu(P_TITLE, "edit title", Accel::key('e')).when(live),
+            Act::menu(P_SYNOPSIS, "edit synopsis", Accel::key('y')).when(live),
+            Act::menu(P_QA, "QA report", Accel::key('Q')).when(live),
+        ]
+    }
+
+    /// Run the action `id` stands for, however it was reached. `None` means
+    /// no such action here.
+    pub fn run(&mut self, id: u16, active: Option<&ActiveProject>) -> Option<Action> {
+        // Every id below is one this screen has; `None` is reserved for an id
+        // that is not, so an unhandled action stays distinguishable from one
+        // that simply has nothing to act on yet.
+        let Some(active) = active else {
+            return self.knows(id).then_some(Action::None);
+        };
+        let vol = self.selected_volume(active).unwrap_or(active.vol);
+        Some(match id {
+            // Chapter selection (incl. the disk-completeness check that catches
+            // partial files scanning as Done) happens in apply, which has cfg.
+            P_TRANSLATE_VOL => match self.selected_volume(active) {
+                Some(vol) => Action::StartVolumeTranslation { vol },
+                None => Action::None,
+            },
+            P_EXPORT => Action::show_overlay(Overlay::export(vol)),
+            P_ADD_VOLUME => Action::AddVolume,
+            P_READ => {
                 if let Some(ch) = self.selected_chapter(active) {
                     Action::OpenChapter { chapter: ch }
-                } else if let Some(Row::Volume(v)) = rows.get(sel) {
-                    if self.collapsed.contains(&v.number) {
-                        self.collapsed.remove(&v.number);
+                } else if let Some(v) = self.selected_volume_row(active) {
+                    if self.collapsed.contains(&v) {
+                        self.collapsed.remove(&v);
                     } else {
-                        self.collapsed.insert(v.number);
+                        self.collapsed.insert(v);
                     }
                     Action::None
                 } else {
                     Action::None
                 }
             }
-            KeyCode::Char(' ') => {
-                if let Some(id) = self.selected_chapter_id(active)
-                    && !self.selected.insert(id)
-                {
-                    self.selected.remove(&id);
-                }
-                Action::None
-            }
-            KeyCode::Char('t') | KeyCode::Char('a') => {
+            P_QUEUE => {
                 let marked = self.marked_ids(active);
                 if !marked.is_empty() {
                     self.selected.clear();
@@ -228,48 +340,15 @@ impl ProjectScreen {
                     Action::None
                 }
             }
-            KeyCode::Char('T') => {
-                // Chapter selection (incl. the disk-completeness check that catches
-                // partial files scanning as Done) happens in apply, which has cfg.
-                match self.selected_volume(active) {
-                    Some(vol) => Action::StartVolumeTranslation { vol },
-                    None => Action::None,
+            P_MARK => {
+                if let Some(id) = self.selected_chapter_id(active)
+                    && !self.selected.insert(id)
+                {
+                    self.selected.remove(&id);
                 }
+                Action::None
             }
-            KeyCode::Char('A') => Action::StartProjectTranslation,
-            KeyCode::Char('y') => {
-                let data = crate::workspace::volume::load(&active.workspace);
-                Action::show_overlay(Overlay::synopsis_edit(
-                    data.synopsis_raw,
-                    data.translated_synopsis,
-                    active.vol,
-                    active.project.title.clone(),
-                    active.project.target_language,
-                ))
-            }
-            KeyCode::Char('e') => Action::show_overlay(Overlay::project_title_edit(
-                active.project.id.clone(),
-                active.project.title.clone(),
-                active.project.translated_title.clone(),
-                active.project.target_language,
-            )),
-            KeyCode::Char('V') => Action::AddVolume,
-            KeyCode::Char('i') => {
-                let vol = self.selected_volume(active).unwrap_or(active.vol);
-                Action::AddChapters { vol }
-            }
-            KeyCode::Char('M') => {
-                let vol = self.selected_volume(active).unwrap_or(active.vol);
-                Action::show_overlay(Overlay::confirm(
-                    "Update volume images",
-                    format!(
-                        "Re-import the source EPUB for Vol.{vol:02}, copy images as vol{vol}_*, and rewrite image links in raw/ and translated/ Markdown. Translation prose stays unchanged."
-                    ),
-                    Action::RefreshVolumeImages { vol },
-                ))
-            }
-            KeyCode::Char('d') => {
-                let vol = self.selected_volume(active).unwrap_or(active.vol);
+            P_DELETE => {
                 let marked = self.marked_chapters_in_vol(vol);
                 let chapters = if !marked.is_empty() {
                     marked
@@ -296,36 +375,52 @@ impl ProjectScreen {
                     ))
                 }
             }
-            KeyCode::Char('x') => {
-                let vol = self.selected_volume(active).unwrap_or(active.vol);
-                Action::show_overlay(Overlay::export(vol))
+            P_TRANSLATE_ALL => Action::StartProjectTranslation,
+            P_ADD_CHAPTERS => Action::AddChapters { vol },
+            P_IMAGES => Action::show_overlay(Overlay::confirm(
+                "Update volume images",
+                format!(
+                    "Re-import the source EPUB for Vol.{vol:02}, copy images as vol{vol}_*, and rewrite image links in raw/ and translated/ Markdown. Translation prose stays unchanged."
+                ),
+                Action::RefreshVolumeImages { vol },
+            )),
+            P_TITLE => Action::show_overlay(Overlay::project_title_edit(
+                active.project.id.clone(),
+                active.project.title.clone(),
+                active.project.translated_title.clone(),
+                active.project.target_language,
+            )),
+            P_SYNOPSIS => {
+                let data = crate::workspace::volume::load(&active.workspace);
+                Action::show_overlay(Overlay::synopsis_edit(
+                    data.synopsis_raw,
+                    data.translated_synopsis,
+                    active.vol,
+                    active.project.title.clone(),
+                    active.project.target_language,
+                ))
             }
-            KeyCode::Char('z') => {
-                self.collapse_all_volumes(active);
-                Action::None
-            }
-            KeyCode::Char('Z') => {
-                self.expand_all_volumes();
-                Action::None
-            }
-            _ => Action::None,
-        };
+            // The App rebuilds the report from the live project on show.
+            P_QA => Action::show_overlay(Overlay::qa_placeholder()),
+            _ => return None,
+        })
+    }
 
-        // Auto-follow volume changes when navigation lands without another action.
-        if matches!(action, Action::None)
-            && let Some(v) = self.selected_volume(active)
-            && v != active.vol
-        {
-            return Action::SetActiveVolume { vol: v };
-        }
-        action
+    /// Whether `id` is one of this screen's actions at all.
+    fn knows(&self, id: u16) -> bool {
+        self.actions(None).iter().any(|a| a.id == id)
     }
 
     /// Mouse: the wheel walks the tree (auto-following the volume under the
     /// cursor, like the keyboard does); a click selects a row; a double-click (or a
     /// click on the selected row) opens a chapter or toggles a volume's collapse.
     /// Clicking the right column focuses it (so `h` steps back to the tree).
-    pub fn handle_mouse(&mut self, m: MouseInput, active: Option<&ActiveProject>) -> Action {
+    pub fn handle_mouse(
+        &mut self,
+        m: MouseInput,
+        zone: Option<crate::ui::kit::ZoneId>,
+        active: Option<&ActiveProject>,
+    ) -> Action {
         let Some(active) = active else {
             return Action::None;
         };
@@ -347,7 +442,10 @@ impl ProjectScreen {
                 }
                 self.focus_panel = 0;
                 let rows = self.rows(active);
-                let Some(idx) = row_index(self.tree_area, self.tree.offset(), rows.len(), m.row)
+                // The clicked row comes from the registry the tree wrote while
+                // drawing, rather than being worked back out of the pointer's
+                // row and the scroll offset.
+                let Some(idx) = zone.and_then(|z| z.row_index()).filter(|i| *i < rows.len())
                 else {
                     return Action::None;
                 };
@@ -390,7 +488,18 @@ impl ProjectScreen {
                     }
                 }
             }
-            MouseGesture::RightClick => Action::None,
+            // The router opens this row's menu straight after, so the
+            // selection has to be on the row the menu is about.
+            MouseGesture::RightClick => {
+                if let Some(idx) = zone
+                    .and_then(|z| z.row_index())
+                    .filter(|i| *i < self.rows(active).len())
+                {
+                    self.focus_panel = 0;
+                    self.tree.select(Some(idx));
+                }
+                Action::None
+            }
         }
     }
 
@@ -430,31 +539,60 @@ impl ProjectScreen {
 
     pub fn render(
         &mut self,
-        f: &mut Frame,
+        ui: &mut crate::ui::kit::Ui,
         area: Rect,
         active: Option<&ActiveProject>,
-        theme: &Theme,
     ) {
         let Some(active) = active else {
-            empty_state(f, area, theme);
+            let theme: &Theme = ui.theme;
+            empty_state(ui.frame, area, theme);
             return;
         };
 
-        // Project dashboard band on top (title · active volume · overall progress),
-        // then the chapter tree + context/detail panels below it.
+        // Project dashboard band on top (title · active volume · overall
+        // progress), then the toolbar, then the chapter tree + context/detail
+        // panels. This is the one screen whose toolbar genuinely costs a row.
         let panes = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(2), Constraint::Min(0)])
+            .constraints([
+                Constraint::Length(2),
+                Constraint::Length(1),
+                Constraint::Min(0),
+            ])
             .split(area);
-        self.render_dashboard(f, panes[0], active, theme);
-
         let cols = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
-            .split(panes[1]);
-
+            .split(panes[2]);
         self.side_area = cols[1];
-        self.render_tree(f, cols[0], active, theme);
+
+        let acts = self.actions(Some(active));
+        crate::ui::kit::toolbar::Toolbar::new(&acts).has_menu(true).render(
+            ui,
+            Rect {
+                x: panes[1].x + 1,
+                width: panes[1].width.saturating_sub(2),
+                height: 1,
+                ..panes[1]
+            },
+        );
+
+        // The tree draws through the kit; the dashboard and side panel are
+        // still on the old path and take the frame back out afterwards. The
+        // three regions do not overlap, so the order is free.
+        self.render_tree(ui, cols[0], active);
+
+        // The selected row's own verbs, over the right end of the row the tree
+        // registered while drawing it.
+        if let Some(sel) = self.tree.selected()
+            && let Some(rect) = ui.zones.rect_of(crate::ui::kit::ZoneId::row(sel))
+        {
+            crate::ui::kit::toolbar::RowActions::new(&acts).render(ui, rect);
+        }
+
+        let theme: &Theme = ui.theme;
+        let f: &mut Frame = ui.frame;
+        self.render_dashboard(f, panes[0], active, theme);
         self.render_side(f, cols[1], active, theme);
     }
 
@@ -540,20 +678,24 @@ impl ProjectScreen {
         render_line_gauge(f, rows[1], ratio, &label, theme);
     }
 
-    fn render_tree(&mut self, f: &mut Frame, area: Rect, active: &ActiveProject, theme: &Theme) {
+    fn render_tree(
+        &mut self,
+        ui: &mut crate::ui::kit::Ui,
+        area: Rect,
+        active: &ActiveProject,
+    ) {
+        use crate::ui::kit::ZoneKind;
+        use crate::ui::kit::card::Card;
+        use crate::ui::kit::list::{self, ListState, Row as KitRow};
+
         let focused = self.focus_panel == 0;
-        let border_color = if focused { theme.accent } else { theme.rule };
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_set(theme::hairline_set())
-            .border_style(Style::default().fg(border_color))
-            .title(Span::styled(
-                " Chapters ",
-                Style::default().fg(theme.ink_soft),
-            ))
-            .style(Style::default().bg(theme.bg_panel));
-        let inner = block.inner(area);
-        f.render_widget(block, area);
+        let inner = Card::new(" Chapters ")
+            .accent(if focused {
+                ui.theme.border_focus
+            } else {
+                ui.theme.rule
+            })
+            .render(ui, area);
         self.tree_area = inner;
 
         let rows = self.rows(active);
@@ -561,33 +703,46 @@ impl ProjectScreen {
         if self.tree.selected().is_none_or(|s| s >= n) {
             self.tree.select(Some(n.saturating_sub(1)));
         }
-        let sel = self.tree.selected().unwrap_or(0);
-        let name_w = inner.width.saturating_sub(40).max(12) as usize;
 
-        let mut items = Vec::new();
-        for (i, row) in rows.iter().enumerate() {
-            items.push(match row {
+        // Built before the list borrows `ui`.
+        let name_w = inner.width.saturating_sub(40).max(12) as usize;
+        let lines: Vec<Line<'static>> = rows
+            .iter()
+            .map(|row| match row {
                 Row::Volume(v) => volume_row(
                     v,
                     self.collapsed.contains(&v.number),
-                    i == sel,
                     inner.width,
-                    theme,
+                    ui.theme,
                 ),
                 Row::Chapter { vol, ch } => chapter_row(
                     ch,
-                    i == sel,
                     self.selected.contains(&(*vol, ch.number)),
                     name_w,
-                    theme,
+                    ui.theme,
                 ),
-            });
-        }
+            })
+            .collect();
 
-        let list = List::new(items).style(Style::default().bg(theme.bg_panel));
-        f.render_stateful_widget(list, inner, &mut self.tree);
-        // The stateful render just updated the offset to keep the selection visible.
-        crate::ui::widgets::render_panel_scrollbar(f, area, n, self.tree.offset(), theme);
+        let mut state = ListState::new();
+        state.select(self.tree.selected());
+        list::render(
+            ui,
+            inner,
+            &mut state,
+            n,
+            list::Opts {
+                rail: true,
+                scrollbar: true,
+                kind: ZoneKind::Row,
+                id_base: 0,
+            },
+            |i| KitRow::new(lines[i].clone()),
+        );
+        // Keep the screen's own offset in step with what was drawn, since the
+        // keyboard paging still reads it.
+        self.tree.select(state.selected());
+        *self.tree.offset_mut() = state.offset();
     }
 
     /// Context + detail card heights: content-sized with a comfortable floor so the
@@ -870,24 +1025,11 @@ impl ProjectScreen {
         );
     }
 
+    /// Navigation only. Every command this screen has is a control now — the
+    /// toolbar, the selected row's buttons, or the menu behind `⋯` — so the
+    /// footer no longer restates fifteen keys.
     pub fn hints(&self) -> &'static [(&'static str, &'static str)] {
-        &[
-            ("↵", "read"),
-            ("Space", "mark"),
-            ("t/a", "queue"),
-            ("T", "vol"),
-            ("A", "all"),
-            ("V", "add vol"),
-            ("i", "add ch"),
-            ("M", "images"),
-            ("x", "export"),
-            ("e", "title"),
-            ("y", "synopsis"),
-            ("d", "del"),
-            ("h/l", "nav"),
-            ("z/Z", "fold"),
-            ("Q", "QA"),
-        ]
+        &[("↑↓", "move"), ("h/l", "panel"), ("z/Z", "fold")]
     }
 }
 
@@ -897,68 +1039,41 @@ impl Default for ProjectScreen {
     }
 }
 
-fn volume_row(
-    v: &Volume,
-    collapsed: bool,
-    selected: bool,
-    width: u16,
-    theme: &Theme,
-) -> ListItem<'static> {
+/// A volume row. Selection styling belongs to the list now, so this draws only
+/// what the row says, not what state it is in.
+fn volume_row(v: &Volume, collapsed: bool, width: u16, theme: &Theme) -> Line<'static> {
     let caret = if collapsed { "▸" } else { "▾" };
     let tally = vol_tally(v);
-    let bar = if selected {
-        theme::SELECT_BAR.to_string()
-    } else {
-        " ".to_string()
-    };
-    let row_bg = if selected {
-        theme.accent_bg
-    } else {
-        theme.bg_panel
-    };
     let label = match &v.label {
         Some(l) => format!("Vol.{:02} {}", v.number, thai_display_safe(l)),
         None => format!("Vol.{:02}", v.number),
     };
     let tally_str = format!("●{} ◐{} ○{} ✗{}", tally.0, tally.1, tally.2, tally.3);
-    let used = col_width(&format!(" {bar} {caret} {label}  ")) + col_width(&tally_str);
-    let fill = (width as usize).saturating_sub(used + 2);
+    let used = col_width(&format!("{caret} {label}  ")) + col_width(&tally_str);
+    let fill = (width as usize).saturating_sub(used + 3);
     let dots = "┄".repeat(fill.min(width as usize));
 
-    ListItem::new(Line::from(vec![
-        Span::styled(
-            format!(" {bar} "),
-            Style::default().fg(theme.accent).bg(row_bg),
-        ),
+    Line::from(vec![
         Span::styled(
             format!("{caret} {label} "),
-            Style::default()
-                .fg(theme.ink)
-                .bg(row_bg)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(theme.ink).add_modifier(Modifier::BOLD),
         ),
-        Span::styled(dots, Style::default().fg(theme.rule).bg(row_bg)),
+        Span::styled(dots, Style::default().fg(theme.rule)),
         Span::styled(
             format!("  {tally_str}"),
-            Style::default().fg(theme.ink_soft).bg(row_bg),
+            Style::default().fg(theme.ink_soft),
         ),
-    ]))
+    ])
 }
 
-fn chapter_row(
-    ch: &Chapter,
-    selected: bool,
-    marked: bool,
-    name_w: usize,
-    theme: &Theme,
-) -> ListItem<'static> {
+/// A chapter row. The mark is the multi-select state, which is the row's own
+/// data; selection and focus styling belong to the list.
+fn chapter_row(ch: &Chapter, marked: bool, name_w: usize, theme: &Theme) -> Line<'static> {
     let cell = status_cell(ch.kind, ch.status, theme);
-    let bar = if selected { theme::SELECT_BAR } else { ' ' };
-    let mark = if marked { '◆' } else { ' ' };
-    let row_bg = if selected {
-        theme.accent_bg
+    let mark = if marked {
+        crate::ui::glyphs::CHECKBOX_ON
     } else {
-        theme.bg_panel
+        crate::ui::glyphs::CHECKBOX_OFF
     };
     let name = pad_to_cols(
         &truncate_cols(&thai_display_safe(&ch.title), name_w),
@@ -974,32 +1089,29 @@ fn chapter_row(
         .map(|t| t.format("%H:%M").to_string())
         .unwrap_or_default();
 
-    ListItem::new(Line::from(vec![
+    Line::from(vec![
         Span::styled(
-            format!(" {bar}"),
-            Style::default().fg(theme.accent).bg(row_bg),
+            mark.as_str().to_string(),
+            Style::default().fg(if marked {
+                theme.accent
+            } else {
+                theme.ink_faint
+            }),
         ),
-        Span::styled(
-            mark.to_string(),
-            Style::default().fg(theme.accent).bg(row_bg),
-        ),
-        // status_cell already carries its own fg color; layer the row bg under it.
-        cell.patch_style(Style::default().bg(row_bg)),
+        Span::raw(" "),
+        cell,
         Span::styled(
             format!(" {:03}  ", ch.number),
-            Style::default().fg(theme.ink_faint).bg(row_bg),
+            Style::default().fg(theme.ink_faint),
         ),
-        Span::styled(name, Style::default().fg(theme.ink).bg(row_bg)),
+        Span::styled(name, Style::default().fg(theme.ink)),
         Span::styled(
             format!("{:>5} 句 ", ch.source_segments),
-            Style::default().fg(theme.ink_faint).bg(row_bg),
+            Style::default().fg(theme.ink_faint),
         ),
-        Span::styled(
-            pad_to_cols(status, 10),
-            Style::default().fg(theme.ink_soft).bg(row_bg),
-        ),
-        Span::styled(time, Style::default().fg(theme.ink_faint).bg(row_bg)),
-    ]))
+        Span::styled(pad_to_cols(status, 10), Style::default().fg(theme.ink_soft)),
+        Span::styled(time, Style::default().fg(theme.ink_faint)),
+    ])
 }
 
 fn empty_state(f: &mut Frame, area: Rect, theme: &Theme) {
@@ -1439,24 +1551,26 @@ mod tests {
     /// selected row) opens it in the Reader.
     #[test]
     fn clicking_a_chapter_selects_then_opens() {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
 
         let active = active_project(); // Vol.01 with chapters 1 & 2
         let mut screen = ProjectScreen::new();
-        let theme = crate::model::ThemeId::default().build();
-        let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
-        term.draw(|f| screen.render(f, f.area(), Some(&active), &theme))
-            .unwrap();
-        let ta = screen.tree_area;
+        let (_, zones) = crate::ui::kit::ctx::draw_test(100, 30, |ui, area| {
+            screen.render(ui, area, Some(&active))
+        });
+        // Rows: 0 = Vol header, 1 = ch 1, 2 = ch 2. Ask the registry where
+        // row 1 landed rather than deriving it from the tree area again.
+        let rect = zones
+            .rect_of(crate::ui::kit::ZoneId::row(1))
+            .expect("chapter row");
+        let (cx, cy) = (rect.x + 4, rect.y);
+        let zone = zones.at(cx, cy);
 
-        // Rows: 0 = Vol header, 1 = ch 1, 2 = ch 2. Click ch 1.
-        let a = screen.handle_mouse(click(false, ta.x + 4, ta.y + 1), Some(&active));
+        let a = screen.handle_mouse(click(false, cx, cy), zone, Some(&active));
         assert!(matches!(a, Action::None));
         assert_eq!(screen.tree.selected(), Some(1));
 
         // Clicking the selected chapter row opens it.
-        match screen.handle_mouse(click(false, ta.x + 4, ta.y + 1), Some(&active)) {
+        match screen.handle_mouse(click(false, cx, cy), zone, Some(&active)) {
             Action::OpenChapter { chapter } => assert_eq!(chapter, 1),
             other => panic!("expected OpenChapter, got {other:?}"),
         }
@@ -1466,19 +1580,18 @@ mod tests {
     /// auto-follow the keyboard does), rather than opening across volumes.
     #[test]
     fn clicking_into_another_volume_follows_it() {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
 
         let active = two_vol_project(); // active.vol == 1
         let mut screen = ProjectScreen::new();
-        let theme = crate::model::ThemeId::default().build();
-        let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
-        term.draw(|f| screen.render(f, f.area(), Some(&active), &theme))
-            .unwrap();
-        let ta = screen.tree_area;
-
-        // Rows: 0 Vol.01, 1 ch1, 2 ch2, 3 Vol.02, 4 ch1, 5 ch2. Click into Vol.02.
-        match screen.handle_mouse(click(false, ta.x + 4, ta.y + 3), Some(&active)) {
+        let (_, zones) = crate::ui::kit::ctx::draw_test(100, 30, |ui, area| {
+            screen.render(ui, area, Some(&active))
+        });
+        // Rows: 0 Vol.01, 1 ch1, 2 ch2, 3 Vol.02, 4 ch1, 5 ch2.
+        let rect = zones
+            .rect_of(crate::ui::kit::ZoneId::row(3))
+            .expect("second volume header");
+        let (cx, cy) = (rect.x + 4, rect.y);
+        match screen.handle_mouse(click(false, cx, cy), zones.at(cx, cy), Some(&active)) {
             Action::SetActiveVolume { vol } => assert_eq!(vol, 2),
             other => panic!("expected SetActiveVolume, got {other:?}"),
         }
@@ -1486,8 +1599,6 @@ mod tests {
 
     #[test]
     fn chapter_tree_draws_a_scrollbar_when_overflowing() {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
 
         let mut active = active_project();
         let vol = active.project.volumes.first_mut().unwrap();
@@ -1495,16 +1606,15 @@ mod tests {
             vol.chapters.push(chapter(i));
         }
         let mut screen = ProjectScreen::new();
-        let theme = crate::model::ThemeId::default().build();
-        let mut term = Terminal::new(TestBackend::new(100, 12)).unwrap();
-        term.draw(|f| screen.render(f, f.area(), Some(&active), &theme))
-            .unwrap();
+        let (lines, _) = crate::ui::kit::ctx::draw_test(100, 12, |ui, area| {
+            screen.render(ui, area, Some(&active))
+        });
 
-        let outer_right = screen.tree_area.x + screen.tree_area.width;
+        let outer_right = (screen.tree_area.x + screen.tree_area.width) as usize;
         let mut saw_bar = false;
         for row in screen.tree_area.y..screen.tree_area.y + screen.tree_area.height {
-            let cell = term.backend().buffer()[(outer_right, row)].symbol();
-            if cell == "┃" || cell == "│" {
+            let cell = lines[row as usize].chars().nth(outer_right);
+            if matches!(cell, Some('┃') | Some('│')) {
                 saw_bar = true;
                 break;
             }

@@ -3,12 +3,15 @@
 //! Layout invariant (see ui::layout::skeleton): header / tabs / rule / body /
 //! toast / footer; the overlay is drawn LAST over a `Clear` so it always wins.
 
+pub mod action_table;
+pub mod bindings;
 pub mod lexicon;
 pub mod overlay;
 pub mod project;
 pub mod qa;
 pub mod reader;
 pub mod refine;
+pub mod settings_defs;
 pub mod shelf;
 pub mod translate;
 
@@ -22,8 +25,6 @@ use ratatui::crossterm::event::{
 };
 use ratatui::layout::Rect;
 use ratatui::style::Style;
-use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
 
 use crate::llm::client::LlmClient;
 use crate::model::{
@@ -34,9 +35,9 @@ use crate::theme::Theme;
 use crate::ui::chrome::{self, StatusTally};
 use crate::ui::layout::{self, Skeleton};
 use crate::ui::mouse::{MouseGesture, MouseInput};
-use crate::ui::text::{thai_display_safe, truncate_cols};
 use crate::workspace::Workspace;
 
+use self::action_table::Act;
 use self::lexicon::LexiconScreen;
 use self::overlay::{JumpKind, JumpTarget, Overlay};
 use self::project::ProjectScreen;
@@ -76,6 +77,17 @@ pub enum Action {
     None,
     Quit,
     Goto(Screen),
+    /// Move the keyboard to the next/previous control on this surface.
+    FocusNext,
+    FocusPrev,
+    /// Act on whatever currently holds the keyboard.
+    ActivateFocused,
+    /// Take the keyboard off the current control without closing anything.
+    ClearFocus,
+    /// Open a context menu over the active screen, listing actions from its
+    /// table.
+    OpenMenu(Box<crate::app::action_table::OpenMenu>),
+    CloseMenu,
     ImportFile {
         source: PathBuf,
         title: String,
@@ -294,6 +306,13 @@ pub enum Action {
         loop_stall_secs: u64,
         /// Whole-chapter re-translates before a looping chapter aborts the run.
         max_chapter_retranslates: u32,
+        /// Size a chunk aims for, and the cap it is never allowed past.
+        chunk_target_tokens: usize,
+        chunk_hard_cap_tokens: usize,
+        /// Seed characters and terms from the raw text before translating.
+        prepass_extract: bool,
+        /// Re-read each finished chapter end to end and flag drift.
+        coherence_check: bool,
         /// Validate and reuse one speculative next-chunk Translator draft.
         parallel_lookahead: bool,
         /// System One settings: master switch, transport, per-feature toggles
@@ -472,15 +491,27 @@ pub struct App {
     /// chapters run sequentially.
     pending_chapter_run: Option<PendingChapterRun>,
     /// Mouse hit-testing state, refreshed every frame in `render`. The skeleton
-    /// gives the header/tabs/body/footer regions; `tab_zones` maps each tab's
-    /// rectangle to its screen; `last_area` is the full frame (for overlay modal
-    /// geometry). `last_click` carries the previous left-press for double-click
+    /// gives the header/tabs/body/footer regions and `last_area` is the full
+    /// frame (for overlay modal geometry); everything finer-grained lives in
+    /// `zones`. `last_click` carries the previous left-press for double-click
     /// detection.
     last_area: Rect,
     last_skeleton: Option<Skeleton>,
-    tab_zones: Vec<(Rect, Screen)>,
     last_click: Option<(std::time::Instant, u16, u16)>,
     quit_armed_at: Option<std::time::Instant>,
+    /// Every interactive rectangle drawn last frame. Rebuilt from scratch in
+    /// `render`, so clicks, hover and the focus ring all resolve against the
+    /// geometry actually on screen rather than a second, hand-kept copy of it.
+    zones: crate::ui::kit::Zones,
+    /// The zone under the pointer. Separate from `focus` on purpose: moving the
+    /// mouse must never move the keyboard's place in a form.
+    hover: crate::ui::kit::Hover,
+    /// Where the keyboard is within the current surface.
+    focus: crate::ui::kit::Focus,
+    /// An open context menu over the active screen. Not an `Overlay`: it holds
+    /// nothing but a selection, every entry is already declared in the screen's
+    /// action table, and it closes the moment a real overlay opens.
+    menu: Option<crate::app::action_table::OpenMenu>,
 
     /// Outbound feed to the relay task while remote is connected.
     remote_out: Option<tokio::sync::mpsc::UnboundedSender<crate::remote::protocol::RemoteOutbound>>,
@@ -530,7 +561,7 @@ impl App {
         if !projects.is_empty() {
             shelf.select_first();
         }
-        let theme = cfg.theme.build();
+        let theme = cfg.theme.build_adaptive();
         // Keep Reader source chunks aligned with the pipeline budget.
         let mut reader = ReaderScreen::new();
         reader.set_chunk_cfg(cfg.chunk_target_tokens, cfg.chunk_hard_cap_tokens);
@@ -566,9 +597,12 @@ impl App {
             pending_chapter_run: None,
             last_area: Rect::default(),
             last_skeleton: None,
-            tab_zones: Vec::new(),
             last_click: None,
             quit_armed_at: None,
+            zones: crate::ui::kit::Zones::new(),
+            hover: crate::ui::kit::Hover::default(),
+            focus: crate::ui::kit::Focus::new(),
+            menu: None,
             remote_out: None,
             remote_kill: None,
             remote_state: crate::remote::protocol::RemoteState::Disconnected,
@@ -2248,7 +2282,17 @@ impl App {
     /// dropped in [`MouseInput::from_event`]; the rest become an `Action` through
     /// the same `apply` funnel keys use. Left-press double-click is detected here
     /// (the App owns the clock) before the gesture is normalized.
-    pub fn on_mouse(&mut self, me: MouseEvent) {
+    /// Fold a raw mouse event into state. Returns whether the frame needs
+    /// repainting: motion fires far faster than the frame budget, and a pointer
+    /// travelling within one zone changes nothing worth redrawing.
+    pub fn on_mouse(&mut self, me: MouseEvent) -> bool {
+        // Motion is hover, and hover is resolved globally against the zone
+        // registry — no screen or overlay ever handles it, so it is answered
+        // here rather than being normalized into a gesture they would all have
+        // to match on.
+        if matches!(me.kind, MouseEventKind::Moved) {
+            return self.hover.moved_to(&self.zones, me.column, me.row);
+        }
         let double = if matches!(me.kind, MouseEventKind::Down(MouseButton::Left)) {
             let now = std::time::Instant::now();
             let is_double = self.last_click.is_some_and(|(t, c, r)| {
@@ -2267,19 +2311,32 @@ impl App {
             false
         };
         let Some(input) = MouseInput::from_event(&me, double) else {
-            return;
+            return false;
         };
+        // A click lands where the pointer is, so keep hover in step with it.
+        self.hover.moved_to(&self.zones, me.column, me.row);
         let action = self.route_mouse(input);
         self.apply(action);
+        true
     }
 
     /// Decide what a mouse gesture means given the current overlay / chrome /
     /// screen regions (mirrors `route_key`'s precedence: overlay first, then the
     /// global chrome, then the active screen).
     fn route_mouse(&mut self, m: MouseInput) -> Action {
-        // 1) An open overlay gets first refusal, just like keys.
+        // 1) An open overlay gets first refusal, just like keys, and answers
+        // from the zone registry — there is no longer a second copy of any
+        // overlay's geometry to consult.
         if !matches!(self.overlay, Overlay::None) {
-            return self.overlay.handle_mouse(m, self.last_area);
+            let zones = std::mem::take(&mut self.zones);
+            let action = self.overlay.handle_mouse_zones(m, &zones);
+            self.zones = zones;
+            return action;
+        }
+        // 1b) A context menu is modal over the screen it was opened on, the
+        // same way an overlay is modal over everything.
+        if self.menu.is_some() {
+            return self.menu_mouse(m);
         }
         let Some(sk) = self.last_skeleton else {
             return Action::None;
@@ -2298,23 +2355,39 @@ impl App {
             return self.route_mouse_to_screen(m);
         }
 
-        // 3) Clicking the toast row dismisses it (matches Esc/Backspace).
-        if self.toast.is_some() && m.in_rect(sk.toast) {
-            self.toast = None;
-            return Action::None;
-        }
-
-        // 4) Tab bar click → switch to that screen.
-        if m.in_rect(sk.tabs) {
-            if let Some((_, screen)) = self.tab_zones.iter().copied().find(|(r, _)| m.in_rect(*r)) {
-                return Action::Goto(screen);
+        // 3) Right-click keeps its "back · dismiss" meaning everywhere except
+        // on a screen row, where it opens that row's menu. The screen is told
+        // first so its selection moves to the row the menu is about.
+        if matches!(m.gesture, MouseGesture::RightClick) {
+            let on_row = self
+                .zones
+                .at(m.col, m.row)
+                .is_some_and(|z| z.kind == crate::ui::kit::ZoneKind::Row);
+            if on_row {
+                let select = self.route_mouse_to_screen(m);
+                if let Some(open) = self.build_screen_menu((m.col, m.row), true) {
+                    return open;
+                }
+                return select;
             }
-            return Action::None;
+            return self.route_mouse_to_screen(m);
         }
 
-        // 5) Breadcrumb / header click → home to the Shelf.
-        if m.is_click() && m.in_rect(sk.header) {
-            return Action::Goto(Screen::Shelf);
+        // 4) Chrome is answered from the registry, so a click lands on whatever
+        // was actually drawn there rather than on a region guessed from the
+        // skeleton. Anything the chrome does not claim falls through to the
+        // screen below.
+        if let Some(id) = self.zones.at(m.col, m.row) {
+            if let Some(action) = self.chrome_action(id) {
+                return action;
+            }
+            // 5) A control from the active screen's action table — a toolbar
+            // button, a chip, an inline row button. Answered here rather than
+            // inside the screen so the click, the key and the menu entry all
+            // reach the same `run`.
+            if let Some(action) = self.focused_action(id) {
+                return action;
+            }
         }
 
         // 6) Body → the active screen decides (select / activate / focus).
@@ -2324,20 +2397,70 @@ impl App {
         Action::None
     }
 
+    /// What a click on a chrome zone means, or `None` when the zone is not
+    /// chrome and the screen beneath should answer instead.
+    fn chrome_action(&mut self, id: crate::ui::kit::ZoneId) -> Option<Action> {
+        use crate::ui::kit::{TallySlot, ZoneKind};
+
+        match id.kind {
+            ZoneKind::Tab => chrome::TAB_SCREENS
+                .get(id.index as usize)
+                .copied()
+                .map(Action::Goto),
+            ZoneKind::Crumb => self
+                .crumb_segments()
+                .get(id.index as usize)
+                .map(|c| Action::Goto(c.target)),
+            ZoneKind::Tally => {
+                // A count is a question about which chapters it counts, and the
+                // Project tree is where that question is answered — except for
+                // failures, which have a report of their own.
+                let slot = TallySlot::from_index(id.index)?;
+                if matches!(slot, TallySlot::Failed)
+                    && self.tally().failed > 0
+                    && self.active.is_some()
+                {
+                    Some(Action::show_overlay(Overlay::qa_placeholder()))
+                } else {
+                    Some(Action::Goto(Screen::Project))
+                }
+            }
+            ZoneKind::RemoteChip => Some(Action::show_overlay(Overlay::settings_account())),
+            ZoneKind::ToastBody | ZoneKind::ToastClose => {
+                self.toast = None;
+                Some(Action::None)
+            }
+            ZoneKind::Hint => match id.index as usize {
+                chrome::HELP_HINT => Some(Action::show_overlay(Overlay::Help(0))),
+                chrome::PALETTE_HINT => Some(Action::show_overlay(Overlay::palette())),
+                chrome::LOG_HINT => Some(Action::show_overlay(Overlay::Log(0))),
+                // The update is applied by the `honya update` command, so the
+                // badge says what to run rather than pretending to run it.
+                chrome::UPDATE_HINT => Some(Action::None),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     fn route_mouse_to_screen(&mut self, m: MouseInput) -> Action {
+        // Screens ported onto the kit answer from the registry; the rest still
+        // work out which row was hit from the pointer's coordinates.
+        let zone = self.zones.at(m.col, m.row);
         match self.screen {
             Screen::Shelf => {
                 self.shelf
-                    .handle_mouse(m, &self.projects, self.cfg.preferred_language)
+                    .handle_mouse(m, zone, &self.projects, self.cfg.preferred_language)
             }
-            Screen::Project => self.project.handle_mouse(m, self.active.as_ref()),
-            Screen::Translate => self.translate.handle_mouse(m),
-            Screen::Reader => self.reader.handle_mouse(m),
-            Screen::Lexicon => self
-                .lexicon
-                .handle_mouse(m, self.active.as_ref().map(|a| &a.workspace)),
+            Screen::Project => self.project.handle_mouse(m, zone, self.active.as_ref()),
+            Screen::Translate => self.translate.handle_mouse(m, zone),
+            Screen::Reader => self.reader.handle_mouse(m, zone),
+            Screen::Lexicon => {
+                self.lexicon
+                    .handle_mouse(m, zone, self.active.as_ref().map(|a| &a.workspace))
+            }
             Screen::Refine if self.active.is_none() => Action::None,
-            Screen::Refine => self.refine.handle_mouse(m),
+            Screen::Refine => self.refine.handle_mouse(m, zone),
         }
     }
 
@@ -2384,13 +2507,34 @@ impl App {
             return action;
         }
 
-        // 1) An open overlay gets first refusal (swallows single-letter globals when capturing).
+        // 1) An open overlay gets first refusal (swallows single-letter globals
+        // when capturing) — except for focus traversal, which has to work
+        // inside a modal or its controls are unreachable by keyboard. The few
+        // overlays that bind Tab themselves keep it.
         if !matches!(self.overlay, Overlay::None) {
+            if !self.overlay.uses_tab() && !self.overlay.is_input_capturing() {
+                match k.code {
+                    KeyCode::Tab => return Action::FocusNext,
+                    KeyCode::BackTab => return Action::FocusPrev,
+                    KeyCode::Esc if self.focus.get().is_some() => return Action::ClearFocus,
+                    _ => {}
+                }
+            }
             return self.overlay.handle_key(k);
         }
 
-        // 2) Ctrl-P opens the palette even outside an overlay.
-        if k.modifiers.contains(KeyModifiers::CONTROL) && k.code == KeyCode::Char('p') {
+        // 1b) A context menu is modal over the screen: it answers every key, and
+        // nothing falls through to what it is covering.
+        if self.menu.is_some() {
+            return self.menu_key(k);
+        }
+
+        // 2) Ctrl-P or Ctrl-K opens the command bar even outside an overlay.
+        // Two bindings because this is the escape hatch for every other
+        // binding: it has to be findable by whichever one a user reaches for.
+        if k.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(k.code, KeyCode::Char('p') | KeyCode::Char('k'))
+        {
             return Action::show_overlay(Overlay::palette());
         }
 
@@ -2404,21 +2548,54 @@ impl App {
             return self.route_to_screen(k);
         }
 
-        // 3) Global keys (only when nothing is capturing input).
+        // 3) Reserved globals — never shadowable, because they are the way out
+        // of wherever you are. Everything else a screen may claim.
         match k.code {
             KeyCode::Char(d @ '1'..='6') => {
                 if let Some(s) = Screen::from_digit(d) {
                     return Action::Goto(s);
                 }
             }
-            KeyCode::Tab => {
-                // Lexicon owns Tab to cycle its sub-sections; every other screen advances tabs.
-                if matches!(self.screen, Screen::Lexicon) {
-                    return self.route_to_screen(k);
-                }
-                return Action::Goto(self.next_screen());
+            // Tab moves between controls, not between screens. With everything
+            // on screen clickable, "next control" is the more useful thing for
+            // the key nearest the home row to mean; screens moved to `]`/`[`.
+            // Lexicon still owns Tab for its sub-sections.
+            KeyCode::Tab if matches!(self.screen, Screen::Lexicon) => {
+                return self.route_to_screen(k);
             }
+            KeyCode::Tab => return Action::FocusNext,
+            KeyCode::BackTab => return Action::FocusPrev,
+            // Space and Enter act on the focused control, and only then — with
+            // nothing focused they belong to the screen, which is what keeps
+            // Project's Space-to-mark working.
+            KeyCode::Char(' ') | KeyCode::Enter if self.focus.get().is_some() => {
+                return Action::ActivateFocused;
+            }
+            // Esc steps back one rung: off the control first, then the toast.
+            KeyCode::Esc if self.focus.get().is_some() => return Action::ClearFocus,
             KeyCode::Char('?') => return Action::show_overlay(Overlay::Help(0)),
+            _ => {}
+        }
+
+        // 4) The active screen's action table, ahead of the remaining globals
+        // so a screen can claim a key the chrome would otherwise eat — which is
+        // what lets `[`/`]` step chapters in the Reader while still cycling
+        // screens everywhere else.
+        let acts = self.screen_actions();
+        // Declared here but unavailable. The key is claimed against the
+        // screen's own navigation arms, but not against the globals below: a
+        // Reader with nothing open should still be leavable with `]`.
+        let mut blocked = false;
+        match action_table::hit(&acts, &k) {
+            action_table::KeyHit::Run(id) => return self.run_screen_action(id),
+            action_table::KeyHit::Blocked => blocked = true,
+            action_table::KeyHit::Miss => {}
+        }
+
+        // 5) The remaining globals.
+        match k.code {
+            KeyCode::Char(']') => return Action::Goto(self.next_screen()),
+            KeyCode::Char('[') => return Action::Goto(self.prev_screen()),
             KeyCode::Char(':') => return Action::show_overlay(Overlay::palette()),
             KeyCode::Char('l')
                 if matches!(self.screen, Screen::Project) && self.active.is_some() =>
@@ -2435,7 +2612,11 @@ impl App {
             _ => {}
         }
 
-        // 4) Otherwise the active screen decides.
+        if blocked {
+            return Action::None;
+        }
+
+        // 6) Otherwise the active screen's navigation arms decide.
         self.route_to_screen(k)
     }
 
@@ -2455,6 +2636,191 @@ impl App {
             || (matches!(self.screen, Screen::Refine)
                 && self.active.is_some()
                 && self.refine.is_capturing())
+    }
+
+    /// The active screen's action table, availability resolved for right now.
+    ///
+    /// One call site for all six screens: the key router, the toolbar, the
+    /// context menu, the footer and the help overlay all read this, which is
+    /// what stops any two of them disagreeing about what a key does.
+    pub(crate) fn screen_actions(&self) -> Vec<Act> {
+        match self.screen {
+            Screen::Shelf => self.shelf.actions(&self.projects),
+            Screen::Project => self.project.actions(self.active.as_ref()),
+            Screen::Translate => self.translate.actions(),
+            Screen::Reader => self.reader.actions(),
+            Screen::Lexicon => self
+                .lexicon
+                .actions(self.active.as_ref().map(|a| &a.workspace)),
+            // Refine is per-project: it offers nothing until one is open.
+            Screen::Refine if self.active.is_none() => Vec::new(),
+            Screen::Refine => self.refine.actions(self.active.as_ref().map(|a| &a.project)),
+        }
+    }
+
+    /// Run one of the active screen's actions, however it was reached.
+    fn run_screen_action(&mut self, id: u16) -> Action {
+        let ran = match self.screen {
+            Screen::Shelf => {
+                let projects = std::mem::take(&mut self.projects);
+                let out = self
+                    .shelf
+                    .run(id, &projects, self.cfg.preferred_language);
+                self.projects = projects;
+                out
+            }
+            Screen::Project => {
+                let active = self.active.take();
+                let out = self.project.run(id, active.as_ref());
+                self.active = active;
+                out
+            }
+            Screen::Translate => self.translate.run(id),
+            Screen::Reader => self.reader.run(id),
+            Screen::Lexicon => {
+                let active = self.active.take();
+                let out = self.lexicon.run(id, active.as_ref().map(|a| &a.workspace));
+                self.active = active;
+                out
+            }
+            Screen::Refine if self.active.is_none() => None,
+            Screen::Refine => {
+                let active = self.active.take();
+                let out = self.refine.run(id, active.as_ref().map(|a| &a.project));
+                self.active = active;
+                out
+            }
+        };
+        // A table entry with no `run` arm is a bug, not a silent no-op: it is
+        // exactly the dead `Q` this design exists to make impossible, so say so
+        // in the log rather than swallowing it.
+        ran.unwrap_or_else(|| {
+            self.push_log(
+                LogLevel::Warn,
+                format!("no handler for action {id} on {:?}", self.screen),
+            );
+            Action::None
+        })
+    }
+
+    /// Build the context menu for the active screen: the long tail, plus the
+    /// row actions when the pointer was on a row.
+    fn build_screen_menu(&self, anchor: (u16, u16), on_row: bool) -> Option<Action> {
+        let items: Vec<Act> = self
+            .screen_actions()
+            .into_iter()
+            .filter(|a| match a.placement {
+                self::action_table::Placement::Row => on_row,
+                action_table::Placement::Menu => true,
+                // A toolbar control is already on screen; it is repeated here
+                // only when the pointer is not on a row, so a right-click on
+                // empty space still reaches everything.
+                action_table::Placement::Toolbar => !on_row,
+            })
+            .collect();
+        if items.is_empty() {
+            return None;
+        }
+        Some(Action::OpenMenu(Box::new(action_table::OpenMenu::new(
+            items, anchor,
+        ))))
+    }
+
+    /// What activating a focused screen control means.
+    ///
+    /// `ActivateFocused` used to consult the chrome and nothing else, so Space
+    /// or Enter on a focused Reader chip did nothing and every toolbar control
+    /// would have been mouse-only.
+    fn focused_action(&mut self, id: crate::ui::kit::ZoneId) -> Option<Action> {
+        if id.kind != crate::ui::kit::ZoneKind::Action {
+            return None;
+        }
+        if id.index == action_table::OVERFLOW_ID as u32 {
+            let anchor = self.zones.rect_of(id).map(|r| (r.x, r.y)).unwrap_or((0, 0));
+            return Some(
+                self.build_screen_menu(anchor, false)
+                    .unwrap_or(Action::None),
+            );
+        }
+        let acts = self.screen_actions();
+        let (act_id, enabled) = {
+            let act = action_table::from_zone(&acts, id)?;
+            (act.id, act.enabled)
+        };
+        if !enabled {
+            return Some(Action::None);
+        }
+        Some(self.run_screen_action(act_id))
+    }
+
+    /// Keys while a context menu is open. The menu is modal: nothing falls
+    /// through to the screen behind it.
+    fn menu_key(&mut self, k: KeyEvent) -> Action {
+        let Some(menu) = self.menu.as_ref() else {
+            return Action::None;
+        };
+        // An entry's own accelerator is checked first, so the key printed
+        // beside it always runs it — even when it is `j` or `k`.
+        if let action_table::KeyHit::Run(id) = menu.hit(&k) {
+            self.menu = None;
+            return self.run_screen_action(id);
+        }
+        let selected = menu.selected();
+        match k.code {
+            KeyCode::Esc => Action::CloseMenu,
+            KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => {
+                if let Some(m) = self.menu.as_mut() {
+                    m.step(-1);
+                }
+                Action::None
+            }
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
+                if let Some(m) = self.menu.as_mut() {
+                    m.step(1);
+                }
+                Action::None
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => match selected {
+                Some(id) => {
+                    self.menu = None;
+                    self.run_screen_action(id)
+                }
+                None => Action::None,
+            },
+            _ => Action::None,
+        }
+    }
+
+    /// Mouse while a context menu is open.
+    fn menu_mouse(&mut self, m: MouseInput) -> Action {
+        use crate::ui::kit::ZoneKind;
+        if m.is_scroll() {
+            if let Some(menu) = self.menu.as_mut() {
+                menu.step(if matches!(m.gesture, MouseGesture::ScrollDown) {
+                    1
+                } else {
+                    -1
+                });
+            }
+            return Action::None;
+        }
+        match self.zones.at(m.col, m.row) {
+            Some(id) if id.kind == ZoneKind::Action => {
+                let enabled = self
+                    .menu
+                    .as_ref()
+                    .and_then(|mn| action_table::from_zone(&mn.items, id))
+                    .is_some_and(|a| a.enabled);
+                if !enabled {
+                    return Action::None;
+                }
+                self.menu = None;
+                self.run_screen_action(id.index as u16)
+            }
+            // Inside the menu but on no entry: inert, not a dismiss.
+            Some(id) if id.kind == ZoneKind::ModalFrame => Action::None,
+            _ => Action::CloseMenu,
+        }
     }
 
     fn route_to_screen(&mut self, k: KeyEvent) -> Action {
@@ -2506,11 +2872,44 @@ impl App {
             Action::Quit => {
                 self.running = false;
             }
+            Action::FocusNext => {
+                self.focus.next(&self.zones);
+            }
+            Action::FocusPrev => {
+                self.focus.prev(&self.zones);
+            }
+            Action::ClearFocus => {
+                self.focus.clear();
+            }
+            Action::ActivateFocused => {
+                // The focused control means the same thing however it is
+                // reached, so this routes through the click handler rather
+                // than restating what each zone does.
+                if let Some(id) = self.focus.get() {
+                    if let Some(action) = self.chrome_action(id) {
+                        self.apply(action);
+                    } else if let Some(action) = self.focused_action(id) {
+                        self.apply(action);
+                    }
+                }
+            }
+            Action::OpenMenu(menu) => {
+                // The menu takes the keyboard; leaving focus on the control
+                // behind it would let Space fire that control instead.
+                self.focus.clear();
+                self.menu = Some(*menu);
+            }
+            Action::CloseMenu => {
+                self.menu = None;
+            }
             Action::Goto(s) => {
                 self.screen = s;
                 self.toast = None;
+                // A menu belongs to the screen it was opened on.
+                self.menu = None;
             }
             Action::ShowOverlay(ov) => {
+                self.menu = None;
                 // Palette placeholders carry no config; rebuild from live config.
                 self.overlay = match *ov {
                     // Welcome placeholders carry no status; rebuild from live state.
@@ -2870,6 +3269,10 @@ impl App {
                 loop_stall_secs,
                 max_chapter_retranslates,
                 parallel_lookahead,
+                chunk_target_tokens,
+                chunk_hard_cap_tokens,
+                prepass_extract,
+                coherence_check,
                 system_one,
                 typesafe_key,
             } => {
@@ -2889,6 +3292,10 @@ impl App {
                     loop_stall_secs,
                     max_chapter_retranslates,
                     parallel_lookahead,
+                    chunk_target_tokens,
+                    chunk_hard_cap_tokens,
+                    prepass_extract,
+                    coherence_check,
                     *system_one,
                     typesafe_key,
                 );
@@ -2906,11 +3313,11 @@ impl App {
             }
             Action::PreviewTheme(id) => {
                 // Live recolor only; picker stays open, config untouched.
-                self.theme = id.build();
+                self.theme = id.build_adaptive();
             }
             Action::SaveTheme(id) => {
                 self.cfg.theme = id;
-                self.theme = id.build();
+                self.theme = id.build_adaptive();
                 match crate::config::save(&self.cfg) {
                     Ok(()) => self.toast = Some(Toast::info(format!("theme → {}", id.label()))),
                     Err(e) => self.toast = Some(Toast::error(format!("save failed: {e}"))),
@@ -2923,7 +3330,7 @@ impl App {
             }
             Action::CancelTheme => {
                 // Revert any preview to the saved theme and close.
-                self.theme = self.cfg.theme.build();
+                self.theme = self.cfg.theme.build_adaptive();
                 self.overlay = Overlay::None;
             }
             Action::StartRemoteLogin => self.start_remote_login(),
@@ -4605,6 +5012,10 @@ impl App {
         loop_stall_secs: u64,
         max_chapter_retranslates: u32,
         parallel_lookahead: bool,
+        chunk_target_tokens: usize,
+        chunk_hard_cap_tokens: usize,
+        prepass_extract: bool,
+        coherence_check: bool,
         system_one: crate::model::SystemOne,
         typesafe_key: Option<String>,
     ) {
@@ -4622,6 +5033,10 @@ impl App {
         self.cfg.loop_stall_secs = loop_stall_secs;
         self.cfg.max_chapter_retranslates = max_chapter_retranslates;
         self.cfg.parallel_lookahead = parallel_lookahead;
+        self.cfg.chunk_target_tokens = chunk_target_tokens;
+        self.cfg.chunk_hard_cap_tokens = chunk_hard_cap_tokens;
+        self.cfg.prepass_extract = prepass_extract;
+        self.cfg.coherence_check = coherence_check;
         let mut keys_changed = false;
         if let Some(k) = openrouter_key {
             let k = k.trim();
@@ -5027,163 +5442,158 @@ impl App {
     }
 
     pub fn render(&mut self, f: &mut Frame) {
+        use crate::ui::kit::{Metrics, Ui};
+
         let area = f.area();
         let show_toast = self.toast.is_some() || self.quit_armed();
-        let hints = self.hints();
+        let hints = self.footer_hints();
+        let update = self.update_available.clone();
+        let installed = self.update_installed.clone();
         let footer_h = chrome::footer_height(
-            hints,
+            &hints,
             area.width,
-            self.update_available.as_deref(),
-            self.update_installed.as_deref(),
+            update.as_deref(),
+            installed.as_deref(),
         );
         let sk: Skeleton = layout::skeleton(area, show_toast, footer_h);
         // Stash this frame's geometry so the next mouse event can hit-test it.
         self.last_area = area;
         self.last_skeleton = Some(sk);
+        // The registry is rebuilt from scratch every frame: a zone exists only
+        // for as long as the thing it addresses is actually drawn.
+        self.zones.clear();
 
-        f.render_widget(
-            Paragraph::new("").style(Style::default().bg(self.theme.bg)),
-            area,
-        );
-
-        let crumb = self.crumb();
+        // Everything the chrome needs, read before the registry is borrowed.
+        let crumbs = self.crumb_segments();
         let tally = self.tally();
-        chrome::render_header(
-            f,
-            sk.header,
-            &crumb,
-            &tally,
-            (self.remote_state, self.remote_watchers),
-            &self.theme,
-        );
+        let remote = (self.remote_state, self.remote_watchers);
+        let screen = self.screen;
+        let run_active = self.run_active;
+        let agent = self.translate.active_agent_role();
+        let frame_count = self.frame;
+        let metrics = Metrics::new(area, false);
+        let quit_armed = self.quit_armed();
+        let toast = self.toast.as_ref().map(|t| (t.level, t.msg.clone()));
 
-        self.tab_zones = chrome::render_tabbar(
-            f,
-            sk.tabs,
-            self.screen,
-            self.run_active,
-            self.translate.active_agent_role(),
-            self.frame,
-            &self.theme,
-        );
+        {
+            let mut ui = Ui::new(
+                f,
+                &mut self.zones,
+                &self.theme,
+                metrics,
+                &self.focus,
+                self.hover,
+                frame_count,
+            );
+            ui.fill(area, Style::default().bg(ui.theme.bg));
+            chrome::render_header(&mut ui, sk.header, &crumbs, &tally, remote);
+            chrome::render_tabbar(&mut ui, sk.tabs, screen, run_active, agent);
+            chrome::render_rule(&mut ui, sk.rule);
+        }
 
-        self.render_rule(f, sk.rule);
+        self.render_body(f, sk.body, metrics);
 
-        self.render_body(f, sk.body);
-
-        if show_toast {
-            if self.quit_armed() {
-                self.render_notice(
-                    f,
+        {
+            let mut ui = Ui::new(
+                f,
+                &mut self.zones,
+                &self.theme,
+                metrics,
+                &self.focus,
+                self.hover,
+                frame_count,
+            );
+            if quit_armed {
+                // Not closable: the prompt is answered, not dismissed.
+                chrome::render_toast(
+                    &mut ui,
                     sk.toast,
                     LogLevel::Warn,
                     "press Ctrl-C again to quit",
-                    "",
+                    false,
                 );
-            } else if let Some(t) = self.toast.as_ref() {
-                self.render_notice(f, sk.toast, t.level, &t.msg, "⌫ dismiss ");
+            } else if let Some((level, msg)) = toast {
+                chrome::render_toast(&mut ui, sk.toast, level, &msg, true);
             }
+            chrome::build_bar(&hints, update.as_deref(), installed.as_deref())
+                .render(&mut ui, sk.footer);
         }
 
-        chrome::render_footer(
-            f,
-            sk.footer,
-            hints,
-            self.update_available.as_deref(),
-            self.update_installed.as_deref(),
-            &self.theme,
-        );
+        // A context menu sits over the screen but under an overlay — opening an
+        // overlay closes it, so the two are never both on screen.
+        if let Some(menu) = self.menu.clone() {
+            let mut ui = Ui::new(
+                f,
+                &mut self.zones,
+                &self.theme,
+                metrics,
+                &self.focus,
+                self.hover,
+                frame_count,
+            );
+            crate::ui::kit::menu::Menu::new(&menu.items, menu.anchor)
+                .sel(menu.sel)
+                .render(&mut ui, area);
+        }
 
         // Overlay last, over a Clear, so it always wins.
         if !matches!(self.overlay, Overlay::None) {
-            self.overlay
-                .render(f, area, &self.theme, &self.cfg, &self.log, self.frame);
-        }
-    }
-
-    fn render_body(&mut self, f: &mut Frame, body: Rect) {
-        match self.screen {
-            Screen::Shelf => {
-                let foreign = self.foreign_busy_dirs();
-                self.shelf
-                    .render(f, body, &self.projects, &foreign, &self.theme)
-            }
-            Screen::Project => self
-                .project
-                .render(f, body, self.active.as_ref(), &self.theme),
-            Screen::Translate => {
-                self.translate
-                    .render(f, body, self.frame, &self.theme, self.cfg.service_tier)
-            }
-            Screen::Reader => self.reader.render(f, body, &self.theme),
-            Screen::Lexicon => self.lexicon.render(
+            let mut ui = Ui::new(
                 f,
-                body,
-                self.active.as_ref().map(|a| &a.workspace),
+                &mut self.zones,
                 &self.theme,
-            ),
-            Screen::Refine => {
-                self.refine
-                    .render(f, body, self.frame, self.active.is_some(), &self.theme)
-            }
-        }
-    }
-
-    fn render_rule(&self, f: &mut Frame, area: Rect) {
-        if area.height == 0 || area.width == 0 {
-            return;
-        }
-        let rule = "─".repeat(area.width as usize);
-        f.render_widget(
-            Paragraph::new(rule).style(Style::default().fg(self.theme.rule).bg(self.theme.bg)),
-            area,
-        );
-    }
-
-    /// Render a toast or quit prompt above the footer.
-    fn render_notice(&self, f: &mut Frame, area: Rect, level: LogLevel, msg: &str, hint: &str) {
-        if area.height == 0 || area.width == 0 {
-            return;
-        }
-        let (glyph, color) = match level {
-            LogLevel::Trace => ("·", self.theme.ink_faint),
-            LogLevel::Info => ("✓", self.theme.status_done),
-            LogLevel::Warn => ("!", self.theme.status_warn),
-            LogLevel::Error => ("✗", self.theme.status_failed),
-        };
-        let body = truncate_cols(
-            &thai_display_safe(msg),
-            area.width.saturating_sub(14) as usize,
-        );
-        let left = Line::from(vec![
-            Span::raw(" "),
-            Span::styled(glyph, Style::default().fg(color)),
-            Span::raw(" "),
-            Span::styled(body, Style::default().fg(self.theme.ink_soft)),
-        ]);
-        f.render_widget(
-            Paragraph::new(left).style(Style::default().bg(self.theme.bg)),
-            area,
-        );
-        if hint.is_empty() {
-            return;
-        }
-        let hint_w = crate::ui::text::col_width(hint) as u16;
-        if area.width > hint_w {
-            let hint_area = Rect {
-                x: area.x + area.width - hint_w,
-                y: area.y,
-                width: hint_w,
-                height: 1,
-            };
-            f.render_widget(
-                Paragraph::new(Span::styled(
-                    hint,
-                    Style::default().fg(self.theme.ink_faint),
-                ))
-                .style(Style::default().bg(self.theme.bg)),
-                hint_area,
+                metrics,
+                &self.focus,
+                self.hover,
+                frame_count,
             );
+            self.overlay.render(&mut ui, area, &self.cfg, &self.log);
+        }
+
+        // Settle focus and hover against what was actually drawn. A list can
+        // shrink or a modal close between frames, leaving either pointing at a
+        // zone that no longer exists.
+        self.focus.reconcile(&self.zones);
+        if self.hover.get().is_some_and(|h| !self.zones.contains(h)) {
+            self.hover.clear();
+        }
+    }
+
+    fn render_body(
+        &mut self,
+        f: &mut Frame,
+        body: Rect,
+        metrics: crate::ui::kit::Metrics,
+    ) {
+        use crate::ui::kit::Ui;
+
+        // Fields are borrowed disjointly: the registry mutably, the palette and
+        // focus immutably, and each screen's own state mutably. Screens are
+        // ported onto the kit one at a time; the rest still draw to `ui.frame`.
+        let foreign = matches!(self.screen, Screen::Shelf)
+            .then(|| self.foreign_busy_dirs())
+            .unwrap_or_default();
+        let mut ui = Ui::new(
+            f,
+            &mut self.zones,
+            &self.theme,
+            metrics,
+            &self.focus,
+            self.hover,
+            self.frame,
+        );
+        match self.screen {
+            Screen::Shelf => self.shelf.render(&mut ui, body, &self.projects, &foreign),
+            Screen::Project => self.project.render(&mut ui, body, self.active.as_ref()),
+            Screen::Translate => {
+                self.translate.render(&mut ui, body, self.cfg.service_tier)
+            }
+            Screen::Reader => self.reader.render(&mut ui, body),
+            Screen::Lexicon => {
+                self.lexicon
+                    .render(&mut ui, body, self.active.as_ref().map(|a| &a.workspace))
+            }
+            Screen::Refine => self.refine.render(&mut ui, body, self.active.is_some()),
         }
     }
 
@@ -5192,6 +5602,8 @@ impl App {
         (self.remote_state, self.remote_watchers)
     }
 
+    /// The breadcrumb as one string, for the GUI header. The TUI uses
+    /// `crumb_segments`, which keeps the parts separate so each can be clicked.
     pub(crate) fn crumb(&self) -> String {
         match (&self.active, self.screen) {
             (Some(active), Screen::Shelf) => format!("honya 本屋   {}", active.project.title),
@@ -5211,6 +5623,36 @@ impl App {
             }
             (None, _) => "honya 本屋".to_string(),
         }
+    }
+
+    /// The breadcrumb as clickable segments, outermost first. Each names a
+    /// place you can go back to, which a single formatted string could not.
+    pub(crate) fn crumb_segments(&self) -> Vec<chrome::Crumb> {
+        let mut out = vec![chrome::Crumb::new("honya 本屋", Screen::Shelf)];
+        let Some(active) = self.active.as_ref() else {
+            return out;
+        };
+        out.push(chrome::Crumb::new(
+            active.project.title.clone(),
+            Screen::Project,
+        ));
+        if !matches!(self.screen, Screen::Shelf) {
+            let vol = active.active_vol();
+            let label = active
+                .project
+                .volumes
+                .iter()
+                .find(|v| v.number == vol)
+                .and_then(|v| v.label.as_deref());
+            out.push(chrome::Crumb::new(
+                match label {
+                    Some(l) => format!("Vol.{vol:02} {l}"),
+                    None => format!("Vol.{vol:02}"),
+                },
+                Screen::Project,
+            ));
+        }
+        out
     }
 
     pub(crate) fn tally(&self) -> StatusTally {
@@ -5254,18 +5696,29 @@ impl App {
         t
     }
 
-    fn hints(&self) -> &'static [(&'static str, &'static str)] {
+    /// What the footer advertises.
+    ///
+    /// It used to be a legend of everything a screen could do — fifteen keys in
+    /// a row on Project, fourteen more under the Reader's chip row. Those are
+    /// controls now, drawn where they act, so the footer is left with what has
+    /// no control: the screen's navigation, and the globals that are true
+    /// wherever you are. Help, and the `⋯` menu, cover the rest.
+    fn footer_hints(&self) -> Vec<crate::ui::kit::shortcuts::Hint> {
+        use crate::ui::kit::shortcuts::hints_from;
         if !matches!(self.overlay, Overlay::None) {
-            return self.overlay.hints();
+            return hints_from(self.overlay.hints());
         }
-        match self.screen {
+        let screen = match self.screen {
             Screen::Shelf => self.shelf.hints(),
             Screen::Project => self.project.hints(),
             Screen::Translate => self.translate.hints(),
             Screen::Reader => self.reader.hints(),
             Screen::Lexicon => self.lexicon.hints(),
             Screen::Refine => self.refine.hints(),
-        }
+        };
+        let mut hints = hints_from(screen);
+        hints.extend(chrome::global_hints());
+        hints
     }
 }
 
@@ -6371,6 +6824,180 @@ mod mouse_tests {
         app.on_mouse(ev(MouseEventKind::Down(MouseButton::Left), col, row));
     }
 
+    fn motion(app: &mut App, col: u16, row: u16) -> bool {
+        app.on_mouse(ev(MouseEventKind::Moved, col, row))
+    }
+
+    /// Hover resolves against the zone registry, and only a real change asks
+    /// for a repaint — the event loop skips the frame otherwise, so this is
+    /// what keeps pointer motion from repainting continuously.
+    #[test]
+    fn hover_tracks_zones_and_reports_only_real_changes() {
+        let mut app = app();
+        render(&mut app, 120, 40);
+
+        let shelf_rect = app
+            .zones
+            .rect_of(crate::ui::kit::ZoneId::tab(Screen::Shelf))
+            .expect("shelf tab zone");
+        let lex_rect = app
+            .zones
+            .rect_of(crate::ui::kit::ZoneId::tab(Screen::Lexicon))
+            .expect("lexicon tab zone");
+
+        assert!(
+            motion(&mut app, shelf_rect.x + 1, shelf_rect.y),
+            "entering a zone is a change"
+        );
+        assert_eq!(app.hover.get(), Some(crate::ui::kit::ZoneId::tab(Screen::Shelf)));
+
+        assert!(
+            !motion(&mut app, shelf_rect.x + 2, shelf_rect.y),
+            "moving within the same zone must not ask for a repaint"
+        );
+
+        assert!(
+            motion(&mut app, lex_rect.x + 1, lex_rect.y),
+            "crossing into another zone is a change"
+        );
+        assert_eq!(
+            app.hover.get(),
+            Some(crate::ui::kit::ZoneId::tab(Screen::Lexicon))
+        );
+    }
+
+    /// The invariant the whole kit exists to guarantee: every rectangle the UI
+    /// registered is one it actually drew inside the frame, and a click at the
+    /// middle of any of them lands on a zone rather than falling through. This
+    /// is the shape of test that would have caught the Settings modal drawing
+    /// at 76x24 while its click handler hit-tested 72x26.
+    #[test]
+    fn every_registered_zone_is_inside_the_frame_and_hittable() {
+        for (w, h) in [(60u16, 20u16), (80, 24), (120, 40)] {
+            for screen in [
+                Screen::Shelf,
+                Screen::Project,
+                Screen::Translate,
+                Screen::Reader,
+                Screen::Lexicon,
+                Screen::Refine,
+            ] {
+                let mut app = app();
+                app.screen = screen;
+                render(&mut app, w, h);
+
+                let frame = Rect {
+                    x: 0,
+                    y: 0,
+                    width: w,
+                    height: h,
+                };
+                for (rect, id) in app.zones.all().collect::<Vec<_>>() {
+                    assert!(
+                        rect.x >= frame.x
+                            && rect.y >= frame.y
+                            && rect.x + rect.width <= frame.x + frame.width
+                            && rect.y + rect.height <= frame.y + frame.height,
+                        "{screen:?} at {w}x{h}: {id:?} at {rect:?} escapes the frame"
+                    );
+                    let (cx, cy) = (rect.x + rect.width / 2, rect.y + rect.height / 2);
+                    assert!(
+                        app.zones.at(cx, cy).is_some(),
+                        "{screen:?} at {w}x{h}: nothing hit-tests at the middle of {id:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    fn press(app: &mut App, code: KeyCode) {
+        app.on_key(KeyEvent::new(code, KeyModifiers::empty()));
+    }
+
+    /// Tab moves between controls now, not between screens.
+    #[test]
+    fn tab_moves_focus_and_brackets_move_screens() {
+        let mut app = app();
+        render(&mut app, 120, 40);
+        let before = app.screen;
+
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(app.screen, before, "Tab must no longer change screen");
+        assert!(app.focus.get().is_some(), "Tab should enter the focus ring");
+
+        // Screens moved to the bracket keys.
+        press(&mut app, KeyCode::Char(']'));
+        assert_ne!(app.screen, before);
+        press(&mut app, KeyCode::Char('['));
+        assert_eq!(app.screen, before, "and back again");
+    }
+
+    /// Shift-Tab walks the ring the other way.
+    #[test]
+    fn shift_tab_walks_the_ring_backwards() {
+        let mut app = app();
+        render(&mut app, 120, 40);
+        press(&mut app, KeyCode::Tab);
+        let first = app.focus.get().expect("focused");
+        press(&mut app, KeyCode::Tab);
+        assert_ne!(app.focus.get(), Some(first));
+        press(&mut app, KeyCode::BackTab);
+        assert_eq!(app.focus.get(), Some(first), "Shift-Tab returns");
+    }
+
+    /// Space acts on the focused control, and reaches the same place a click
+    /// on it would.
+    #[test]
+    fn space_activates_the_focused_control() {
+        let mut app = app();
+        render(&mut app, 120, 40);
+        // Walk to a specific tab so the expected outcome is known.
+        let target = Screen::Lexicon;
+        for _ in 0..24 {
+            press(&mut app, KeyCode::Tab);
+            if app.focus.get() == Some(crate::ui::kit::ZoneId::tab(target)) {
+                break;
+            }
+        }
+        assert_eq!(app.focus.get(), Some(crate::ui::kit::ZoneId::tab(target)));
+        press(&mut app, KeyCode::Char(' '));
+        assert_eq!(app.screen, target, "Space should do what clicking would");
+    }
+
+    /// With nothing focused, Space still belongs to the screen — which is what
+    /// keeps Project's mark-a-chapter binding working.
+    #[test]
+    fn space_falls_through_to_the_screen_when_nothing_is_focused() {
+        let mut app = app();
+        app.screen = Screen::Project;
+        render(&mut app, 120, 40);
+        assert!(app.focus.get().is_none());
+        // No panic and no navigation: the screen decides.
+        press(&mut app, KeyCode::Char(' '));
+        assert_eq!(app.screen, Screen::Project);
+    }
+
+    /// Esc steps back one rung: off the control before anything else.
+    #[test]
+    fn esc_leaves_the_control_before_it_closes_anything() {
+        let mut app = app();
+        app.overlay = Overlay::Help(0);
+        render(&mut app, 120, 40);
+        press(&mut app, KeyCode::Tab);
+        let focused = app.focus.get();
+        assert!(focused.is_some(), "the modal should be reachable by Tab");
+
+        press(&mut app, KeyCode::Esc);
+        assert!(
+            !matches!(app.overlay, Overlay::None),
+            "the first Esc leaves the control, it does not close the modal"
+        );
+        assert!(app.focus.get().is_none());
+
+        press(&mut app, KeyCode::Esc);
+        assert!(matches!(app.overlay, Overlay::None), "the second closes it");
+    }
+
     /// Clicking a tab in the bar switches to that screen; the zones the bar
     /// reports really land on their labels.
     #[test]
@@ -6383,11 +7010,9 @@ mod mouse_tests {
             Screen::Shelf,
         ] {
             render(&mut app, 120, 40);
-            let (rect, _) = app
-                .tab_zones
-                .iter()
-                .copied()
-                .find(|(_, s)| *s == target)
+            let rect = app
+                .zones
+                .rect_of(crate::ui::kit::ZoneId::tab(target))
                 .unwrap_or_else(|| panic!("no zone for {target:?}"));
             click(&mut app, rect.x + rect.width / 2, rect.y);
             assert_eq!(app.screen, target);
@@ -6428,18 +7053,63 @@ mod mouse_tests {
     }
 
     /// Clicking a confirm dialog's confirm button runs its wrapped action.
+    ///
+    /// The button's position is read from the registry rather than recomputed
+    /// here. A test that re-derives the geometry can only ever check that two
+    /// copies of the arithmetic agree, which is the thing that went wrong.
     #[test]
     fn clicking_confirm_button_runs_action() {
         let mut app = app();
         app.overlay = Overlay::confirm("Title", "Body", Action::Goto(Screen::Lexicon));
         render(&mut app, 80, 24);
-        // Resolve the modal the same way the render/hit-test path does, then click
-        // the start of the confirm label on the button (last interior) row.
-        let modal = crate::ui::layout::centered_modal(64, 9, app.last_area);
-        let button_row = modal.y + modal.height - 2; // inner bottom line
-        click(&mut app, modal.x + 4, button_row);
+        let rect = app
+            .zones
+            .rect_of(crate::ui::kit::ZoneId::button(
+                crate::app::overlay::DIALOG_CONFIRM,
+            ))
+            .expect("the confirm button should be registered");
+        click(&mut app, rect.x + rect.width / 2, rect.y);
         assert!(matches!(app.overlay, Overlay::None));
         assert_eq!(app.screen, Screen::Lexicon);
+    }
+
+    /// And its cancel button closes without running anything.
+    #[test]
+    fn clicking_cancel_closes_without_acting() {
+        let mut app = app();
+        let before = app.screen;
+        app.overlay = Overlay::confirm("Title", "Body", Action::Goto(Screen::Lexicon));
+        render(&mut app, 80, 24);
+        let rect = app
+            .zones
+            .rect_of(crate::ui::kit::ZoneId::button(
+                crate::app::overlay::DIALOG_CANCEL,
+            ))
+            .expect("the cancel button should be registered");
+        click(&mut app, rect.x + rect.width / 2, rect.y);
+        assert!(matches!(app.overlay, Overlay::None));
+        assert_eq!(app.screen, before, "cancel must not run the action");
+    }
+
+    /// A click inside a modal but on none of its controls does nothing — it is
+    /// inert, not a dismiss.
+    #[test]
+    fn clicking_dead_space_inside_a_modal_is_inert() {
+        let mut app = app();
+        app.overlay = Overlay::confirm("Title", "Body", Action::Goto(Screen::Lexicon));
+        render(&mut app, 80, 24);
+        let frame = app
+            .zones
+            .rect_of(crate::ui::kit::ZoneId::bare(
+                crate::ui::kit::ZoneKind::ModalFrame,
+            ))
+            .expect("the modal frame should be registered");
+        // The middle of the frame, well away from the title and button rows.
+        click(&mut app, frame.x + frame.width / 2, frame.y + frame.height / 2);
+        assert!(
+            !matches!(app.overlay, Overlay::None),
+            "dead space inside a modal must not close it"
+        );
     }
 }
 
@@ -6773,5 +7443,305 @@ mod remote_tests {
             msg: "x".into(),
         });
         assert!(app.log.iter().any(|(_, m)| m == "x"));
+    }
+}
+
+/// The assertions that hold the action-table design together.
+///
+/// Each one is a way the old arrangement failed. Keys were written down in the
+/// `handle_key` match, the `hints()` array and `bindings.rs`, and nothing
+/// checked the three against each other: Project advertised a `Q` with no
+/// handler at all, and `bindings.rs` described three Reader keys that do
+/// something else. These walk every screen's table and hold it against what is
+/// actually drawn and actually dispatched.
+#[cfg(test)]
+mod action_table_tests {
+    use super::*;
+    use crate::app::action_table::{self, OVERFLOW_ID, Placement};
+    use crate::ui::kit::ZoneId;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    fn app() -> App {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        App::new(EventTx(tx), AppConfig::default())
+    }
+
+    fn on(screen: Screen) -> App {
+        let mut app = app();
+        app.screen = screen;
+        app
+    }
+
+    fn render(app: &mut App, w: u16, h: u16) {
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| app.render(f)).unwrap();
+    }
+
+    fn press(a: &action_table::Accel) -> KeyEvent {
+        let mods = if a.ctrl {
+            KeyModifiers::CONTROL
+        } else {
+            KeyModifiers::NONE
+        };
+        KeyEvent::new(a.code, mods)
+    }
+
+    /// The dead `Q`: advertised in the footer and in help for a handler that
+    /// was never written. An id in the table with no `run` arm logs a warning,
+    /// and there must not be one.
+    #[test]
+    fn every_declared_action_has_a_handler() {
+        for screen in chrome::TAB_SCREENS {
+            let mut app = on(screen);
+            for act in app.screen_actions() {
+                app.log.clear();
+                let _ = app.run_screen_action(act.id);
+                let unhandled: Vec<&String> = app
+                    .log
+                    .iter()
+                    .filter(|(_, m)| m.contains("no handler"))
+                    .map(|(_, m)| m)
+                    .collect();
+                assert!(
+                    unhandled.is_empty(),
+                    "{screen:?}: {} ({}) is advertised with no handler",
+                    act.label,
+                    act.accel.shown()
+                );
+            }
+        }
+    }
+
+    /// The key printed on a control is the key that runs it. Nothing declared
+    /// earlier in a screen's table may shadow a later accelerator, and no
+    /// reserved global may eat one.
+    #[test]
+    fn a_control_and_its_accelerator_resolve_to_the_same_action() {
+        for screen in chrome::TAB_SCREENS {
+            let app = on(screen);
+            let acts = app.screen_actions();
+            for act in acts.iter().filter(|a| a.enabled) {
+                assert_eq!(
+                    action_table::hit(&acts, &press(&act.accel)),
+                    action_table::KeyHit::Run(act.id),
+                    "{screen:?}: {} prints {} but that key runs something else",
+                    act.label,
+                    act.accel.shown()
+                );
+                assert_eq!(
+                    action_table::from_zone(&acts, act.zone()).map(|a| a.id),
+                    Some(act.id),
+                    "{screen:?}: {}'s zone addresses a different action",
+                    act.label
+                );
+            }
+        }
+    }
+
+    /// Nothing is reachable by keyboard alone: an action is drawn as a control,
+    /// or it is in the menu a right-click opens — on a row for a row action, on
+    /// the screen for everything else.
+    #[test]
+    fn nothing_is_keyboard_only() {
+        for screen in chrome::TAB_SCREENS {
+            let mut app = on(screen);
+            render(&mut app, 120, 40);
+            let ids = |app: &App, on_row: bool| match app.build_screen_menu((0, 0), on_row) {
+                Some(Action::OpenMenu(m)) => m.items.iter().map(|a| a.id).collect(),
+                _ => Vec::new(),
+            };
+            let on_row: Vec<u16> = ids(&app, true);
+            let on_screen: Vec<u16> = ids(&app, false);
+            for act in app.screen_actions() {
+                let menu = match act.placement {
+                    Placement::Row => &on_row,
+                    _ => &on_screen,
+                };
+                assert!(
+                    app.zones.contains(act.zone()) || menu.contains(&act.id),
+                    "{screen:?}: {} ({:?}) has no control and is not in the menu",
+                    act.label,
+                    act.placement
+                );
+            }
+        }
+    }
+
+    /// The footer may advertise only what has no control of its own, which is
+    /// what stops the fifteen-key legend creeping back.
+    #[test]
+    fn the_footer_advertises_only_what_has_no_control() {
+        for screen in chrome::TAB_SCREENS {
+            let app = on(screen);
+            let controls: Vec<String> = app
+                .screen_actions()
+                .iter()
+                .filter(|a| matches!(a.placement, Placement::Toolbar | Placement::Row))
+                .map(|a| a.accel.shown())
+                .collect();
+            for hint in app.footer_hints() {
+                assert!(
+                    !controls.contains(&hint.key),
+                    "{screen:?}: the footer restates {}, which is already a control",
+                    hint.key
+                );
+            }
+        }
+    }
+
+    /// At 60x20 the toolbars collapse rather than overflowing, and whatever
+    /// they dropped stays reachable behind the `⋯`.
+    #[test]
+    fn toolbars_collapse_without_overflowing() {
+        for screen in chrome::TAB_SCREENS {
+            let mut app = on(screen);
+            render(&mut app, 60, 20);
+            for (rect, id) in app.zones.all() {
+                assert!(
+                    rect.x + rect.width <= 60 && rect.y + rect.height <= 20,
+                    "{screen:?}: {id:?} at {rect:?} runs off a 60x20 frame"
+                );
+            }
+            let acts = app.screen_actions();
+            let drew_any = acts
+                .iter()
+                .any(|a| a.placement != Placement::Menu && app.zones.contains(a.zone()));
+            let dropped = acts.iter().any(|a| {
+                a.placement != Placement::Row && !app.zones.contains(a.zone())
+            });
+            // A screen that fits everything needs no `⋯`; one that dropped
+            // something must still offer the way to it. Screens showing an
+            // empty state legitimately draw nothing at all.
+            if drew_any && dropped {
+                assert!(
+                    app.zones.contains(ZoneId::action(OVERFLOW_ID)),
+                    "{screen:?}: controls were dropped with no ⋯ to reach them"
+                );
+            }
+        }
+    }
+
+    /// Opening a menu and picking an entry runs the same action its key does.
+    #[test]
+    fn a_menu_entry_runs_what_its_key_runs() {
+        let mut app = on(Screen::Reader);
+        render(&mut app, 120, 40);
+        let Some(Action::OpenMenu(menu)) = app.build_screen_menu((10, 10), false) else {
+            panic!("the Reader keeps actions behind its menu");
+        };
+        let entry = *menu
+            .items
+            .iter()
+            .find(|a| a.placement == Placement::Menu && a.enabled)
+            .expect("at least one available menu entry");
+        app.apply(Action::OpenMenu(menu));
+        assert!(app.menu.is_some());
+
+        // Picking it by its accelerator closes the menu and runs the action.
+        let by_menu = app.menu_key(press(&entry.accel));
+        assert!(app.menu.is_none(), "the menu stays open after a choice");
+        let by_key = on(Screen::Reader).run_screen_action(entry.id);
+        assert_eq!(
+            format!("{by_menu:?}"),
+            format!("{by_key:?}"),
+            "{} means something different from the menu",
+            entry.label
+        );
+    }
+
+    /// The headline path end to end: a pointer press on a drawn control runs
+    /// the same action its key does, through the same `run` arm.
+    #[test]
+    fn clicking_a_control_runs_it() {
+        use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+        let mut app = on(Screen::Reader);
+        render(&mut app, 120, 40);
+        let sync = app
+            .screen_actions()
+            .into_iter()
+            .find(|a| a.label == "sync")
+            .expect("the Reader draws a sync chip");
+        let rect = app.zones.rect_of(sync.zone()).expect("registered");
+
+        // Read the state back out of the table, which is where the chip gets
+        // it from in the first place.
+        let state = |app: &App| {
+            app.screen_actions()
+                .into_iter()
+                .find(|a| a.label == "sync")
+                .map(|a| a.kind)
+        };
+        let before = state(&app);
+        app.on_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: rect.x + rect.width / 2,
+            row: rect.y,
+            modifiers: KeyModifiers::empty(),
+        });
+        assert_ne!(state(&app), before, "the click did not reach run");
+
+        // …and the key printed on it puts it back.
+        app.on_key(press(&sync.accel));
+        assert_eq!(state(&app), before);
+    }
+
+    /// The `⋯` is reachable both ways: activating it with the keyboard opens
+    /// the same menu a click on it does. Without this the long tail would be
+    /// mouse-only, which is the failure the focus ring exists to prevent.
+    #[test]
+    fn the_overflow_control_opens_the_menu_from_either_hand() {
+        let overflow = ZoneId::action(OVERFLOW_ID);
+        let mut app = on(Screen::Reader);
+        render(&mut app, 120, 40);
+        assert!(app.zones.contains(overflow), "the Reader draws a ⋯");
+
+        // Keyboard: park focus on it and activate.
+        app.focus.set(overflow);
+        app.apply(Action::ActivateFocused);
+        let by_key: Vec<u16> = app
+            .menu
+            .as_ref()
+            .expect("activating ⋯ opens the menu")
+            .items
+            .iter()
+            .map(|a| a.id)
+            .collect();
+
+        // Pointer: the same control, clicked.
+        let mut app = on(Screen::Reader);
+        render(&mut app, 120, 40);
+        let rect = app.zones.rect_of(overflow).unwrap();
+        let action = app.route_mouse(MouseInput {
+            gesture: MouseGesture::Click { double: false },
+            col: rect.x + rect.width / 2,
+            row: rect.y,
+        });
+        app.apply(action);
+        let by_click: Vec<u16> = app
+            .menu
+            .as_ref()
+            .expect("clicking ⋯ opens the menu")
+            .items
+            .iter()
+            .map(|a| a.id)
+            .collect();
+
+        assert_eq!(by_key, by_click);
+    }
+
+    /// An overlay closes the menu, so the two are never both on screen and a
+    /// key never has two claimants.
+    #[test]
+    fn opening_an_overlay_closes_the_menu() {
+        let mut app = on(Screen::Reader);
+        render(&mut app, 120, 40);
+        if let Some(open) = app.build_screen_menu((10, 10), false) {
+            app.apply(open);
+        }
+        assert!(app.menu.is_some());
+        app.apply(Action::show_overlay(Overlay::Help(0)));
+        assert!(app.menu.is_none());
     }
 }
