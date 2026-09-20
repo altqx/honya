@@ -56,6 +56,12 @@ pub struct SubagentCheckpoint {
     pub task: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
+    /// The role the child ran under, so resuming restores its capabilities
+    /// rather than silently widening them. Checkpoints written before roles
+    /// existed deserialize to "" and resume as `general`, which is what they
+    /// had.
+    #[serde(default)]
+    pub role: String,
     pub model: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<serde_json::Value>,
@@ -75,6 +81,7 @@ pub struct SubagentCheckpointMeta {
     pub id: String,
     pub task: String,
     pub scope: Option<String>,
+    pub role: String,
     pub model: String,
     pub updated: DateTime<Utc>,
     pub tool_call_count: usize,
@@ -182,6 +189,7 @@ pub fn list_subagents(root: &Path) -> Vec<SubagentCheckpointMeta> {
             id: cp.id,
             task: cp.task,
             scope: cp.scope,
+            role: cp.role,
             model: cp.model,
             updated: cp.updated,
             tool_call_count: cp.tool_call_count,

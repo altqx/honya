@@ -14,6 +14,7 @@ use serde_json::json;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::oneshot;
 
+use crate::agents::subagent::{SubagentRole, SubagentSpec};
 use crate::app::refine::{MentionTarget, parse_scope};
 use crate::llm::client::LlmClient;
 use crate::llm::tool_loop::{ToolExecutor, ToolLoopOutcome};
@@ -280,11 +281,12 @@ pub fn refine_tools_schema() -> serde_json::Value {
         }},
         {"type":"function","function":{
             "name":"task",
-            "description":"Spawn a focused sub-agent to carry out a self-contained chunk of work (e.g. \"normalize every honorific in volume 2\") using the same project tools, then report back. Use for large or parallelizable sub-tasks so the current thread stays focused. Multiple task calls in the same assistant turn run in parallel; use disjoint scopes. Sub-agents may delegate smaller self-contained work to their own sub-agents; nesting is bounded by the app.",
+            "description":"Spawn a focused sub-agent to carry out a self-contained chunk of work (e.g. \"normalize every honorific in volume 2\") using the same project tools, then report back. Use for large or parallelizable sub-tasks so the current thread stays focused. Multiple task calls in the same assistant turn run in parallel; use disjoint scopes. Pick the narrowest `role` that can finish the job: a role it was not given is a tool it cannot call, which is what stops a survey from turning into an edit. Sub-agents may delegate smaller self-contained work to their own sub-agents; nesting is bounded by the app.",
             "parameters":{"type":"object","additionalProperties":false,"required":["description"],
                 "properties":{
                     "description":{"type":"string","description":"The complete, self-contained task for the sub-agent."},
-                    "scope":{"type":"string","description":"Optional scope hint, e.g. a volume or chapter range."}
+                    "scope":{"type":"string","description":"Optional scope hint, e.g. a volume or chapter range."},
+                    "role":{"type":"string","enum":["explore","editor","lexicon","general"],"description":"What the sub-agent is allowed to do. `explore` reads, searches and reports but cannot change anything; `editor` also rewrites chapter prose; `lexicon` also maintains characters, glossary, style notes and recaps; `general` (the default) has everything and may delegate further."}
                 }}
         }},
         {"type":"function","function":{
@@ -675,17 +677,6 @@ fn seed_messages(root: &Path, id: &str) -> Vec<Message> {
         .unwrap_or_default()
 }
 
-const SUBAGENT_SYSTEM: &str = "You are a focused sub-agent inside honya's Refine system completing ONE self-contained parent-delegated task. Use the project tools to gather evidence, make surgical changes, verify them, then report chapters/terms/characters touched. Keep Thai idiomatic; preserve scene breaks, image links, and Markdown. When a female character uses `僕/ぼく/ボク` as her self-pronoun, render it as `เรา`, never `ผม` or `โบคุ`; identify the character from context rather than inferring gender from `僕` alone. Spawn parallel sub-agents only for large independent disjoint scopes; nesting is app-bounded.";
-
-const SUBAGENT_SYSTEM_ENGLISH: &str = "You are a focused sub-agent inside honya's Refine system, completing one self-contained task delegated by a parent agent. Read the real Japanese source, English translation, and reference data before editing. Make only evidence-backed surgical changes, keep the English idiomatic and publication-ready for native light-novel readers, preserve scene breaks, image links, and Markdown, verify the result, then report the chapters and metadata changed.";
-
-fn subagent_system_prompt(target: crate::model::TargetLanguage) -> &'static str {
-    match target {
-        crate::model::TargetLanguage::Thai => SUBAGENT_SYSTEM,
-        crate::model::TargetLanguage::English => SUBAGENT_SYSTEM_ENGLISH,
-    }
-}
-
 fn refine_system_prompt(target: crate::model::TargetLanguage) -> String {
     if target == crate::model::TargetLanguage::English {
         return r#"You are honya's Refine agent for a Japanese-to-English light-novel translation project. Work directly on the on-disk project through the provided tools and keep going until the user's request is resolved.
@@ -726,7 +717,7 @@ Stop when the request is resolved and changed regions have been re-read/grepped.
         .to_string()
 }
 
-fn refine_tools_vec() -> Vec<Tool> {
+pub(crate) fn refine_tools_vec() -> Vec<Tool> {
     serde_json::from_value(refine_tools_schema()).unwrap_or_default()
 }
 
@@ -1136,25 +1127,24 @@ impl SubagentCheckpointState {
     fn for_request(
         root: PathBuf,
         id: String,
-        task: String,
-        scope: Option<String>,
+        spec: SubagentSpec,
         req: &ChatRequest,
         max_rounds: usize,
-        depth: usize,
     ) -> Self {
         let now = chrono::Utc::now();
         Self {
             root,
             checkpoint: crate::workspace::refine_session::SubagentCheckpoint {
                 id,
-                task,
-                scope,
+                task: spec.task,
+                scope: spec.scope,
+                role: spec.role.label().to_string(),
                 model: req.model.clone(),
                 reasoning: req.reasoning.clone(),
                 messages: req.messages.clone(),
                 tool_call_count: 0,
                 max_rounds,
-                depth,
+                depth: spec.depth,
                 created: now,
                 updated: now,
             },
@@ -3002,6 +2992,9 @@ pub struct RefineTools {
     path: String,
     interact: RefineInteract,
     target_language: crate::model::TargetLanguage,
+    /// What this executor is allowed to run. The root agent is `General`; a
+    /// child carries whatever role spawned it.
+    role: SubagentRole,
 }
 
 impl RefineTools {
@@ -3018,6 +3011,7 @@ impl RefineTools {
             path: String::new(),
             interact: RefineInteract::default(),
             target_language: crate::model::TargetLanguage::Thai,
+            role: SubagentRole::General,
         }
     }
 
@@ -3061,21 +3055,25 @@ impl RefineTools {
             path: String::new(),
             interact,
             target_language,
+            role: SubagentRole::General,
         }
     }
 
-    fn child(&self, path: String) -> Self {
+    fn child(&self, path: String, role: SubagentRole) -> Self {
         Self {
             root: self.root.clone(),
             default_vol: self.default_vol,
             tx: self.tx.clone(),
             client: self.client.clone(),
             model: self.model.clone(),
-            can_spawn: self.can_spawn && self.depth + 1 < MAX_SUBAGENT_DEPTH,
+            can_spawn: self.can_spawn
+                && self.depth + 1 < MAX_SUBAGENT_DEPTH
+                && role.allows("task"),
             depth: self.depth + 1,
             path,
             interact: self.interact.clone(),
             target_language: self.target_language,
+            role,
         }
     }
 
@@ -3132,6 +3130,7 @@ impl RefineTools {
                     "id": cp.id,
                     "task": cp.task,
                     "scope": cp.scope,
+                    "role": cp.role,
                     "model": cp.model,
                     "updated": cp.updated.to_rfc3339(),
                     "tool_calls": cp.tool_call_count,
@@ -3191,11 +3190,14 @@ impl RefineTools {
             description: String,
             #[serde(default)]
             scope: Option<String>,
+            #[serde(default)]
+            role: Option<String>,
         }
         let a: Args = match serde_json::from_str(arguments_json) {
             Ok(a) => a,
             Err(e) => return ToolResult::err(format!("bad task args: {e}")),
         };
+        let role = a.role.as_deref().map(SubagentRole::parse).unwrap_or_default();
         let event_id = subagent_event_id(&self.path, call_id);
         let preview: String = a.description.chars().take(80).collect();
         self.tx.send(AppEvent::Log {
@@ -3231,23 +3233,26 @@ impl RefineTools {
         let mut req = ChatRequest::new(
             self.model.model.clone(),
             vec![
-                Message::system(subagent_system_prompt(self.target_language)),
+                Message::system(role.system_prompt(self.target_language)),
                 Message::user(user),
             ],
         );
-        req.tools = Some(refine_tools_vec());
+        req.tools = Some(role.tools());
         req.reasoning = self.model.reasoning_param();
         let checkpoint = SubagentCheckpointState::for_request(
             self.root.clone(),
             event_id.clone(),
-            a.description,
-            a.scope,
+            SubagentSpec {
+                task: a.description,
+                scope: a.scope,
+                role,
+                depth: self.depth + 1,
+            },
             &req,
             SUBAGENT_MAX_TOOL_ROUNDS,
-            self.depth + 1,
         );
 
-        self.run_subagent_loop(client, event_id, req, 0, checkpoint)
+        self.run_subagent_loop(client, event_id, role, req, 0, checkpoint)
             .await
     }
 
@@ -3258,8 +3263,9 @@ impl RefineTools {
         checkpoint: crate::workspace::refine_session::SubagentCheckpoint,
         resumed: bool,
     ) -> ToolResult {
+        let role = SubagentRole::parse(&checkpoint.role);
         let mut req = ChatRequest::new(checkpoint.model.clone(), checkpoint.messages.clone());
-        req.tools = Some(refine_tools_vec());
+        req.tools = Some(role.tools());
         req.reasoning = checkpoint
             .reasoning
             .clone()
@@ -3275,7 +3281,7 @@ impl RefineTools {
                 format!("resuming checkpoint · {checkpoint_id}"),
             );
         }
-        self.run_subagent_loop(client, event_id, req, initial_tool_call_count, state)
+        self.run_subagent_loop(client, event_id, role, req, initial_tool_call_count, state)
             .await
     }
 
@@ -3283,6 +3289,7 @@ impl RefineTools {
         &self,
         client: std::sync::Arc<dyn LlmClient>,
         event_id: String,
+        role: SubagentRole,
         req: ChatRequest,
         initial_tool_call_count: usize,
         checkpoint: SubagentCheckpointState,
@@ -3292,7 +3299,7 @@ impl RefineTools {
         match run_compacting_tool_loop(
             client.as_ref(),
             req,
-            &self.child(event_id.clone()),
+            &self.child(event_id.clone(), role),
             &self.tx,
             SubagentLoopOptions::new(SUBAGENT_MAX_TOOL_ROUNDS, task_depth, &event_id)
                 .initial_tool_call_count(initial_tool_call_count)
@@ -3346,6 +3353,13 @@ impl RefineTools {
 #[async_trait]
 impl ToolExecutor for RefineTools {
     async fn execute(&self, name: &str, arguments_json: &str) -> anyhow::Result<String> {
+        // Checked again here, not only when the tool list was built: a model
+        // that names a tool it was never offered gets a refusal, not an edit.
+        if !self.role.allows(name) {
+            return Ok(serde_json::to_string(&ToolResult::err(
+                self.role.refusal(name),
+            ))?);
+        }
         if name == "task" {
             return Ok(serde_json::to_string(
                 &self.run_subagent("direct", arguments_json).await,
@@ -3470,7 +3484,11 @@ mod tests {
         let prompt = refine_system_prompt(crate::model::TargetLanguage::Thai);
         assert!(prompt.contains("Thai form is always `เรา`"));
         assert!(prompt.contains("never `ผม` or the transliteration `โบคุ`"));
-        assert!(SUBAGENT_SYSTEM.contains("render it as `เรา`, never `ผม` or `โบคุ`"));
+        assert!(
+            SubagentRole::General
+                .system_prompt(crate::model::TargetLanguage::Thai)
+                .contains("render it as `เรา`, never `ผม` or `โบคุ`")
+        );
     }
 
     #[test]
@@ -3658,6 +3676,32 @@ mod tests {
             .unwrap();
         assert!(out.contains("\"ok\":false"));
         assert!(out.contains("sub-agent") || out.contains("nested"));
+    }
+
+    #[tokio::test]
+    async fn an_explore_subagent_cannot_edit_a_chapter() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let child = RefineTools::new(std::path::PathBuf::from("/tmp"), 1, EventTx(tx))
+            .child("call_1".to_string(), SubagentRole::Explore);
+
+        // Refused on the way in, not merely absent from the advertised list:
+        // the gate has to hold for a name the model invented.
+        for tool in ["edit_chapter", "multi_edit_chapter", "upsert_character", "task"] {
+            let out = child.execute(tool, "{}").await.unwrap();
+            assert!(out.contains("\"ok\":false"), "{tool} was not refused: {out}");
+            assert!(out.contains("explore"), "{tool} refusal does not name the role: {out}");
+        }
+        // And reading still works, or the role would be useless.
+        let out = child.execute("list_volumes", "{}").await.unwrap();
+        assert!(!out.contains("not available to a `explore`"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn an_explore_subagent_cannot_delegate_its_way_around_the_gate() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let root = RefineTools::new(std::path::PathBuf::from("/tmp"), 1, EventTx(tx));
+        assert!(!root.child("a".into(), SubagentRole::Explore).can_spawn);
+        assert!(!root.child("a".into(), SubagentRole::Editor).can_spawn);
     }
 
     #[test]
@@ -3989,7 +4033,7 @@ mod tests {
         let mut req = ChatRequest::new(
             "subagent-test",
             vec![
-                Message::system(SUBAGENT_SYSTEM),
+                Message::system(SubagentRole::General.system_prompt(crate::model::TargetLanguage::Thai)),
                 Message::user("audit the volume"),
             ],
         );
@@ -4035,7 +4079,7 @@ mod tests {
         let mut req = ChatRequest::new(
             "subagent-test",
             vec![
-                Message::system(SUBAGENT_SYSTEM),
+                Message::system(SubagentRole::General.system_prompt(crate::model::TargetLanguage::Thai)),
                 Message::user("fix a long review-needed chapter"),
             ],
         );
@@ -4133,7 +4177,7 @@ mod tests {
         let mut req = ChatRequest::new(
             "subagent-test",
             vec![
-                Message::system(SUBAGENT_SYSTEM),
+                Message::system(SubagentRole::General.system_prompt(crate::model::TargetLanguage::Thai)),
                 Message::user("audit the volume"),
             ],
         );
@@ -4273,7 +4317,7 @@ mod tests {
         let mut req = ChatRequest::new(
             "subagent-test",
             vec![
-                Message::system(SUBAGENT_SYSTEM),
+                Message::system(SubagentRole::General.system_prompt(crate::model::TargetLanguage::Thai)),
                 Message::user("audit the volume"),
             ],
         );
@@ -4323,7 +4367,7 @@ mod tests {
         let mut req = ChatRequest::new(
             "subagent-test",
             vec![
-                Message::system(SUBAGENT_SYSTEM),
+                Message::system(SubagentRole::General.system_prompt(crate::model::TargetLanguage::Thai)),
                 Message::user("audit the volume"),
             ],
         );
@@ -4331,11 +4375,14 @@ mod tests {
         let checkpoint = SubagentCheckpointState::for_request(
             root.clone(),
             "call_1".to_string(),
-            "audit the volume".to_string(),
-            None,
+            SubagentSpec {
+                task: "audit the volume".to_string(),
+                scope: None,
+                role: SubagentRole::General,
+                depth: 1,
+            },
             &req,
             SUBAGENT_MAX_TOOL_ROUNDS,
-            1,
         );
         let executor = HugeExecutor {
             payload: "ok".to_string(),
@@ -4418,7 +4465,7 @@ mod tests {
         let mut req = ChatRequest::new(
             "subagent-test",
             vec![
-                Message::system(SUBAGENT_SYSTEM),
+                Message::system(SubagentRole::General.system_prompt(crate::model::TargetLanguage::Thai)),
                 Message::user("audit the volume"),
             ],
         );
@@ -4461,7 +4508,7 @@ mod tests {
         let mut req = ChatRequest::new(
             "subagent-test",
             vec![
-                Message::system(SUBAGENT_SYSTEM),
+                Message::system(SubagentRole::General.system_prompt(crate::model::TargetLanguage::Thai)),
                 Message::user("audit the volume"),
             ],
         );
@@ -4474,7 +4521,7 @@ mod tests {
             crate::model::AgentModel::openrouter("m"),
             RefineInteract::default(),
         );
-        let executor = tools.child("root_call".to_string());
+        let executor = tools.child("root_call".to_string(), SubagentRole::General);
 
         let outcome = run_compacting_tool_loop(
             client.as_ref(),
@@ -5177,7 +5224,7 @@ mod tests {
     async fn subagent_update_plan_does_not_replace_main_plan() {
         let root = temp_root("subagentplan");
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let tools = RefineTools::new(root.clone(), 1, EventTx(tx)).child("call_1".to_string());
+        let tools = RefineTools::new(root.clone(), 1, EventTx(tx)).child("call_1".to_string(), SubagentRole::General);
 
         let result = tools
             .execute(

@@ -17,6 +17,7 @@ pub mod reference_scope;
 pub mod refine;
 pub mod review_gate;
 pub mod reviewer;
+pub mod subagent;
 pub mod synopsis;
 pub mod tokenize;
 pub mod tools;
