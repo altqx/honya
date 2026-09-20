@@ -1,10 +1,4 @@
-//! A query-and-filter list: the command bar, the Reader's jump list, the
-//! Refine screen's slash and mention popups.
-//!
-//! These are four near-identical things drawn four ways today. Unifying them
-//! also gives the aggressive key remap its safety net: anything that can be
-//! done has a name here, so a binding a user cannot remember is still one
-//! search away.
+//! A query-and-filter list: the command bar and the Reader's jump list.
 //!
 //! Matching is subsequence-based rather than substring, so `ocv` finds "open
 //! **c**hapter in **v**olume". Scoring prefers matches that start a word and
@@ -24,14 +18,9 @@ use crate::ui::text::truncate_cols;
 
 /// Score awarded for a match that begins a word.
 const WORD_START_BONUS: i32 = 12;
-/// Score awarded per character of the current consecutive run.
-///
-/// Deliberately multiplied by the run length rather than flat. A flat bonus
-/// loses to word-start bonuses in the pathological case where every character
-/// begins a word — matching "open" against "o p e n" collects four word-start
-/// bonuses and beats the exact run in "open chapter", which is plainly wrong.
-/// A run of four is much stronger evidence than four isolated hits, so it
-/// should score much higher, not merely a little.
+/// Score awarded per character of the current consecutive run, multiplied by
+/// the run length rather than flat: a flat bonus lets "o p e n" collect four
+/// word-start bonuses and beat the exact run in "open chapter".
 const CONSECUTIVE_BONUS: i32 = 8;
 /// Penalty per character skipped between matches.
 const GAP_PENALTY: i32 = 1;

@@ -1,14 +1,10 @@
 //! Cards: a block set apart by a left accent rail and padding, not a box.
 //!
-//! This is the visual change the redesign turns on. A border around every panel
-//! costs two rows and two columns of the space a terminal has least of, draws a
-//! hard edge around things that are not really separate, and leaves every panel
-//! looking equally important. A rail down the left costs one column, says the
-//! same thing, and can carry state — accent when the pane is focused, faint
-//! when it is not, a status colour when the block is reporting one.
+//! A rail costs one column where a border costs two rows and two columns, and it
+//! can carry state — accent when the pane is focused, faint when it is not, a
+//! status colour when the block is reporting one.
 //!
-//! Borders are kept for modals, where a hard edge is the point: a modal *is*
-//! separate from what it covers.
+//! Modals keep their borders: there a hard edge is the point.
 
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};

@@ -1,15 +1,10 @@
 //! One declaration per screen *command*, read by every consumer.
 //!
-//! A screen used to write each of its keys down three times — the `handle_key`
-//! match, the `hints()` array and `bindings.rs` — with nothing checking the
-//! three against each other. They drifted: Project advertised a `Q` that had no
-//! handler at all, and `bindings.rs` described three Reader keys that do
-//! something else. Adding toolbars and menus would have made it five copies.
-//!
-//! Here a screen declares an action once — label, accelerator, availability —
-//! and everything else reads that declaration: `handle_key` dispatches from it,
-//! the toolbar and the context menu draw from it, and the help overlay lists
-//! it. The key printed on a control *is* the key that runs it.
+//! A screen declares an action once — label, accelerator, availability — and
+//! everything else reads that declaration: `handle_key` dispatches from it, the
+//! toolbar and the context menu draw from it, help lists it. So the key printed
+//! on a control *is* the key that runs it, and a binding cannot be advertised
+//! without a handler, because the handler is what declares it.
 //!
 //! Navigation is deliberately absent. Scrolling, folding, panel focus and
 //! paging stay ordinary `handle_key` arms: the wheel and a click already do

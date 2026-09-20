@@ -1,16 +1,13 @@
 //! How an interactive element *looks* in each of its states.
 //!
-//! Centralised so every component agrees: a hovered row in a list, a hovered
-//! button and a hovered tab must read as the same gesture, or hover stops
-//! meaning anything. Components ask for a state and get a style; none of them
-//! decide what "focused" looks like on their own.
+//! Centralised so every component agrees: a hovered row, a hovered button and a
+//! hovered tab must read as the same gesture, or hover stops meaning anything.
 //!
 //! One palette needs care. The adaptive `terminal` theme paints **no
-//! backgrounds at all** — every background slot is `Color::Reset` so terminal
-//! translucency and background images show through, which is the whole point of
-//! it. There, a background wash is not merely subtle, it is invisible. So state
-//! is carried by the reverse-video and bold modifiers instead, and
-//! [`Theme::paints_fills`] is the test that decides which language to speak.
+//! backgrounds** — every slot is `Color::Reset`, so terminal translucency shows
+//! through — and a background wash there is not subtle but invisible. State is
+//! carried by reverse-video and bold instead; [`Theme::paints_fills`] decides
+//! which of the two languages to speak.
 
 use ratatui::style::{Color, Modifier, Style};
 

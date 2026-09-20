@@ -1,14 +1,11 @@
 //! A segmented control: the tab bar, the Lexicon's sections, Settings'
 //! categories.
 //!
-//! Three places in the app draw a row of mutually exclusive choices, each in its
-//! own idiom — coloured text, bracketed labels, a divider-separated run. One
-//! component means they agree, and means each segment registers its own
-//! rectangle instead of the bar handing back a parallel array of rects for
-//! somebody else to hit-test.
+//! Each segment registers its own rectangle, rather than the bar handing back a
+//! parallel array of rects for somebody else to hit-test.
 //!
-//! The active segment is a filled pill rather than differently coloured text.
-//! Colour alone has to survive whatever the palette does to it; a fill does not.
+//! The active segment is a filled pill rather than differently coloured text:
+//! colour alone has to survive whatever the palette does to it, a fill does not.
 
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};

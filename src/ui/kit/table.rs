@@ -1,13 +1,11 @@
 //! A table with clickable, sortable headers and columns that give way in order.
 //!
-//! The Lexicon hand-builds two tables and re-derives its column widths with a
-//! bespoke function per table. Here a column declares how it wants to be sized
-//! and what priority it has, and the table resolves the layout — which means the
-//! behaviour at 60 columns is a property of the declaration rather than of
-//! whoever wrote that particular renderer.
+//! A column declares how it wants to be sized and what priority it has, and the
+//! table resolves the layout — so what happens at 60 columns is a property of
+//! the declaration rather than of whoever wrote that particular renderer.
 //!
-//! Sorting lives here too, because a header you can click is the obvious
-//! affordance and the current tables have none.
+//! Sorting lives here because a header you can click is the obvious affordance
+//! for it.
 
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};

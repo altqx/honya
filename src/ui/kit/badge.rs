@@ -1,10 +1,8 @@
 //! Small status marks: dots, chips and badges.
 //!
-//! These are the app's smallest interactive things, and the ones most often
-//! drawn as inert decoration when they should not be. The header's status
-//! tally, the Reader's mode toggles and the Lexicon's filters are all really
-//! controls — a count you can click to filter by, a toggle you can click to
-//! flip — so they register zones like anything else.
+//! These are the app's smallest controls, not decoration: the header's status
+//! tally filters by what it counts, the Reader's chips flip the mode they name.
+//! So they register zones like anything else.
 
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};

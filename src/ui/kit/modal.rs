@@ -1,17 +1,12 @@
 //! The one modal frame every overlay is an instance of.
 //!
-//! Twenty overlays currently pick their own `centered_modal(w, h)` literal and
-//! then restate it in a separate hit-test function. The two copies have already
-//! drifted apart once. Here a modal computes its rectangle from a named size,
-//! draws itself, and registers what it drew — so there is nothing left to
-//! disagree with.
+//! A modal computes its rectangle from a named size, draws itself, and registers
+//! what it drew, so there is no second copy of its geometry to disagree with.
 //!
-//! It also owns the focus contract. A modal blocks: while one is open the
-//! keyboard belongs to it, Tab wraps inside it and cannot reach the screen
-//! behind, and a click beside it dismisses rather than falling through to
-//! whatever it is covering. [`Zones::begin_trap`] and the full-frame backdrop
-//! are what make both true, and doing them here means no overlay has to
-//! remember to.
+//! It also owns the focus contract. A modal blocks: the keyboard belongs to it,
+//! Tab wraps inside it and cannot reach the screen behind, and a click beside it
+//! dismisses rather than falling through. [`Zones::begin_trap`] and the
+//! full-frame backdrop are what make both true, so no overlay has to remember.
 
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -40,11 +35,9 @@ pub struct Sizing {
     pub max_width: u16,
     /// Rows left clear above and below.
     pub v_margin: u16,
-    /// The tallest this modal grows, whatever the terminal allows.
-    ///
-    /// Without a cap a modal fills the screen minus its margin, so a panel
-    /// holding four menu rows arrived as a mostly-empty box the height of the
-    /// terminal. A dialog should be the size of what it holds.
+    /// The tallest this modal grows, whatever the terminal allows. Without a
+    /// cap it fills the screen minus its margin, and a dialog should be the
+    /// size of what it holds.
     pub max_height: u16,
     /// Columns of padding inside the border.
     pub h_pad: u16,

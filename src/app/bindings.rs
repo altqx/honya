@@ -1,23 +1,12 @@
-//! Every key binding, in one place.
+//! Every key binding, in one place — the documentation copy.
 //!
-//! The same facts used to be written down three times — once in the help
-//! overlay's pre-formatted lines, once in each screen's footer hints, and once
-//! in the routing that actually implements them. Three copies of a list that
-//! only ever grows is three chances to document a key that no longer exists,
-//! and no chance at all of noticing. It had already happened: this file told
-//! people that Project's `Q` opened the QA report (there was no handler), that
-//! the Reader's `y` synced the panes (it copies) and that its `b` bookmarked
-//! (it pages up).
+//! The per-screen **command** sections are not written here. They are read out
+//! of each screen's [`super::action_table`], the same declaration `handle_key`
+//! dispatches from, so help cannot describe a key the screen does not have.
 //!
-//! So the per-screen **command** sections are no longer written here. They are
-//! read out of each screen's [`super::action_table`], which is the same
-//! declaration `handle_key` dispatches from and the toolbars draw — a key
-//! cannot be documented for a handler that does not exist, because the handler
-//! is what declares it.
-//!
-//! What is still written by hand is what is not a screen command: the globals,
-//! the pointer gestures, and each screen's *navigation* — scrolling, folding,
-//! moving between panels. Those are deliberately outside the table.
+//! What is written by hand is what is not a screen command: the globals, the
+//! pointer gestures, and each screen's *navigation* — scrolling, folding,
+//! moving between panels — which are deliberately outside the table.
 
 use std::sync::OnceLock;
 

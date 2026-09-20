@@ -1,18 +1,9 @@
 //! The shortcuts bar along the bottom of every screen.
 //!
-//! The existing footer packs `(key, label)` pairs until they stop fitting and
-//! then ellipsises. That is almost right, but it can trim away the binding that
-//! tells you where the rest went — on a narrow terminal you are left with a
-//! handful of arbitrary hints and no route to the full list. So two things are
-//! reserved before anything else is packed:
-//!
-//! * **the help binding**, always, because it is the way out of not knowing;
-//! * **a pinned hint**, when focus has been parked outside a modal that is still
-//!   on screen, because it names the only way back into it.
-//!
-//! Everything else competes for what is left. Hints are also clickable, which
-//! they have never been despite already being structured data with exact
-//! column arithmetic behind them.
+//! Hints are packed until they stop fitting, except two reserved first: the help
+//! binding, always, because it is the way out of not knowing, and a pinned hint
+//! when there is one. Without that reservation a narrow terminal can trim away
+//! the binding that tells you where the rest went.
 
 use ratatui::layout::Rect;
 use ratatui::style::Style;
@@ -92,13 +83,9 @@ impl<'a> ShortcutsBar<'a> {
         self
     }
 
-    /// The reserved hints that actually fit in `width`, in draw order
-    /// (left to right), so the last one ends up rightmost.
-    ///
-    /// Help outranks the pinned hint. Both are reserved, but when the bar is too
-    /// narrow for both, the universal escape hatch is the one that has to
-    /// survive — a pinned hint names a way back into one modal, whereas help
-    /// names the way out of not knowing anything at all.
+    /// The reserved hints that fit in `width`, in draw order, so the last one
+    /// ends up rightmost. Help outranks the pinned hint: when only one fits,
+    /// the way out of not knowing anything is the one that has to survive.
     fn reserved_hints(&self, width: usize) -> Vec<&Hint> {
         let help = self.help.as_ref();
         let pinned = self.pinned.as_ref();

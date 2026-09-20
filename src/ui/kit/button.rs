@@ -1,10 +1,8 @@
 //! Buttons, and rows of them.
 //!
-//! Dialogs used to draw their choices as bare key hints and recover the click
-//! target by re-deriving column arithmetic afterwards. A button here draws its
-//! own label and registers its own rectangle, so the thing you can see is
-//! exactly the thing you can click, and its accelerator is printed on it rather
-//! than hidden in the footer.
+//! A button draws its own label and registers its own rectangle, so what you can
+//! see is exactly what you can click, and its accelerator is printed on it
+//! rather than hidden in the footer.
 
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};

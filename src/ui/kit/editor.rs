@@ -1,16 +1,11 @@
 //! An editable text surface you can point at.
 //!
-//! Every editor overlay in the app is click-inert today: you can open one, but
-//! the only way to move the caret is arrow keys, even though byte-offset cursors
-//! and a caret renderer already exist. The missing piece is the inverse mapping
-//! — from a screen cell back to an offset in the text — which is what this
-//! module provides.
-//!
-//! Getting that mapping right is entirely a width problem, and honya's text is
-//! the hard case: a Japanese line is mostly two-column glyphs, and a Thai line
-//! contains combining marks that occupy no columns at all. So the walk is by
-//! grapheme and by display column, never by byte or `char`, and a click past the
-//! end of a line lands at the line's end rather than wrapping onto the next.
+//! What makes a click work is the inverse mapping — from a screen cell back to
+//! an offset in the text — and getting it right is entirely a width problem.
+//! honya's text is the hard case: a Japanese line is mostly two-column glyphs, a
+//! Thai line carries marks that occupy none. So the walk is by grapheme and by
+//! display column, never by byte or `char`, and a click past the end of a line
+//! lands at that line's end rather than wrapping onto the next.
 
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};

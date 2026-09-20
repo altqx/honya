@@ -1,11 +1,8 @@
 //! Typed form fields, and a scrolling form built from them.
 //!
-//! Settings is 37 fields rendered as one imperative `Vec<Line>` scrolled by
-//! hand, where every row restates how a label is padded, how a value is masked,
-//! and where the caret goes. Here a field declares what kind of value it holds
-//! and the component draws it — which also means each row, and each of a
-//! stepper's arrows, registers a rectangle, so a select is a thing you click
-//! rather than a thing you cycle blind with the arrow keys.
+//! A field declares what kind of value it holds and the component draws it, so
+//! every row — and each of a stepper's arrows — registers a rectangle. That is
+//! what makes a select something you click rather than cycle blind.
 //!
 //! One row per field. Help text belongs to the focused field and is drawn once,
 //! wherever the caller puts it, rather than doubling the height of every row.
@@ -423,15 +420,13 @@ fn render_value(
     }
 }
 
-/// `‹ value ›` with both arrows registered, so a stepped value can be changed
-/// by pointing at it rather than only by arrow keys.
-/// The widest a stepper's value column grows.
-///
-/// Bounded rather than filling the row: with the arrows pinned to the far edge
-/// of a wide column, `<` and `>` ended up half a screen apart with a short
-/// value stranded between them, and clicking one meant travelling to it.
+/// The widest a stepper's value column grows. Bounded rather than filling the
+/// row: arrows pinned to the far edge of a wide column sit half a screen apart,
+/// and clicking one means travelling to it.
 const STEPPER_VALUE_COLS: u16 = 24;
 
+/// `‹ value ›` with both arrows registered, so a stepped value can be changed
+/// by pointing at it rather than only with the arrow keys.
 fn render_stepper(ui: &mut Ui, area: Rect, field: &Field, index: usize, st: State, base: Style) {
     let bg = base.bg.unwrap_or(ui.surface());
     let value = field.display_value();

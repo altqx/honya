@@ -1,13 +1,13 @@
 //! The keyboard focus ring, and the pointer's hover state.
 //!
 //! Both resolve against the same [`Zones`] registry the mouse hit-tests, so what
-//! Tab reaches and what a click reaches can never disagree. Focus and hover are
-//! deliberately separate: the pointer moving across a row must not steal the
+//! Tab reaches and what a click reaches cannot disagree. They are separate
+//! structures on purpose: the pointer crossing a row must not steal the
 //! keyboard's place in a form.
 //!
-//! Zones are rebuilt every frame, so a focused id can vanish between frames — a
-//! list shrinks, a modal closes. [`Focus::reconcile`] runs after each render and
-//! settles that, rather than leaving focus pointing at something gone.
+//! Zones are rebuilt every frame, so a focused id can vanish between them — a
+//! list shrinks, a modal closes. [`Focus::reconcile`] settles that after each
+//! render rather than leaving focus pointing at something gone.
 
 use super::zones::{ZoneId, Zones};
 

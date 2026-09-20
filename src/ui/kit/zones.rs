@@ -1,16 +1,14 @@
 //! Frame-scoped registry of every interactive rectangle the UI drew.
 //!
-//! The contract that makes the whole kit work: a component **draws and
-//! registers in the same call**, so clicks, hover and keyboard focus resolve
-//! against the geometry that is actually on screen. Nothing re-derives a layout
-//! a second time to hit-test it — the class of drift that let the Settings modal
-//! draw at 76x24 while its click handler claimed 72x26.
+//! The contract the whole kit rests on: a component **draws and registers in the
+//! same call**, so clicks, hover and keyboard focus resolve against the geometry
+//! actually on screen, and no layout is re-derived a second time to hit-test it.
 //!
-//! Registration order is meaningful twice: [`Zones::at`] scans in reverse so the
-//! last (topmost) registration wins, and [`Zones::tab_order`] walks forward so
-//! the focus ring follows reading order. An overlay therefore only needs to
-//! register a full-frame backdrop before its own content for a click beside the
-//! modal to resolve as "dismiss" rather than falling through to the screen.
+//! Registration order means two things. [`Zones::at`] scans in reverse, so the
+//! last (topmost) registration wins; [`Zones::tab_order`] walks forward, so the
+//! focus ring follows reading order. An overlay therefore only has to register a
+//! full-frame backdrop before its own content for a click beside it to resolve
+//! as "dismiss" rather than falling through to the screen.
 
 use ratatui::layout::Rect;
 

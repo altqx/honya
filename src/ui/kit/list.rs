@@ -1,14 +1,11 @@
 //! A scrolling, selectable list that registers a zone per visible row.
 //!
-//! Every screen currently reimplements this: windowing the data to the
-//! viewport, keeping the selection visible, drawing a selection bar, and
-//! separately recovering which row a click landed on. Doing it once removes
-//! that duplication and, because rows register as they draw, removes the second
-//! copy of the arithmetic entirely.
+//! Rows register as they draw, so which row a click landed on is read back from
+//! the registry rather than re-derived from the offset and the viewport.
 //!
-//! Rows are built through a closure that is **only called for visible indices**,
-//! so a hundred-thousand-line activity log costs the same as a ten-item menu.
-//! That matters: honya's lists span both extremes.
+//! Rows are built through a closure called **only for visible indices**, so a
+//! hundred-thousand-line activity log costs the same as a ten-item menu.
+//! honya's lists span both extremes.
 
 use std::ops::Range;
 

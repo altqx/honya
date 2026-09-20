@@ -32,11 +32,10 @@ pub struct Ui<'a, 'f> {
     pub frame_count: u64,
     /// The background of the container currently being drawn into.
     ///
-    /// A control has to know what it sits on. Everything used to assume the
-    /// screen background, which is wrong the moment it is inside a modal — the
-    /// row fills with one colour while the spans on it carry another, and the
-    /// difference shows as a box around every piece of text. A modal sets this
-    /// for its body; nested containers set it in turn.
+    /// A control has to know what it sits on: assume the screen's and a row
+    /// inside a modal fills with one colour while its spans carry another,
+    /// which reads as a box around every piece of text. A modal sets this for
+    /// its body; nested containers set it in turn.
     surface: ratatui::style::Color,
 }
 
