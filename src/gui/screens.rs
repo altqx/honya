@@ -1195,11 +1195,13 @@ fn refine(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
     let plan = app.refine.plan().to_vec();
     let pending = app.refine.pending_prompt();
     let sessions = app.refine_sessions.clone();
+    // The TUI transcript is blocks with fold state; the GUI draws roles, so it
+    // takes the block's role and whatever the block would say when open.
     let turns: Vec<(TurnRole, String, bool)> = app
         .refine
-        .conversation
+        .blocks
         .iter()
-        .map(|t| (t.role, t.text.clone(), t.streaming))
+        .map(|b| (b.role(), b.to_markdown(), b.streaming))
         .collect();
 
     toolbar_row(ui, |ui| {

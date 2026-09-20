@@ -2357,9 +2357,9 @@ async fn refine_submit_pushes_user_turn() {
         app.on_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::empty()));
     }
     app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
-    assert_eq!(app.refine.conversation.len(), 1);
-    assert_eq!(app.refine.conversation[0].role, TurnRole::User);
-    assert_eq!(app.refine.conversation[0].text, "hello");
+    assert_eq!(app.refine.blocks.len(), 1);
+    assert_eq!(app.refine.blocks[0].role(), TurnRole::User);
+    assert_eq!(app.refine.blocks[0].body, "hello");
     let _ = std::fs::remove_dir_all(app.active.as_ref().unwrap().project.dir.clone());
 }
 
@@ -2375,20 +2375,23 @@ fn refine_stream_events_fold_into_transcript() {
     app.on_app_event(AppEvent::RefineDelta {
         delta: "lo".to_string(),
     });
-    assert_eq!(app.refine.conversation.len(), 1);
-    assert_eq!(app.refine.conversation[0].role, TurnRole::Assistant);
-    assert_eq!(app.refine.conversation[0].text, "Hello");
-    assert!(app.refine.conversation[0].streaming);
+    assert_eq!(app.refine.blocks.len(), 1);
+    assert_eq!(app.refine.blocks[0].role(), TurnRole::Assistant);
+    assert_eq!(app.refine.blocks[0].body, "Hello");
+    assert!(app.refine.blocks[0].streaming);
 
     app.on_app_event(AppEvent::RefineMessageDone);
-    assert!(!app.refine.conversation[0].streaming);
+    assert!(!app.refine.blocks[0].streaming);
 
     app.on_app_event(AppEvent::RefineToolInvoked {
+        id: "c1".to_string(),
         tool: "upsert_character".to_string(),
         summary: "Yuu".to_string(),
+        args: r#"{"name":"Yuu"}"#.to_string(),
     });
-    let last = app.refine.conversation.last().unwrap();
-    assert_eq!(last.role, TurnRole::Tool);
+    let last = app.refine.blocks.last().unwrap();
+    assert_eq!(last.role(), TurnRole::Tool);
+    assert_eq!(last.tool_call(), Some("c1"));
 }
 
 #[test]
@@ -2399,7 +2402,7 @@ fn refine_slash_clear_resets_conversation() {
     app.on_app_event(AppEvent::RefineDelta {
         delta: "draft".to_string(),
     });
-    assert_eq!(app.refine.conversation.len(), 1);
+    assert_eq!(app.refine.blocks.len(), 1);
 
     // First Enter accepts the slash popup; second submits `/clear`.
     for ch in "/clear".chars() {
@@ -2408,7 +2411,7 @@ fn refine_slash_clear_resets_conversation() {
     app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
     app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
     assert!(
-        app.refine.conversation.is_empty(),
+        app.refine.blocks.is_empty(),
         "/clear empties the transcript"
     );
     let _ = std::fs::remove_dir_all(app.active.as_ref().unwrap().project.dir.clone());

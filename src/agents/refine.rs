@@ -1470,10 +1470,7 @@ async fn run_refine_turn(
                 }
 
                 for call in &tool_calls[start..end] {
-                    tx.send(AppEvent::RefineToolInvoked {
-                        tool: call.function.name.clone(),
-                        summary: summarize_args(&call.function.arguments),
-                    });
+                    emit_tool_invoked(tx, call);
                 }
 
                 let results = match cancellable(
@@ -1491,6 +1488,7 @@ async fn run_refine_turn(
                 };
 
                 for ToolExecution { call, result } in results {
+                    emit_tool_returned(tx, &call, &result);
                     if let Some(summary) = tool_summary_for_final(&call.function.name, &result) {
                         turn_tool_summaries.push(summary);
                     }
@@ -1507,10 +1505,7 @@ async fn run_refine_turn(
             }
             // Plan calls render in the pinned panel, not the transcript.
             if call.function.name != "update_plan" {
-                tx.send(AppEvent::RefineToolInvoked {
-                    tool: call.function.name.clone(),
-                    summary: summarize_args(&call.function.arguments),
-                });
+                emit_tool_invoked(tx, call);
             }
             let result =
                 match cancellable(runtime.cancel, execute_tool_call_result(tools, call)).await {
@@ -1521,6 +1516,7 @@ async fn run_refine_turn(
                         return;
                     }
                 };
+            emit_tool_returned(tx, call, &result);
             if let Some(summary) = tool_summary_for_final(&call.function.name, &result) {
                 turn_tool_summaries.push(summary);
             }
@@ -1805,6 +1801,26 @@ async fn run_compacting_tool_loop(
     })
 }
 
+fn emit_tool_invoked(tx: &EventTx, call: &ToolCall) {
+    tx.send(AppEvent::RefineToolInvoked {
+        id: call.id.clone(),
+        tool: call.function.name.clone(),
+        summary: summarize_args(&call.function.arguments),
+        args: cap_to(&call.function.arguments, 2_000),
+    });
+}
+
+fn emit_tool_returned(tx: &EventTx, call: &ToolCall, result: &str) {
+    if call.function.name == "update_plan" {
+        return;
+    }
+    tx.send(AppEvent::RefineToolReturned {
+        id: call.id.clone(),
+        ok: !result.contains("\"ok\":false"),
+        detail: cap_to(&tool_result_message(result), 4_000),
+    });
+}
+
 fn summarize_args(args_json: &str) -> String {
     let flat: String = args_json.split_whitespace().collect::<Vec<_>>().join(" ");
     if flat.chars().count() <= 70 {
@@ -1853,8 +1869,10 @@ fn drain_steering(
 
     if count > 0 {
         tx.send(AppEvent::RefineToolInvoked {
+            id: String::new(),
             tool: "steering".to_string(),
             summary: format!("added {count} queued user instruction(s)"),
+            args: String::new(),
         });
     }
 
@@ -5425,7 +5443,7 @@ mod tests {
 
         let mut saw_steering_event = false;
         while let Ok(ev) = rx.try_recv() {
-            if let AppEvent::RefineToolInvoked { tool, summary } = ev
+            if let AppEvent::RefineToolInvoked { tool, summary, .. } = ev
                 && tool == "steering"
             {
                 saw_steering_event = true;

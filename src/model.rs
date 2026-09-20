@@ -1937,9 +1937,19 @@ pub enum AppEvent {
         context_max: u32,
     },
     RefineMessageDone,
+    /// A tool call is starting. `args` is the whole argument JSON, capped —
+    /// `summary` is the one-line form the collapsed block shows.
     RefineToolInvoked {
+        id: String,
         tool: String,
         summary: String,
+        args: String,
+    },
+    /// What that call returned, so expanding it shows something worth the key.
+    RefineToolReturned {
+        id: String,
+        ok: bool,
+        detail: String,
     },
     /// A sub-agent was spawned. Everything fixed about it arrives once, here.
     RefineSubagentStarted {
@@ -1953,6 +1963,9 @@ pub enum AppEvent {
     },
     /// What a running sub-agent is doing right now.
     RefineSubagentActivity { id: String, activity: String },
+    /// A line from a sub-agent's own conversation, so its block can be opened
+    /// and read rather than only counted.
+    RefineSubagentTurn { id: String, text: String },
     /// How a sub-agent ended.
     RefineSubagentFinished {
         id: String,

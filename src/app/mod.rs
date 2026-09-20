@@ -12,6 +12,7 @@ pub mod project;
 pub mod qa;
 pub mod reader;
 pub mod refine;
+pub mod refine_blocks;
 pub mod settings_defs;
 pub mod shelf;
 pub mod translate;
@@ -210,6 +211,9 @@ pub enum Action {
     ReaderStepChapter {
         forward: bool,
     },
+    /// Put one transcript block on the clipboard. OSC-52 gives no success
+    /// signal, so the toast is the only confirmation there is.
+    RefineCopyBlock { text: String },
     ReaderCopy {
         text: String,
         lines: usize,
@@ -1376,10 +1380,10 @@ impl App {
         let loaded = crate::workspace::refine_session::load(&root, &id);
         let turns = loaded
             .as_ref()
-            .map(|s| refine::display_turns(&s.messages))
+            .map(|s| refine::display_blocks(&s.messages, refine::COMPACT_SUMMARY_PREFIX))
             .unwrap_or_default();
         let plan = loaded.map(|s| s.plan).unwrap_or_default();
-        self.refine.load_turns(turns, id.clone());
+        self.refine.load_blocks(turns, id.clone());
         self.refine.set_plan(plan);
         self.refine_session_id = id;
         self.refine_sessions = sessions;
@@ -1426,7 +1430,7 @@ impl App {
     fn refine_new_session(&mut self) {
         let id = crate::workspace::refine_session::new_id();
         self.clear_refine_steering();
-        self.refine.load_turns(Vec::new(), id.clone());
+        self.refine.load_blocks(Vec::new(), id.clone());
         self.refine_session_id = id.clone();
         if let Some(tx) = &self.refine_tx {
             let _ = tx.send(crate::agents::refine::RefineControl::SwitchSession(id));
@@ -1441,11 +1445,11 @@ impl App {
         let session = crate::workspace::refine_session::load(&root, &id);
         let turns = session
             .as_ref()
-            .map(|s| refine::display_turns(&s.messages))
+            .map(|s| refine::display_blocks(&s.messages, refine::COMPACT_SUMMARY_PREFIX))
             .unwrap_or_default();
         let plan = session.map(|s| s.plan).unwrap_or_default();
         self.clear_refine_steering();
-        self.refine.load_turns(turns, id.clone());
+        self.refine.load_blocks(turns, id.clone());
         self.refine.set_plan(plan);
         self.refine_session_id = id.clone();
         if let Some(tx) = &self.refine_tx {
@@ -3408,6 +3412,14 @@ impl App {
             }
             Action::OpenAuthUrl => self.open_auth_url(),
             Action::CopyAuthCode => self.copy_auth_code(),
+            Action::RefineCopyBlock { text } => {
+                match crate::remote::copy_to_clipboard(&text) {
+                    Ok(()) => self.toast = Some(Toast::info("copied block".to_string())),
+                    Err(_) => {
+                        self.toast = Some(Toast::warn("couldn't copy — terminal blocked clipboard"))
+                    }
+                }
+            }
             Action::ReaderCopy { text, lines } => {
                 // OSC-52 has no reliable success signal, so always toast.
                 match crate::remote::copy_to_clipboard(&text) {
@@ -7402,7 +7414,7 @@ mod remote_tests {
     }
 
     #[test]
-    fn ctrl_r_expands_refine_instead_of_toggling_remote() {
+    fn ctrl_r_folds_refine_instead_of_toggling_remote() {
         let base =
             std::env::temp_dir().join(format!("honya_refine_ctrl_r_route_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
@@ -7433,8 +7445,16 @@ mod remote_tests {
             vol: 1,
         });
 
+        app.refine.on_app_event(&crate::model::AppEvent::RefineToolInvoked {
+            id: "c1".to_string(),
+            tool: "read_chapter".to_string(),
+            summary: "v1/c1".to_string(),
+            args: r#"{"ch":1}"#.to_string(),
+        });
+        assert!(!app.refine.blocks[0].open, "a tool call starts folded");
+
         assert!(matches!(app.route_key(ctrl_r()), Action::None));
-        assert!(app.refine.expanded_for_test());
+        assert!(app.refine.blocks[0].open, "⌃R unfolds the transcript");
 
         let _ = std::fs::remove_dir_all(&base);
     }

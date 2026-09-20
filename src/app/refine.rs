@@ -1,8 +1,6 @@
 //! Refine screen: transcript, chat input, `@` mentions, and slash commands.
 //! The focused input captures globals until `Esc` releases it.
 
-use std::hash::{Hash, Hasher};
-
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
@@ -10,7 +8,6 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
-use crate::llm::{Message, Role};
 use crate::model::{
     AppEvent, PlanStep, PlanStepStatus, Project, RefineQuestion, RefineSubagentStatus,
 };
@@ -23,6 +20,9 @@ use crate::workspace::refine_session::SessionMeta;
 use super::action_table::{self, Act};
 use super::Action;
 use super::overlay::Overlay;
+// `Block` here is ratatui's panel; the transcript's is `blocks::Block`.
+use super::refine_blocks::{self as blocks, ToolStatus};
+pub use super::refine_blocks::{TurnRole, display_blocks};
 
 /// Structured `@` mention used as both context and default tool scope.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,7 +116,11 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/resume", "pick a session to resume"),
 ];
 
-const COMPACT_SUMMARY_PREFIX: &str = "[Earlier conversation, compacted to fit the context window]";
+/// Lines of a sub-agent's own transcript kept in its block. Enough to read
+/// what it did; not enough for a long run to grow without bound.
+const CHILD_TRANSCRIPT_CAP: usize = 400;
+
+pub const COMPACT_SUMMARY_PREFIX: &str = "[Earlier conversation, compacted to fit the context window]";
 
 const FIX_REVIEW_NEEDED_PROMPT: &str = r#"Investigate and fix `honya:review-needed` chunks across the requested scope.
 
@@ -163,45 +167,6 @@ enum Popup {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TurnRole {
-    User,
-    Assistant,
-    Reasoning,
-    Tool,
-}
-
-#[derive(Debug, Clone)]
-pub struct Turn {
-    pub role: TurnRole,
-    pub text: String,
-    pub streaming: bool,
-}
-
-impl Turn {
-    fn user(text: String) -> Self {
-        Self {
-            role: TurnRole::User,
-            text,
-            streaming: false,
-        }
-    }
-    fn assistant(text: String) -> Self {
-        Self {
-            role: TurnRole::Assistant,
-            text,
-            streaming: false,
-        }
-    }
-    fn tool(text: String) -> Self {
-        Self {
-            role: TurnRole::Tool,
-            text,
-            streaming: false,
-        }
-    }
-}
-
 /// One transcript line per question, with what it was answered.
 fn ask_record(s: &AskSession, answer: &str) -> String {
     if answer.is_empty() {
@@ -213,59 +178,6 @@ fn ask_record(s: &AskSession, answer: &str) -> String {
         out.push_str(&format!("\n· {} → {}", item.question.trim(), value));
     }
     out
-}
-
-/// Rebuild display turns from stored messages, skipping raw tool results.
-pub fn display_turns(messages: &[Message]) -> Vec<Turn> {
-    let mut turns = Vec::new();
-    for m in messages {
-        match m.role {
-            Role::User => {
-                if let Some(c) = &m.content {
-                    if is_compacted_summary(c) {
-                        turns.push(Turn::tool(
-                            "context summarized - earlier messages compacted".to_string(),
-                        ));
-                    } else {
-                        turns.push(Turn::user(user_display(c).to_string()));
-                    }
-                }
-            }
-            Role::Assistant => {
-                if let Some(c) = &m.content
-                    && !c.is_empty()
-                {
-                    turns.push(Turn::assistant(c.clone()));
-                }
-                for call in m.tool_calls.iter().flatten() {
-                    // Plan calls render in the pinned panel.
-                    if call.function.name != "update_plan" {
-                        turns.push(Turn::tool(call.function.name.clone()));
-                    }
-                }
-            }
-            Role::Tool | Role::System => {}
-        }
-    }
-    turns
-}
-
-fn user_display(content: &str) -> &str {
-    let mut end = content.len();
-    for marker in [
-        "\n\n(In scope:",
-        "\n\n[Mid-run steering:",
-        "\n\n[Approval mode:",
-    ] {
-        if let Some((head, _)) = content.split_once(marker) {
-            end = end.min(head.len());
-        }
-    }
-    &content[..end]
-}
-
-fn is_compacted_summary(content: &str) -> bool {
-    content.starts_with(COMPACT_SUMMARY_PREFIX)
 }
 
 /// Read-only view of a blocking refine prompt, for the GUI's prompt card.
@@ -478,8 +390,26 @@ impl SubagentRun {
     }
 }
 
+/// One block's rendered lines, and the state they were rendered from.
+struct BlockRender {
+    key: Option<u64>,
+    lines: Vec<Line<'static>>,
+    /// Display rows at the cached width, so the row index costs no re-measure.
+    rows: u16,
+}
+
 pub struct RefineScreen {
-    pub conversation: Vec<Turn>,
+    pub blocks: Vec<blocks::Block>,
+    /// Parallel to `blocks`; a streamed delta rebuilds one entry, not all.
+    renders: Vec<BlockRender>,
+    next_block: u32,
+    /// Which block the transcript cursor is on. `None` while the input has the
+    /// keyboard — in the transcript, the cursor *is* the focus.
+    selected: Option<usize>,
+    /// Where each block landed in the last frame: `(start row, rows)`. Zones
+    /// and scroll-into-view both read this, so what you can click and what was
+    /// drawn cannot drift.
+    placed: Vec<(u16, u16)>,
     input: String,
     cursor: usize,
     focused: bool,
@@ -498,7 +428,6 @@ pub struct RefineScreen {
     approval_mode: crate::agents::refine::ApprovalMode,
     plan: Vec<PlanStep>,
     subagents: Vec<SubagentRun>,
-    expanded: bool,
     in_flight: bool,
     turn_started: Option<std::time::Instant>,
     last_turn_elapsed: Option<std::time::Duration>,
@@ -515,7 +444,6 @@ pub struct RefineScreen {
     /// Slash/mention popup list geometry, refreshed on render while open.
     popup_area: Rect,
     popup_offset: usize,
-    transcript_cache: crate::ui::markdown::RenderCache,
 }
 
 impl Default for RefineScreen {
@@ -532,11 +460,16 @@ const R_APPROVAL: u16 = 2;
 const R_COMPACT: u16 = 3;
 const R_EXPORT: u16 = 4;
 const R_UNDO: u16 = 5;
+const R_COPY: u16 = 6;
 
 impl RefineScreen {
     pub fn new() -> Self {
         Self {
-            conversation: Vec::new(),
+            blocks: Vec::new(),
+            renders: Vec::new(),
+            next_block: 0,
+            selected: None,
+            placed: Vec::new(),
             input: String::new(),
             cursor: 0,
             focused: true,
@@ -553,7 +486,6 @@ impl RefineScreen {
             approval_mode: crate::agents::refine::ApprovalMode::default(),
             plan: Vec::new(),
             subagents: Vec::new(),
-            expanded: false,
             in_flight: false,
             turn_started: None,
             last_turn_elapsed: None,
@@ -567,8 +499,25 @@ impl RefineScreen {
             picker_start: 0,
             popup_area: Rect::default(),
             popup_offset: 0,
-            transcript_cache: crate::ui::markdown::RenderCache::default(),
         }
+    }
+
+    /// The next block id. Ids are never reused within a session, so a cached
+    /// render can never be handed to a different block.
+    fn block_id(&mut self) -> u32 {
+        self.next_block += 1;
+        self.next_block
+    }
+
+    fn push_block(&mut self, block: blocks::Block) {
+        self.blocks.push(block);
+    }
+
+    /// Append a one-line notice — something that happened to the conversation
+    /// rather than in it.
+    fn notice(&mut self, text: String) {
+        let id = self.block_id();
+        self.push_block(blocks::Block::notice(id, text));
     }
 
     /// Consulted by `App::screen_is_capturing()` to suppress single-letter globals.
@@ -617,8 +566,12 @@ impl RefineScreen {
         })
     }
 
-    pub fn load_turns(&mut self, turns: Vec<Turn>, active_session: String) {
-        self.conversation = turns;
+    pub fn load_blocks(&mut self, blocks: Vec<blocks::Block>, active_session: String) {
+        self.next_block = blocks.iter().map(|b| b.id).max().unwrap_or(0);
+        self.blocks = blocks;
+        self.renders.clear();
+        self.selected = None;
+        self.placed.clear();
         self.active_session = active_session;
         self.input.clear();
         self.cursor = 0;
@@ -662,11 +615,6 @@ impl RefineScreen {
         self.in_flight
     }
 
-    #[cfg(test)]
-    pub fn expanded_for_test(&self) -> bool {
-        self.expanded
-    }
-
     pub fn set_plan(&mut self, plan: Vec<PlanStep>) {
         self.plan = plan;
     }
@@ -693,7 +641,10 @@ impl RefineScreen {
     }
 
     pub fn clear(&mut self) {
-        self.conversation.clear();
+        self.blocks.clear();
+        self.renders.clear();
+        self.selected = None;
+        self.placed.clear();
         self.input.clear();
         self.cursor = 0;
         self.popup = Popup::None;
@@ -760,7 +711,7 @@ impl RefineScreen {
     fn resolve_front(&mut self, id: u64, answer: String) -> Action {
         if let Some(RefinePending::Ask(s)) = self.pending.front() {
             let record = ask_record(s, &answer);
-            self.conversation.push(Turn::tool(record));
+            self.notice(record);
         }
         self.pending.pop_front();
         self.follow = true;
@@ -912,22 +863,52 @@ impl RefineScreen {
             action_table::KeyHit::Miss => {}
         }
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('r') {
-            self.expanded = !self.expanded;
+            self.fold_all();
             return Action::None;
         }
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::End {
             self.jump_bottom();
             return Action::None;
         }
+        // With the input unfocused the transcript has the keyboard, and what
+        // focus *is* there is a block cursor. Typing still starts a message,
+        // so nothing single-letter can be bound here.
         if !self.focused {
+            let shift = key.modifiers.contains(KeyModifiers::SHIFT);
             match key.code {
                 KeyCode::Char(_) | KeyCode::Enter => self.focused = true,
-                KeyCode::Up | KeyCode::PageUp => {
-                    self.scroll_up(3);
+                KeyCode::Up if shift => {
+                    self.jump_turn(-1);
                     return Action::None;
                 }
-                KeyCode::Down | KeyCode::PageDown => {
-                    self.scroll_down(3);
+                KeyCode::Down if shift => {
+                    self.jump_turn(1);
+                    return Action::None;
+                }
+                KeyCode::Up => {
+                    self.move_cursor(-1);
+                    return Action::None;
+                }
+                KeyCode::Down => {
+                    self.move_cursor(1);
+                    return Action::None;
+                }
+                KeyCode::Left => {
+                    self.fold_selected(false);
+                    return Action::None;
+                }
+                KeyCode::Right => {
+                    self.fold_selected(true);
+                    return Action::None;
+                }
+                KeyCode::PageUp => {
+                    self.selected = None;
+                    self.scroll_up(5);
+                    return Action::None;
+                }
+                KeyCode::PageDown => {
+                    self.selected = None;
+                    self.scroll_down(5);
                     return Action::None;
                 }
                 _ => return Action::None,
@@ -964,17 +945,47 @@ impl RefineScreen {
             return Action::None;
         }
 
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         match key.code {
             KeyCode::Enter => self.submit(),
             KeyCode::Esc => {
                 self.focused = false;
                 Action::None
             }
+            // Nothing is typed, so an arrow has nothing to do in the field —
+            // it may as well be the block cursor, and then the cursor needs no
+            // separate step to reach.
+            KeyCode::Up if self.input.is_empty() => {
+                if shift {
+                    self.jump_turn(-1);
+                } else {
+                    self.move_cursor(-1);
+                }
+                Action::None
+            }
+            KeyCode::Down if self.input.is_empty() => {
+                if shift {
+                    self.jump_turn(1);
+                } else {
+                    self.move_cursor(1);
+                }
+                Action::None
+            }
+            KeyCode::Left if self.input.is_empty() && self.selected.is_some() => {
+                self.fold_selected(false);
+                Action::None
+            }
+            KeyCode::Right if self.input.is_empty() && self.selected.is_some() => {
+                self.fold_selected(true);
+                Action::None
+            }
             KeyCode::PageUp => {
+                self.selected = None;
                 self.scroll_up(5);
                 Action::None
             }
             KeyCode::PageDown => {
+                self.selected = None;
                 self.scroll_down(5);
                 Action::None
             }
@@ -1062,14 +1073,30 @@ impl RefineScreen {
             }
         }
         if m.is_scroll() {
+            self.selected = None;
             match m.gesture {
                 MouseGesture::ScrollUp => self.scroll_up(3),
                 _ => self.scroll_down(3),
             }
             return Action::None;
         }
+        // A click in the transcript selects the block it landed on, and folds
+        // it if there is anything behind the fold. The rect comes from the
+        // registry, so it is the one that was drawn.
+        if m.is_click() && m.in_rect(self.transcript_area) {
+            if let Some(i) = zone.and_then(|z| z.row_index())
+                && i < self.blocks.len()
+            {
+                self.selected = Some(i);
+                self.follow = false;
+                self.blocks[i].toggle();
+                return Action::None;
+            }
+            return Action::None;
+        }
         if m.is_click() {
             self.focused = true;
+            self.selected = None;
         }
         Action::None
     }
@@ -1145,7 +1172,8 @@ impl RefineScreen {
         self.follow = true;
         self.last_scope = parse_scope(&text);
         // Plans persist until the agent updates or clears them.
-        self.conversation.push(Turn::user(text.clone()));
+        let id = self.block_id();
+        self.push_block(blocks::Block::user(id, text.clone()));
         Action::RefineSubmit { text }
     }
 
@@ -1168,8 +1196,7 @@ impl RefineScreen {
             "/resume" => Action::RefineOpenSessions,
             "/grep" => {
                 if rest.is_empty() {
-                    self.conversation
-                        .push(Turn::tool("usage: /grep <text>".to_string()));
+                    self.notice("usage: /grep <text>".to_string());
                     self.follow = true;
                     Action::None
                 } else {
@@ -1195,12 +1222,12 @@ impl RefineScreen {
                 } else {
                     0
                 };
-                self.conversation.push(Turn::tool(format!(
-                    "context {} / {} tokens ({pct}% full) · {} turns · auto-compacts at 80%",
+                self.notice(format!(
+                    "context {} / {} tokens ({pct}% full) · {} blocks · auto-compacts at 80%",
                     fmt_tokens(self.last_context),
                     fmt_tokens(self.context_max),
-                    self.conversation.len()
-                )));
+                    self.blocks.len()
+                ));
                 self.follow = true;
                 Action::None
             }
@@ -1209,8 +1236,7 @@ impl RefineScreen {
             },
             "/rename" => {
                 if rest.is_empty() {
-                    self.conversation
-                        .push(Turn::tool("usage: /rename <title>".to_string()));
+                    self.notice("usage: /rename <title>".to_string());
                     self.follow = true;
                     Action::None
                 } else {
@@ -1220,8 +1246,7 @@ impl RefineScreen {
                 }
             }
             _ => {
-                self.conversation
-                    .push(Turn::tool(format!("unknown command: {cmd}")));
+                self.notice(format!("unknown command: {cmd}"));
                 self.follow = true;
                 Action::None
             }
@@ -1318,11 +1343,11 @@ impl RefineScreen {
                 context_max,
             } => {
                 self.settle_reasoning();
-                self.conversation.push(Turn::tool(compaction_notice(
+                self.notice(compaction_notice(
                     *dropped_messages,
                     *token_estimate,
                     *context_max,
-                )));
+                ));
                 self.follow = true;
             }
             AppEvent::RefineDelta { delta } => self.push_delta(delta),
@@ -1348,11 +1373,36 @@ impl RefineScreen {
                     .push_back(RefinePending::Ask(AskSession::new(*id, questions.clone())));
                 self.follow = true;
             }
-            AppEvent::RefineToolInvoked { tool, summary } => {
+            AppEvent::RefineToolInvoked {
+                id,
+                tool,
+                summary,
+                args,
+            } => {
                 self.settle_reasoning();
-                self.conversation
-                    .push(Turn::tool(format!("{tool} — {summary}")));
+                let block_id = self.block_id();
+                let mut block = blocks::Block::tool(
+                    block_id,
+                    tool.clone(),
+                    id.clone(),
+                    summary.clone(),
+                );
+                block.set_detail(blocks::tool_detail(args, None));
+                self.push_block(block);
                 self.follow = true;
+            }
+            AppEvent::RefineToolReturned { id, ok, detail } => {
+                if let Some(b) = self
+                    .blocks
+                    .iter_mut()
+                    .rev()
+                    .find(|b| b.tool_call() == Some(id.as_str()))
+                {
+                    b.set_tool_status(if *ok { ToolStatus::Ok } else { ToolStatus::Failed });
+                    let args = b.detail.clone();
+                    let args = args.split_once("\n→ ").map_or(args.as_str(), |(a, _)| a);
+                    b.set_detail(blocks::tool_detail(args, Some(detail)));
+                }
             }
             AppEvent::RefineSubagentStarted {
                 id,
@@ -1373,6 +1423,13 @@ impl RefineScreen {
                 run.summary.clear();
                 run.started = std::time::Instant::now();
                 run.ran_for = None;
+                // ...and a row in the conversation, because a delegated run is
+                // something that happened in it, not beside it.
+                if !self.blocks.iter().any(|b| b.subagent_id() == Some(id.as_str())) {
+                    let block_id = self.block_id();
+                    let head = format!("{title} · {role}");
+                    self.push_block(blocks::Block::subagent(block_id, id.clone(), head));
+                }
                 self.follow = true;
             }
             AppEvent::RefineSubagentActivity { id, activity } => {
@@ -1382,6 +1439,17 @@ impl RefineScreen {
                     && run.status == RefineSubagentStatus::Running
                 {
                     run.activity = activity.clone();
+                }
+            }
+            AppEvent::RefineSubagentTurn { id, text } => {
+                if let Some(b) = self.blocks.iter_mut().find(|b| b.subagent_id() == Some(id.as_str()))
+                {
+                    let mut detail = b.detail.clone();
+                    if !detail.is_empty() {
+                        detail.push('\n');
+                    }
+                    detail.push_str(text.trim());
+                    b.set_detail(blocks::cap_tail(&detail, CHILD_TRANSCRIPT_CAP));
                 }
             }
             AppEvent::RefineSubagentFinished {
@@ -1395,24 +1463,32 @@ impl RefineScreen {
                     run.activity.clear();
                     run.ran_for = Some(run.started.elapsed());
                 }
+                if let Some(b) = self.blocks.iter_mut().find(|b| b.subagent_id() == Some(id.as_str()))
+                {
+                    let mut detail = b.detail.clone();
+                    if !detail.is_empty() {
+                        detail.push('\n');
+                    }
+                    detail.push_str(summary.trim());
+                    b.set_detail(blocks::cap_tail(&detail, CHILD_TRANSCRIPT_CAP));
+                }
                 self.follow = true;
             }
             AppEvent::RefineEditApplied { kind, summary } => {
                 self.settle_reasoning();
-                self.conversation
-                    .push(Turn::tool(format!("{kind}: {summary}")));
+                self.notice(format!("{kind}: {summary}"));
                 self.follow = true;
             }
             AppEvent::RefineMessageDone => {
-                if let Some(last) = self.conversation.last_mut() {
-                    last.streaming = false;
+                if let Some(last) = self.blocks.last_mut() {
+                    last.settle();
                 }
                 self.streaming = false;
                 self.finish_turn();
             }
             AppEvent::RefineError { msg } => {
                 self.settle_reasoning();
-                self.conversation.push(Turn::tool(format!("error: {msg}")));
+                self.notice(format!("error: {msg}"));
                 self.streaming = false;
                 self.follow = true;
                 self.finish_turn();
@@ -1437,19 +1513,16 @@ impl RefineScreen {
     fn push_delta(&mut self, delta: &str) {
         let keep_following = self.at_bottom();
         self.settle_reasoning();
-        let need_new = !matches!(
-            self.conversation.last(),
-            Some(t) if t.role == TurnRole::Assistant && t.streaming
+        let open = matches!(
+            self.blocks.last(),
+            Some(b) if b.role() == TurnRole::Assistant && b.streaming
         );
-        if need_new {
-            self.conversation.push(Turn {
-                role: TurnRole::Assistant,
-                text: String::new(),
-                streaming: true,
-            });
+        if !open {
+            let id = self.block_id();
+            self.push_block(blocks::Block::assistant(id, String::new()).streaming());
         }
-        if let Some(last) = self.conversation.last_mut() {
-            last.text.push_str(delta);
+        if let Some(last) = self.blocks.last_mut() {
+            last.push_body(delta);
         }
         self.streaming = true;
         if keep_following {
@@ -1459,24 +1532,108 @@ impl RefineScreen {
 
     fn push_reasoning(&mut self, delta: &str) {
         let keep_following = self.at_bottom();
-        let need_new = !matches!(
-            self.conversation.last(),
-            Some(t) if t.role == TurnRole::Reasoning && t.streaming
+        let open = matches!(
+            self.blocks.last(),
+            Some(b) if b.role() == TurnRole::Reasoning && b.streaming
         );
-        if need_new {
-            self.conversation.push(Turn {
-                role: TurnRole::Reasoning,
-                text: String::new(),
-                streaming: true,
-            });
+        if !open {
+            let id = self.block_id();
+            self.push_block(blocks::Block::reasoning(id, String::new()).streaming());
         }
-        if let Some(last) = self.conversation.last_mut() {
-            last.text.push_str(delta);
+        if let Some(last) = self.blocks.last_mut() {
+            last.push_body(delta);
         }
         self.streaming = true;
         if keep_following {
             self.jump_bottom();
         }
+    }
+
+    /// Move the block cursor. The first press lands on the last block rather
+    /// than stepping off it — arriving somewhere is the point.
+    fn move_cursor(&mut self, delta: isize) {
+        if self.blocks.is_empty() {
+            return;
+        }
+        let last = self.blocks.len() - 1;
+        let next = match self.selected {
+            None => last,
+            Some(cur) => (cur as isize + delta).clamp(0, last as isize) as usize,
+        };
+        self.selected = Some(next);
+        self.follow = false;
+        self.scroll_to_selected();
+    }
+
+    /// To the previous or next thing *you* said — the landmarks in a
+    /// conversation are your own turns, not the agent's.
+    fn jump_turn(&mut self, dir: isize) {
+        let mine: Vec<usize> = self
+            .blocks
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| b.role() == TurnRole::User)
+            .map(|(i, _)| i)
+            .collect();
+        if mine.is_empty() {
+            return;
+        }
+        let cur = self.selected.unwrap_or(self.blocks.len().saturating_sub(1));
+        let next = if dir < 0 {
+            mine.iter().rev().find(|i| **i < cur).copied()
+        } else {
+            mine.iter().find(|i| **i > cur).copied()
+        };
+        if let Some(next) = next {
+            self.selected = Some(next);
+            self.follow = false;
+            self.scroll_to_selected();
+        }
+    }
+
+    fn fold_selected(&mut self, open: bool) {
+        if self.selected.is_none() {
+            self.move_cursor(0);
+        }
+        if let Some(i) = self.selected
+            && let Some(b) = self.blocks.get_mut(i)
+        {
+            b.set_open(open);
+        }
+        self.scroll_to_selected();
+    }
+
+    /// Open everything, or — when everything already is — close it.
+    fn fold_all(&mut self) {
+        let any_closed = self
+            .blocks
+            .iter()
+            .any(|b| b.collapsible() && !b.open);
+        for b in &mut self.blocks {
+            b.set_open(any_closed);
+        }
+    }
+
+    fn copy_selected(&self) -> Option<String> {
+        let i = self.selected?;
+        Some(self.blocks.get(i)?.to_markdown())
+    }
+
+    /// Bring the cursor's block into view, using the placement the last frame
+    /// actually drew rather than a second guess at it.
+    fn scroll_to_selected(&mut self) {
+        let Some(i) = self.selected else { return };
+        let Some(&(start, rows)) = self.placed.get(i) else {
+            return;
+        };
+        let h = self.transcript_area.height.max(1);
+        if start < self.scroll {
+            self.scroll = start;
+        } else if start.saturating_add(rows) > self.scroll.saturating_add(h) {
+            self.scroll = start.saturating_add(rows).saturating_sub(h);
+        }
+        self.scroll = self.scroll.min(self.last_bottom);
+        self.follow = self.scroll >= self.last_bottom;
     }
 
     fn at_bottom(&self) -> bool {
@@ -1488,12 +1645,15 @@ impl RefineScreen {
         self.scroll = self.last_bottom;
     }
 
+    /// Reasoning folds itself away once the answer it was working towards
+    /// starts arriving: watching it is useful live, and noise afterwards.
     fn settle_reasoning(&mut self) {
-        if let Some(last) = self.conversation.last_mut()
-            && last.role == TurnRole::Reasoning
+        if let Some(last) = self.blocks.last_mut()
+            && last.role() == TurnRole::Reasoning
             && last.streaming
         {
-            last.streaming = false;
+            last.settle();
+            last.set_open(false);
         }
     }
 
@@ -1551,6 +1711,8 @@ impl RefineScreen {
             Act::menu(R_COMPACT, "compact conversation", Accel::ctrl('y')).when(live),
             Act::menu(R_EXPORT, "export to markdown", Accel::ctrl('e')).when(live),
             Act::menu(R_UNDO, "undo last chapter edit", Accel::ctrl('u')).when(live),
+            Act::menu(R_COPY, "copy selected block", Accel::ctrl('b'))
+                .when(live && self.selected.is_some()),
         ]
     }
 
@@ -1570,6 +1732,9 @@ impl RefineScreen {
             R_COMPACT => Action::RefineCompact,
             R_EXPORT => Action::RefineExport,
             R_UNDO => Action::RefineUndo,
+            R_COPY => Action::RefineCopyBlock {
+                text: self.copy_selected()?,
+            },
             _ => return None,
         })
     }
@@ -1590,10 +1755,16 @@ impl RefineScreen {
                 ("↵", "send"),
                 ("@", "mention"),
                 ("/", "cmd"),
-                ("esc", "unfocus"),
+                ("↑↓", "blocks"),
             ]
         } else {
-            &[("type", "focus"), ("↑↓", "scroll"), ("⌃End", "bottom")]
+            &[
+                ("↑↓", "block"),
+                ("←→", "fold"),
+                ("⇧↑↓", "your turns"),
+                ("⌃R", "fold all"),
+                ("type", "write"),
+            ]
         }
     }
 
@@ -1660,7 +1831,7 @@ impl RefineScreen {
         let zones: &mut crate::ui::kit::Zones = ui.zones;
         let f: &mut Frame = ui.frame;
 
-        self.render_transcript(f, rows[0], frame, theme);
+        self.render_transcript(f, zones, rows[0], frame, theme);
         let input_row = rows[rows.len() - 1];
         if !self.plan.is_empty() {
             self.render_plan(f, rows[next], theme);
@@ -2239,8 +2410,44 @@ impl RefineScreen {
         );
     }
 
-    fn render_transcript(&mut self, f: &mut Frame, area: Rect, frame: u64, theme: &Theme) {
-        let block = Block::default()
+    /// Re-render only the blocks whose state actually changed.
+    ///
+    /// The transcript used to be hashed and rendered whole, so every streamed
+    /// delta re-rendered every message that had ever been said. Per block, a
+    /// delta rebuilds the tail and nothing else.
+    fn rebuild_renders(&mut self, width: u16, theme: &Theme) {
+        if self.renders.len() != self.blocks.len() {
+            self.renders
+                .resize_with(self.blocks.len(), || BlockRender {
+                    key: None,
+                    lines: Vec::new(),
+                    rows: 0,
+                });
+        }
+        for (i, b) in self.blocks.iter().enumerate() {
+            let key = blocks::cache_key(b, width, theme);
+            if self.renders[i].key == Some(key) {
+                continue;
+            }
+            let lines = blocks::render(b, width, theme);
+            let rows = wrapped_line_count(&lines, width as usize);
+            self.renders[i] = BlockRender {
+                key: Some(key),
+                lines,
+                rows,
+            };
+        }
+    }
+
+    fn render_transcript(
+        &mut self,
+        f: &mut Frame,
+        zones: &mut crate::ui::kit::Zones,
+        area: Rect,
+        frame: u64,
+        theme: &Theme,
+    ) {
+        let panel = Block::default()
             .borders(Borders::ALL)
             .border_set(theme::hairline_set())
             .border_style(Style::default().fg(theme.rule))
@@ -2249,42 +2456,54 @@ impl RefineScreen {
                 Style::default().fg(theme.ink_soft),
             ))
             .style(Style::default().bg(theme.bg_panel));
-        let inner = block.inner(area);
-        f.render_widget(block, area);
+        let inner = panel.inner(area);
+        f.render_widget(panel, area);
         self.transcript_area = inner;
+        if inner.width == 0 || inner.height == 0 {
+            return;
+        }
 
-        let width = inner.width as usize;
-        let mut lines: Vec<Line> = if self.conversation.is_empty() {
-            vec![
-                Line::from(Span::styled(
-                    "Ask the refine agent to fix or improve anything in this project.",
-                    Style::default().fg(theme.ink_faint),
-                )),
-                Line::raw(""),
-                Line::from(Span::styled(
-                    "  @v1/c3 tighten the prose · @glossary rename a term · /help",
-                    Style::default().fg(theme.ink_faint),
-                )),
-            ]
-        } else {
-            let md = self.transcript_markdown();
-            let fg = theme.translated_text;
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            md.len().hash(&mut h);
-            md.as_bytes()
-                .iter()
-                .rev()
-                .take(64)
-                .for_each(|b| b.hash(&mut h));
-            width.hash(&mut h);
-            fg.hash(&mut h);
-            self.expanded.hash(&mut h);
-            crate::ui::markdown::theme_fingerprint(theme).hash(&mut h);
-            let key = h.finish();
-            self.transcript_cache
-                .lines(key, || crate::ui::markdown::render(&md, fg, theme, width))
-                .to_vec()
+        if self.blocks.is_empty() {
+            self.placed.clear();
+            self.last_bottom = 0;
+            f.render_widget(
+                Paragraph::new(vec![
+                    Line::from(Span::styled(
+                        "Ask the refine agent to fix or improve anything in this project.",
+                        Style::default().fg(theme.ink_faint),
+                    )),
+                    Line::raw(""),
+                    Line::from(Span::styled(
+                        "  @v1/c3 tighten the prose · @glossary rename a term · /help",
+                        Style::default().fg(theme.ink_faint),
+                    )),
+                ])
+                .style(Style::default().bg(theme.bg_panel)),
+                inner,
+            );
+            return;
+        }
+
+        // A two-column gutter carries the selection rail. It is painted per
+        // frame rather than rendered into a block, so moving the cursor costs
+        // no re-render.
+        let rail = inner.width.min(2);
+        let body = Rect {
+            x: inner.x + rail,
+            width: inner.width - rail,
+            ..inner
         };
+        self.rebuild_renders(body.width, theme);
+
+        let mut lines: Vec<Line<'static>> = Vec::new();
+        self.placed.clear();
+        let mut row = 0u16;
+        for r in &self.renders {
+            self.placed.push((row, r.rows));
+            lines.extend(r.lines.iter().cloned());
+            row = row.saturating_add(r.rows);
+        }
+        let total = row;
 
         if self.streaming {
             let caret = Span::styled(
@@ -2298,9 +2517,7 @@ impl RefineScreen {
         }
 
         let was_at_bottom = self.at_bottom();
-        let total_lines = wrapped_line_count(&lines, width);
-        let view_h = inner.height;
-        self.last_bottom = total_lines.saturating_sub(view_h);
+        self.last_bottom = total.saturating_sub(body.height);
         let scroll = if self.follow || was_at_bottom {
             self.jump_bottom();
             self.last_bottom
@@ -2309,18 +2526,65 @@ impl RefineScreen {
             self.scroll
         };
 
-        let para = Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .scroll((scroll, 0))
-            .style(Style::default().bg(theme.bg_panel));
-        f.render_widget(para, inner);
-        crate::ui::widgets::render_panel_scrollbar(
-            f,
-            area,
-            total_lines as usize,
-            scroll as usize,
-            theme,
+        f.render_widget(
+            Paragraph::new(lines)
+                .wrap(Wrap { trim: false })
+                .scroll((scroll, 0))
+                .style(Style::default().bg(theme.bg_panel)),
+            body,
         );
+        crate::ui::widgets::render_panel_scrollbar(f, area, total as usize, scroll as usize, theme);
+
+        // One pass registers what can be clicked and paints what is selected,
+        // from the same placement the draw above used.
+        for (i, &(start, rows)) in self.placed.iter().enumerate() {
+            let Some(vis) = visible_rows(start, rows, scroll, body.height) else {
+                continue;
+            };
+            let hit = Rect {
+                x: inner.x,
+                y: inner.y + vis.0,
+                width: inner.width,
+                height: vis.1,
+            };
+            zones.push(
+                hit,
+                crate::ui::kit::ZoneId::new(crate::ui::kit::ZoneKind::Row, i as u32),
+            );
+            if self.selected == Some(i) {
+                let bar = Rect { width: rail, ..hit };
+                f.render_widget(
+                    Paragraph::new(vec![
+                        Line::from(Span::styled(
+                            "\u{258c}",
+                            Style::default().fg(theme.accent),
+                        ));
+                        vis.1 as usize
+                    ]),
+                    bar,
+                );
+            }
+        }
+    }
+
+    /// What the transcript is showing right now, flattened. Reading the drawn
+    /// lines rather than a parallel string is the point: a test that passes
+    /// against a second renderer proves nothing about the first.
+    #[cfg(test)]
+    fn visible_text(&mut self, width: u16) -> String {
+        let theme = crate::model::ThemeId::default().build();
+        self.rebuild_renders(width, &theme);
+        self.renders
+            .iter()
+            .flat_map(|r| &r.lines)
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|sp| sp.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     fn running_subagents(&self) -> usize {
@@ -2398,68 +2662,6 @@ impl RefineScreen {
         let mut spans = vec![Span::styled(text, faint)];
         still(&mut spans);
         Some(Line::from(spans))
-    }
-
-    fn transcript_markdown(&self) -> String {
-        let mut out = String::new();
-        let mut i = 0;
-        while i < self.conversation.len() {
-            let turn = &self.conversation[i];
-            match turn.role {
-                TurnRole::User => {
-                    out.push_str("**› you**\n\n");
-                    out.push_str(&turn.text);
-                    i += 1;
-                }
-                TurnRole::Assistant => {
-                    out.push_str(&turn.text);
-                    i += 1;
-                }
-                TurnRole::Reasoning => {
-                    self.push_reasoning_md(&mut out, turn);
-                    i += 1;
-                }
-                TurnRole::Tool => {
-                    // Collapse runs so the answer stays prominent; ⌃R expands detail.
-                    let start = i;
-                    while i < self.conversation.len() && self.conversation[i].role == TurnRole::Tool
-                    {
-                        i += 1;
-                    }
-                    let run = &self.conversation[start..i];
-                    if self.expanded || run.len() == 1 {
-                        let joined = run
-                            .iter()
-                            .map(|t| format!("`🔧 {}`", t.text.trim()))
-                            .collect::<Vec<_>>()
-                            .join("\n\n");
-                        out.push_str(&joined);
-                    } else {
-                        out.push_str(&format!("`🔧 {} actions · ⌃R`", run.len()));
-                    }
-                }
-            }
-            out.push_str("\n\n");
-        }
-        out
-    }
-
-    fn push_reasoning_md(&self, out: &mut String, turn: &Turn) {
-        let body = turn.text.trim();
-        if body.is_empty() {
-            return;
-        }
-        if self.expanded || turn.streaming {
-            out.push_str("> 💭 *thinking*\n>\n");
-            for line in body.lines() {
-                out.push_str("> ");
-                out.push_str(line);
-                out.push('\n');
-            }
-        } else {
-            let lines = body.lines().count().max(1);
-            out.push_str(&format!("> 💭 *thinking — {lines} line(s); ⌃R to expand*"));
-        }
     }
 
     fn render_input(&mut self, f: &mut Frame, area: Rect, theme: &Theme) {
@@ -2626,6 +2828,22 @@ fn popup_window_start(row_count: usize, selected: usize, max_rows: usize) -> usi
         .saturating_add(1)
         .saturating_sub(max_rows)
         .min(row_count - max_rows)
+}
+
+/// Where a block that starts at `start` and is `rows` tall lands inside a
+/// viewport scrolled to `scroll`: `(top row, height)`, or `None` when none of
+/// it is on screen.
+fn visible_rows(start: u16, rows: u16, scroll: u16, height: u16) -> Option<(u16, u16)> {
+    if rows == 0 || height == 0 {
+        return None;
+    }
+    let end = start.saturating_add(rows);
+    if end <= scroll || start >= scroll.saturating_add(height) {
+        return None;
+    }
+    let top = start.max(scroll) - scroll;
+    let bottom = end.min(scroll.saturating_add(height)) - scroll;
+    Some((top, bottom - top))
 }
 
 fn wrapped_line_count(lines: &[Line<'_>], width: usize) -> u16 {
@@ -2814,8 +3032,8 @@ mod tests {
     }
 
     #[test]
-    fn display_turns_reconstructs_from_messages() {
-        use crate::llm::{FunctionCall, ToolCall};
+    fn display_blocks_reconstructs_from_messages() {
+        use crate::llm::{FunctionCall, Message, Role, ToolCall};
         let messages = vec![
             Message::user("fix the prose\n\n(In scope: volume 1 chapter 1. Active volume: 1.)"),
             Message::user(
@@ -2838,15 +3056,21 @@ mod tests {
             Message::tool_result("c1", "{\"ok\":true}"),
             Message::assistant("done — tightened the phrasing"),
         ];
-        let turns = display_turns(&messages);
-        assert_eq!(turns.len(), 4);
-        assert_eq!(turns[0].role, TurnRole::User);
-        assert_eq!(turns[0].text, "fix the prose"); // scope hint stripped
-        assert_eq!(turns[1].role, TurnRole::User);
-        assert_eq!(turns[1].text, "also update tone"); // steering metadata stripped
-        assert_eq!(turns[2].role, TurnRole::Tool);
-        assert_eq!(turns[2].text, "edit_chapter");
-        assert_eq!(turns[3].role, TurnRole::Assistant);
+        let out = display_blocks(&messages, COMPACT_SUMMARY_PREFIX);
+        assert_eq!(out.len(), 4);
+        assert_eq!(out[0].role(), TurnRole::User);
+        assert_eq!(out[0].body, "fix the prose"); // scope hint stripped
+        assert_eq!(out[1].role(), TurnRole::User);
+        assert_eq!(out[1].body, "also update tone"); // steering metadata stripped
+        assert_eq!(out[2].role(), TurnRole::Tool);
+        assert_eq!(out[2].tool_name(), Some("edit_chapter"));
+        assert_eq!(out[3].role(), TurnRole::Assistant);
+
+        // Ids are unique, or a cached render could be handed to another block.
+        let mut ids: Vec<_> = out.iter().map(|b| b.id).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), out.len());
     }
 
     #[test]
@@ -2860,14 +3084,14 @@ mod tests {
     }
 
     #[test]
-    fn display_turns_shows_compacted_history_as_tool_notice() {
-        let messages = vec![Message::user(format!(
+    fn display_blocks_shows_compacted_history_as_a_notice() {
+        let messages = vec![crate::llm::Message::user(format!(
             "{COMPACT_SUMMARY_PREFIX}\nUser: earlier request"
         ))];
-        let turns = display_turns(&messages);
+        let turns = display_blocks(&messages, COMPACT_SUMMARY_PREFIX);
         assert_eq!(turns.len(), 1);
-        assert_eq!(turns[0].role, TurnRole::Tool);
-        assert!(turns[0].text.contains("context summarized"));
+        assert_eq!(turns[0].role(), TurnRole::Tool);
+        assert!(turns[0].body.contains("context summarized"));
     }
 
     #[test]
@@ -2983,57 +3207,81 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_streams_then_collapses_and_toggles() {
+    fn reasoning_streams_then_folds_itself_when_the_answer_starts() {
         let mut s = RefineScreen::new();
         s.on_app_event(&AppEvent::RefineReasoning {
             delta: "weighing the options\nthen deciding".to_string(),
         });
-        assert_eq!(s.conversation.len(), 1);
-        assert_eq!(s.conversation[0].role, TurnRole::Reasoning);
-        assert!(s.conversation[0].streaming, "reasoning streams live");
+        assert_eq!(s.blocks.len(), 1);
+        assert_eq!(s.blocks[0].role(), TurnRole::Reasoning);
+        assert!(s.blocks[0].streaming, "reasoning streams live");
+        assert!(s.blocks[0].open, "and is open while it does");
+        assert!(s.visible_text(80).contains("weighing the options"));
 
         s.on_app_event(&AppEvent::RefineDelta {
             delta: "Here is the fix.".to_string(),
         });
         assert!(
-            !s.conversation[0].streaming,
+            !s.blocks[0].streaming,
             "reasoning stops when the answer starts"
         );
-        assert_eq!(s.conversation[1].role, TurnRole::Assistant);
+        assert!(!s.blocks[0].open, "and folds itself away");
+        assert_eq!(s.blocks[1].role(), TurnRole::Assistant);
 
-        let md = s.transcript_markdown();
-        assert!(
-            md.contains("thinking —"),
-            "collapsed reasoning summary shown"
-        );
-        assert!(
-            !md.contains("weighing the options"),
-            "full reasoning hidden when collapsed"
-        );
+        let shown = s.visible_text(80);
+        assert!(shown.contains("thinking —"), "{shown}");
+        assert!(!shown.contains("weighing the options"), "{shown}");
 
-        s.expanded = true;
-        let md = s.transcript_markdown();
-        assert!(
-            md.contains("weighing the options"),
-            "expanded reasoning shows the text"
-        );
+        // ...and only that block reopens, which is the whole point.
+        s.selected = Some(0);
+        s.fold_selected(true);
+        let shown = s.visible_text(80);
+        assert!(shown.contains("weighing the options"), "{shown}");
+    }
+
+    #[test]
+    fn only_the_selected_block_folds() {
+        let mut s = RefineScreen::new();
+        for n in 0..3 {
+            s.on_app_event(&tool_invoked(&format!("c{n}"), "read_chapter", "ch1"));
+        }
+        assert!(s.blocks.iter().all(|b| !b.open));
+
+        s.selected = Some(1);
+        s.fold_selected(true);
+        assert!(!s.blocks[0].open);
+        assert!(s.blocks[1].open, "the selected one opened");
+        assert!(!s.blocks[2].open, "and only that one");
+
+        // ⌃R is the deliberate all-at-once, and it is a separate gesture.
+        s.fold_all();
+        assert!(s.blocks.iter().all(|b| b.open));
+        s.fold_all();
+        assert!(s.blocks.iter().all(|b| !b.open));
+    }
+
+    /// Shaped like the real event: the collapsed summary the agent sends is
+    /// the flattened arguments, which is what a reload derives it from too.
+    fn tool_invoked(id: &str, tool: &str, summary: &str) -> AppEvent {
+        let args = format!("{{\"note\":\"{summary}\"}}");
+        AppEvent::RefineToolInvoked {
+            id: id.to_string(),
+            tool: tool.to_string(),
+            summary: args.clone(),
+            args,
+        }
     }
 
     #[test]
     fn expanded_reasoning_renders_bold_without_comment_dividers() {
         let mut s = RefineScreen::new();
-        s.expanded = true;
         s.on_app_event(&AppEvent::RefineReasoning {
             delta: "**Inferring character names and traits** <!-- -->**Confirming character presence and POV** <!-- -->".to_string(),
         });
 
         let theme = crate::model::ThemeId::default().build();
-        let lines = crate::ui::markdown::render(
-            &s.transcript_markdown(),
-            theme.translated_text,
-            &theme,
-            100,
-        );
+        s.rebuild_renders(100, &theme);
+        let lines: Vec<_> = s.renders.iter().flat_map(|r| r.lines.clone()).collect();
         let visible = lines
             .iter()
             .flat_map(|line| &line.spans)
@@ -3054,47 +3302,240 @@ mod tests {
     }
 
     #[test]
-    fn tool_run_collapses_then_expands() {
+    fn a_tool_call_shows_its_name_always_and_its_detail_on_request() {
         let mut s = RefineScreen::new();
-        for (tool, summary) in [
+        for (n, (tool, summary)) in [
             ("read_chapter", "ch1"),
             ("grep_chapter", "ดาบ"),
             ("edit_chapter", "ch1: 1 edit(s)"),
-        ] {
-            s.on_app_event(&AppEvent::RefineToolInvoked {
-                tool: tool.to_string(),
-                summary: summary.to_string(),
-            });
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            s.on_app_event(&tool_invoked(&format!("c{n}"), tool, summary));
         }
-        let md = s.transcript_markdown();
-        assert!(
-            md.contains("3 actions"),
-            "consecutive tool lines coalesce: {md}"
-        );
-        assert!(
-            !md.contains("grep_chapter"),
-            "details hidden when collapsed"
-        );
+        // What ran is never hidden — it used to coalesce into "3 actions".
+        let shown = s.visible_text(80);
+        for tool in ["read_chapter", "grep_chapter", "edit_chapter"] {
+            assert!(shown.contains(tool), "{tool} missing from: {shown}");
+        }
+        assert!(!shown.contains("→"), "the result is hidden when folded: {shown}");
 
-        s.expanded = true;
-        let md = s.transcript_markdown();
-        assert!(md.contains("grep_chapter") && md.contains("edit_chapter"));
-        assert!(!md.contains("3 actions"));
+        s.on_app_event(&AppEvent::RefineToolReturned {
+            id: "c1".to_string(),
+            ok: true,
+            detail: "9 matches in v1/c3".to_string(),
+        });
+        s.selected = Some(1);
+        s.fold_selected(true);
+        let shown = s.visible_text(80);
+        assert!(shown.contains("9 matches"), "{shown}");
     }
 
     #[test]
-    fn compaction_event_adds_visible_tool_notice() {
+    fn a_failed_tool_call_is_marked_without_being_opened() {
+        let mut s = RefineScreen::new();
+        s.on_app_event(&tool_invoked("c1", "edit_chapter", "ch1"));
+        s.on_app_event(&AppEvent::RefineToolReturned {
+            id: "c1".to_string(),
+            ok: false,
+            detail: "old text not found".to_string(),
+        });
+        assert!(!s.blocks[0].open);
+        assert!(matches!(
+            s.blocks[0].kind,
+            blocks::BlockKind::Tool {
+                status: ToolStatus::Failed,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn every_visible_block_registers_a_zone_and_a_click_lands_on_it() {
+        let mut s = RefineScreen::new();
+        s.on_app_event(&AppEvent::RefineDelta {
+            delta: "here is what I found".to_string(),
+        });
+        s.on_app_event(&AppEvent::RefineMessageDone);
+        for n in 0..3 {
+            s.on_app_event(&tool_invoked(&format!("c{n}"), "read_chapter", "ch1"));
+        }
+
+        let (_, zones) =
+            crate::ui::kit::ctx::draw_test(100, 40, |ui, area| s.render(ui, area, true));
+
+        for i in 0..s.blocks.len() {
+            let id = crate::ui::kit::ZoneId::new(crate::ui::kit::ZoneKind::Row, i as u32);
+            let rect = zones
+                .rect_of(id)
+                .unwrap_or_else(|| panic!("block {i} drew but registered no zone"));
+            let (col, row) = (rect.x + 1, rect.y);
+            s.handle_mouse(
+                MouseInput {
+                    gesture: MouseGesture::Click { double: false },
+                    col,
+                    row,
+                },
+                zones.at(col, row),
+            );
+            assert_eq!(s.selected, Some(i), "clicking block {i} selected something else");
+        }
+    }
+
+    #[test]
+    fn a_click_on_a_folded_block_also_opens_it() {
+        let mut s = RefineScreen::new();
+        s.on_app_event(&tool_invoked("c0", "grep_chapter", "先輩"));
+        let (_, zones) =
+            crate::ui::kit::ctx::draw_test(100, 20, |ui, area| s.render(ui, area, true));
+        let rect = zones
+            .rect_of(crate::ui::kit::ZoneId::new(crate::ui::kit::ZoneKind::Row, 0))
+            .expect("the tool block registered a zone");
+        let (col, row) = (rect.x + 1, rect.y);
+        s.handle_mouse(
+            MouseInput {
+                gesture: MouseGesture::Click { double: false },
+                col,
+                row,
+            },
+            zones.at(col, row),
+        );
+        assert!(s.blocks[0].open);
+    }
+
+    #[test]
+    fn shift_arrow_jumps_between_your_own_turns() {
+        let mut s = RefineScreen::new();
+        for n in 0..3 {
+            let id = s.block_id();
+            s.push_block(blocks::Block::user(id, format!("ask {n}")));
+            s.on_app_event(&tool_invoked(&format!("c{n}"), "read_chapter", "ch1"));
+            s.on_app_event(&AppEvent::RefineDelta {
+                delta: format!("answer {n}"),
+            });
+            s.on_app_event(&AppEvent::RefineMessageDone);
+        }
+        let mine: Vec<usize> = s
+            .blocks
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| b.role() == TurnRole::User)
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(mine.len(), 3);
+
+        // From the bottom, back up through the three things you said.
+        s.selected = None;
+        s.handle_key(shift(KeyCode::Up), None);
+        assert_eq!(s.selected, Some(mine[2]));
+        s.handle_key(shift(KeyCode::Up), None);
+        assert_eq!(s.selected, Some(mine[1]));
+        s.handle_key(shift(KeyCode::Down), None);
+        assert_eq!(s.selected, Some(mine[2]));
+        // ...and it stops rather than wrapping round.
+        s.handle_key(shift(KeyCode::Down), None);
+        assert_eq!(s.selected, Some(mine[2]));
+    }
+
+    fn shift(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::SHIFT)
+    }
+
+    #[test]
+    fn a_streamed_delta_rerenders_only_the_tail_block() {
+        let theme = crate::model::ThemeId::default().build();
+        let mut s = RefineScreen::new();
+        for n in 0..4 {
+            s.on_app_event(&tool_invoked(&format!("c{n}"), "read_chapter", "ch1"));
+        }
+        s.on_app_event(&AppEvent::RefineDelta {
+            delta: "partial".to_string(),
+        });
+        s.rebuild_renders(80, &theme);
+        let before: Vec<_> = s.renders.iter().map(|r| r.key).collect();
+
+        s.on_app_event(&AppEvent::RefineDelta {
+            delta: " more".to_string(),
+        });
+        s.rebuild_renders(80, &theme);
+        let after: Vec<_> = s.renders.iter().map(|r| r.key).collect();
+
+        assert_eq!(
+            before[..before.len() - 1],
+            after[..after.len() - 1],
+            "a delta must not invalidate the messages above it"
+        );
+        assert_ne!(before.last(), after.last(), "the tail did change");
+    }
+
+    #[test]
+    fn a_reloaded_session_shows_what_the_live_one_did() {
+        use crate::llm::{FunctionCall, Message, Role, ToolCall};
+        let mut live = RefineScreen::new();
+        let id = live.block_id();
+        live.push_block(blocks::Block::user(id, "fix chapter 3".to_string()));
+        live.on_app_event(&tool_invoked("c1", "read_chapter", "v1/c3"));
+        live.on_app_event(&AppEvent::RefineToolReturned {
+            id: "c1".to_string(),
+            ok: true,
+            detail: "read 40 lines".to_string(),
+        });
+        live.on_app_event(&AppEvent::RefineDelta {
+            delta: "tightened it".to_string(),
+        });
+        live.on_app_event(&AppEvent::RefineMessageDone);
+
+        let messages = vec![
+            Message::user("fix chapter 3"),
+            Message {
+                role: Role::Assistant,
+                content: None,
+                tool_calls: Some(vec![ToolCall {
+                    id: "c1".to_string(),
+                    kind: "function".to_string(),
+                    function: FunctionCall {
+                        name: "read_chapter".to_string(),
+                        arguments: r#"{"note":"v1/c3"}"#.to_string(),
+                    },
+                }]),
+                tool_call_id: None,
+                name: None,
+            },
+            Message::tool_result("c1", r#"{"ok":true,"message":"read 40 lines"}"#),
+            Message::assistant("tightened it"),
+        ];
+        let mut reloaded = RefineScreen::new();
+        reloaded.load_blocks(
+            display_blocks(&messages, COMPACT_SUMMARY_PREFIX),
+            String::new(),
+        );
+
+        let roles = |s: &RefineScreen| s.blocks.iter().map(|b| b.role()).collect::<Vec<_>>();
+        assert_eq!(roles(&live), roles(&reloaded));
+        assert_eq!(
+            live.blocks.iter().map(|b| b.body.clone()).collect::<Vec<_>>(),
+            reloaded
+                .blocks
+                .iter()
+                .map(|b| b.body.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn compaction_event_adds_a_visible_notice() {
         let mut s = RefineScreen::new();
         s.on_app_event(&AppEvent::RefineContextCompacted {
             dropped_messages: 4,
             token_estimate: 120_000,
             context_max: 128_000,
         });
-        assert_eq!(s.conversation.len(), 1);
-        assert_eq!(s.conversation[0].role, TurnRole::Tool);
-        let md = s.transcript_markdown();
-        assert!(md.contains("context summarized"));
-        assert!(md.contains("4 old message"));
+        assert_eq!(s.blocks.len(), 1);
+        assert_eq!(s.blocks[0].role(), TurnRole::Tool);
+        let shown = s.visible_text(80);
+        assert!(shown.contains("context summarized"), "{shown}");
+        assert!(shown.contains("4 old message"), "{shown}");
     }
 
     #[test]
