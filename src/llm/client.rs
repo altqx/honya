@@ -135,6 +135,83 @@ impl LlmError {
 /// LLM-layer result alias. Shadows `std::result::Result` within `crate::llm::*`.
 pub type Result<T> = std::result::Result<T, LlmError>;
 
+/// How hard to try again after a transient HTTP fault, and how long to wait
+/// between tries.
+///
+/// One policy for every transport — chat, streaming chat, Codex's Responses
+/// API and the decisions endpoint — so a run behaves the same whichever agent
+/// hit the fault. Both numbers come from [`AppConfig`], so a flaky provider is
+/// something the user can dial for rather than a constant per client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetryPolicy {
+    /// Send attempts per call, initial included. 1 disables retrying.
+    pub max_attempts: u32,
+    /// The longest any single backoff waits, `Retry-After` included.
+    pub cooldown_cap: Duration,
+}
+
+/// A rate limit is the one fault where waiting *is* the remedy, so it gets a
+/// deeper budget than a general transient fault — unless the user has already
+/// asked for more than this.
+const RATE_LIMIT_MIN_ATTEMPTS: u32 = 10;
+
+/// Flex runs on spare, deprioritised capacity and faults far more often, so it
+/// gets a couple of extra tries before a chunk is given up on.
+const FLEX_EXTRA_ATTEMPTS: u32 = 2;
+
+impl RetryPolicy {
+    pub fn from_app_config(cfg: &AppConfig) -> Self {
+        Self {
+            max_attempts: cfg.retry_attempts.max(1),
+            cooldown_cap: Duration::from_secs(cfg.retry_cooldown_secs),
+        }
+    }
+
+    /// The same policy with the extra headroom a deprioritised tier needs.
+    fn for_tier(mut self, tier: Option<ServiceTier>) -> Self {
+        if matches!(tier, Some(ServiceTier::Flex)) {
+            self.max_attempts = self.max_attempts.saturating_add(FLEX_EXTRA_ATTEMPTS);
+        }
+        self
+    }
+
+    /// Send-attempt budget for one error.
+    pub fn attempts_for(&self, err: &LlmError) -> u32 {
+        if err.is_rate_limited() {
+            self.max_attempts.max(RATE_LIMIT_MIN_ATTEMPTS)
+        } else {
+            self.max_attempts
+        }
+    }
+
+    /// Wait before the `retry`-th retry (1-based): exponential from 1s, capped.
+    /// A `Retry-After` hint wins but is capped too, so one call cannot stall a
+    /// run for minutes on a single rate-limit reset.
+    pub fn backoff(&self, retry: u32, retry_after: Option<u64>) -> Duration {
+        let cap = self.cooldown_cap.as_secs().max(1);
+        let secs = match retry_after {
+            Some(hint) => hint.min(cap),
+            None => (1u64 << (retry.saturating_sub(1)).min(5)).min(cap),
+        };
+        Duration::from_secs(secs)
+    }
+
+    /// Whether `err` should be tried again, given how many sends have gone out.
+    /// `sent` counts the attempt that just failed.
+    pub fn should_retry(&self, err: &LlmError, sent: u32) -> bool {
+        err.is_retryable() && sent < self.attempts_for(err)
+    }
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self {
+            max_attempts: 3,
+            cooldown_cap: Duration::from_secs(20),
+        }
+    }
+}
+
 /// Shared HTTP client settings for provider transports.
 #[derive(Debug, Clone)]
 pub struct ClientConfig {
@@ -150,6 +227,8 @@ pub struct ClientConfig {
     pub service_tier: Option<ServiceTier>,
     /// Per-request timeout.
     pub timeout: Duration,
+    /// How this endpoint retries a transient fault.
+    pub retry: RetryPolicy,
 }
 
 impl ClientConfig {
@@ -163,6 +242,7 @@ impl ClientConfig {
             title: cfg.title.clone(),
             service_tier: cfg.service_tier,
             timeout: Duration::from_secs(120),
+            retry: RetryPolicy::from_app_config(cfg),
         }
     }
 
@@ -188,40 +268,12 @@ impl ClientConfig {
         format!("{base}/chat/completions")
     }
 
-    /// Send attempts (initial + retries) per chat call. Flex runs on spare,
-    /// deprioritized capacity and faults far more often, so it gets a deeper budget.
-    pub(super) fn max_send_attempts(&self) -> u32 {
-        match self.service_tier {
-            Some(ServiceTier::Flex) => 5,
-            _ => 3,
-        }
+    /// The configured policy with this endpoint's tier folded in. Read at use
+    /// time rather than baked into the field, because
+    /// [`Self::for_cloudflare_workers_ai`] clears the tier after construction.
+    pub(super) fn send_policy(&self) -> RetryPolicy {
+        self.retry.for_tier(self.service_tier)
     }
-}
-
-/// Rate-limit hits get a deeper send budget than other transient faults.
-/// Exhausting it aborts the pipeline instead of salvaging a NeedsReview chunk.
-pub(super) const RATE_LIMIT_MAX_SEND_ATTEMPTS: u32 = 10;
-
-/// Send-attempt budget for one transport error: rate limits use
-/// [`RATE_LIMIT_MAX_SEND_ATTEMPTS`]; other retryable faults use `general_max`.
-pub(super) fn max_attempts_for_error(err: &LlmError, general_max: u32) -> u32 {
-    if err.is_rate_limited() {
-        RATE_LIMIT_MAX_SEND_ATTEMPTS
-    } else {
-        general_max
-    }
-}
-
-/// Backoff before the `retry`-th retry (1-based): exponential from 1s, capped at
-/// 20s. A `Retry-After` hint wins but is still capped, so one chunk can't stall
-/// the run for minutes on a single rate-limit reset.
-pub(super) fn retry_backoff(retry: u32, retry_after: Option<u64>) -> Duration {
-    const MAX_BACKOFF: u64 = 20;
-    let secs = match retry_after {
-        Some(hint) => hint.min(MAX_BACKOFF),
-        None => (1u64 << (retry.saturating_sub(1)).min(5)).min(MAX_BACKOFF),
-    };
-    Duration::from_secs(secs)
 }
 
 pub(super) fn retry_after_hint(err: &LlmError) -> Option<u64> {
@@ -278,7 +330,7 @@ impl ClientSet {
         };
         let codex = match &cfg.codex_auth {
             Some(auth) => {
-                Some(Arc::new(super::codex::CodexClient::new(auth.clone())?) as Arc<dyn LlmClient>)
+                Some(Arc::new(super::codex::CodexClient::new(auth.clone(), RetryPolicy::from_app_config(cfg))?) as Arc<dyn LlmClient>)
             }
             None => None,
         };
@@ -395,7 +447,12 @@ fn build_decisions(cfg: &AppConfig) -> Result<Option<Arc<dyn super::decisions::D
     let Some(key) = key else {
         return Ok(None);
     };
-    let client = DecisionsClient::new(url, key, DECISIONS_TIMEOUT)?;
+    let client = DecisionsClient::new(
+        url,
+        key,
+        DECISIONS_TIMEOUT,
+        RetryPolicy::from_app_config(cfg),
+    )?;
     Ok(Some(Arc::new(client) as Arc<dyn super::decisions::DecisionsBackend>))
 }
 
@@ -575,13 +632,13 @@ impl OpenRouterClient {
 #[async_trait]
 impl LlmClient for OpenRouterClient {
     async fn chat(&self, req: &ChatRequest) -> Result<ChatResponse> {
-        let max = self.cfg.max_send_attempts();
-        let mut retry = 0u32;
+        let policy = self.cfg.send_policy();
+        let mut sent = 0u32;
         loop {
+            sent += 1;
             match self.send_once(req).await {
-                Err(e) if retry + 1 < max_attempts_for_error(&e, max) && e.is_retryable() => {
-                    retry += 1;
-                    tokio::time::sleep(retry_backoff(retry, retry_after_hint(&e))).await;
+                Err(e) if policy.should_retry(&e, sent) => {
+                    tokio::time::sleep(policy.backoff(sent, retry_after_hint(&e))).await;
                 }
                 other => return other,
             }
@@ -601,19 +658,15 @@ impl LlmClient for OpenRouterClient {
             emitted.store(true, Ordering::Relaxed);
             on_delta(delta);
         };
-        let max = self.cfg.max_send_attempts();
-        let mut retry = 0u32;
+        let policy = self.cfg.send_policy();
+        let mut sent = 0u32;
         loop {
+            sent += 1;
             match self.send_stream_once(req, &mut tracked).await {
                 // Only retry while nothing has reached the caller: replaying after
                 // partial output would double-feed the field-stream parser.
-                Err(e)
-                    if retry + 1 < max_attempts_for_error(&e, max)
-                        && e.is_retryable()
-                        && !emitted.load(Ordering::Relaxed) =>
-                {
-                    retry += 1;
-                    tokio::time::sleep(retry_backoff(retry, retry_after_hint(&e))).await;
+                Err(e) if policy.should_retry(&e, sent) && !emitted.load(Ordering::Relaxed) => {
+                    tokio::time::sleep(policy.backoff(sent, retry_after_hint(&e))).await;
                 }
                 other => return other,
             }
@@ -1026,6 +1079,7 @@ mod tests {
             title: None,
             service_tier,
             timeout: Duration::from_secs(1),
+            retry: RetryPolicy::default(),
         })
         .unwrap()
     }
@@ -1227,19 +1281,10 @@ mod tests {
 
     #[test]
     fn flex_tier_gets_a_deeper_retry_budget() {
-        assert_eq!(
-            client_with_tier(Some(ServiceTier::Flex))
-                .cfg
-                .max_send_attempts(),
-            5
-        );
-        assert_eq!(
-            client_with_tier(Some(ServiceTier::Priority))
-                .cfg
-                .max_send_attempts(),
-            3
-        );
-        assert_eq!(client_with_tier(None).cfg.max_send_attempts(), 3);
+        let attempts = |tier| client_with_tier(tier).cfg.send_policy().max_attempts;
+        assert_eq!(attempts(Some(ServiceTier::Flex)), 5);
+        assert_eq!(attempts(Some(ServiceTier::Priority)), 3);
+        assert_eq!(attempts(None), 3);
     }
 
     #[test]
@@ -1252,23 +1297,72 @@ mod tests {
             status: 503,
             message: "unavailable".into(),
         };
-        assert_eq!(max_attempts_for_error(&rate_limited, 3), 10);
-        assert_eq!(max_attempts_for_error(&transport, 3), 3);
-        assert_eq!(max_attempts_for_error(&transport, 5), 5);
+        let at = |n| RetryPolicy {
+            max_attempts: n,
+            ..RetryPolicy::default()
+        };
+        assert_eq!(at(3).attempts_for(&rate_limited), 10);
+        assert_eq!(at(3).attempts_for(&transport), 3);
+        assert_eq!(at(5).attempts_for(&transport), 5);
+        // A configured budget deeper than the rate-limit floor is respected.
+        assert_eq!(at(15).attempts_for(&rate_limited), 15);
         assert!(rate_limited.is_rate_limited());
         assert!(!transport.is_rate_limited());
     }
 
     #[test]
     fn backoff_is_exponential_capped_and_honors_retry_after() {
-        // Exponential from 1s, doubling, capped at 20s.
-        assert_eq!(retry_backoff(1, None), Duration::from_secs(1));
-        assert_eq!(retry_backoff(2, None), Duration::from_secs(2));
-        assert_eq!(retry_backoff(3, None), Duration::from_secs(4));
-        assert_eq!(retry_backoff(4, None), Duration::from_secs(8));
-        assert_eq!(retry_backoff(9, None), Duration::from_secs(20));
+        let p = RetryPolicy::default();
+        // Exponential from 1s, doubling, capped at the configured cooldown.
+        assert_eq!(p.backoff(1, None), Duration::from_secs(1));
+        assert_eq!(p.backoff(2, None), Duration::from_secs(2));
+        assert_eq!(p.backoff(3, None), Duration::from_secs(4));
+        assert_eq!(p.backoff(4, None), Duration::from_secs(8));
+        assert_eq!(p.backoff(9, None), Duration::from_secs(20));
         // A server hint takes precedence but is still capped.
-        assert_eq!(retry_backoff(1, Some(3)), Duration::from_secs(3));
-        assert_eq!(retry_backoff(1, Some(600)), Duration::from_secs(20));
+        assert_eq!(p.backoff(1, Some(3)), Duration::from_secs(3));
+        assert_eq!(p.backoff(1, Some(600)), Duration::from_secs(20));
+    }
+
+    /// The cooldown is a setting, so a shorter one has to actually bind — on
+    /// the exponential ramp and on the provider's own hint alike.
+    #[test]
+    fn a_configured_cooldown_caps_both_the_ramp_and_the_hint() {
+        let p = RetryPolicy {
+            max_attempts: 3,
+            cooldown_cap: Duration::from_secs(5),
+        };
+        assert_eq!(p.backoff(9, None), Duration::from_secs(5));
+        assert_eq!(p.backoff(1, Some(600)), Duration::from_secs(5));
+        assert_eq!(p.backoff(1, Some(2)), Duration::from_secs(2));
+    }
+
+    /// One attempt means "do not retry", and the loops must honour it.
+    #[test]
+    fn a_single_attempt_disables_retrying() {
+        let p = RetryPolicy {
+            max_attempts: 1,
+            ..RetryPolicy::default()
+        };
+        let transport = LlmError::Api {
+            status: 503,
+            message: "unavailable".into(),
+        };
+        assert!(!p.should_retry(&transport, 1));
+    }
+
+    /// A deterministic failure is never worth replaying, however deep the budget.
+    #[test]
+    fn a_deterministic_failure_is_not_retried() {
+        let p = RetryPolicy {
+            max_attempts: 9,
+            ..RetryPolicy::default()
+        };
+        let bad_request = LlmError::Api {
+            status: 400,
+            message: "malformed".into(),
+        };
+        assert!(!p.should_retry(&bad_request, 1));
+        assert!(!p.should_retry(&LlmError::EmptyChoices, 1));
     }
 }

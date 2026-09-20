@@ -11,8 +11,8 @@ use serde_json::{Map, Value, json};
 use crate::model::ServiceTier;
 
 use super::client::{
-    ClientConfig, LlmClient, LlmError, Result, StreamDelta, max_attempts_for_error,
-    parse_retry_after, retry_after_hint, retry_backoff,
+    ClientConfig, LlmClient, LlmError, Result, StreamDelta, parse_retry_after,
+    retry_after_hint,
 };
 use super::{
     ChatRequest, ChatResponse, Choice, FunctionCall, Message, ResponseFormat, ResponseMessage,
@@ -124,13 +124,13 @@ impl GoogleInteractionsClient {
 #[async_trait]
 impl LlmClient for GoogleInteractionsClient {
     async fn chat(&self, req: &ChatRequest) -> Result<ChatResponse> {
-        let max = self.cfg.max_send_attempts();
-        let mut retry = 0u32;
+        let policy = self.cfg.send_policy();
+        let mut sent = 0u32;
         loop {
+            sent += 1;
             match self.send_once(req).await {
-                Err(e) if retry + 1 < max_attempts_for_error(&e, max) && e.is_retryable() => {
-                    retry += 1;
-                    tokio::time::sleep(retry_backoff(retry, retry_after_hint(&e))).await;
+                Err(e) if policy.should_retry(&e, sent) => {
+                    tokio::time::sleep(policy.backoff(sent, retry_after_hint(&e))).await;
                 }
                 other => return other,
             }
@@ -147,17 +147,16 @@ impl LlmClient for GoogleInteractionsClient {
             emitted.store(true, std::sync::atomic::Ordering::Relaxed);
             on_delta(delta);
         };
-        let max = self.cfg.max_send_attempts();
-        let mut retry = 0u32;
+        let policy = self.cfg.send_policy();
+        let mut sent = 0u32;
         loop {
+            sent += 1;
             match self.send_stream_once(req, &mut tracked).await {
                 Err(e)
-                    if retry + 1 < max_attempts_for_error(&e, max)
-                        && e.is_retryable()
+                    if policy.should_retry(&e, sent)
                         && !emitted.load(std::sync::atomic::Ordering::Relaxed) =>
                 {
-                    retry += 1;
-                    tokio::time::sleep(retry_backoff(retry, retry_after_hint(&e))).await;
+                    tokio::time::sleep(policy.backoff(sent, retry_after_hint(&e))).await;
                 }
                 other => return other,
             }

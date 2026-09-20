@@ -11,8 +11,7 @@ use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
 use super::client::{
-    LlmClient, LlmError, Result, StreamDelta, max_attempts_for_error, parse_retry_after,
-    retry_after_hint, retry_backoff,
+    LlmClient, LlmError, Result, RetryPolicy, StreamDelta, parse_retry_after, retry_after_hint,
 };
 use super::{
     ChatRequest, ChatResponse, Choice, FunctionCall, ResponseFormat, ResponseMessage, Role,
@@ -21,7 +20,6 @@ use super::{
 use crate::codex::{CodexAuth, auth, now_unix};
 
 const RESPONSES_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
-const MAX_SEND_ATTEMPTS: u32 = 3;
 const STREAM_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -31,10 +29,13 @@ pub struct CodexClient {
     responses_url: String,
     /// Held behind a mutex so an expired access token can be refreshed mid-run.
     auth: Mutex<CodexAuth>,
+    /// The same budget every other transport uses, so a flaky provider behaves
+    /// the same whichever agent is talking to it.
+    retry: RetryPolicy,
 }
 
 impl CodexClient {
-    pub fn new(auth: CodexAuth) -> Result<Self> {
+    pub fn new(auth: CodexAuth, retry: RetryPolicy) -> Result<Self> {
         let http = reqwest::Client::builder()
             .user_agent(concat!("honya/", env!("CARGO_PKG_VERSION")))
             .read_timeout(STREAM_READ_TIMEOUT)
@@ -44,6 +45,7 @@ impl CodexClient {
             http,
             responses_url: RESPONSES_URL.to_string(),
             auth: Mutex::new(auth),
+            retry,
         })
     }
 
@@ -152,16 +154,15 @@ impl CodexClient {
             emitted.store(true, Ordering::Relaxed);
             on_delta(delta);
         };
-        let mut retry = 0u32;
+        let mut sent = 0u32;
         loop {
+            sent += 1;
             match self.run_once(req, &mut tracked).await {
                 Err(e)
-                    if retry + 1 < max_attempts_for_error(&e, MAX_SEND_ATTEMPTS)
-                        && e.is_retryable()
+                    if self.retry.should_retry(&e, sent)
                         && (replay_after_delta || !emitted.load(Ordering::Relaxed)) =>
                 {
-                    retry += 1;
-                    tokio::time::sleep(retry_backoff(retry, retry_after_hint(&e))).await;
+                    tokio::time::sleep(self.retry.backoff(sent, retry_after_hint(&e))).await;
                 }
                 other => return other,
             }
@@ -581,6 +582,7 @@ mod tests {
                 account_id: "acct".to_string(),
                 expires_at: 0,
             }),
+            retry: RetryPolicy::default(),
         };
         let result = client
             .chat(&ChatRequest::new("gpt-5-codex", vec![Message::user("hi")]))

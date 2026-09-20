@@ -21,8 +21,7 @@ use serde::{Deserialize, Serialize};
 
 use super::Usage;
 use super::client::{
-    LlmError, Result, max_attempts_for_error, parse_error_envelope, parse_retry_after,
-    retry_after_hint, retry_backoff,
+    LlmError, Result, RetryPolicy, parse_error_envelope, parse_retry_after, retry_after_hint,
 };
 
 pub const OPENROUTER_DECISIONS_URL: &str = "https://openrouter.ai/api/alpha/decisions";
@@ -32,7 +31,8 @@ pub const TYPESAFE_SYSTEMONE_URL: &str = "https://api.typesafe.ai/v1/systemone";
 /// than the chat client's: the gate exists to be fast, and its fallback (the LLM
 /// reviewer) is right there, so spending a long retry ladder to save one
 /// reviewer call is a bad trade. One retry absorbs a single blip; anything
-/// worse defers.
+/// worse defers. The configured budget still applies when it is *shallower*
+/// than this, and the configured cooldown always does.
 const MAX_SEND_ATTEMPTS: u32 = 2;
 
 /// Per-request timeout. Jev answers in 70-500ms, so this is ~30x the expected
@@ -217,15 +217,25 @@ pub struct DecisionsClient {
     http: reqwest::Client,
     url: String,
     api_key: String,
+    retry: RetryPolicy,
 }
 
 impl DecisionsClient {
-    pub fn new(url: impl Into<String>, api_key: String, timeout: Duration) -> Result<Self> {
+    pub fn new(
+        url: impl Into<String>,
+        api_key: String,
+        timeout: Duration,
+        retry: RetryPolicy,
+    ) -> Result<Self> {
         let http = reqwest::Client::builder().timeout(timeout).build()?;
         Ok(Self {
             http,
             url: url.into(),
             api_key,
+            retry: RetryPolicy {
+                max_attempts: retry.max_attempts.min(MAX_SEND_ATTEMPTS),
+                ..retry
+            },
         })
     }
 
@@ -271,15 +281,12 @@ impl DecisionsClient {
 #[async_trait]
 impl DecisionsBackend for DecisionsClient {
     async fn decide(&self, req: &DecisionsRequest) -> Result<DecisionsResponse> {
-        let mut retry = 0u32;
+        let mut sent = 0u32;
         loop {
+            sent += 1;
             match self.send_once(req).await {
-                Err(e)
-                    if retry + 1 < max_attempts_for_error(&e, MAX_SEND_ATTEMPTS)
-                        && e.is_retryable() =>
-                {
-                    retry += 1;
-                    tokio::time::sleep(retry_backoff(retry, retry_after_hint(&e))).await;
+                Err(e) if self.retry.should_retry(&e, sent) => {
+                    tokio::time::sleep(self.retry.backoff(sent, retry_after_hint(&e))).await;
                 }
                 other => return other,
             }

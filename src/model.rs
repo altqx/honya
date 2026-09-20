@@ -968,6 +968,15 @@ pub struct AppConfig {
     /// project-translate run; see [`crate::agents::pipeline`].
     #[serde(default = "default_loop_stall_secs")]
     pub loop_stall_secs: u64,
+    /// Send attempts per HTTP call (initial + retries) for a transient fault —
+    /// a timeout, a dropped connection, a 5xx. A rate limit gets a deeper
+    /// budget, since waiting is the whole remedy for one.
+    #[serde(default = "default_retry_attempts")]
+    pub retry_attempts: u32,
+    /// The longest any single backoff waits, in seconds. Caps the provider's
+    /// own `Retry-After` hint too, so one call cannot stall a run for minutes.
+    #[serde(default = "default_retry_cooldown_secs")]
+    pub retry_cooldown_secs: u64,
     /// How many times a single chapter may be re-translated from scratch after the
     /// loop watchdog trips before the whole run aborts. `0` aborts on the first
     /// detected loop (no re-translate).
@@ -1070,6 +1079,14 @@ fn default_true() -> bool {
 /// Default loop-watchdog stall window (seconds). Sits above the 120 s per-request
 /// HTTP timeout so a single slow-but-legit call never trips it — only a genuine
 /// multi-call stall or a stream that never converges does.
+fn default_retry_attempts() -> u32 {
+    3
+}
+
+fn default_retry_cooldown_secs() -> u64 {
+    20
+}
+
 fn default_loop_stall_secs() -> u64 {
     180
 }
@@ -1091,6 +1108,8 @@ impl Default for AppConfig {
             parallel_lookahead: true,
             preferred_language: TargetLanguage::default(),
             loop_stall_secs: default_loop_stall_secs(),
+            retry_attempts: default_retry_attempts(),
+            retry_cooldown_secs: default_retry_cooldown_secs(),
             max_chapter_retranslates: default_max_chapter_retranslates(),
             referer: Some("https://github.com/altqx/honya".into()),
             title: Some("honya".into()),

@@ -509,6 +509,9 @@ pub struct App {
     /// The zone under the pointer. Separate from `focus` on purpose: moving the
     /// mouse must never move the keyboard's place in a form.
     hover: crate::ui::kit::Hover,
+    /// Set when a settings change has outdated the running refine agent's
+    /// captured model or client, so the next turn respawns it.
+    refine_stale: bool,
     /// Where the keyboard is within the current surface.
     focus: crate::ui::kit::Focus,
     /// An open context menu over the active screen. Not an `Overlay`: it holds
@@ -604,6 +607,7 @@ impl App {
             quit_armed_at: None,
             zones: crate::ui::kit::Zones::new(),
             hover: crate::ui::kit::Hover::default(),
+            refine_stale: false,
             focus: crate::ui::kit::Focus::new(),
             menu: None,
             remote_out: None,
@@ -1135,6 +1139,10 @@ impl App {
                     active.clients = crate::build_clients(&self.cfg).ok();
                 }
                 crate::codex::models::spawn_fetch_models(*auth.clone(), self.tx.clone());
+                // A refine agent already running holds a client built without
+                // these credentials.
+                self.refine_stale = true;
+                self.sync_settings_remote();
                 self.toast = Some(Toast::info("signed in to Codex".to_string()));
                 self.push_log(LogLevel::Info, "Codex account linked".to_string());
             }
@@ -1234,8 +1242,14 @@ impl App {
 
     fn ensure_refine_agent(&mut self) -> bool {
         if self.refine_tx.is_some() {
-            return true;
+            // Mid-turn is the wrong moment to swap the client out from under
+            // the agent; the flag survives, so the next turn picks it up.
+            if !self.refine_stale || self.refine.is_in_flight() {
+                return true;
+            }
+            self.shutdown_refine_worker();
         }
+        self.refine_stale = false;
         let Some(clients) = self.ensure_active_clients() else {
             self.toast = Some(Toast::warn(
                 "no API key — add one in Settings (Ctrl-,) to use Refine",
@@ -1301,7 +1315,10 @@ impl App {
     }
 
     /// Tear down the agent; late thread updates are session-guarded.
-    fn teardown_refine(&mut self) {
+    /// Stop the refine worker but keep the transcript and session list. The
+    /// next turn respawns it, which is how a changed model, provider or key
+    /// reaches an agent that captured its client when it started.
+    fn shutdown_refine_worker(&mut self) {
         if let Some(c) = &self.refine_cancel {
             c.store(true, std::sync::atomic::Ordering::Relaxed);
         }
@@ -1311,6 +1328,10 @@ impl App {
         self.refine_cancel = None;
         self.clear_refine_steering();
         self.refine_steering = None;
+    }
+
+    fn teardown_refine(&mut self) {
+        self.shutdown_refine_worker();
         self.refine.clear();
         self.refine_sessions.clear();
         self.refine_session_id.clear();
@@ -3354,6 +3375,8 @@ impl App {
                     if let Some(active) = self.active.as_mut() {
                         active.clients = crate::build_clients(&self.cfg).ok();
                     }
+                    self.refine_stale = true;
+                    self.sync_settings_remote();
                     self.toast = Some(Toast::info("signed out of Codex".to_string()));
                 } else {
                     crate::codex::auth::spawn_codex_login(self.tx.clone());
@@ -3497,8 +3520,10 @@ impl App {
         let code = self.remote_auth_code.clone();
         let session_label = self.session_label.clone();
         let codex_models = self.codex_models.clone();
+        let codex_account = self.cfg.codex_auth.as_ref().map(|a| a.account_id.clone());
         if let self::overlay::Overlay::Settings(st) = &mut self.overlay {
             st.account_login = login;
+            st.codex_account = codex_account;
             st.remote_enabled = enabled;
             st.remote_state = state;
             st.remote_watchers = watchers;
@@ -5098,10 +5123,13 @@ impl App {
         }
         // Rebuild the active clients so changed keys, providers, or service tier
         // (snapshotted into ClientConfig) take hold without reopening.
-        if (keys_changed || tier_changed || models_changed || system_one_changed)
-            && let Some(active) = self.active.as_mut()
-        {
-            active.clients = crate::build_clients(&self.cfg).ok();
+        if keys_changed || tier_changed || models_changed || system_one_changed {
+            if let Some(active) = self.active.as_mut() {
+                active.clients = crate::build_clients(&self.cfg).ok();
+            }
+            // The refine agent captured its client and model when it started,
+            // so rebuilding the set is not enough to reach it.
+            self.refine_stale = true;
         }
         match crate::config::save(&self.cfg) {
             Ok(()) => self.toast = Some(Toast::info("settings saved")),
@@ -7757,5 +7785,99 @@ mod action_table_tests {
         assert!(app.menu.is_some());
         app.apply(Action::show_overlay(Overlay::Help(0)));
         assert!(app.menu.is_none());
+    }
+}
+
+/// A settings change has to reach the agent that is already running, not just
+/// the config on disk.
+#[cfg(test)]
+mod live_settings_tests {
+    use super::*;
+    use crate::app::overlay::SettingsState;
+
+    fn app() -> App {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        App::new(EventTx(tx), AppConfig::default())
+    }
+
+    /// The settings form as the app builds it, so an untouched one really is
+    /// unchanged rather than a default that happens to differ.
+    fn form(app: &App) -> Box<SettingsState> {
+        match Overlay::settings_with_field(&app.cfg, 0) {
+            Overlay::Settings(st) => st,
+            _ => unreachable!("settings_with_field returns a settings overlay"),
+        }
+    }
+
+    /// The refine agent captures its model and client when it starts, so
+    /// changing either in Settings has to mark it for a respawn. Without this
+    /// the change only landed when the project was reopened.
+    #[test]
+    fn changing_a_model_outdates_the_running_refine_agent() {
+        let mut app = app();
+        assert!(!app.refine_stale);
+
+        let mut st = form(&app);
+        st.models.refine.set_model("a-different-model".to_string());
+        app.apply(st.save_action());
+
+        assert!(
+            app.refine_stale,
+            "a changed refine model must reach the agent already running"
+        );
+        assert_eq!(app.cfg.models.refine.model, "a-different-model");
+    }
+
+    /// Saving an unchanged form must not tear the agent down underneath a
+    /// conversation that is going fine.
+    #[test]
+    fn saving_an_unchanged_form_leaves_the_agent_alone() {
+        let mut app = app();
+        let st = form(&app);
+        app.apply(st.save_action());
+        assert!(!app.refine_stale);
+    }
+
+    /// The Account rows are a snapshot taken when the form opened, so a sign-in
+    /// that lands afterwards — Codex's is a browser round-trip — has to be
+    /// pushed into it, or the row still reads "not signed in".
+    // The handler spawns a background model fetch, so this needs a runtime.
+    #[tokio::test]
+    async fn signing_in_to_codex_updates_an_open_settings_form() {
+        let mut app = app();
+        app.apply(Action::show_overlay(Overlay::settings_with_field(
+            &app.cfg, 0,
+        )));
+
+        app.on_app_event(AppEvent::CodexSignedIn {
+            auth: Box::new(crate::codex::CodexAuth {
+                access_token: "a".into(),
+                refresh_token: "r".into(),
+                account_id: "acct-1234".into(),
+                expires_at: 0,
+            }),
+        });
+
+        match &app.overlay {
+            Overlay::Settings(st) => assert_eq!(
+                st.codex_account.as_deref(),
+                Some("acct-1234"),
+                "the open form must show the sign-in that just landed"
+            ),
+            _ => panic!("settings overlay"),
+        }
+        assert!(app.refine_stale, "new credentials outdate a running agent");
+    }
+
+    /// A new key changes which client the agent should be holding, even though
+    /// the model is untouched.
+    #[test]
+    fn a_new_key_outdates_it_too() {
+        let mut app = app();
+        let mut st = form(&app);
+        st.api_key_env = false;
+        st.openrouter_key = "sk-something-new".into();
+        app.apply(st.save_action());
+        assert!(app.refine_stale, "the agent holds a client built from the key");
     }
 }
