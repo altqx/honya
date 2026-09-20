@@ -50,6 +50,11 @@ pub enum LlmError {
         finish_reason: String,
     },
 
+    /// The caller asked this call to stop. Distinct from a failure so a
+    /// cancelled sub-agent is reported as cancelled, not as broken.
+    #[error("cancelled")]
+    Canceled,
+
     /// A structured response failed to deserialize into the target type.
     #[error("failed to parse {target}: {source} — raw: {raw}")]
     Parse {
@@ -125,9 +130,10 @@ impl LlmError {
                     408 | 425 | 429 | 500 | 502 | 503 | 504 | 520..=524 | 529
                 )
             }
-            LlmError::EmptyChoices | LlmError::EmptyContent { .. } | LlmError::Parse { .. } => {
-                false
-            }
+            LlmError::EmptyChoices
+            | LlmError::EmptyContent { .. }
+            | LlmError::Parse { .. }
+            | LlmError::Canceled => false,
         }
     }
 }

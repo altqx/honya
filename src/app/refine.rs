@@ -439,10 +439,43 @@ struct SubagentRun {
     id: String,
     depth: usize,
     title: String,
+    role: String,
+    model: String,
+    /// Still running after the turn that spawned it ended.
+    background: bool,
     status: RefineSubagentStatus,
     activity: String,
     summary: String,
     plan: Vec<PlanStep>,
+    /// Kept here rather than sent on every event, so the elapsed time ticks
+    /// between updates instead of freezing at the last one.
+    started: std::time::Instant,
+    ran_for: Option<std::time::Duration>,
+}
+
+impl SubagentRun {
+    /// A run the UI heard about sideways — a plan or an activity line for an
+    /// id no `Started` announced. Better a row with gaps than a silent drop.
+    fn unannounced(id: &str) -> Self {
+        Self {
+            id: id.to_string(),
+            depth: id.matches('/').count(),
+            title: "sub-agent".to_string(),
+            role: String::new(),
+            model: String::new(),
+            background: false,
+            status: RefineSubagentStatus::Running,
+            activity: String::new(),
+            summary: String::new(),
+            plan: Vec::new(),
+            started: std::time::Instant::now(),
+            ran_for: None,
+        }
+    }
+
+    fn elapsed(&self) -> std::time::Duration {
+        self.ran_for.unwrap_or_else(|| self.started.elapsed())
+    }
 }
 
 pub struct RefineScreen {
@@ -1321,13 +1354,47 @@ impl RefineScreen {
                     .push(Turn::tool(format!("{tool} — {summary}")));
                 self.follow = true;
             }
-            AppEvent::RefineSubagentUpdated {
+            AppEvent::RefineSubagentStarted {
                 id,
                 depth,
+                title,
+                role,
+                model,
+                background,
+            } => {
+                let run = self.subagent_mut(id);
+                run.depth = *depth;
+                run.title = title.clone();
+                run.role = role.clone();
+                run.model = model.clone();
+                run.background = *background;
+                run.status = RefineSubagentStatus::Running;
+                run.activity = "starting".to_string();
+                run.summary.clear();
+                run.started = std::time::Instant::now();
+                run.ran_for = None;
+                self.follow = true;
+            }
+            AppEvent::RefineSubagentActivity { id, activity } => {
+                // Only for a run we were told about: a stray activity line is
+                // not enough to invent a row from.
+                if let Some(run) = self.subagents.iter_mut().find(|r| r.id == *id)
+                    && run.status == RefineSubagentStatus::Running
+                {
+                    run.activity = activity.clone();
+                }
+            }
+            AppEvent::RefineSubagentFinished {
+                id,
                 status,
                 summary,
             } => {
-                self.update_subagent(id, *depth, *status, summary);
+                if let Some(run) = self.subagents.iter_mut().find(|r| r.id == *id) {
+                    run.status = *status;
+                    run.summary = summary.clone();
+                    run.activity.clear();
+                    run.ran_for = Some(run.started.elapsed());
+                }
                 self.follow = true;
             }
             AppEvent::RefineEditApplied { kind, summary } => {
@@ -1354,59 +1421,17 @@ impl RefineScreen {
         }
     }
 
-    fn update_subagent(
-        &mut self,
-        id: &str,
-        depth: usize,
-        status: RefineSubagentStatus,
-        summary: &str,
-    ) {
-        if let Some(run) = self.subagents.iter_mut().find(|run| run.id == id) {
-            run.depth = depth;
-            if status == RefineSubagentStatus::Running {
-                if run.status == RefineSubagentStatus::Running {
-                    run.activity = summary.to_string();
-                } else {
-                    run.title = summary.to_string();
-                    run.activity = "starting".to_string();
-                }
-            } else {
-                run.summary = summary.to_string();
-            }
-            run.status = status;
-            return;
+    fn subagent_mut(&mut self, id: &str) -> &mut SubagentRun {
+        if let Some(i) = self.subagents.iter().position(|run| run.id == id) {
+            return &mut self.subagents[i];
         }
-
-        let (title, activity, run_summary) = if status == RefineSubagentStatus::Running {
-            (summary.to_string(), "starting".to_string(), String::new())
-        } else {
-            ("sub-agent".to_string(), String::new(), summary.to_string())
-        };
-        self.subagents.push(SubagentRun {
-            id: id.to_string(),
-            depth,
-            title,
-            status,
-            activity,
-            summary: run_summary,
-            plan: Vec::new(),
-        });
+        self.subagents.push(SubagentRun::unannounced(id));
+        self.subagents.last_mut().expect("just pushed")
     }
 
     fn update_subagent_plan(&mut self, id: &str, steps: &[PlanStep]) {
-        if let Some(run) = self.subagents.iter_mut().find(|run| run.id == id) {
-            run.plan = steps.to_vec();
-            return;
-        }
-        self.subagents.push(SubagentRun {
-            id: id.to_string(),
-            depth: id.matches('/').count(),
-            title: "sub-agent".to_string(),
-            status: RefineSubagentStatus::Running,
-            activity: "planning".to_string(),
-            summary: String::new(),
-            plan: steps.to_vec(),
-        });
+        let run = self.subagent_mut(id);
+        run.plan = steps.to_vec();
     }
 
     fn push_delta(&mut self, delta: &str) {
@@ -2031,6 +2056,9 @@ impl RefineScreen {
                 let detail = if run.status == RefineSubagentStatus::Running {
                     let activity = run.activity.trim();
                     let mut parts = vec![status.to_string()];
+                    if run.background {
+                        parts.push("bg".to_string());
+                    }
                     if !activity.is_empty() {
                         parts.push(activity.to_string());
                     }
@@ -2064,9 +2092,24 @@ impl RefineScreen {
                     format!("{status} · {}", run.summary.trim())
                 };
                 let indent = "  ".repeat(run.depth.min(4));
+                // Role and model belong on the row: a reader deciding whether
+                // to cancel a run wants to know what it is allowed to do and
+                // what it is costing.
+                let mut tags = Vec::new();
+                if !run.role.is_empty() {
+                    tags.push(run.role.clone());
+                }
+                if !run.model.is_empty() {
+                    tags.push(short_model(&run.model));
+                }
+                tags.push(fmt_elapsed(run.elapsed()));
                 Line::from(Span::styled(
                     truncate_cols(
-                        &format!("{indent}{mark} {} — {detail}", run.title.trim()),
+                        &format!(
+                            "{indent}{mark} {} [{}] — {detail}",
+                            run.title.trim(),
+                            tags.join(" · ")
+                        ),
                         w,
                     ),
                     style,
@@ -2280,10 +2323,31 @@ impl RefineScreen {
         );
     }
 
+    fn running_subagents(&self) -> usize {
+        self.subagents
+            .iter()
+            .filter(|r| r.status == RefineSubagentStatus::Running)
+            .count()
+    }
+
     /// Working line while a turn runs; idle usage summary otherwise.
     fn status_line(&self, frame: u64, theme: &Theme) -> Option<Line<'static>> {
         let faint = Style::default().fg(theme.ink_faint);
         let soft = Style::default().fg(theme.ink_soft);
+        // A background sub-agent outlives the turn that spawned it, so between
+        // turns this band is the only thing that says work is still happening.
+        let running = self.running_subagents();
+        let still = |spans: &mut Vec<Span<'static>>| {
+            if running > 0 {
+                spans.push(Span::styled(
+                    format!(
+                        " · ◎ {running} sub-agent{} running",
+                        if running == 1 { "" } else { "s" }
+                    ),
+                    Style::default().fg(theme.accent),
+                ));
+            }
+        };
         if self.in_flight {
             let elapsed = self.turn_started.map(|s| s.elapsed()).unwrap_or_default();
             let (inp, out) = self.turn_tokens;
@@ -2307,6 +2371,7 @@ impl RefineScreen {
                 spans.push(Span::styled(" tokens", faint));
             }
             spans.push(Span::styled(" · Ctrl-C to interrupt)", faint));
+            still(&mut spans);
             return Some(Line::from(spans));
         }
 
@@ -2330,7 +2395,9 @@ impl RefineScreen {
                 text.push_str(&format!(" · last {}", fmt_elapsed(d)));
             }
         }
-        Some(Line::from(Span::styled(text, faint)))
+        let mut spans = vec![Span::styled(text, faint)];
+        still(&mut spans);
+        Some(Line::from(spans))
     }
 
     fn transcript_markdown(&self) -> String {
@@ -2588,6 +2655,12 @@ fn fmt_tokens(n: u32) -> String {
 }
 
 /// Human elapsed time: `45s`, `1m 10s`, `1h 2m`.
+/// `anthropic/claude-sonnet-5` reads as `claude-sonnet-5` on a crowded row;
+/// the vendor prefix is the part nobody is choosing between.
+fn short_model(model: &str) -> String {
+    model.rsplit('/').next().unwrap_or(model).to_string()
+}
+
 fn fmt_elapsed(d: std::time::Duration) -> String {
     let s = d.as_secs();
     if s < 60 {
@@ -3028,33 +3101,26 @@ mod tests {
     fn subagent_events_populate_panel_state_and_clear() {
         let mut s = RefineScreen::new();
 
-        s.on_app_event(&AppEvent::RefineSubagentUpdated {
-            id: "call_1".to_string(),
-            depth: 1,
-            status: RefineSubagentStatus::Running,
-            summary: "audit volume 2".to_string(),
-        });
+        s.on_app_event(&started("call_1", "audit volume 2"));
 
         assert_eq!(s.subagents.len(), 1);
         assert_eq!(s.subagents[0].depth, 1);
         assert_eq!(s.subagents[0].title, "audit volume 2");
+        assert_eq!(s.subagents[0].role, "explore");
         assert_eq!(s.subagents[0].status, RefineSubagentStatus::Running);
         assert_eq!(s.subagents[0].activity, "starting");
 
-        s.on_app_event(&AppEvent::RefineSubagentUpdated {
+        s.on_app_event(&AppEvent::RefineSubagentActivity {
             id: "call_1".to_string(),
-            depth: 1,
-            status: RefineSubagentStatus::Running,
-            summary: "reading chapter · {\"ch\":2}".to_string(),
+            activity: "reading chapter · {\"ch\":2}".to_string(),
         });
 
         assert_eq!(s.subagents[0].title, "audit volume 2");
         assert_eq!(s.subagents[0].status, RefineSubagentStatus::Running);
         assert!(s.subagents[0].activity.contains("reading chapter"));
 
-        s.on_app_event(&AppEvent::RefineSubagentUpdated {
+        s.on_app_event(&AppEvent::RefineSubagentFinished {
             id: "call_1".to_string(),
-            depth: 1,
             status: RefineSubagentStatus::Succeeded,
             summary: "sub-agent finished (3 tool call(s))".to_string(),
         });
@@ -3063,9 +3129,59 @@ mod tests {
         assert_eq!(s.subagents[0].title, "audit volume 2");
         assert_eq!(s.subagents[0].status, RefineSubagentStatus::Succeeded);
         assert!(s.subagents[0].summary.contains("3 tool"));
+        assert!(s.subagents[0].activity.is_empty());
+        // The elapsed time stops at the end rather than ticking forever.
+        let settled = s.subagents[0].elapsed();
+        assert_eq!(settled, s.subagents[0].elapsed());
 
         s.clear();
         assert!(s.subagents.is_empty());
+    }
+
+    fn started(id: &str, title: &str) -> AppEvent {
+        AppEvent::RefineSubagentStarted {
+            id: id.to_string(),
+            depth: 1,
+            title: title.to_string(),
+            role: "explore".to_string(),
+            model: "m".to_string(),
+            background: false,
+        }
+    }
+
+    #[test]
+    fn an_activity_line_for_an_unknown_subagent_invents_nothing() {
+        let mut s = RefineScreen::new();
+        s.on_app_event(&AppEvent::RefineSubagentActivity {
+            id: "ghost".to_string(),
+            activity: "thinking".to_string(),
+        });
+        assert!(s.subagents.is_empty());
+
+        // ...and nor does an ending for one that never started.
+        s.on_app_event(&AppEvent::RefineSubagentFinished {
+            id: "ghost".to_string(),
+            status: RefineSubagentStatus::Canceled,
+            summary: "cancelled by the user".to_string(),
+        });
+        assert!(s.subagents.is_empty());
+    }
+
+    #[test]
+    fn a_finished_subagent_stops_reporting_activity() {
+        let mut s = RefineScreen::new();
+        s.on_app_event(&started("call_1", "sweep"));
+        s.on_app_event(&AppEvent::RefineSubagentFinished {
+            id: "call_1".to_string(),
+            status: RefineSubagentStatus::Succeeded,
+            summary: "done".to_string(),
+        });
+        s.on_app_event(&AppEvent::RefineSubagentActivity {
+            id: "call_1".to_string(),
+            activity: "thinking".to_string(),
+        });
+        assert!(s.subagents[0].activity.is_empty());
+        assert_eq!(s.subagents[0].status, RefineSubagentStatus::Succeeded);
     }
 
     #[test]
@@ -3077,12 +3193,7 @@ mod tests {
         }];
 
         for id in ["call_1", "call_2"] {
-            s.on_app_event(&AppEvent::RefineSubagentUpdated {
-                id: id.to_string(),
-                depth: 0,
-                status: RefineSubagentStatus::Running,
-                summary: format!("run {id}"),
-            });
+            s.on_app_event(&started(id, &format!("run {id}")));
         }
         s.on_app_event(&AppEvent::RefineSubagentPlanUpdated {
             id: "call_1".to_string(),

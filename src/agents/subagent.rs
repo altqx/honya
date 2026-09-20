@@ -6,8 +6,14 @@
 //! child that invents a tool name it was never offered gets a refusal rather
 //! than an edit.
 
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+
+use tokio::sync::{mpsc, oneshot};
+
 use crate::llm::Tool;
-use crate::model::TargetLanguage;
+use crate::model::{RefineSubagentStatus, TargetLanguage};
 
 /// Tools every role gets: reading, searching, planning, asking.
 const READ: &[&str] = &[
@@ -155,9 +161,245 @@ pub struct SubagentSpec {
     pub depth: usize,
 }
 
-const SUBAGENT_SYSTEM_THAI: &str = "You are a focused sub-agent inside honya's Refine system completing ONE self-contained parent-delegated task. Use the project tools to gather evidence, make surgical changes, verify them, then report chapters/terms/characters touched. Keep Thai idiomatic; preserve scene breaks, image links, and Markdown. When a female character uses `僕/ぼく/ボク` as her self-pronoun, render it as `เรา`, never `ผม` or `โบคุ`; identify the character from context rather than inferring gender from `僕` alone.";
+/// How many children may be live at once. A model asked to parallelise will
+/// happily ask for fifty; past this it is told to collect some first.
+pub const MAX_LIVE_SUBAGENTS: usize = 8;
 
-const SUBAGENT_SYSTEM_ENGLISH: &str = "You are a focused sub-agent inside honya's Refine system, completing one self-contained task delegated by a parent agent. Read the real Japanese source, English translation, and reference data before editing. Make only evidence-backed surgical changes, keep the English idiomatic and publication-ready for native light-novel readers, preserve scene breaks, image links, and Markdown, verify the result, then report the chapters and metadata changed.";
+/// Finished runs stay listed so their output can still be collected, but not
+/// forever — the oldest finished entry is dropped past this.
+const MAX_REMEMBERED: usize = 64;
+
+/// When a message reaches a running child.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Delivery {
+    /// At the child's next round boundary. Redirects work in progress.
+    #[default]
+    Steer,
+    /// Held until the child would otherwise finish, turning "done" into "now
+    /// also do this". Dropped unread if the child stops for any other reason.
+    Queue,
+    /// Like `Steer`, but abandons the model call already in flight so the
+    /// child sees it now rather than after the current round.
+    Interject,
+}
+
+impl Delivery {
+    pub fn parse(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "queue" => Self::Queue,
+            "interject" => Self::Interject,
+            _ => Self::Steer,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Steer => "steer",
+            Self::Queue => "queue",
+            Self::Interject => "interject",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ChildMessage {
+    pub text: String,
+    pub delivery: Delivery,
+}
+
+/// The controls handed to a child when it registers.
+pub struct RunHandle {
+    pub cancel: Arc<AtomicBool>,
+    /// Set when a message should abandon the model call already in flight.
+    pub interrupt: Arc<AtomicBool>,
+    pub inbox: mpsc::UnboundedReceiver<ChildMessage>,
+}
+
+/// What looking a run up finds.
+pub enum Collected {
+    /// Finished; here is its tool-result JSON.
+    Done(String),
+    /// Started but not finished.
+    Running,
+    /// No such run.
+    Unknown,
+}
+
+struct Slot {
+    status: RefineSubagentStatus,
+    cancel: Arc<AtomicBool>,
+    interrupt: Arc<AtomicBool>,
+    inbox: mpsc::UnboundedSender<ChildMessage>,
+    result: Option<String>,
+    waiters: Vec<oneshot::Sender<String>>,
+    seq: u64,
+}
+
+/// Every sub-agent this Refine session has started, running or finished.
+///
+/// It is created once per agent task rather than per turn, which is what lets
+/// a background child outlive the turn that spawned it.
+#[derive(Clone, Default)]
+pub struct SubagentRegistry {
+    inner: Arc<Mutex<Registry>>,
+}
+
+#[derive(Default)]
+struct Registry {
+    slots: HashMap<String, Slot>,
+    seq: u64,
+}
+
+impl SubagentRegistry {
+    /// Register a run and take its controls. Replaces any entry under the same
+    /// id, which is how a resumed child reuses its own slot.
+    pub fn register(&self, id: &str) -> RunHandle {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let interrupt = Arc::new(AtomicBool::new(false));
+        let (tx, inbox) = mpsc::unbounded_channel();
+        if let Ok(mut reg) = self.inner.lock() {
+            reg.seq += 1;
+            let seq = reg.seq;
+            reg.slots.insert(
+                id.to_string(),
+                Slot {
+                    status: RefineSubagentStatus::Running,
+                    cancel: cancel.clone(),
+                    interrupt: interrupt.clone(),
+                    inbox: tx,
+                    result: None,
+                    waiters: Vec::new(),
+                    seq,
+                },
+            );
+            reg.trim(id);
+        }
+        RunHandle {
+            cancel,
+            interrupt,
+            inbox,
+        }
+    }
+
+    pub fn finish(&self, id: &str, status: RefineSubagentStatus, result: String) {
+        let Ok(mut reg) = self.inner.lock() else { return };
+        let Some(slot) = reg.slots.get_mut(id) else {
+            return;
+        };
+        slot.status = status;
+        slot.result = Some(result.clone());
+        for w in slot.waiters.drain(..) {
+            let _ = w.send(result.clone());
+        }
+    }
+
+    /// A look, with no side effect — polling must not leave a waiter behind.
+    pub fn poll(&self, id: &str) -> Collected {
+        let Ok(reg) = self.inner.lock() else {
+            return Collected::Unknown;
+        };
+        match reg.slots.get(id) {
+            None => Collected::Unknown,
+            Some(slot) => match &slot.result {
+                Some(result) => Collected::Done(result.clone()),
+                None => Collected::Running,
+            },
+        }
+    }
+
+    /// Park a waiter on a run that has not finished. `None` when it already
+    /// has, or was never known.
+    pub fn waiter(&self, id: &str) -> Option<oneshot::Receiver<String>> {
+        let mut reg = self.inner.lock().ok()?;
+        let slot = reg.slots.get_mut(id)?;
+        if slot.result.is_some() {
+            return None;
+        }
+        let (tx, rx) = oneshot::channel();
+        slot.waiters.push(tx);
+        Some(rx)
+    }
+
+    pub fn live(&self) -> usize {
+        self.inner
+            .lock()
+            .map(|reg| {
+                reg.slots
+                    .values()
+                    .filter(|s| s.status == RefineSubagentStatus::Running)
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    /// True when the run existed and was running.
+    pub fn cancel(&self, id: &str) -> bool {
+        let Ok(reg) = self.inner.lock() else {
+            return false;
+        };
+        let Some(slot) = reg.slots.get(id) else {
+            return false;
+        };
+        if slot.status != RefineSubagentStatus::Running {
+            return false;
+        }
+        slot.cancel.store(true, Ordering::Relaxed);
+        slot.interrupt.store(true, Ordering::Relaxed);
+        true
+    }
+
+    pub fn cancel_all(&self) {
+        let Ok(reg) = self.inner.lock() else { return };
+        for slot in reg.slots.values() {
+            slot.cancel.store(true, Ordering::Relaxed);
+            slot.interrupt.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// True when the run existed, was running, and took the message.
+    pub fn send(&self, id: &str, msg: ChildMessage) -> bool {
+        let Ok(reg) = self.inner.lock() else {
+            return false;
+        };
+        let Some(slot) = reg.slots.get(id) else {
+            return false;
+        };
+        if slot.status != RefineSubagentStatus::Running {
+            return false;
+        }
+        if msg.delivery == Delivery::Interject {
+            slot.interrupt.store(true, Ordering::Relaxed);
+        }
+        slot.inbox.send(msg).is_ok()
+    }
+
+}
+
+impl Registry {
+    fn trim(&mut self, keep: &str) {
+        while self.slots.len() > MAX_REMEMBERED {
+            let oldest = self
+                .slots
+                .iter()
+                .filter(|(id, s)| {
+                    s.status != RefineSubagentStatus::Running && id.as_str() != keep
+                })
+                .min_by_key(|(_, s)| s.seq)
+                .map(|(id, _)| id.clone());
+            match oldest {
+                Some(id) => {
+                    self.slots.remove(&id);
+                }
+                // Everything left is running; dropping one would strand it.
+                None => break,
+            }
+        }
+    }
+}
+
+const SUBAGENT_SYSTEM_THAI: &str = "You are a focused sub-agent inside honya's Refine system completing ONE self-contained parent-delegated task. Use the project tools to gather evidence, make surgical changes, verify them, then report chapters/terms/characters touched. Keep Thai idiomatic; preserve scene breaks, image links, and Markdown. When a female character uses `僕/ぼく/ボク` as her self-pronoun, render it as `เรา`, never `ผม` or `โบคุ`; identify the character from context rather than inferring gender from `僕` alone. If the parent needs something before you finish — a blocker, a decision only it can make, or a finding that changes its plan — send it with message_subagent using the id \"parent\" instead of saving it for your final report.";
+
+const SUBAGENT_SYSTEM_ENGLISH: &str = "You are a focused sub-agent inside honya's Refine system, completing one self-contained task delegated by a parent agent. Read the real Japanese source, English translation, and reference data before editing. Make only evidence-backed surgical changes, keep the English idiomatic and publication-ready for native light-novel readers, preserve scene breaks, image links, and Markdown, verify the result, then report the chapters and metadata changed. If the parent needs something before you finish — a blocker, a decision only it can make, or a finding that changes its plan — send it with message_subagent using the id \"parent\" instead of saving it for your final report.";
 
 #[cfg(test)]
 mod tests {

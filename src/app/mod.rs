@@ -1239,7 +1239,7 @@ impl App {
             if let Some(steering) = &self.refine_steering
                 && let Ok(mut queue) = steering.lock()
             {
-                queue.push_back(crate::agents::refine::UserTurn { text });
+                queue.push_back(crate::agents::refine::UserTurn { text, from: None });
                 self.toast = Some(Toast::info(
                     "steering queued for the running Refine turn".to_string(),
                 ));
@@ -1248,7 +1248,7 @@ impl App {
         }
         if let Some(tx) = &self.refine_tx {
             let _ = tx.send(crate::agents::refine::RefineControl::Submit(
-                crate::agents::refine::UserTurn { text },
+                crate::agents::refine::UserTurn { text, from: None },
             ));
             self.refine.begin_turn();
         }

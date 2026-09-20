@@ -1941,9 +1941,21 @@ pub enum AppEvent {
         tool: String,
         summary: String,
     },
-    RefineSubagentUpdated {
+    /// A sub-agent was spawned. Everything fixed about it arrives once, here.
+    RefineSubagentStarted {
         id: String,
         depth: usize,
+        title: String,
+        role: String,
+        model: String,
+        /// Running past the turn that spawned it.
+        background: bool,
+    },
+    /// What a running sub-agent is doing right now.
+    RefineSubagentActivity { id: String, activity: String },
+    /// How a sub-agent ended.
+    RefineSubagentFinished {
+        id: String,
         status: RefineSubagentStatus,
         summary: String,
     },

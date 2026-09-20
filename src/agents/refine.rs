@@ -14,7 +14,10 @@ use serde_json::json;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::oneshot;
 
-use crate::agents::subagent::{SubagentRole, SubagentSpec};
+use crate::agents::subagent::{
+    ChildMessage, Collected, Delivery, MAX_LIVE_SUBAGENTS, SubagentRegistry, SubagentRole,
+    SubagentSpec,
+};
 use crate::app::refine::{MentionTarget, parse_scope};
 use crate::llm::client::LlmClient;
 use crate::llm::tool_loop::{ToolExecutor, ToolLoopOutcome};
@@ -286,7 +289,33 @@ pub fn refine_tools_schema() -> serde_json::Value {
                 "properties":{
                     "description":{"type":"string","description":"The complete, self-contained task for the sub-agent."},
                     "scope":{"type":"string","description":"Optional scope hint, e.g. a volume or chapter range."},
-                    "role":{"type":"string","enum":["explore","editor","lexicon","general"],"description":"What the sub-agent is allowed to do. `explore` reads, searches and reports but cannot change anything; `editor` also rewrites chapter prose; `lexicon` also maintains characters, glossary, style notes and recaps; `general` (the default) has everything and may delegate further."}
+                    "role":{"type":"string","enum":["explore","editor","lexicon","general"],"description":"What the sub-agent is allowed to do. `explore` reads, searches and reports but cannot change anything; `editor` also rewrites chapter prose; `lexicon` also maintains characters, glossary, style notes and recaps; `general` (the default) has everything and may delegate further."},
+                    "background":{"type":"boolean","description":"Return a sub-agent id immediately instead of its report, leaving it to run while you carry on. Collect it later with subagent_output — a background sub-agent you never collect is work the user never hears about. Use it when you have something useful to do meanwhile; leave it false when the next thing you do depends on the answer."}
+                }}
+        }},
+        {"type":"function","function":{
+            "name":"subagent_output",
+            "description":"Collect the reports of sub-agents started with `background: true`. Pass timeout_ms 0 for an immediate snapshot of who has finished, or a positive value to wait for them (capped at one hour). Collect every background sub-agent before you finish your turn.",
+            "parameters":{"type":"object","additionalProperties":false,"required":["ids"],
+                "properties":{
+                    "ids":{"type":"array","items":{"type":"string"},"description":"Sub-agent ids returned by background task calls; at most 20."},
+                    "timeout_ms":{"type":"integer","description":"0 for a non-blocking snapshot, otherwise how long to wait in milliseconds."}
+                }}
+        }},
+        {"type":"function","function":{
+            "name":"cancel_subagent",
+            "description":"Stop a running sub-agent. It stops at its next round boundary and keeps a resumable checkpoint, so anything it already wrote to disk stays written and the rest can be picked up later with resume_subagent. Use it when a delegated task turns out to be wrong, redundant, or no longer wanted.",
+            "parameters":{"type":"object","additionalProperties":false,"required":["id"],
+                "properties":{"id":{"type":"string","description":"The sub-agent id."}}}
+        }},
+        {"type":"function","function":{
+            "name":"message_subagent",
+            "description":"Send a message to a running sub-agent, or upward to your own parent with the id \"parent\". Use it to redirect a child heading the wrong way, to add a requirement it should also satisfy, or to report something the parent needs before you finish. `delivery` is `steer` (default: the child sees it at its next round), `queue` (held until the child would otherwise finish, turning \"done\" into \"now also do this\"), or `interject` (abandons the model call already in flight so the child sees it immediately).",
+            "parameters":{"type":"object","additionalProperties":false,"required":["id","message"],
+                "properties":{
+                    "id":{"type":"string","description":"A sub-agent id, or \"parent\"."},
+                    "message":{"type":"string","description":"What to tell it."},
+                    "delivery":{"type":"string","enum":["steer","queue","interject"]}
                 }}
         }},
         {"type":"function","function":{
@@ -659,6 +688,8 @@ impl RefineInteract {
 
 pub struct UserTurn {
     pub text: String,
+    /// The sub-agent that sent this upward, when it was not the user.
+    pub from: Option<String>,
 }
 
 pub enum RefineControl {
@@ -681,7 +712,7 @@ fn refine_system_prompt(target: crate::model::TargetLanguage) -> String {
     if target == crate::model::TargetLanguage::English {
         return r#"You are honya's Refine agent for a Japanese-to-English light-novel translation project. Work directly on the on-disk project through the provided tools and keep going until the user's request is resolved.
 
-Lead with results, stay concise, and match the user's language. Read the Japanese source, current English translation, CHARACTERS, GLOSSARY, STYLE, and relevant context before judging or editing. For multi-step work, maintain a plan; delegate only large independent scopes. Prefer surgical exact edits, verify every changed passage afterward, preserve Markdown/images/scene breaks, and archive-safe tool workflows.
+Lead with results, stay concise, and match the user's language. Read the Japanese source, current English translation, CHARACTERS, GLOSSARY, STYLE, and relevant context before judging or editing. For multi-step work, maintain a plan; delegate only large independent scopes. Give every `task` the narrowest `role` that can finish it (`explore`, `editor`, `lexicon`, or `general`); set `background: true` only when you have useful work to do meanwhile and always collect the result with `subagent_output` before finishing the turn; redirect a sub-agent with `message_subagent` or stop it with `cancel_subagent` rather than letting wrong work run to completion. Prefer surgical exact edits, verify every changed passage afterward, preserve Markdown/images/scene breaks, and archive-safe tool workflows.
 
 English quality means publication-ready prose for native English-language light-novel readers: faithful meaning and POV, natural dialogue, distinct voices, confident narrative rhythm, idiomatic syntax, restrained honorific/localization choices consistent with project style, and no translationese, intrusive glosses, gratuitous Westernization, invented profanity, censorship, or raw Japanese residue. Treat reviewer notes as evidence to verify, not automatic truth. Resolve speakers and Japanese modifier chains from the source. Keep short name surfaces short and follow exact alternate-address mappings.
 
@@ -697,6 +728,9 @@ Autonomy:
 - for change/fix/refine requests: make in-scope local edits and verify without asking first
 - require confirmation only for destructive/irreversible bulk risk or when two materially different valid outcomes cannot be resolved from source/context/defaults
 - keep working until done; use update_plan for multi-step work; delegate with `task` only for large independent disjoint scopes
+- give every `task` the narrowest `role` that can finish it: `explore` to survey and report, `editor` for chapter prose, `lexicon` for characters/glossary/style/recaps, `general` only when it genuinely needs everything — a role it was not given is a tool it cannot call
+- set `background: true` when you have useful work to do meanwhile, then collect with `subagent_output` before you finish the turn; a background sub-agent you never collect is work the user never hears about
+- `cancel_subagent` when a delegated task turns out wrong or redundant — it keeps a resumable checkpoint — and `message_subagent` to redirect one that is heading the wrong way rather than letting it finish and redoing the work
 - after interruption/cancel, call list_interrupted_subagents then resume_subagent before redoing delegated work
 - use ask_user sparingly when the choice is genuinely the user's; otherwise act on a safe default and say so
 - when you do ask, put every related question in ONE ask_user call: they are shown together as one card, so asking one at a time costs the user a round trip each
@@ -723,15 +757,8 @@ pub(crate) fn refine_tools_vec() -> Vec<Tool> {
 
 /// Owns the live chat thread so multi-turn history persists.
 pub async fn run_refine_agent(ctx: RefineCtx, mut rx: UnboundedReceiver<RefineControl>) {
-    let tools = RefineTools::with_agent_for_language(
-        ctx.root.clone(),
-        ctx.default_vol,
-        ctx.tx.clone(),
-        ctx.client.clone(),
-        ctx.model.clone(),
-        ctx.interact.clone(),
-        ctx.target_language,
-    );
+    let registry = SubagentRegistry::default();
+    let tools = RefineTools::for_ctx(&ctx, registry.clone());
     let mut req = ChatRequest::new(
         ctx.model.model.clone(),
         vec![Message::system(refine_system_prompt(ctx.target_language))],
@@ -754,6 +781,7 @@ pub async fn run_refine_agent(ctx: RefineCtx, mut rx: UnboundedReceiver<RefineCo
                 req.messages.push(Message::user(msg));
                 let runtime = RefineTurnRuntime {
                     tx: &ctx.tx,
+                    registry: &registry,
                     cancel: &ctx.cancel,
                     default_vol: ctx.default_vol,
                     interact: &ctx.interact,
@@ -769,6 +797,7 @@ pub async fn run_refine_agent(ctx: RefineCtx, mut rx: UnboundedReceiver<RefineCo
             RefineControl::Clear => {
                 req.messages.truncate(1); // keep the system turn
                 ctx.cancel.store(true, Ordering::Relaxed);
+                registry.cancel_all();
                 clear_steering(&ctx.steering);
                 ctx.tx.send(AppEvent::RefineThreadUpdated {
                     session: current_id.clone(),
@@ -778,6 +807,7 @@ pub async fn run_refine_agent(ctx: RefineCtx, mut rx: UnboundedReceiver<RefineCo
             RefineControl::SetModel(m) => req.model = m,
             RefineControl::SwitchSession(id) => {
                 ctx.cancel.store(true, Ordering::Relaxed);
+                registry.cancel_all();
                 clear_steering(&ctx.steering);
                 current_id = id.clone();
                 req.messages.truncate(1);
@@ -790,13 +820,17 @@ pub async fn run_refine_agent(ctx: RefineCtx, mut rx: UnboundedReceiver<RefineCo
                     messages: req.messages[1..].to_vec(),
                 });
             }
-            RefineControl::Shutdown => break,
+            RefineControl::Shutdown => {
+                registry.cancel_all();
+                break;
+            }
         }
     }
 }
 
 struct RefineTurnRuntime<'a> {
     tx: &'a EventTx,
+    registry: &'a SubagentRegistry,
     cancel: &'a AtomicBool,
     default_vol: u32,
     interact: &'a RefineInteract,
@@ -833,16 +867,24 @@ fn push_cancelled_tool_results(
     req: &mut ChatRequest,
     calls: &[crate::llm::ToolCall],
     tx: &EventTx,
+    registry: &SubagentRegistry,
     parent_path: &str,
-    task_depth: usize,
 ) {
     for call in calls {
+        // A foreground child dies with the future tree it is inside, so nothing
+        // it owns will report its end — the parent has to close it out here. A
+        // background child is not in that tree and is deliberately left alone.
         if call.function.name == "task" {
-            send_subagent_update(
+            let id = subagent_event_id(parent_path, &call.id);
+            registry.finish(
+                &id,
+                RefineSubagentStatus::Canceled,
+                serde_json::to_string(&ToolResult::err("cancelled by the user"))
+                    .unwrap_or_default(),
+            );
+            emit_subagent_terminal(
                 tx,
-                parent_path,
-                call,
-                task_depth,
+                &id,
                 RefineSubagentStatus::Canceled,
                 "cancelled by the user".to_string(),
             );
@@ -860,22 +902,6 @@ fn subagent_event_id(parent_path: &str, call_id: &str) -> String {
     } else {
         format!("{parent_path}/{call_id}")
     }
-}
-
-fn send_subagent_update(
-    tx: &EventTx,
-    parent_path: &str,
-    call: &crate::llm::ToolCall,
-    depth: usize,
-    status: RefineSubagentStatus,
-    summary: String,
-) {
-    tx.send(AppEvent::RefineSubagentUpdated {
-        id: subagent_event_id(parent_path, &call.id),
-        depth,
-        status,
-        summary,
-    });
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -926,63 +952,118 @@ fn replace_across_project_is_dry_run(args: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn emit_tool_call_started(tx: &EventTx, parent_path: &str, call: &ToolCall, task_depth: usize) {
-    if call.function.name == "task" {
-        send_subagent_update(
-            tx,
-            parent_path,
-            call,
-            task_depth,
-            RefineSubagentStatus::Running,
-            summarize_task_args(&call.function.arguments),
-        );
-    }
-}
-
-fn emit_tool_call_finished(
-    tx: &EventTx,
-    parent_path: &str,
-    call: &ToolCall,
+/// One delegated child, packed so foreground and background take the same path.
+struct SubagentRun {
+    client: std::sync::Arc<dyn LlmClient>,
+    /// Already the child's own executor, carrying its role and event path.
+    executor: RefineTools,
+    event_id: String,
     task_depth: usize,
-    result: &str,
-) {
-    if call.function.name == "task" {
-        send_subagent_update(
-            tx,
-            parent_path,
-            call,
-            task_depth,
-            subagent_status_from_result(result),
-            tool_result_first_line(result),
-        );
-    }
+    req: ChatRequest,
+    initial_tool_call_count: usize,
+    checkpoint: SubagentCheckpointState,
+    handle: crate::agents::subagent::RunHandle,
 }
 
-fn emit_subagent_activity(tx: &EventTx, parent_path: &str, task_depth: usize, activity: String) {
+/// What a caller has to decide before a child can start.
+struct LaunchSpec {
+    event_id: String,
+    role: SubagentRole,
+    title: String,
+    background: bool,
+    req: ChatRequest,
+    initial_tool_call_count: usize,
+    checkpoint: SubagentCheckpointState,
+}
+
+/// Run a child to the end and close it out. The registry and the UI learn how
+/// it finished from here and nowhere else, so a foreground child and a
+/// backgrounded one report identically.
+async fn drive_subagent(run: SubagentRun) -> ToolResult {
+    let SubagentRun {
+        client,
+        executor,
+        event_id,
+        task_depth,
+        req,
+        initial_tool_call_count,
+        checkpoint,
+        handle,
+    } = run;
+    let checkpoint_id = checkpoint.id().to_string();
+    let tx = executor.tx.clone();
+    let registry = executor.registry.clone();
+
+    let outcome = run_compacting_tool_loop(
+        client.as_ref(),
+        req,
+        &executor,
+        &tx,
+        SubagentLoopOptions::new(SUBAGENT_MAX_TOOL_ROUNDS, task_depth, &event_id)
+            .initial_tool_call_count(initial_tool_call_count)
+            .checkpoint(checkpoint)
+            .controls(handle),
+    )
+    .await;
+
+    let (status, result) = match outcome {
+        Ok(outcome) => {
+            let report = outcome
+                .response
+                .choices
+                .first()
+                .and_then(|c| c.message.content.clone())
+                .unwrap_or_default();
+            (
+                RefineSubagentStatus::Succeeded,
+                ToolResult::ok(format!(
+                    "sub-agent finished ({} tool call(s)):\n{report}",
+                    outcome.tool_calls
+                )),
+            )
+        }
+        Err(LlmError::Canceled) => (
+            RefineSubagentStatus::Canceled,
+            ToolResult::err(format!(
+                "sub-agent cancelled; checkpoint `{checkpoint_id}` kept for resume"
+            )),
+        ),
+        Err(e) => (
+            RefineSubagentStatus::Failed,
+            ToolResult::err(format!(
+                "sub-agent interrupted; checkpoint `{checkpoint_id}` kept for resume: {e}"
+            )),
+        ),
+    };
+
+    let json = serde_json::to_string(&result).unwrap_or_default();
+    let summary = tool_result_first_line(&json);
+    registry.finish(&event_id, status, json);
+    emit_subagent_terminal(&tx, &event_id, status, summary);
+    result
+}
+
+fn emit_subagent_activity(tx: &EventTx, parent_path: &str, _task_depth: usize, activity: String) {
     if parent_path.is_empty() {
         return;
     }
-    tx.send(AppEvent::RefineSubagentUpdated {
+    tx.send(AppEvent::RefineSubagentActivity {
         id: parent_path.to_string(),
-        depth: task_depth.saturating_sub(1),
-        status: RefineSubagentStatus::Running,
-        summary: activity,
+        activity,
     });
 }
 
 fn emit_subagent_terminal(
     tx: &EventTx,
     event_id: &str,
-    task_depth: usize,
     status: RefineSubagentStatus,
     summary: String,
 ) {
     if event_id.is_empty() {
         return;
     }
-    tx.send(AppEvent::RefineSubagentUpdated {
+    tx.send(AppEvent::RefineSubagentFinished {
         id: event_id.to_string(),
-        depth: task_depth.saturating_sub(1),
         status,
         summary,
     });
@@ -1213,6 +1294,12 @@ struct SubagentLoopOptions {
     parent_path: String,
     initial_tool_call_count: usize,
     checkpoint: Option<SubagentCheckpointState>,
+    /// Stops this child between rounds. A background child is not inside the
+    /// parent turn's future tree, so dropping that tree cannot reach it.
+    cancel: Option<Arc<AtomicBool>>,
+    /// Abandons the model call already in flight, for an interjected message.
+    interrupt: Option<Arc<AtomicBool>>,
+    inbox: Option<tokio::sync::mpsc::UnboundedReceiver<ChildMessage>>,
 }
 
 impl SubagentLoopOptions {
@@ -1223,7 +1310,17 @@ impl SubagentLoopOptions {
             parent_path: parent_path.into(),
             initial_tool_call_count: 0,
             checkpoint: None,
+            cancel: None,
+            interrupt: None,
+            inbox: None,
         }
+    }
+
+    fn controls(mut self, handle: crate::agents::subagent::RunHandle) -> Self {
+        self.cancel = Some(handle.cancel);
+        self.interrupt = Some(handle.interrupt);
+        self.inbox = Some(handle.inbox);
+        self
     }
 
     fn initial_tool_call_count(mut self, count: usize) -> Self {
@@ -1359,7 +1456,7 @@ async fn run_refine_turn(
         let mut idx = 0;
         while idx < tool_calls.len() {
             if runtime.cancel.load(Ordering::Relaxed) {
-                push_cancelled_tool_results(req, &tool_calls[idx..], tx, "", 0);
+                push_cancelled_tool_results(req, &tool_calls[idx..], tx, runtime.registry, "");
                 tx.send(AppEvent::RefineMessageDone);
                 return;
             }
@@ -1373,7 +1470,6 @@ async fn run_refine_turn(
                 }
 
                 for call in &tool_calls[start..end] {
-                    emit_tool_call_started(tx, "", call, 0);
                     tx.send(AppEvent::RefineToolInvoked {
                         tool: call.function.name.clone(),
                         summary: summarize_args(&call.function.arguments),
@@ -1388,14 +1484,13 @@ async fn run_refine_turn(
                 {
                     Ok(results) => results,
                     Err(_) => {
-                        push_cancelled_tool_results(req, &tool_calls[start..], tx, "", 0);
+                        push_cancelled_tool_results(req, &tool_calls[start..], tx, runtime.registry, "");
                         tx.send(AppEvent::RefineMessageDone);
                         return;
                     }
                 };
 
                 for ToolExecution { call, result } in results {
-                    emit_tool_call_finished(tx, "", &call, 0, &result);
                     if let Some(summary) = tool_summary_for_final(&call.function.name, &result) {
                         turn_tool_summaries.push(summary);
                     }
@@ -1410,7 +1505,6 @@ async fn run_refine_turn(
             if call.function.name == "update_plan" {
                 latest_plan = parse_plan_steps(&call.function.arguments);
             }
-            emit_tool_call_started(tx, "", call, 0);
             // Plan calls render in the pinned panel, not the transcript.
             if call.function.name != "update_plan" {
                 tx.send(AppEvent::RefineToolInvoked {
@@ -1422,12 +1516,11 @@ async fn run_refine_turn(
                 match cancellable(runtime.cancel, execute_tool_call_result(tools, call)).await {
                     Ok(result) => result,
                     Err(_) => {
-                        push_cancelled_tool_results(req, &tool_calls[idx..], tx, "", 0);
+                        push_cancelled_tool_results(req, &tool_calls[idx..], tx, runtime.registry, "");
                         tx.send(AppEvent::RefineMessageDone);
                         return;
                     }
                 };
-            emit_tool_call_finished(tx, "", call, 0, &result);
             if let Some(summary) = tool_summary_for_final(&call.function.name, &result) {
                 turn_tool_summaries.push(summary);
             }
@@ -1451,6 +1544,43 @@ async fn run_refine_turn(
     tx.send(AppEvent::RefineMessageDone);
 }
 
+/// A child's message queue, split by when each message is allowed to land.
+struct Inbox {
+    rx: Option<tokio::sync::mpsc::UnboundedReceiver<ChildMessage>>,
+    /// `Delivery::Queue` messages, held until the child would otherwise stop.
+    held: Vec<String>,
+}
+
+impl Inbox {
+    fn new(rx: Option<tokio::sync::mpsc::UnboundedReceiver<ChildMessage>>) -> Self {
+        Self { rx, held: Vec::new() }
+    }
+
+    /// Messages to inject at this round boundary.
+    fn drain_now(&mut self) -> Vec<String> {
+        let Some(rx) = self.rx.as_mut() else {
+            return Vec::new();
+        };
+        let mut now = Vec::new();
+        while let Ok(m) = rx.try_recv() {
+            match m.delivery {
+                Delivery::Queue => self.held.push(m.text),
+                Delivery::Steer | Delivery::Interject => now.push(m.text),
+            }
+        }
+        now
+    }
+
+    /// Messages that were waiting for the child to think it was finished.
+    fn take_held(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.held)
+    }
+}
+
+fn parent_message(text: &str) -> String {
+    format!("[Message from the parent agent: {text}]")
+}
+
 async fn run_compacting_tool_loop(
     client: &dyn LlmClient,
     mut req: ChatRequest,
@@ -1465,20 +1595,41 @@ async fn run_compacting_tool_loop(
     let parent_path = parent_path.as_str();
     let mut checkpoint = options.checkpoint;
     let mut tool_call_count = options.initial_tool_call_count;
+    let cancel = options.cancel;
+    let interrupt = options.interrupt;
+    let mut inbox = Inbox::new(options.inbox);
     for _round in 0..max_rounds {
+        if cancel.as_ref().is_some_and(|c| c.load(Ordering::Relaxed)) {
+            save_subagent_checkpoint(checkpoint.as_mut(), &req, tool_call_count, tx);
+            return Err(LlmError::Canceled);
+        }
+        for text in inbox.drain_now() {
+            req.messages.push(Message::user(parent_message(&text)));
+        }
         maybe_compact(&mut req, tx, false);
         save_subagent_checkpoint(checkpoint.as_mut(), &req, tool_call_count, tx);
 
         emit_subagent_activity(tx, parent_path, task_depth, "thinking".to_string());
-        let resp = subagent_chat_resuming_after_rate_limit(
+        let chat = subagent_chat_resuming_after_rate_limit(
             client,
             &req,
             tx,
             task_depth,
             parent_path,
             "thinking",
-        )
-        .await?;
+        );
+        let resp = match interrupt.as_deref() {
+            // An interjected message abandons the call in flight; the next
+            // round picks the message up at the top of the loop.
+            Some(flag) => match cancellable(flag, chat).await {
+                Ok(r) => r?,
+                Err(RefineCancelled) => {
+                    flag.store(false, Ordering::Relaxed);
+                    continue;
+                }
+            },
+            None => chat.await?,
+        };
         if let Some(u) = &resp.usage {
             usage.add(u);
         }
@@ -1493,6 +1644,22 @@ async fn run_compacting_tool_loop(
                 .as_deref()
                 .is_some_and(|c| !c.trim().is_empty())
             {
+                // A queued message was waiting for exactly this moment: the
+                // child thinks it is done, and is told there is more.
+                let held = inbox.take_held();
+                if !held.is_empty() {
+                    req.messages.push(Message {
+                        role: Role::Assistant,
+                        content: choice.message.content.clone(),
+                        tool_calls: None,
+                        tool_call_id: None,
+                        name: None,
+                    });
+                    for text in held {
+                        req.messages.push(Message::user(parent_message(&text)));
+                    }
+                    continue;
+                }
                 finish_subagent_checkpoint(&mut checkpoint, tx);
                 return Ok(ToolLoopOutcome {
                     response: resp,
@@ -1531,13 +1698,8 @@ async fn run_compacting_tool_loop(
                     task_depth,
                     tool_batch_activity(&tool_calls[start..end], kind),
                 );
-                for call in &tool_calls[start..end] {
-                    emit_tool_call_started(tx, parent_path, call, task_depth);
-                }
-
                 let results = execute_tool_calls_parallel(executor, &tool_calls[start..end]).await;
                 for ToolExecution { call, result } in results {
-                    emit_tool_call_finished(tx, parent_path, &call, task_depth, &result);
                     req.messages.push(Message::tool_result(call.id, result));
                 }
 
@@ -1547,9 +1709,7 @@ async fn run_compacting_tool_loop(
 
             let call = &tool_calls[idx];
             emit_subagent_activity(tx, parent_path, task_depth, tool_activity(call));
-            emit_tool_call_started(tx, parent_path, call, task_depth);
             let result = execute_tool_call_result(executor, call).await;
-            emit_tool_call_finished(tx, parent_path, call, task_depth, &result);
             req.messages
                 .push(Message::tool_result(call.id.clone(), result));
             idx += 1;
@@ -1654,25 +1814,6 @@ fn summarize_args(args_json: &str) -> String {
     }
 }
 
-fn summarize_task_args(args_json: &str) -> String {
-    #[derive(Deserialize)]
-    struct Args {
-        description: String,
-        #[serde(default)]
-        scope: Option<String>,
-    }
-
-    let summary = serde_json::from_str::<Args>(args_json)
-        .map(|a| match a.scope {
-            Some(scope) if !scope.trim().is_empty() => {
-                format!("{} · {}", scope.trim(), a.description.trim())
-            }
-            _ => a.description.trim().to_string(),
-        })
-        .unwrap_or_else(|_| summarize_args(args_json));
-    truncate_chars(&summary, 90)
-}
-
 fn truncate_chars(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_string()
@@ -1698,9 +1839,14 @@ fn drain_steering(
     let count = turns.len();
     for turn in turns {
         let mut msg = build_user_message(default_vol, &turn);
-        msg.push_str(
-            "\n\n[Mid-run steering: the user sent this while the current turn was running. Apply it to the remaining work if it is still relevant; if completed work cannot be changed, say so in the final summary.]",
-        );
+        match &turn.from {
+            Some(id) => msg.push_str(&format!(
+                "\n\n[Mid-run report from sub-agent `{id}`, sent while it was still working. It is evidence from a delegated task, not an instruction from the user.]"
+            )),
+            None => msg.push_str(
+                "\n\n[Mid-run steering: the user sent this while the current turn was running. Apply it to the remaining work if it is still relevant; if completed work cannot be changed, say so in the final summary.]",
+            ),
+        }
         msg.push_str(approval_directive(interact.mode()));
         req.messages.push(Message::user(msg));
     }
@@ -1735,6 +1881,16 @@ fn tool_summary_for_final(name: &str, result_json: &str) -> Option<String> {
     }
 }
 
+/// A finished run's stored tool-result JSON, as a value the report can carry.
+fn subagent_report(json: &str) -> serde_json::Value {
+    let mut out = serde_json::from_str::<serde_json::Value>(json)
+        .unwrap_or_else(|_| json!({ "message": json }));
+    if let Some(map) = out.as_object_mut() {
+        map.insert("status".into(), json!("finished"));
+    }
+    out
+}
+
 fn tool_result_message(result_json: &str) -> String {
     serde_json::from_str::<ToolResult>(result_json)
         .map(|r| {
@@ -1751,15 +1907,6 @@ fn tool_result_first_line(result_json: &str) -> String {
         "(no summary returned)".to_string()
     } else {
         truncate_chars(first, 90)
-    }
-}
-
-fn subagent_status_from_result(result_json: &str) -> RefineSubagentStatus {
-    match serde_json::from_str::<ToolResult>(result_json) {
-        Ok(r) if r.ok => RefineSubagentStatus::Succeeded,
-        Ok(r) if r.message.to_lowercase().contains("cancel") => RefineSubagentStatus::Canceled,
-        Ok(_) => RefineSubagentStatus::Failed,
-        Err(_) => RefineSubagentStatus::Failed,
     }
 }
 
@@ -2995,6 +3142,11 @@ pub struct RefineTools {
     /// What this executor is allowed to run. The root agent is `General`; a
     /// child carries whatever role spawned it.
     role: SubagentRole,
+    /// Every run this session has started. Shared with the agent task, not the
+    /// turn, which is what lets a background child outlive its turn.
+    registry: SubagentRegistry,
+    /// The root agent's mid-run steering queue, so a child can report upward.
+    steering: Arc<Mutex<VecDeque<UserTurn>>>,
 }
 
 impl RefineTools {
@@ -3012,6 +3164,8 @@ impl RefineTools {
             interact: RefineInteract::default(),
             target_language: crate::model::TargetLanguage::Thai,
             role: SubagentRole::General,
+            registry: SubagentRegistry::default(),
+            steering: Arc::new(Mutex::new(VecDeque::new())),
         }
     }
 
@@ -3024,26 +3178,6 @@ impl RefineTools {
         model: crate::model::AgentModel,
         interact: RefineInteract,
     ) -> Self {
-        Self::with_agent_for_language(
-            root,
-            default_vol,
-            tx,
-            client,
-            model,
-            interact,
-            crate::model::TargetLanguage::Thai,
-        )
-    }
-
-    pub fn with_agent_for_language(
-        root: PathBuf,
-        default_vol: u32,
-        tx: EventTx,
-        client: std::sync::Arc<dyn LlmClient>,
-        model: crate::model::AgentModel,
-        interact: RefineInteract,
-        target_language: crate::model::TargetLanguage,
-    ) -> Self {
         Self {
             root,
             default_vol,
@@ -3054,8 +3188,40 @@ impl RefineTools {
             depth: 0,
             path: String::new(),
             interact,
-            target_language,
+            target_language: crate::model::TargetLanguage::Thai,
             role: SubagentRole::General,
+            registry: SubagentRegistry::default(),
+            steering: Arc::new(Mutex::new(VecDeque::new())),
+        }
+    }
+
+    #[cfg(test)]
+    fn sharing(
+        mut self,
+        registry: SubagentRegistry,
+        steering: Arc<Mutex<VecDeque<UserTurn>>>,
+    ) -> Self {
+        self.registry = registry;
+        self.steering = steering;
+        self
+    }
+
+    /// The root executor for one Refine session.
+    pub fn for_ctx(ctx: &RefineCtx, registry: SubagentRegistry) -> Self {
+        Self {
+            root: ctx.root.clone(),
+            default_vol: ctx.default_vol,
+            tx: ctx.tx.clone(),
+            client: Some(ctx.client.clone()),
+            model: ctx.model.clone(),
+            can_spawn: true,
+            depth: 0,
+            path: String::new(),
+            interact: ctx.interact.clone(),
+            target_language: ctx.target_language,
+            role: SubagentRole::General,
+            registry,
+            steering: ctx.steering.clone(),
         }
     }
 
@@ -3074,6 +3240,8 @@ impl RefineTools {
             interact: self.interact.clone(),
             target_language: self.target_language,
             role,
+            registry: self.registry.clone(),
+            steering: self.steering.clone(),
         }
     }
 
@@ -3121,6 +3289,156 @@ impl RefineTools {
         ToolResult::ok(out)
     }
 
+    /// The run that spawned this one, or `None` when the parent is the root
+    /// agent (whose own inbox is the steering queue).
+    fn parent_run_id(&self) -> Option<&str> {
+        self.path.rsplit_once('/').map(|(head, _)| head)
+    }
+
+    async fn collect_subagents(&self, arguments_json: &str) -> ToolResult {
+        #[derive(serde::Deserialize)]
+        struct Args {
+            ids: Vec<String>,
+            #[serde(default)]
+            timeout_ms: u64,
+        }
+        let a: Args = match serde_json::from_str(arguments_json) {
+            Ok(a) => a,
+            Err(e) => return ToolResult::err(format!("bad subagent_output args: {e}")),
+        };
+        if a.ids.is_empty() {
+            return ToolResult::err("subagent_output needs at least one id");
+        }
+        let ids: Vec<String> = a.ids.into_iter().take(20).collect();
+        let budget = std::time::Duration::from_millis(a.timeout_ms.min(3_600_000));
+        let deadline = tokio::time::Instant::now() + budget;
+
+        let mut out = serde_json::Map::new();
+        let mut pending = Vec::new();
+        for id in ids {
+            match self.registry.poll(&id) {
+                Collected::Done(json) => {
+                    out.insert(id, subagent_report(&json));
+                }
+                Collected::Running => pending.push(id),
+                Collected::Unknown => {
+                    out.insert(id, json!({ "status": "unknown" }));
+                }
+            }
+        }
+
+        // One shared deadline across the waits, so `timeout_ms` means what it
+        // says however many ids were given.
+        for id in pending {
+            let done = match self.registry.waiter(&id) {
+                None => self.registry.poll(&id),
+                Some(rx) => {
+                    let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+                    match tokio::time::timeout(left, rx).await {
+                        Ok(Ok(json)) => Collected::Done(json),
+                        _ => Collected::Running,
+                    }
+                }
+            };
+            match done {
+                Collected::Done(json) => {
+                    out.insert(id, subagent_report(&json));
+                }
+                _ => {
+                    out.insert(id, json!({ "status": "running" }));
+                }
+            }
+        }
+
+        let still = out
+            .values()
+            .filter(|v| v.get("status").and_then(|s| s.as_str()) == Some("running"))
+            .count();
+        let summary = if still == 0 {
+            format!("collected {} sub-agent report(s)", out.len())
+        } else {
+            format!("{} of {} sub-agent(s) still running", still, out.len())
+        };
+        ToolResult::data(summary, json!({ "subagents": out }))
+    }
+
+    fn cancel_subagent(&self, arguments_json: &str) -> ToolResult {
+        #[derive(serde::Deserialize)]
+        struct Args {
+            id: String,
+        }
+        let a: Args = match serde_json::from_str(arguments_json) {
+            Ok(a) => a,
+            Err(e) => return ToolResult::err(format!("bad cancel_subagent args: {e}")),
+        };
+        if self.registry.cancel(&a.id) {
+            ToolResult::ok(format!(
+                "sub-agent `{}` will stop at its next round boundary; its checkpoint is kept, so resume_subagent can pick the work up",
+                a.id
+            ))
+        } else {
+            ToolResult::err(format!("no running sub-agent `{}`", a.id))
+        }
+    }
+
+    fn message_subagent(&self, arguments_json: &str) -> ToolResult {
+        #[derive(serde::Deserialize)]
+        struct Args {
+            id: String,
+            message: String,
+            #[serde(default)]
+            delivery: Option<String>,
+        }
+        let a: Args = match serde_json::from_str(arguments_json) {
+            Ok(a) => a,
+            Err(e) => return ToolResult::err(format!("bad message_subagent args: {e}")),
+        };
+        if a.message.trim().is_empty() {
+            return ToolResult::err("message_subagent needs a message");
+        }
+        let delivery = a.delivery.as_deref().map(Delivery::parse).unwrap_or_default();
+        let msg = ChildMessage {
+            text: a.message,
+            delivery,
+        };
+
+        if a.id.trim() == "parent" {
+            let Some(from) = (!self.path.is_empty()).then(|| self.path.clone()) else {
+                return ToolResult::err(
+                    "you are the top-level agent; say this in your reply to the user instead",
+                );
+            };
+            return match self.parent_run_id() {
+                Some(parent) => {
+                    if self.registry.send(parent, msg) {
+                        ToolResult::ok(format!("message delivered to parent sub-agent `{parent}`"))
+                    } else {
+                        ToolResult::err("the parent sub-agent is no longer running")
+                    }
+                }
+                // The top-level agent's inbox is the steering queue.
+                None => {
+                    if let Ok(mut queue) = self.steering.lock() {
+                        queue.push_back(UserTurn {
+                            text: msg.text,
+                            from: Some(from),
+                        });
+                        ToolResult::ok("message queued for the top-level agent")
+                    } else {
+                        ToolResult::err("could not reach the top-level agent")
+                    }
+                }
+            };
+        }
+
+        let label = delivery.label();
+        if self.registry.send(&a.id, msg) {
+            ToolResult::ok(format!("message {label}ed to sub-agent `{}`", a.id))
+        } else {
+            ToolResult::err(format!("no running sub-agent `{}`", a.id))
+        }
+    }
+
     fn list_interrupted_subagents(&self) -> ToolResult {
         let checkpoints = crate::workspace::refine_session::list_subagents(&self.root);
         let items: Vec<_> = checkpoints
@@ -3165,15 +3483,6 @@ impl RefineTools {
             return ToolResult::err(format!("no interrupted sub-agent checkpoint `{}`", a.id));
         };
         let event_id = subagent_event_id(&self.path, call_id);
-        self.tx.send(AppEvent::RefineSubagentUpdated {
-            id: event_id.clone(),
-            depth: self.depth,
-            status: RefineSubagentStatus::Running,
-            summary: format!(
-                "resume {}",
-                checkpoint.task.chars().take(80).collect::<String>()
-            ),
-        });
         self.continue_subagent_checkpoint(client, event_id, checkpoint, true)
             .await
     }
@@ -3192,6 +3501,8 @@ impl RefineTools {
             scope: Option<String>,
             #[serde(default)]
             role: Option<String>,
+            #[serde(default)]
+            background: bool,
         }
         let a: Args = match serde_json::from_str(arguments_json) {
             Ok(a) => a,
@@ -3243,7 +3554,7 @@ impl RefineTools {
             self.root.clone(),
             event_id.clone(),
             SubagentSpec {
-                task: a.description,
+                task: a.description.clone(),
                 scope: a.scope,
                 role,
                 depth: self.depth + 1,
@@ -3252,8 +3563,19 @@ impl RefineTools {
             SUBAGENT_MAX_TOOL_ROUNDS,
         );
 
-        self.run_subagent_loop(client, event_id, role, req, 0, checkpoint)
-            .await
+        self.launch(
+            client,
+            LaunchSpec {
+                event_id,
+                role,
+                title: a.description,
+                background: a.background,
+                req,
+                initial_tool_call_count: 0,
+                checkpoint,
+            },
+        )
+        .await
     }
 
     async fn continue_subagent_checkpoint(
@@ -3272,6 +3594,7 @@ impl RefineTools {
             .or_else(|| self.model.reasoning_param());
         let initial_tool_call_count = checkpoint.tool_call_count;
         let checkpoint_id = checkpoint.id.clone();
+        let title = checkpoint.task.clone();
         let state = SubagentCheckpointState::from_existing(self.root.clone(), checkpoint);
         if resumed {
             emit_subagent_activity(
@@ -3281,72 +3604,59 @@ impl RefineTools {
                 format!("resuming checkpoint · {checkpoint_id}"),
             );
         }
-        self.run_subagent_loop(client, event_id, role, req, initial_tool_call_count, state)
-            .await
-    }
-
-    async fn run_subagent_loop(
-        &self,
-        client: std::sync::Arc<dyn LlmClient>,
-        event_id: String,
-        role: SubagentRole,
-        req: ChatRequest,
-        initial_tool_call_count: usize,
-        checkpoint: SubagentCheckpointState,
-    ) -> ToolResult {
-        let checkpoint_id = checkpoint.id().to_string();
-        let task_depth = self.depth + 1;
-        match run_compacting_tool_loop(
-            client.as_ref(),
-            req,
-            &self.child(event_id.clone(), role),
-            &self.tx,
-            SubagentLoopOptions::new(SUBAGENT_MAX_TOOL_ROUNDS, task_depth, &event_id)
-                .initial_tool_call_count(initial_tool_call_count)
-                .checkpoint(checkpoint),
+        self.launch(
+            client,
+            LaunchSpec {
+                event_id,
+                role,
+                title: title.clone(),
+                background: false,
+                req,
+                initial_tool_call_count,
+                checkpoint: state,
+            },
         )
         .await
-        {
-            Ok(outcome) => {
-                let report = outcome
-                    .response
-                    .choices
-                    .first()
-                    .and_then(|c| c.message.content.clone())
-                    .unwrap_or_default();
-                let result = ToolResult::ok(format!(
-                    "sub-agent finished ({} tool call(s)):\n{report}",
-                    outcome.tool_calls
-                ));
-                let summary = serde_json::to_string(&result)
-                    .map(|json| tool_result_first_line(&json))
-                    .unwrap_or_else(|_| "(no summary returned)".to_string());
-                emit_subagent_terminal(
-                    &self.tx,
-                    &event_id,
-                    task_depth,
-                    RefineSubagentStatus::Succeeded,
-                    summary,
-                );
-                result
-            }
-            Err(e) => {
-                let result = ToolResult::err(format!(
-                    "sub-agent interrupted; checkpoint `{checkpoint_id}` kept for resume: {e}"
-                ));
-                let summary = serde_json::to_string(&result)
-                    .map(|json| tool_result_first_line(&json))
-                    .unwrap_or_else(|_| "sub-agent failed".to_string());
-                emit_subagent_terminal(
-                    &self.tx,
-                    &event_id,
-                    task_depth,
-                    RefineSubagentStatus::Failed,
-                    summary,
-                );
-                result
-            }
+    }
+
+    /// Register a child, then either await it or hand it to the runtime.
+    async fn launch(&self, client: std::sync::Arc<dyn LlmClient>, spec: LaunchSpec) -> ToolResult {
+        let task_depth = self.depth + 1;
+        if spec.background && self.registry.live() >= MAX_LIVE_SUBAGENTS {
+            return ToolResult::err(format!(
+                "{MAX_LIVE_SUBAGENTS} sub-agents are already running; collect one with subagent_output before starting another"
+            ));
         }
+        let handle = self.registry.register(&spec.event_id);
+        self.tx.send(AppEvent::RefineSubagentStarted {
+            id: spec.event_id.clone(),
+            depth: task_depth.saturating_sub(1),
+            title: truncate_chars(&spec.title, 80),
+            role: spec.role.label().to_string(),
+            model: self.model.model.clone(),
+            background: spec.background,
+        });
+
+        let run = SubagentRun {
+            client,
+            executor: self.child(spec.event_id.clone(), spec.role),
+            event_id: spec.event_id.clone(),
+            task_depth,
+            req: spec.req,
+            initial_tool_call_count: spec.initial_tool_call_count,
+            checkpoint: spec.checkpoint,
+            handle,
+        };
+
+        if spec.background {
+            let id = spec.event_id;
+            tokio::spawn(drive_subagent(run));
+            return ToolResult::data(
+                format!("sub-agent `{id}` started in the background"),
+                json!({ "id": id, "status": "running", "background": true }),
+            );
+        }
+        drive_subagent(run).await
     }
 }
 
@@ -3367,6 +3677,17 @@ impl ToolExecutor for RefineTools {
         }
         if name == "list_interrupted_subagents" {
             return Ok(serde_json::to_string(&self.list_interrupted_subagents())?);
+        }
+        if name == "subagent_output" {
+            return Ok(serde_json::to_string(
+                &self.collect_subagents(arguments_json).await,
+            )?);
+        }
+        if name == "cancel_subagent" {
+            return Ok(serde_json::to_string(&self.cancel_subagent(arguments_json))?);
+        }
+        if name == "message_subagent" {
+            return Ok(serde_json::to_string(&self.message_subagent(arguments_json))?);
         }
         if name == "resume_subagent" {
             return Ok(serde_json::to_string(
@@ -3678,6 +3999,290 @@ mod tests {
         assert!(out.contains("sub-agent") || out.contains("nested"));
     }
 
+    /// A client that parks before answering, so a test can watch a child while
+    /// it is genuinely mid-flight instead of racing its completion.
+    struct GatedClient {
+        gate: Arc<tokio::sync::Semaphore>,
+        responses: Mutex<VecDeque<crate::llm::ChatResponse>>,
+    }
+
+    impl GatedClient {
+        fn new(responses: Vec<crate::llm::ChatResponse>) -> (Arc<Self>, Arc<tokio::sync::Semaphore>) {
+            let gate = Arc::new(tokio::sync::Semaphore::new(0));
+            (
+                Arc::new(Self {
+                    gate: gate.clone(),
+                    responses: Mutex::new(VecDeque::from(responses)),
+                }),
+                gate,
+            )
+        }
+    }
+
+    #[async_trait]
+    impl LlmClient for GatedClient {
+        async fn chat(&self, _req: &ChatRequest) -> LlmResult<crate::llm::ChatResponse> {
+            let permit = self
+                .gate
+                .acquire()
+                .await
+                .map_err(|_| LlmError::Canceled)?;
+            permit.forget();
+            let next = self.responses.lock().unwrap().pop_front();
+            Ok(next.unwrap_or_else(|| stop_turn("done")))
+        }
+    }
+
+    fn gated_tools(root: &std::path::Path, client: Arc<dyn LlmClient>) -> RefineTools {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        RefineTools::with_agent(
+            root.to_path_buf(),
+            1,
+            EventTx(tx),
+            client,
+            crate::model::AgentModel::openrouter("m"),
+            RefineInteract::default(),
+        )
+    }
+
+    /// Give a spawned child a moment to reach its first await point.
+    async fn settle() {
+        for _ in 0..40 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    /// Real time, not just yields: a cancel reaches a parked call through
+    /// `CANCEL_POLL`, which yielding alone never advances past.
+    async fn wait_until(mut done: impl FnMut() -> bool) -> bool {
+        for _ in 0..300 {
+            if done() {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        done()
+    }
+
+    #[tokio::test]
+    async fn a_background_task_returns_before_the_child_finishes() {
+        let root = temp_root("bgtask");
+        let (client, gate) = GatedClient::new(vec![stop_turn("swept ch1")]);
+        let tools = gated_tools(&root, client);
+
+        let out = tools
+            .execute("task", r#"{"description":"sweep ch1","background":true}"#)
+            .await
+            .unwrap();
+        // The tool answered with an id while the child is still parked.
+        assert!(out.contains(r#""status":"running""#), "{out}");
+        assert!(out.contains(r#""background":true"#), "{out}");
+        settle().await;
+        assert_eq!(tools.registry.live(), 1);
+
+        // A snapshot must not block, and must not claim a report it has not got.
+        let snap = tools
+            .execute("subagent_output", r#"{"ids":["direct"],"timeout_ms":0}"#)
+            .await
+            .unwrap();
+        assert!(snap.contains(r#""status":"running""#), "{snap}");
+
+        gate.add_permits(1);
+        let done = tools
+            .execute("subagent_output", r#"{"ids":["direct"],"timeout_ms":5000}"#)
+            .await
+            .unwrap();
+        assert!(done.contains("swept ch1"), "{done}");
+        assert_eq!(tools.registry.live(), 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn collecting_an_id_that_was_never_started_says_so() {
+        let root = temp_root("bgunknown");
+        let (client, _gate) = GatedClient::new(vec![]);
+        let tools = gated_tools(&root, client);
+        let out = tools
+            .execute("subagent_output", r#"{"ids":["nope"],"timeout_ms":0}"#)
+            .await
+            .unwrap();
+        assert!(out.contains(r#""status":"unknown""#), "{out}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn cancelling_one_child_leaves_its_sibling_running() {
+        let root = temp_root("bgcancel");
+        let (client, gate) = GatedClient::new(vec![]);
+        let tools = gated_tools(&root, client);
+
+        for (id, desc) in [("call_a", "sweep ch1"), ("call_b", "sweep ch2")] {
+            let call = ToolCall {
+                id: id.to_string(),
+                kind: "function".to_string(),
+                function: crate::llm::FunctionCall {
+                    name: "task".to_string(),
+                    arguments: format!(r#"{{"description":"{desc}","background":true}}"#),
+                },
+            };
+            tools.execute_call(&call).await.unwrap();
+        }
+        settle().await;
+        assert_eq!(tools.registry.live(), 2);
+
+        let out = tools
+            .execute("cancel_subagent", r#"{"id":"call_a"}"#)
+            .await
+            .unwrap();
+        assert!(out.contains("resume_subagent"), "{out}");
+
+        // Neither child is let past its gate: cancelling abandons the call in
+        // flight, so the cancelled one stops and the sibling stays parked.
+        assert!(
+            wait_until(|| tools.registry.live() == 1).await,
+            "the cancel never reached the child"
+        );
+        assert_eq!(tools.registry.live(), 1, "the sibling was cancelled too");
+        drop(gate);
+
+        let snap = tools
+            .execute(
+                "subagent_output",
+                r#"{"ids":["call_a","call_b"],"timeout_ms":0}"#,
+            )
+            .await
+            .unwrap();
+        assert!(snap.contains("cancelled"), "{snap}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_child_keeps_a_resumable_checkpoint() {
+        let root = temp_root("bgckpt");
+        let (client, gate) = GatedClient::new(vec![]);
+        let tools = gated_tools(&root, client);
+        tools
+            .execute("task", r#"{"description":"long sweep","background":true}"#)
+            .await
+            .unwrap();
+        settle().await;
+        tools
+            .execute("cancel_subagent", r#"{"id":"direct"}"#)
+            .await
+            .unwrap();
+        assert!(wait_until(|| tools.registry.live() == 0).await);
+        drop(gate);
+        let saved = crate::workspace::refine_session::list_subagents(&root);
+        assert!(
+            saved.iter().any(|c| c.task == "long sweep"),
+            "nothing left to resume: {saved:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn spawning_past_the_live_cap_is_refused_not_queued() {
+        let root = temp_root("bgcap");
+        let (client, _gate) = GatedClient::new(vec![]);
+        let tools = gated_tools(&root, client);
+
+        for n in 0..MAX_LIVE_SUBAGENTS {
+            let call = ToolCall {
+                id: format!("call_{n}"),
+                kind: "function".to_string(),
+                function: crate::llm::FunctionCall {
+                    name: "task".to_string(),
+                    arguments: r#"{"description":"work","background":true}"#.to_string(),
+                },
+            };
+            let out = tools.execute_call(&call).await.unwrap();
+            assert!(out.contains(r#""status":"running""#), "{n}: {out}");
+        }
+        settle().await;
+        let out = tools
+            .execute("task", r#"{"description":"one too many","background":true}"#)
+            .await
+            .unwrap();
+        assert!(out.contains(r#""ok":false"#), "{out}");
+        assert!(out.contains("subagent_output"), "{out}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn a_message_to_a_running_child_is_taken_and_a_finished_one_is_not() {
+        let root = temp_root("bgmsg");
+        let (client, gate) = GatedClient::new(vec![stop_turn("done")]);
+        let tools = gated_tools(&root, client);
+        tools
+            .execute("task", r#"{"description":"sweep","background":true}"#)
+            .await
+            .unwrap();
+        settle().await;
+
+        let out = tools
+            .execute(
+                "message_subagent",
+                r#"{"id":"direct","message":"also check chapter 4","delivery":"steer"}"#,
+            )
+            .await
+            .unwrap();
+        assert!(out.contains(r#""ok":true"#), "{out}");
+
+        gate.add_permits(4);
+        assert!(wait_until(|| tools.registry.live() == 0).await);
+        let out = tools
+            .execute(
+                "message_subagent",
+                r#"{"id":"direct","message":"too late"}"#,
+            )
+            .await
+            .unwrap();
+        assert!(out.contains(r#""ok":false"#), "{out}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn the_top_level_agent_has_no_parent_to_message() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let tools = RefineTools::new(std::path::PathBuf::from("/tmp"), 1, EventTx(tx));
+        let out = tools
+            .execute("message_subagent", r#"{"id":"parent","message":"hi"}"#)
+            .await
+            .unwrap();
+        assert!(out.contains(r#""ok":false"#), "{out}");
+        assert!(out.contains("top-level"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn a_child_of_the_root_agent_reports_upward_through_steering() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let steering = empty_steering();
+        let tools = RefineTools::with_agent(
+            std::path::PathBuf::from("/tmp"),
+            1,
+            EventTx(tx),
+            Arc::new(ScriptedClient {
+                responses: Mutex::new(VecDeque::new()),
+            }),
+            crate::model::AgentModel::openrouter("m"),
+            RefineInteract::default(),
+        )
+        .sharing(SubagentRegistry::default(), steering.clone())
+        .child("call_1".to_string(), SubagentRole::Explore);
+
+        let out = tools
+            .execute(
+                "message_subagent",
+                r#"{"id":"parent","message":"chapter 3 is already clean"}"#,
+            )
+            .await
+            .unwrap();
+        assert!(out.contains(r#""ok":true"#), "{out}");
+        let queued = steering.lock().unwrap();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].from.as_deref(), Some("call_1"));
+    }
+
     #[tokio::test]
     async fn an_explore_subagent_cannot_edit_a_chapter() {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -3895,11 +4500,19 @@ mod tests {
     ) -> RefineTurnRuntime<'a> {
         RefineTurnRuntime {
             tx,
+            registry: test_registry(),
             cancel,
             default_vol: 1,
             interact,
             steering,
         }
+    }
+
+    /// Leaked deliberately: the runtime borrows it for the length of a test,
+    /// and one registry per test is cheaper than threading a lifetime through
+    /// every call site.
+    fn test_registry() -> &'static SubagentRegistry {
+        Box::leak(Box::new(SubagentRegistry::default()))
     }
 
     #[tokio::test]
@@ -3962,7 +4575,7 @@ mod tests {
         }
 
         let root = temp_root("paralleltasks");
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let etx = EventTx(tx);
         let client = ScriptedClient {
             responses: Mutex::new(VecDeque::from(vec![
@@ -3994,22 +4607,7 @@ mod tests {
             .filter_map(|m| m.tool_call_id.as_deref())
             .collect();
         assert_eq!(tool_ids, vec!["call_1", "call_2"]);
-
-        let statuses: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok())
-            .filter_map(|ev| match ev {
-                AppEvent::RefineSubagentUpdated { status, .. } => Some(status),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            statuses,
-            vec![
-                RefineSubagentStatus::Running,
-                RefineSubagentStatus::Running,
-                RefineSubagentStatus::Succeeded,
-                RefineSubagentStatus::Succeeded
-            ]
-        );
+        drop(rx);
 
         unsafe {
             std::env::remove_var("HONYA_REFINE_PARALLELISM");
@@ -4150,7 +4748,7 @@ mod tests {
 
         let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok())
             .filter_map(|ev| match ev {
-                AppEvent::RefineSubagentUpdated { id, status, .. } => Some((id, status)),
+                AppEvent::RefineSubagentFinished { id, status, .. } => Some((id, status)),
                 _ => None,
             })
             .collect();
@@ -4279,11 +4877,10 @@ mod tests {
 
         let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok())
             .filter_map(|ev| match ev {
-                AppEvent::RefineSubagentUpdated {
+                AppEvent::RefineSubagentFinished {
                     id,
                     status,
                     summary,
-                    ..
                 } => Some((id, status, summary)),
                 _ => None,
             })
@@ -4344,8 +4941,8 @@ mod tests {
         );
         let mut saw_rate_limit_activity = false;
         while let Ok(ev) = rx.try_recv() {
-            if let AppEvent::RefineSubagentUpdated { summary, .. } = ev
-                && summary.contains("rate limited")
+            if let AppEvent::RefineSubagentActivity { activity, .. } = ev
+                && activity.contains("rate limited")
             {
                 saw_rate_limit_activity = true;
             }
@@ -4534,35 +5131,34 @@ mod tests {
         .unwrap();
 
         assert_eq!(outcome.tool_calls, 1);
-        let mut updates = Vec::new();
+        let mut started = Vec::new();
+        let mut finished = Vec::new();
         while let Ok(ev) = rx.try_recv() {
-            if let AppEvent::RefineSubagentUpdated {
-                id,
-                depth,
-                status,
-                summary,
-            } = ev
-            {
-                updates.push((id, depth, status, summary));
+            match ev {
+                AppEvent::RefineSubagentStarted {
+                    id, depth, title, ..
+                } => started.push((id, depth, title)),
+                AppEvent::RefineSubagentFinished {
+                    id,
+                    status,
+                    summary,
+                } => finished.push((id, status, summary)),
+                _ => {}
             }
         }
         assert!(
-            updates.iter().any(|(id, depth, status, summary)| {
-                id == "root_call/call_1"
-                    && *depth == 1
-                    && *status == RefineSubagentStatus::Running
-                    && summary.contains("nested audit")
+            started.iter().any(|(id, depth, title)| {
+                id == "root_call/call_1" && *depth == 1 && title.contains("nested audit")
             }),
-            "nested task start should be namespaced under the parent path: {updates:?}"
+            "nested task start should be namespaced under the parent path: {started:?}"
         );
         assert!(
-            updates.iter().any(|(id, depth, status, summary)| {
+            finished.iter().any(|(id, status, summary)| {
                 id == "root_call/call_1"
-                    && *depth == 1
                     && *status == RefineSubagentStatus::Succeeded
                     && summary.contains("sub-agent finished")
             }),
-            "nested task completion should update the same namespaced row: {updates:?}"
+            "nested task completion should close the same namespaced row: {finished:?}"
         );
 
         let _ = std::fs::remove_dir_all(&root);
@@ -4734,33 +5330,28 @@ mod tests {
         }
 
         let mut saw_done = false;
-        let mut subagent_statuses = Vec::new();
-        let mut subagent_summaries = Vec::new();
+        let mut saw_start = false;
+        let mut activities = Vec::new();
+        let mut finals = Vec::new();
         while let Ok(ev) = rx.try_recv() {
             match ev {
                 AppEvent::RefineMessageDone => saw_done = true,
-                AppEvent::RefineSubagentUpdated {
-                    status, summary, ..
-                } => {
-                    subagent_statuses.push(status);
-                    subagent_summaries.push(summary);
-                }
+                AppEvent::RefineSubagentStarted { .. } => saw_start = true,
+                AppEvent::RefineSubagentActivity { activity, .. } => activities.push(activity),
+                AppEvent::RefineSubagentFinished { status, .. } => finals.push(status),
                 _ => {}
             }
         }
         assert!(saw_done, "cancelled long task still emits MessageDone");
-        assert_eq!(
-            subagent_statuses,
-            vec![
-                RefineSubagentStatus::Running,
-                RefineSubagentStatus::Running,
-                RefineSubagentStatus::Canceled
-            ],
-            "UI sees sub-agent start, current activity, and cancellation"
-        );
+        assert!(saw_start, "UI is told the sub-agent started");
         assert!(
-            subagent_summaries.iter().any(|s| s == "thinking"),
-            "UI sees the sub-agent's current activity"
+            activities.iter().any(|s| s == "thinking"),
+            "UI sees the sub-agent's current activity: {activities:?}"
+        );
+        assert_eq!(
+            finals,
+            vec![RefineSubagentStatus::Canceled],
+            "UI sees exactly one ending, and it is a cancellation"
         );
         let tool_result = req
             .messages
@@ -4804,6 +5395,7 @@ mod tests {
         let interact = RefineInteract::default();
         let steering = Arc::new(Mutex::new(VecDeque::from(vec![UserTurn {
             text: "also check @style".to_string(),
+            from: None,
         }])));
         let runtime = test_runtime(&etx, &cancel, &interact, &steering);
 
@@ -4866,6 +5458,7 @@ mod tests {
         let interact = RefineInteract::default();
         let steering = Arc::new(Mutex::new(VecDeque::from(vec![UserTurn {
             text: "one more thing".to_string(),
+            from: None,
         }])));
         let runtime = test_runtime(&etx, &cancel, &interact, &steering);
 
