@@ -17,7 +17,7 @@ use super::style::State;
 use super::zones::{ZoneId, ZoneKind};
 use crate::ui::glyphs;
 use crate::ui::input::caret_halves;
-use crate::ui::text::{col_width, pad_to_cols, truncate_cols};
+use crate::ui::text::{col_width, pad_to_cols, thai_display_safe, truncate_cols};
 
 /// Zone-index bases for a field's own sub-controls, kept far apart so a form
 /// with a realistic number of fields cannot have one collide with another.
@@ -443,12 +443,12 @@ fn render_value(
                 ui.line(
                     area,
                     Line::from(vec![
-                        Span::styled(before, normal),
+                        Span::styled(thai_display_safe(&before), normal),
                         Span::styled(
                             glyphs::ACCENT_RAIL.as_str().to_string(),
                             Style::default().fg(ui.theme.stream_cursor).bg(bg),
                         ),
-                        Span::styled(after, normal),
+                        Span::styled(thai_display_safe(&after), normal),
                     ]),
                     base,
                 );
@@ -461,7 +461,7 @@ fn render_value(
                 ui.line(
                     area,
                     Line::from(Span::styled(
-                        truncate_cols(&text, area.width as usize),
+                        thai_display_safe(&truncate_cols(&text, area.width as usize)),
                         style,
                     )),
                     base,
@@ -501,7 +501,7 @@ fn render_stepper(ui: &mut Ui, area: Rect, field: &Field, index: usize, st: Stat
     // A fixed-width block so the arrows stay put as the value cycles through
     // names of different lengths.
     let block = STEPPER_VALUE_COLS.min(area.width.saturating_sub(2));
-    let shown = truncate_cols(&value, block as usize);
+    let shown = thai_display_safe(&truncate_cols(&value, block as usize));
 
     let left = Rect {
         width: 1,
@@ -610,17 +610,17 @@ fn render_combo(
             field,
             Line::from(vec![
                 Span::styled(" ".to_string(), ink),
-                Span::styled(before, ink),
+                Span::styled(thai_display_safe(&before), ink),
                 Span::styled(
                     glyphs::ACCENT_RAIL.as_str().to_string(),
                     Style::default().fg(ui.theme.stream_cursor).bg(bg),
                 ),
-                Span::styled(after, ink),
+                Span::styled(thai_display_safe(&after), ink),
             ]),
             base,
         );
     } else {
-        let shown = truncate_cols(value, block.saturating_sub(1) as usize);
+        let shown = thai_display_safe(&truncate_cols(value, block.saturating_sub(1) as usize));
         ui.line(
             field,
             Line::from(Span::styled(
@@ -681,7 +681,7 @@ fn render_chips(
     let mut spans: Vec<(Rect, Vec<Span<'static>>)> = Vec::new();
 
     for (n, item) in items.iter().enumerate() {
-        let label = truncate_cols(item, 18);
+        let label = thai_display_safe(&truncate_cols(item, 18));
         let w = col_width(&label) as u16 + 4; // "[" + label + " ×" + "]"
         if x + w > right {
             break;
@@ -726,12 +726,12 @@ fn render_chips(
         ui.line(
             rest,
             Line::from(vec![
-                Span::styled(before, ink),
+                Span::styled(thai_display_safe(&before), ink),
                 Span::styled(
                     glyphs::ACCENT_RAIL.as_str().to_string(),
                     Style::default().fg(ui.theme.stream_cursor).bg(bg),
                 ),
-                Span::styled(after, ink),
+                Span::styled(thai_display_safe(&after), ink),
             ]),
             base,
         );
@@ -1109,5 +1109,45 @@ mod tests {
         let buf = term.backend().buffer().clone();
         let text: String = (0..60).map(|x| buf[(x, 0)].symbol().to_string()).collect();
         assert!(text.contains("metadata turn"), "got {text:?}");
+    }
+
+    /// Thai clusters are decomposed on the way to the cell buffer, like the
+    /// editor does it — the Lexicon puts project text in these rows, and a
+    /// composed SARA AM drifts the terminal a cell at a time from there on.
+    #[test]
+    fn a_thai_value_is_made_cell_safe_before_it_is_drawn() {
+        const SARA_AM: char = '\u{0E33}';
+        const NIKHAHIT: char = '\u{0E4D}';
+        let value = format!("คํ{SARA_AM}", SARA_AM = SARA_AM);
+        for kind in [
+            Kind::Text {
+                value: value.clone(),
+                cursor: 0,
+                placeholder: String::new(),
+            },
+            Kind::Combo {
+                value: value.clone(),
+                cursor: 0,
+                known: vec![value.clone()],
+            },
+            Kind::Chips {
+                items: vec![value.clone()],
+                buffer: String::new(),
+                cursor: 0,
+            },
+        ] {
+            let mut state = ListState::new();
+            state.select(Some(0));
+            let (lines, _) = paint(48, 3, &Focus::new(), &mut state, &[Field::new("V", kind)]);
+            let drawn: String = lines.join("");
+            assert!(
+                !drawn.contains(SARA_AM),
+                "a composed SARA AM reached the buffer: {drawn:?}"
+            );
+            assert!(
+                drawn.contains(NIKHAHIT),
+                "the decomposed form is missing: {drawn:?}"
+            );
+        }
     }
 }
