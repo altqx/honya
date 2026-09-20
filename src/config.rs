@@ -6,6 +6,13 @@ use std::path::PathBuf;
 use crate::model::AppConfig;
 
 /// Resolve honya's config directory.
+///
+/// Under `cargo test`, a test that has not redirected `XDG_CONFIG_HOME` gets a
+/// scratch directory rather than the developer's own. Two tests already
+/// redirected because they knew they persisted; the ones that did not — the
+/// Codex sign-in event writes the config outright (`app/mod.rs`) — were
+/// overwriting a real `config.json` with fixture credentials and dropping the
+/// API key with it.
 pub fn config_dir() -> PathBuf {
     if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
         let xdg = PathBuf::from(xdg);
@@ -13,6 +20,15 @@ pub fn config_dir() -> PathBuf {
             return xdg.join("honya");
         }
     }
+    // A test that did not redirect still must not reach the real config.
+    #[cfg(test)]
+    return std::env::temp_dir().join(format!("honya-test-config-{}", std::process::id()));
+    #[cfg(not(test))]
+    real_config_dir()
+}
+
+#[cfg(not(test))]
+fn real_config_dir() -> PathBuf {
     // Prefer roaming app data on Windows, where HOME is often unset.
     #[cfg(windows)]
     {
