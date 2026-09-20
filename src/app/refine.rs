@@ -1274,11 +1274,8 @@ impl RefineScreen {
         ]
     }
 
-    /// Run the action `id` stands for, whether it was reached by chord, by a
-    /// control on the status band or from the context menu.
-    ///
-    /// `None` means "no such action here" — the sentinel that makes an
-    /// advertised binding with no handler impossible to write.
+    /// Run the action `id` stands for, however it was reached. `None` means
+    /// no such action here.
     pub fn run(&mut self, id: u16, project: Option<&Project>) -> Option<Action> {
         let _ = project;
         self.run_action(id)

@@ -993,11 +993,8 @@ impl LexiconScreen {
         ]
     }
 
-    /// Run the action `id` stands for, whether it was reached by key, by a
-    /// toolbar button, by a row button or from the context menu.
-    ///
-    /// `None` means "no such action here" — the sentinel that makes an
-    /// advertised binding with no handler impossible to write.
+    /// Run the action `id` stands for, however it was reached. `None` means
+    /// no such action here.
     pub fn run(&mut self, id: u16, ws: Option<&Workspace>) -> Option<Action> {
         Some(match id {
             L_NEW => {

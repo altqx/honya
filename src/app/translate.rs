@@ -533,12 +533,8 @@ impl TranslateScreen {
         }
     }
 
-    /// This screen's commands, availability resolved for this frame.
-    ///
-    /// The one declaration everything else reads: `handle_key` dispatches from
-    /// it, the band under the pipeline draws it as a toolbar, the queue's
-    /// selected row draws its own verbs, and help prints it. See
-    /// [`super::action_table`].
+    /// This screen's commands, availability resolved for this frame. Drawn as
+    /// the band under the pipeline and the queue row's verbs.
     pub fn actions(&self) -> Vec<Act> {
         use action_table::Accel;
 
@@ -568,11 +564,8 @@ impl TranslateScreen {
         ]
     }
 
-    /// Run the action `id` stands for, whether it was reached by key, by a
-    /// toolbar control, by a queue-row button or from the context menu.
-    ///
-    /// `None` means "no such action here" — the sentinel that makes an
-    /// advertised binding with no handler impossible to write.
+    /// Run the action `id` stands for, however it was reached. `None` means
+    /// no such action here.
     pub fn run(&mut self, id: u16) -> Option<Action> {
         let pc = self.pending_count();
         Some(match id {

@@ -254,12 +254,8 @@ impl ProjectScreen {
         }
     }
 
-    /// This screen's commands, availability resolved for this frame.
-    ///
-    /// The one declaration everything else reads: `handle_key` dispatches from
-    /// it, the band under the dashboard draws it as a toolbar, the selected
-    /// tree row draws its own verbs, and help prints it. See
-    /// [`super::action_table`].
+    /// This screen's commands, availability resolved for this frame. Drawn as
+    /// the band under the dashboard and the selected tree row's verbs.
     pub fn actions(&self, active: Option<&ActiveProject>) -> Vec<Act> {
         use action_table::Accel;
 
@@ -300,13 +296,8 @@ impl ProjectScreen {
         ]
     }
 
-    /// Run the action `id` stands for, whether it was reached by key, by a
-    /// toolbar button, by a row button or from the context menu.
-    ///
-    /// `None` means "no such action here" — the sentinel that makes an
-    /// advertised binding with no handler impossible to write. `Q` was
-    /// advertised in the footer and in the help for a handler that did not
-    /// exist; it cannot be now.
+    /// Run the action `id` stands for, however it was reached. `None` means
+    /// no such action here.
     pub fn run(&mut self, id: u16, active: Option<&ActiveProject>) -> Option<Action> {
         // Every id below is one this screen has; `None` is reserved for an id
         // that is not, so an unhandled action stays distinguishable from one

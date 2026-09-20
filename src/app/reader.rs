@@ -1122,11 +1122,8 @@ impl ReaderScreen {
         }
     }
 
-    /// This screen's commands, availability resolved for this frame.
-    ///
-    /// The one declaration everything else reads: `handle_key` dispatches from
-    /// it, the status row draws it as a toolbar, right-click lists it, and help
-    /// prints it. See [`super::action_table`].
+    /// This screen's commands, availability resolved for this frame. Drawn as
+    /// the status row's chips.
     ///
     /// `[` and `]` are declared here so they step chapters in the Reader and
     /// cycle screens everywhere else. With nothing open they are unavailable
@@ -1183,11 +1180,8 @@ impl ReaderScreen {
         ]
     }
 
-    /// Run the action `id` stands for, whether it was reached by key, by a chip
-    /// on the status row or from the context menu.
-    ///
-    /// `None` means "no such action here" — the sentinel that makes an
-    /// advertised binding with no handler impossible to write.
+    /// Run the action `id` stands for, however it was reached. `None` means
+    /// no such action here.
     pub fn run(&mut self, id: u16) -> Option<Action> {
         Some(match id {
             A_SYNC => {

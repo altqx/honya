@@ -395,11 +395,8 @@ impl ShelfScreen {
         }
     }
 
-    /// This screen's commands, availability resolved for this frame.
-    ///
-    /// The one declaration everything else reads: `handle_key` dispatches from
-    /// it, the toolbar row and the selected row's buttons draw from it, and
-    /// help prints it. See [`super::action_table`].
+    /// This screen's commands, availability resolved for this frame. Drawn as
+    /// the toolbar row and the selected row's buttons.
     pub fn actions(&self, projects: &[Project]) -> Vec<Act> {
         use action_table::Accel;
 
@@ -414,11 +411,8 @@ impl ShelfScreen {
         ]
     }
 
-    /// Run the action `id` stands for, whether it was reached by key, by a
-    /// toolbar button, by a row button or from the context menu.
-    ///
-    /// `None` means "no such action here" — the sentinel that makes an
-    /// advertised binding with no handler impossible to write.
+    /// Run the action `id` stands for, however it was reached. `None` means
+    /// no such action here.
     pub fn run(
         &mut self,
         id: u16,
