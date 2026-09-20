@@ -26,6 +26,10 @@ pub struct Layout {
     pub inspector_open: bool,
     pub drawer_open: bool,
     pub drawer_tab: DrawerTab,
+    /// What was open last time. A tab's live state is not saved — a scroll
+    /// position is worth keeping across a switch, not across a restart.
+    pub tabs: Vec<super::tabs::TabId>,
+    pub active_tab: usize,
 }
 
 impl Default for Layout {
@@ -38,6 +42,8 @@ impl Default for Layout {
             inspector_open: true,
             drawer_open: false,
             drawer_tab: DrawerTab::Activity,
+            tabs: Vec::new(),
+            active_tab: 0,
         }
     }
 }

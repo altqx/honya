@@ -747,6 +747,17 @@ impl LexiconScreen {
         Some(form.into_draft())
     }
 
+    /// The live filter, shared with whatever draws the list. The window kept
+    /// its own, so `L_SEARCH` narrowed a list nothing there was reading.
+    pub fn filter(&self) -> &str {
+        &self.filter
+    }
+
+    pub fn set_filter(&mut self, query: String) {
+        self.filter_cursor = query.len();
+        self.filter = query;
+    }
+
     pub fn discard_edit(&mut self) {
         self.editing = None;
     }

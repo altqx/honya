@@ -221,6 +221,9 @@ pub enum Action {
     /// Run one of the active screen's declared commands by id — what the
     /// palette carries, since a screen command is resolved, not precomputed.
     RunScreenCommand { id: u16 },
+    /// Show the Lexicon narrowed to one entry. What a palette row for a
+    /// character or a term does, since finding it is the whole point.
+    OpenLexiconEntry { jp: String },
     ReaderCopy {
         text: String,
         lines: usize,
@@ -2755,6 +2758,39 @@ impl App {
             }
         }
 
+        if let Some(active) = self.active.as_ref() {
+            let ws = &active.workspace;
+            for c in crate::workspace::characters::load(ws) {
+                extra.push(PaletteItem::new(
+                    format!("辞 {}  {}", c.jp_name, c.translated_name),
+                    Action::OpenLexiconEntry { jp: c.jp_name },
+                ));
+            }
+            for t in crate::workspace::glossary::load(ws) {
+                extra.push(PaletteItem::new(
+                    format!("辞 {}  {}", t.jp_term, t.translated_term),
+                    Action::OpenLexiconEntry { jp: t.jp_term },
+                ));
+            }
+            for issue in crate::app::qa::collect(active).issues {
+                let Some(chapter) = issue.chapter else { continue };
+                let detail = if issue.detail.trim().is_empty() {
+                    issue.title.trim()
+                } else {
+                    issue.detail.trim()
+                };
+                extra.push(PaletteItem::new(
+                    format!("⚑ c{chapter:03}  {detail}"),
+                    match issue.kind {
+                        crate::app::qa::QaKind::ReviewChunk { chunk } => {
+                            Action::OpenChapterAtChunk { chapter, chunk }
+                        }
+                        _ => Action::OpenChapter { chapter },
+                    },
+                ));
+            }
+        }
+
         for s in &self.refine_sessions {
             let title = s.title.trim();
             extra.push(PaletteItem::new(
@@ -3485,6 +3521,10 @@ impl App {
             }
             Action::OpenAuthUrl => self.open_auth_url(),
             Action::CopyAuthCode => self.copy_auth_code(),
+            Action::OpenLexiconEntry { jp } => {
+                self.lexicon.set_filter(jp);
+                self.screen = Screen::Lexicon;
+            }
             Action::RunScreenCommand { id } => {
                 let next = self.run_screen_action(id);
                 self.apply(next);

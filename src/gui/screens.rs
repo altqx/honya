@@ -51,7 +51,6 @@ pub struct GuiNav {
     pub project_sel: Option<(u32, u32)>,
     pub project_vol: Option<u32>,
     pub lexicon_tab: usize,
-    pub lexicon_filter: String,
     /// Set by the File menu; the Shelf rescans + clears it on its next frame.
     pub rescan_requested: bool,
     /// Draft text in the Refine input box (App's RefineScreen input is TUI-only).
@@ -1382,11 +1381,19 @@ fn lexicon(
             }
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.add(
-                egui::TextEdit::singleline(&mut nav.lexicon_filter)
-                    .hint_text("Filter…")
-                    .desired_width(180.0),
-            );
+            // The screen's own filter, not a second copy: `L_SEARCH` and a
+            // palette row both narrow this list now.
+            let mut filter = app.lexicon.filter().to_string();
+            if ui
+                .add(
+                    egui::TextEdit::singleline(&mut filter)
+                        .hint_text("Filter…")
+                        .desired_width(180.0),
+                )
+                .changed()
+            {
+                app.lexicon.set_filter(filter);
+            }
             // The GUI could not create either of these at all.
             if nav.lexicon_tab < 2 && ui.button("＋ New").clicked() {
                 nav.lexicon_form = Some(super::lexicon_form::LexiconForm::new(
@@ -1402,7 +1409,7 @@ fn lexicon(
     });
     ui.add_space(8.0);
 
-    let filter = nav.lexicon_filter.to_lowercase();
+    let filter = app.lexicon.filter().to_lowercase();
     match nav.lexicon_tab {
         0 => {
             let terms: Vec<_> = nav

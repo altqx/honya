@@ -18,10 +18,11 @@ use crate::app::{App, Screen};
 use crate::app::reader::ReaderScreen;
 
 /// What a tab is showing. Two tabs with the same `TabId` are the same tab.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TabId {
     /// One of the views there is only ever one of.
-    View(Screen),
+    View(#[serde(with = "screen_name")] Screen),
     Chapter { vol: u32, ch: u32 },
     Session(String),
 }
@@ -47,6 +48,55 @@ pub struct Tab {
 pub struct Tabs {
     tabs: Vec<Tab>,
     active: usize,
+}
+
+/// `Screen` is `ui::chrome`'s vocabulary and its variant *order* is
+/// load-bearing there, so a saved layout names the view rather than numbering
+/// it — renumbering must not reopen the wrong tab.
+mod screen_name {
+    use super::Screen;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(s: &Screen, ser: S) -> Result<S::Ok, S::Error> {
+        ser.serialize_str(crate::app::keys::screen_slug(*s))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<Screen, D::Error> {
+        let name = String::deserialize(de)?;
+        [
+            Screen::Shelf,
+            Screen::Project,
+            Screen::Translate,
+            Screen::Reader,
+            Screen::Lexicon,
+            Screen::Refine,
+        ]
+        .into_iter()
+        .find(|s| crate::app::keys::screen_slug(*s) == name)
+        .ok_or_else(|| serde::de::Error::custom(format!("unknown view {name}")))
+    }
+}
+
+impl Tabs {
+    /// What was open, for the next run. A tab's live state is not saved — a
+    /// scroll position is worth keeping across a switch, not across a restart.
+    pub fn open_ids(&self) -> Vec<TabId> {
+        self.tabs.iter().map(|t| t.id.clone()).collect()
+    }
+
+    /// Reopen what was open, without applying any of it: the first frame's
+    /// reconcile puts the app on whichever one is forward.
+    pub fn restore(&mut self, ids: Vec<TabId>, active: usize, app: &App) {
+        self.tabs = ids
+            .into_iter()
+            .map(|id| Tab {
+                title: title_for(&id, app),
+                id,
+                state: None,
+            })
+            .collect();
+        self.active = active.min(self.tabs.len().saturating_sub(1));
+    }
 }
 
 impl Tabs {
@@ -314,5 +364,47 @@ mod tests {
     fn a_long_conversation_name_is_cut_not_wrapped() {
         assert_eq!(truncate("short", 18), "short");
         assert_eq!(truncate(&"x".repeat(30), 5), "xxxxx…");
+    }
+
+    #[test]
+    fn what_was_open_comes_back() {
+        let mut app = app();
+        let mut tabs = Tabs::default();
+        tabs.focus(TabId::View(Screen::Project), "構図".into(), &mut app);
+        tabs.focus(TabId::Chapter { vol: 1, ch: 12 }, "読".into(), &mut app);
+        let ids = tabs.open_ids();
+        let active = tabs.active_index();
+
+        let mut later = Tabs::default();
+        later.restore(ids.clone(), active, &app);
+        assert_eq!(later.open_ids(), ids);
+        assert_eq!(later.active_index(), active);
+    }
+
+    #[test]
+    fn a_view_is_saved_by_name_not_by_number() {
+        // `Screen`'s variant order is load-bearing elsewhere; renumbering it
+        // must not reopen a different tab.
+        let json = serde_json::to_string(&TabId::View(Screen::Lexicon)).unwrap();
+        assert!(json.contains("lexicon"), "{json}");
+        let back: TabId = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, TabId::View(Screen::Lexicon));
+    }
+
+    #[test]
+    fn a_layout_naming_a_view_that_no_longer_exists_is_not_fatal() {
+        assert!(serde_json::from_str::<TabId>(r#"{"view":"holodeck"}"#).is_err());
+        // ...and a list containing one simply loses that entry rather than
+        // throwing the whole layout away.
+        let ids: Vec<TabId> = serde_json::from_str(r#"[{"view":"shelf"}]"#).unwrap();
+        assert_eq!(ids.len(), 1);
+    }
+
+    #[test]
+    fn restoring_more_tabs_than_the_active_index_is_safe() {
+        let app = app();
+        let mut tabs = Tabs::default();
+        tabs.restore(vec![TabId::View(Screen::Shelf)], 9, &app);
+        assert_eq!(tabs.active_index(), 0);
     }
 }

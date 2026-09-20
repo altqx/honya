@@ -154,6 +154,15 @@ impl eframe::App for GuiApp {
         if !self.fonts_ready {
             fonts::install(ctx);
             self.fonts_ready = true;
+            // Reopen what was open. Nothing is applied here: the strip's own
+            // reconcile puts the app on whichever tab is forward.
+            let (ids, active) = (
+                std::mem::take(&mut self.layout.tabs),
+                self.layout.active_tab,
+            );
+            if !ids.is_empty() {
+                self.tabs.restore(ids, active, &self.app);
+            }
         }
 
         while let Some(ev) = self.events.lock().ok().and_then(|mut q| q.pop_front()) {
@@ -423,6 +432,8 @@ impl eframe::App for GuiApp {
     }
 
     fn on_exit(&mut self) {
+        self.layout.tabs = self.tabs.open_ids();
+        self.layout.active_tab = self.tabs.active_index();
         self.layout.save();
         self.app.running = false;
     }
