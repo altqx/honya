@@ -500,11 +500,31 @@ impl Theme {
     }
 }
 
+/// The cached terminal colour depth. `u8::MAX` means "not detected yet"; every
+/// other value is a [`quantize::ColorDepth`] discriminant.
+static DEPTH: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(u8::MAX);
+
 /// The terminal's colour depth, detected once. Detection reads the
 /// environment, which does not change under a running process.
 pub fn terminal_depth() -> quantize::ColorDepth {
-    static DEPTH: std::sync::OnceLock<quantize::ColorDepth> = std::sync::OnceLock::new();
-    *DEPTH.get_or_init(quantize::ColorDepth::detect)
+    use std::sync::atomic::Ordering;
+    if let Some(d) = quantize::ColorDepth::from_u8(DEPTH.load(Ordering::Relaxed)) {
+        return d;
+    }
+    let detected = quantize::ColorDepth::detect();
+    DEPTH.store(detected as u8, Ordering::Relaxed);
+    detected
+}
+
+/// Pin the depth, for tests that assert on colour.
+///
+/// The detected depth is cached on first use, so a test cannot steer it through
+/// the environment: under `cargo test` another test has usually triggered
+/// detection first. At [`quantize::ColorDepth::Mono`] every palette collapses
+/// to `Color::Reset`, which would make such assertions compare Reset to Reset.
+#[cfg(test)]
+pub fn pin_terminal_depth(depth: quantize::ColorDepth) {
+    DEPTH.store(depth as u8, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Every theme in picker order: lights, native dark + adaptive, then schemes.

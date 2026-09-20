@@ -22,6 +22,7 @@ use ratatui::style::Color;
 
 /// What the terminal can actually display.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+#[repr(u8)]
 pub enum ColorDepth {
     /// No color at all: `NO_COLOR`, or `TERM=dumb`.
     Mono,
@@ -75,6 +76,18 @@ impl ColorDepth {
             return ColorDepth::Ansi16;
         }
         ColorDepth::Ansi16
+    }
+
+    /// Round-trip for the cached depth. Only values this enum produced are ever
+    /// passed back in, so an unknown byte means the cache was never set.
+    pub(crate) fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(ColorDepth::Mono),
+            1 => Some(ColorDepth::Ansi16),
+            2 => Some(ColorDepth::Indexed256),
+            3 => Some(ColorDepth::TrueColor),
+            _ => None,
+        }
     }
 
     fn parse(v: &str) -> Option<Self> {
