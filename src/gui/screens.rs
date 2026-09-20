@@ -909,6 +909,24 @@ fn translate(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
         app.apply(action);
     }
 
+    // What a non-default service tier trades away. The window never said, so a
+    // run on Flex looked identical to one on the standard tier.
+    if let Some(tier) = app.cfg.service_tier {
+        let (label, color) = match tier {
+            crate::model::ServiceTier::Flex => ("Flex", pal.status_warn),
+            crate::model::ServiceTier::Priority => ("Priority", pal.accent),
+        };
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(format!("⚑ {label} tier")).color(color).small().strong());
+            ui.label(
+                RichText::new(crate::model::ServiceTier::desc(Some(tier)))
+                    .color(pal.ink_faint)
+                    .small(),
+            );
+        });
+        ui.add_space(4.0);
+    }
+
     // Chapter + progress strip — always same height (progress bar always shown).
     card_frame(pal).show(ui, |ui| {
         let ch_label = match chapter {
@@ -989,16 +1007,24 @@ fn translate(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
         card_fill(&mut cols[0], pal, |ui| {
             ui.label(RichText::new("Agents").color(pal.ink_soft).strong());
             ui.add_space(4.0);
+            // A pipeline, not three unrelated rows: the chunk goes through
+            // these in order, and which one has it is the thing to see at a
+            // glance. The window drew them flat.
             let roles = ["◆ Orchestrator", "▲ Translator", "■ Reviewer"];
             for (i, (role, line)) in roles.iter().zip(agent_lines.iter()).enumerate() {
                 let active = i == active_agent && (running || paused);
+                let done = (running || paused) && i < active_agent;
                 let color = if active {
                     pal.status_working
+                } else if done {
+                    pal.status_done
                 } else {
                     pal.ink_soft
                 };
                 let prefix = if active {
                     theme::spinner_frame(app.frame)
+                } else if done {
+                    "✓"
                 } else {
                     "·"
                 };
@@ -1012,6 +1038,18 @@ fn translate(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
                         ui.label(RichText::new(line).color(pal.ink));
                     });
                 });
+                // The flow between them, so the order reads as an order.
+                if i + 1 < roles.len() {
+                    ui.horizontal(|ui| {
+                        ui.add_space(6.0);
+                        ui.label(
+                            RichText::new("│")
+                                .color(if done { pal.status_done } else { pal.rule })
+                                .monospace()
+                                .small(),
+                        );
+                    });
+                }
                 ui.add_space(4.0);
             }
 

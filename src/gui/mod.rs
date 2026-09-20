@@ -132,13 +132,15 @@ impl GuiApp {
     /// The theme to paint with right now: the picker's live selection while it
     /// is open (preview), else the saved config theme.
     fn effective_theme(&self) -> ThemeId {
-        if let Overlay::Theme(st) = &self.app.overlay {
-            ALL_THEMES
+        match &self.app.overlay {
+            Overlay::Theme(st) => ALL_THEMES
                 .get(st.sel)
                 .copied()
-                .unwrap_or(self.app.cfg.theme)
-        } else {
-            self.app.cfg.theme
+                .unwrap_or(self.app.cfg.theme),
+            // The Appearance tab previews too, now that it commits with the
+            // form rather than on the click.
+            Overlay::Settings(st) => st.theme,
+            _ => self.app.cfg.theme,
         }
     }
 }

@@ -91,7 +91,7 @@ pub fn render(
                     SettingsTab::Agents => agents_tab(ui, st, pal),
                     SettingsTab::Providers => providers_tab(ui, st, pal),
                     SettingsTab::Pipeline => pipeline_tab(ui, st, pal),
-                    SettingsTab::Appearance => appearance_tab(ui, st, saved_theme, pal, actions),
+                    SettingsTab::Appearance => appearance_tab(ui, st, saved_theme, pal),
                     SettingsTab::Account => account_tab(ui, st, codex_signed_in, pal, actions),
                 });
 
@@ -415,7 +415,6 @@ fn appearance_tab(
     st: &mut SettingsState,
     saved_theme: ThemeId,
     pal: &GuiPalette,
-    actions: &mut Vec<Action>,
 ) {
     section(ui, pal, "Updates");
     ui.add_space(4.0);
@@ -454,14 +453,25 @@ fn appearance_tab(
 
     ui.add_space(10.0);
     section(ui, pal, "Theme");
-    hint(ui, pal, "Applied and saved immediately.");
+    // One rule for a theme change, whichever surface makes it: the choice
+    // previews and the form commits it. This tab used to save on the click,
+    // so the same operation was final in one place and cancellable in another.
+    hint(
+        ui,
+        pal,
+        if st.theme == saved_theme {
+            "Previewed as you pick; saved with the form."
+        } else {
+            "Previewing — Save settings to keep it, Cancel to revert."
+        },
+    );
     ui.add_space(4.0);
     for &id in ALL_THEMES {
         ui.horizontal(|ui| {
             theme_swatch(ui, id);
             let label = format!("{}  ·  {}", id.label(), id.tone());
-            if ui.selectable_label(saved_theme == id, label).clicked() {
-                actions.push(Action::SaveTheme(id));
+            if ui.selectable_label(st.theme == id, label).clicked() {
+                st.theme = id;
             }
         });
     }
