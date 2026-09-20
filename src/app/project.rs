@@ -122,6 +122,28 @@ impl ProjectScreen {
         }
     }
 
+    /// Whether this chapter is in the marked set — what `P_QUEUE` and
+    /// `P_DELETE` act on when it is not empty.
+    pub fn is_marked(&self, vol: u32, ch: u32) -> bool {
+        self.selected.contains(&(vol, ch))
+    }
+
+    pub fn marked_count(&self) -> usize {
+        self.selected.len()
+    }
+
+    /// Mark or unmark one chapter. The pointer's equivalent of `Space`.
+    pub fn toggle_mark(&mut self, vol: u32, ch: u32) {
+        let id = (vol, ch);
+        if !self.selected.insert(id) {
+            self.selected.remove(&id);
+        }
+    }
+
+    pub fn clear_marks(&mut self) {
+        self.selected.clear();
+    }
+
     fn marked_ids(&self, active: &ActiveProject) -> Vec<(u32, u32)> {
         let known: HashSet<(u32, u32)> = active
             .project
@@ -1745,3 +1767,32 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod mark_tests {
+    use super::*;
+
+    #[test]
+    fn marking_is_a_toggle_and_the_count_follows_it() {
+        let mut p = ProjectScreen::default();
+        assert_eq!(p.marked_count(), 0);
+        assert!(!p.is_marked(1, 3));
+
+        p.toggle_mark(1, 3);
+        assert!(p.is_marked(1, 3));
+        assert_eq!(p.marked_count(), 1);
+
+        // Marks span volumes, which is what batch delete needs.
+        p.toggle_mark(2, 7);
+        assert_eq!(p.marked_count(), 2);
+        assert!(p.is_marked(2, 7));
+
+        p.toggle_mark(1, 3);
+        assert!(!p.is_marked(1, 3));
+        assert_eq!(p.marked_count(), 1);
+
+        p.clear_marks();
+        assert_eq!(p.marked_count(), 0);
+    }
+}
+

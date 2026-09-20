@@ -356,7 +356,23 @@ fn project(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
     let project = active.project.clone();
     let active_vol = active.vol;
 
+    let marked = app.project.marked_count();
+    let mut clear_marks = false;
     toolbar_row(ui, |ui| {
+        // The mark set is what batch queue and batch delete act on; without a
+        // count there is nothing to tell you a later action is about to touch
+        // eight chapters rather than the one under the pointer.
+        if marked > 0 {
+            ui.label(
+                RichText::new(format!("{marked} marked"))
+                    .color(pal.accent)
+                    .small(),
+            );
+            if ui.small_button("clear").clicked() {
+                clear_marks = true;
+            }
+            ui.add_space(8.0);
+        }
         // Truncate the title into a stable max width so the toolbar never reflows.
         let title = if project.translated_title.is_empty() {
             project.title.clone()
@@ -423,6 +439,10 @@ fn project(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
     });
     ui.add_space(6.0);
 
+    if clear_marks {
+        app.project.clear_marks();
+    }
+
     let body_h = ui.available_height();
     ui.columns(2, |cols| {
         // Size each column exactly — cards must not grow past this box.
@@ -462,25 +482,41 @@ fn project(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
                                 let selected =
                                     nav.project_sel == Some((vol.number, ch.number));
                                 let (glyph, color) = status_chip(ch, pal);
-                                let label = format!(
-                                    "{}  ch {:03}  {}",
-                                    glyph,
-                                    ch.number,
-                                    if ch.title.is_empty() { "—" } else { &ch.title }
-                                );
-                                let response = ui.selectable_label(
-                                    selected,
-                                    RichText::new(label)
-                                        .color(if selected { pal.ink } else { color }),
-                                );
-                                if response.clicked() {
-                                    nav.project_sel = Some((vol.number, ch.number));
-                                    nav.project_vol = Some(vol.number);
-                                    app.apply(Action::SetActiveVolume { vol: vol.number });
-                                }
-                                if response.double_clicked() {
-                                    app.apply(Action::OpenChapter { chapter: ch.number });
-                                }
+                                ui.horizontal(|ui| {
+                                    // The mark set is `ProjectScreen`'s, the same
+                                    // one Space toggles and the one batch queue
+                                    // and batch delete act on. The GUI had no way
+                                    // to mark anything, so those were
+                                    // single-chapter only.
+                                    let mut marked =
+                                        app.project.is_marked(vol.number, ch.number);
+                                    if ui
+                                        .checkbox(&mut marked, "")
+                                        .on_hover_text("mark for queue or delete")
+                                        .changed()
+                                    {
+                                        app.project.toggle_mark(vol.number, ch.number);
+                                    }
+                                    let label = format!(
+                                        "{}  ch {:03}  {}",
+                                        glyph,
+                                        ch.number,
+                                        if ch.title.is_empty() { "—" } else { &ch.title }
+                                    );
+                                    let response = ui.selectable_label(
+                                        selected,
+                                        RichText::new(label)
+                                            .color(if selected { pal.ink } else { color }),
+                                    );
+                                    if response.clicked() {
+                                        nav.project_sel = Some((vol.number, ch.number));
+                                        nav.project_vol = Some(vol.number);
+                                        app.apply(Action::SetActiveVolume { vol: vol.number });
+                                    }
+                                    if response.double_clicked() {
+                                        app.apply(Action::OpenChapter { chapter: ch.number });
+                                    }
+                                });
                             });
                         }
                     });
