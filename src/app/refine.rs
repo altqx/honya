@@ -22,7 +22,7 @@ use super::Action;
 use super::overlay::Overlay;
 // `Block` here is ratatui's panel; the transcript's is `blocks::Block`.
 use super::refine_blocks::{self as blocks, ToolStatus};
-pub use super::refine_blocks::{TurnRole, display_blocks};
+pub use super::refine_blocks::{BlockKind, ToolStatus as BlockToolStatus, TurnRole, display_blocks};
 
 /// Structured `@` mention used as both context and default tool scope.
 #[derive(Debug, Clone, PartialEq, Eq)]

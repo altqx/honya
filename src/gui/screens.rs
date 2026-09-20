@@ -6,7 +6,7 @@ use egui::{
 };
 
 use crate::app::overlay::Overlay;
-use crate::app::refine::TurnRole;
+use crate::app::refine::{BlockKind, BlockToolStatus as ToolStatus};
 use crate::app::{Action, App, Screen};
 use crate::model::{Chapter, ChapterKind, ChapterStatus, PlanStepStatus, Project, Volume};
 use crate::theme;
@@ -53,6 +53,9 @@ pub struct GuiNav {
     md_translated: super::markdown::MarkdownCache,
     md_style: super::markdown::MarkdownCache,
     md_preview: super::markdown::MarkdownCache,
+    /// One per transcript block. A single cache would thrash between them, and
+    /// a streamed delta would re-parse every message above it.
+    md_blocks: Vec<super::markdown::MarkdownCache>,
     /// Avoid re-parsing GLOSSARY/CHARACTERS/STYLE every egui frame.
     lexicon_cache: LexiconCache,
 }
@@ -69,6 +72,16 @@ fn file_mtime(path: &std::path::Path) -> Option<std::time::SystemTime> {
     std::fs::metadata(path)
         .and_then(|m| m.modified())
         .ok()
+}
+
+impl GuiNav {
+    /// The cache for transcript block `i`, grown on demand.
+    fn md_block(&mut self, i: usize) -> &mut super::markdown::MarkdownCache {
+        if self.md_blocks.len() <= i {
+            self.md_blocks.resize_with(i + 1, Default::default);
+        }
+        &mut self.md_blocks[i]
+    }
 }
 
 impl LexiconCache {
@@ -1277,12 +1290,8 @@ fn refine(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
     let sessions = app.refine_sessions.clone();
     // The TUI transcript is blocks with fold state; the GUI draws roles, so it
     // takes the block's role and whatever the block would say when open.
-    let turns: Vec<(TurnRole, String, bool)> = app
-        .refine
-        .blocks
-        .iter()
-        .map(|b| (b.role(), b.text(), b.streaming))
-        .collect();
+    let block_count = app.refine.blocks.len();
+    let th = app.theme.clone();
 
     toolbar_row(ui, |ui| {
         ui.heading(RichText::new("磨  Refine").color(pal.ink));
@@ -1369,7 +1378,7 @@ fn refine(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
             ui.allocate_ui(egui::vec2(transcript_w, transcript_h), |ui| {
                 card_fill(ui, pal, |ui| {
                     scroll_y("refine_chat").stick_to_bottom(true).show(ui, |ui| {
-                        if turns.is_empty() {
+                        if block_count == 0 {
                             ui.label(
                                 RichText::new(
                                     "Steer the Refine agent: “soften ch 3's dialogue”, “fix the honorifics in vol 2”…",
@@ -1378,37 +1387,162 @@ fn refine(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
                                 .italics(),
                             );
                         }
-                        for (role, text, streaming) in &turns {
-                            match role {
-                                TurnRole::User => {
+                        // Blocks, not flattened roles: a tool call keeps its
+                        // status and its detail behind a fold, a sub-agent gets
+                        // a row of its own, and a notice reads as a notice.
+                        for i in 0..block_count {
+                            let Some(b) = app.refine.blocks.get(i) else {
+                                break;
+                            };
+                            let open = b.open;
+                            let collapsible = b.collapsible();
+                            let role = b.role();
+                            let body = b.body.clone();
+                            let detail = b.detail.clone();
+                            let streaming = b.streaming;
+                            let kind = b.kind.clone();
+                            let mut toggle = false;
+
+                            ui.push_id(("block", b.id), |ui| match &kind {
+                                BlockKind::User => {
                                     ui.with_layout(Layout::top_down(Align::Max), |ui| {
                                         inset_frame(pal).show(ui, |ui| {
-                                            ui.label(RichText::new(text).color(pal.ink));
+                                            ui.label(RichText::new(&body).color(pal.ink));
                                         });
                                     });
                                 }
-                                TurnRole::Assistant => {
-                                    ui.label(RichText::new(text).color(pal.ink));
-                                    if *streaming {
+                                BlockKind::Assistant => {
+                                    super::markdown::show(
+                                        ui,
+                                        nav.md_block(i),
+                                        &body,
+                                        &th,
+                                        pal.ink,
+                                    );
+                                    if streaming {
                                         ui.label(
                                             RichText::new(theme::spinner_frame(app.frame))
                                                 .color(pal.status_working),
                                         );
                                     }
                                 }
-                                TurnRole::Reasoning => {
-                                    ui.label(
-                                        RichText::new(text).color(pal.ink_faint).italics().small(),
-                                    );
+                                BlockKind::Reasoning => {
+                                    let head = if open {
+                                        "▾ 💭 thinking".to_string()
+                                    } else {
+                                        format!(
+                                            "▸ 💭 thinking — {} line(s)",
+                                            body.lines().count().max(1)
+                                        )
+                                    };
+                                    if ui
+                                        .add(
+                                            egui::Label::new(
+                                                RichText::new(head)
+                                                    .color(pal.ink_faint)
+                                                    .italics()
+                                                    .small(),
+                                            )
+                                            .sense(egui::Sense::click()),
+                                        )
+                                        .clicked()
+                                    {
+                                        toggle = true;
+                                    }
+                                    if open {
+                                        ui.label(
+                                            RichText::new(&body)
+                                                .color(pal.ink_faint)
+                                                .italics()
+                                                .small(),
+                                        );
+                                    }
                                 }
-                                TurnRole::Tool => {
+                                BlockKind::Tool { name, status, .. } => {
+                                    let (mark, color) = match status {
+                                        ToolStatus::Running => ("·", pal.ink_soft),
+                                        ToolStatus::Ok => ("✓", pal.status_done),
+                                        ToolStatus::Failed => ("!", pal.status_failed),
+                                    };
+                                    let caret = if !collapsible {
+                                        " "
+                                    } else if open {
+                                        "▾"
+                                    } else {
+                                        "▸"
+                                    };
+                                    if ui
+                                        .add(
+                                            egui::Label::new(
+                                                RichText::new(format!(
+                                                    "{caret} {mark} {name}  {}",
+                                                    body.trim()
+                                                ))
+                                                .color(color)
+                                                .monospace()
+                                                .small(),
+                                            )
+                                            .sense(egui::Sense::click())
+                                            .truncate(),
+                                        )
+                                        .clicked()
+                                    {
+                                        toggle = true;
+                                    }
+                                    if open && !detail.trim().is_empty() {
+                                        ui.horizontal(|ui| {
+                                            ui.add_space(14.0);
+                                            ui.label(
+                                                RichText::new(detail.trim())
+                                                    .color(pal.ink_faint)
+                                                    .monospace()
+                                                    .small(),
+                                            );
+                                        });
+                                    }
+                                }
+                                BlockKind::Subagent { .. } => {
+                                    let caret = if open { "▾" } else { "▸" };
+                                    if ui
+                                        .add(
+                                            egui::Label::new(
+                                                RichText::new(format!(
+                                                    "{caret} ◇ {}",
+                                                    body.trim()
+                                                ))
+                                                .color(pal.accent)
+                                                .small(),
+                                            )
+                                            .sense(egui::Sense::click()),
+                                        )
+                                        .on_hover_text("its own conversation")
+                                        .clicked()
+                                    {
+                                        toggle = true;
+                                    }
+                                    if open && !detail.trim().is_empty() {
+                                        ui.horizontal(|ui| {
+                                            ui.add_space(14.0);
+                                            ui.label(
+                                                RichText::new(detail.trim())
+                                                    .color(pal.ink_soft)
+                                                    .monospace()
+                                                    .small(),
+                                            );
+                                        });
+                                    }
+                                }
+                                BlockKind::Notice => {
                                     ui.label(
-                                        RichText::new(format!("⚒ {text}"))
-                                            .color(pal.status_image)
-                                            .monospace()
+                                        RichText::new(body.trim())
+                                            .color(pal.ink_faint)
                                             .small(),
                                     );
                                 }
+                            });
+                            let _ = role;
+                            if toggle && let Some(b) = app.refine.blocks.get_mut(i) {
+                                b.toggle();
                             }
                             ui.add_space(6.0);
                         }
@@ -1558,27 +1692,36 @@ fn refine(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
     // Send — it used to double as "Answer" and quietly steal the message.
     ui.horizontal(|ui| {
         let send_w = 90.0;
-        ui.add_sized(
+        let field = ui.add_sized(
             [ui.available_width() - send_w - 8.0, 80.0],
             TextEdit::multiline(&mut nav.refine_input)
-                .hint_text("Message the Refine agent…  (@ch3, @vol2 to scope)")
+                .hint_text("Message the Refine agent…  (@ch3, @vol2 to scope · ⇧↵ for a new line)")
                 .desired_rows(3),
         );
+        // Enter sends, Shift-Enter breaks the line. Send used to be
+        // button-only: the field had no key handling at all, so Enter simply
+        // inserted a newline and there was no way to send from the keyboard.
+        let mut send = field.lost_focus()
+            && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
         ui.vertical(|ui| {
             let can_send = !nav.refine_input.trim().is_empty();
             if in_flight {
                 if ui.add_sized([send_w, 38.0], egui::Button::new("Cancel")).clicked() {
                     app.apply(Action::RefineCancel);
                 }
+                send = false;
             } else if ui
                 .add_enabled_ui(can_send, |ui| primary_button(ui, pal, "Send"))
                 .inner
                 .clicked()
-                && can_send
             {
+                send = true;
+            }
+            if send && can_send {
                 let text = nav.refine_input.trim().to_string();
                 nav.refine_input.clear();
                 app.apply(Action::RefineSubmit { text });
+                field.request_focus();
             }
         });
     });

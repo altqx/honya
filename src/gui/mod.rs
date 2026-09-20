@@ -251,6 +251,20 @@ impl eframe::App for GuiApp {
             }
         });
 
+        // A file dropped on the window opens the wizard on it. Importing used
+        // to mean putting the file in the shelf directory from outside the app
+        // and pressing Rescan — the empty state said so in as many words.
+        let dropped: Vec<std::path::PathBuf> = ctx.input(|i| {
+            i.raw
+                .dropped_files
+                .iter()
+                .filter_map(|f| f.path.clone())
+                .collect()
+        });
+        if !dropped.is_empty() {
+            self.open_import_for(dropped);
+        }
+
         if let Some(id) = screen_command {
             let action = self.app.run_screen_action(id);
             self.dispatch(action);
@@ -630,6 +644,32 @@ impl GuiApp {
                 self.layout.toggle_drawer(shell::DrawerTab::Activity);
             }
         });
+    }
+
+    /// Open the import wizard on the files that were dropped, ignoring
+    /// anything honya cannot read.
+    fn open_import_for(&mut self, paths: Vec<std::path::PathBuf>) {
+        let files: Vec<(std::path::PathBuf, u64)> = paths
+            .into_iter()
+            .filter(|p| crate::document_import::is_supported_import_path(p))
+            .map(|p| {
+                let size = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+                (p, size)
+            })
+            .collect();
+        if files.is_empty() {
+            self.app.apply(Action::Notify {
+                level: crate::model::LogLevel::Warn,
+                msg: "nothing there honya can import — EPUB, PDF, HTML, Markdown, text"
+                    .to_string(),
+            });
+            return;
+        }
+        let projects = self.app.projects.clone();
+        let language = self.app.cfg.preferred_language;
+        self.app.apply(Action::show_overlay(Overlay::import(
+            files, &projects, language,
+        )));
     }
 
     /// What the app is showing right now, as a tab identity.

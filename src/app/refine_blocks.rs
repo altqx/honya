@@ -204,22 +204,6 @@ impl Block {
         }
     }
 
-    /// What this block says, without the role heading a clipboard copy wants —
-    /// for a caller that draws the role itself.
-    pub fn text(&self) -> String {
-        let head = match &self.kind {
-            BlockKind::Tool { name, .. } => format!("{name} — "),
-            BlockKind::Subagent { .. } => "sub-agent — ".to_string(),
-            _ => String::new(),
-        };
-        let mut out = format!("{head}{}", self.body.trim_end());
-        if !self.detail.trim().is_empty() {
-            out.push('\n');
-            out.push_str(self.detail.trim_end());
-        }
-        out
-    }
-
     /// What ⌃B puts on the clipboard: the whole block, expanded, whatever the
     /// fold happens to be showing.
     pub fn to_markdown(&self) -> String {
