@@ -17,7 +17,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
 use super::ctx::Ui;
-use super::style::{self, State};
+use super::style::State;
 use super::tokens::SCROLLBAR_COLS;
 use super::zones::{ZoneId, ZoneKind};
 use crate::ui::glyphs;

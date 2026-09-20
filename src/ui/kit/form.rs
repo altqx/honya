@@ -16,11 +16,11 @@ use ratatui::text::{Line, Span};
 
 use super::ctx::Ui;
 use super::list::{self, ListState};
-use super::style::{self, State};
+use super::style::State;
 use super::zones::{ZoneId, ZoneKind};
 use crate::ui::glyphs;
 use crate::ui::input::caret_halves;
-use crate::ui::text::{col_width, pad_to_cols, truncate_cols};
+use crate::ui::text::{pad_to_cols, truncate_cols};
 
 /// Zone-index bases for a field's own sub-controls, kept far apart so a form
 /// with a realistic number of fields cannot have one collide with another.

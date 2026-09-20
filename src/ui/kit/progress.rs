@@ -14,7 +14,6 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use super::ctx::Ui;
-use super::style;
 use super::zones::ZoneId;
 use crate::ui::glyphs;
 use crate::ui::text::{col_width, truncate_cols};

@@ -16,7 +16,7 @@ use ratatui::text::{Line, Span};
 
 use super::ctx::Ui;
 use super::list::{self, ListState};
-use super::zones::{ZoneId, ZoneKind};
+use super::zones::ZoneKind;
 use crate::ui::glyphs;
 use crate::ui::input::caret_halves;
 use crate::ui::text::truncate_cols;

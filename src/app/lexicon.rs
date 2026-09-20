@@ -7,11 +7,13 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 use crate::model::{AltName, Character, GlossaryTerm, TermPolicy};
 use crate::theme::{self, Theme};
 use crate::ui::input::{self, EditOpts, Edited};
+use crate::ui::kit::list::ListState;
+use crate::ui::kit::table::{self, Column, Width};
 use crate::ui::mouse::{MouseGesture, MouseInput};
 use crate::ui::text::{col_width, pad_to_cols, thai_display_safe, truncate_cols};
 use crate::workspace::Workspace;
@@ -193,6 +195,9 @@ pub struct LexiconScreen {
     style_cache: crate::ui::markdown::RenderCache,
     /// Vertical scroll offset of the Style tab (clamped to content in render).
     style_scroll: u16,
+    /// Sort order per tabular section, indexed by `self.sub`. Style has no
+    /// table, so its slot is never read.
+    sort: [table::Sort; 2],
 }
 
 /// Action ids for this screen's table. Stable within the screen: they are also
@@ -217,6 +222,7 @@ impl LexiconScreen {
             screen_area: Rect::default(),
             style_cache: crate::ui::markdown::RenderCache::default(),
             style_scroll: 0,
+            sort: [table::Sort::default(); 2],
         }
     }
 
@@ -237,7 +243,7 @@ impl LexiconScreen {
 
     fn glossary(&self, ws: &Workspace) -> Vec<GlossaryTerm> {
         let all = crate::workspace::glossary::load(ws);
-        if self.filter.is_empty() {
+        let mut rows = if self.filter.is_empty() {
             all
         } else {
             let q = self.filter.to_lowercase();
@@ -262,19 +268,23 @@ impl LexiconScreen {
                             .contains(&q)
                 })
                 .collect()
-        }
+        };
+        sort_rows(&mut rows, self.sort[SUB_GLOSSARY as usize], glossary_cells);
+        rows
     }
 
     fn characters(&self, ws: &Workspace) -> Vec<Character> {
         let all = crate::workspace::characters::load(ws);
-        if self.filter.is_empty() {
+        let mut rows = if self.filter.is_empty() {
             all
         } else {
             let q = self.filter.to_lowercase();
             all.into_iter()
                 .filter(|c| character_matches_filter(c, &q))
                 .collect()
-        }
+        };
+        sort_rows(&mut rows, self.sort[SUB_CHARACTERS as usize], character_cells);
+        rows
     }
 
     pub fn handle_key(&mut self, key: KeyEvent, ws: Option<&Workspace>) -> Action {
@@ -402,6 +412,16 @@ impl LexiconScreen {
                         self.sub = next;
                         self.list.select(Some(0));
                         self.style_scroll = 0;
+                    }
+                    return Action::None;
+                }
+                // A header sorts by its column; clicking the column already
+                // sorted flips the direction.
+                if let Some(col) = zone.and_then(table::header_column) {
+                    let slot = self.sub as usize;
+                    if let Some(sort) = self.sort.get_mut(slot) {
+                        *sort = sort.toggled(col);
+                        self.list.select(Some(0));
                     }
                     return Action::None;
                 }
@@ -623,13 +643,10 @@ impl LexiconScreen {
         };
         let acts = self.actions(ws);
         self.render_header(ui, header, ws, &acts);
-        let theme: &Theme = ui.theme;
-        let f: &mut Frame = ui.frame;
-        self.render_table(f, body, ws, theme);
-        self.register_rows(ui, ws);
+        self.render_table(ui, body, ws);
 
         // The selected row's own verbs, over the right end of the row the table
-        // just registered.
+        // registered while drawing it.
         if let Some(sel) = self.list.selected()
             && let Some(rect) = ui.zones.rect_of(crate::ui::kit::ZoneId::row(sel))
         {
@@ -640,37 +657,6 @@ impl LexiconScreen {
         let f: &mut Frame = ui.frame;
         if self.editing.is_some() {
             self.render_edit(f, area, theme);
-        }
-    }
-
-    /// Register the data rows the table just drew.
-    ///
-    /// The table is still a ratatui `List` rather than a kit component, so this
-    /// is where its row geometry is written down — once, and read back by the
-    /// click handler and the row buttons, instead of being re-derived by each.
-    fn register_rows(&mut self, ui: &mut crate::ui::kit::Ui, ws: Option<&Workspace>) {
-        if ws.is_none() || self.sub == SUB_STYLE {
-            return;
-        }
-        let area = self.table_area;
-        // Row 0 of the table is the column header; data starts one below.
-        let visible = area.height.saturating_sub(1);
-        if visible == 0 || area.width == 0 {
-            return;
-        }
-        let offset = self.list.offset();
-        let len = self.current_len(ws);
-        let cols = area.width.saturating_sub(crate::ui::kit::tokens::SCROLLBAR_COLS);
-        for i in offset..len.min(offset + visible as usize) {
-            ui.zones.push(
-                Rect {
-                    x: area.x,
-                    y: area.y + 1 + (i - offset) as u16,
-                    width: cols,
-                    height: 1,
-                },
-                crate::ui::kit::ZoneId::row(i),
-            );
         }
     }
 
@@ -767,212 +753,109 @@ impl LexiconScreen {
         }
     }
 
-    fn render_table(&mut self, f: &mut Frame, area: Rect, ws: Option<&Workspace>, theme: &Theme) {
+    fn render_table(&mut self, ui: &mut crate::ui::kit::Ui, area: Rect, ws: Option<&Workspace>) {
+        let theme: &Theme = ui.theme;
+        let panel = theme.bg_panel;
         let block = Block::default()
             .borders(Borders::ALL)
             .border_set(theme::hairline_set())
             .border_style(Style::default().fg(theme.rule))
-            .style(Style::default().bg(theme.bg_panel));
+            .style(Style::default().bg(panel));
         let inner = block.inner(area);
-        f.render_widget(block, area);
+        ui.frame.render_widget(block, area);
         self.table_area = inner;
 
         let Some(ws) = ws else {
-            f.render_widget(
-                Paragraph::new(Span::styled(
-                    "  Open a project (Shelf → ↵) to edit its lexicon.",
-                    Style::default().fg(theme.ink_faint),
-                ))
-                .style(Style::default().bg(theme.bg_panel)),
-                inner,
+            let faint = Style::default().fg(ui.theme.ink_faint).bg(panel);
+            ui.text(
+                crate::ui::kit::ctx::row_at(inner, 0),
+                "  Open a project (Shelf → ↵) to edit its lexicon.",
+                faint,
             );
             return;
         };
 
-        match self.sub {
-            SUB_GLOSSARY => self.render_glossary_table(f, inner, ws, theme),
-            SUB_CHARACTERS => self.render_characters_table(f, inner, ws, theme),
-            _ => self.render_style(f, inner, ws, theme),
-        }
+        // Everything below sits on the panel, not the screen behind it.
+        ui.on_surface(panel, |ui| match self.sub {
+            SUB_GLOSSARY => self.render_glossary_table(ui, inner, ws),
+            SUB_CHARACTERS => self.render_characters_table(ui, inner, ws),
+            _ => {
+                let theme: &Theme = ui.theme;
+                let f: &mut Frame = ui.frame;
+                self.render_style(f, inner, ws, theme);
+            }
+        });
     }
 
-    fn render_glossary_table(&mut self, f: &mut Frame, area: Rect, ws: &Workspace, theme: &Theme) {
-        let terms = self.glossary(ws);
-        if self.list.selected().is_none_or(|s| s >= terms.len()) {
-            self.list.select(Some(terms.len().saturating_sub(1)));
-        }
-        let sel = self.list.selected().unwrap_or(0);
-
-        let head = Line::from(Span::styled(
-            format!(
-                "   {} {} {} {} {}  Notes",
-                pad_to_cols("JP term", 12),
-                pad_to_cols("Target term", 16),
-                pad_to_cols("Cat", 8),
-                pad_to_cols("Policy", 10),
-                "DNT"
-            ),
-            Style::default().fg(theme.ink_faint),
-        ));
-
+    /// Split a table area into its header row and its body.
+    fn table_rows(area: Rect) -> (Rect, Rect) {
         let rows = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(1), Constraint::Min(0)])
             .split(area);
-        f.render_widget(
-            Paragraph::new(head).style(Style::default().bg(theme.bg_panel)),
-            rows[0],
-        );
+        (rows[0], rows[1])
+    }
 
-        let mut items: Vec<ListItem> = Vec::new();
-        let gloss_w = area.width.saturating_sub(63).max(8) as usize;
-        for (i, t) in terms.iter().enumerate() {
-            let selected = i == sel;
-            let bar = if selected { theme::SELECT_BAR } else { ' ' };
-            let bg = if selected {
-                theme.accent_bg
-            } else {
-                theme.bg_panel
-            };
-            let policy = policy_short(crate::workspace::glossary::effective_policy(t));
-            let dnt = if t.do_not_translate.unwrap_or(false) {
-                "✓"
-            } else {
-                "·"
-            };
-            items.push(ListItem::new(Line::from(vec![
-                Span::styled(format!(" {bar} "), Style::default().fg(theme.accent).bg(bg)),
-                Span::styled(
-                    pad_to_cols(&t.jp_term, 12),
-                    Style::default().fg(theme.ink).bg(bg),
-                ),
-                Span::styled(" ", Style::default().bg(bg)),
-                Span::styled(
-                    pad_to_cols(&thai_display_safe(&t.translated_term), 16),
-                    Style::default().fg(theme.translated_text).bg(bg),
-                ),
-                Span::styled(" ", Style::default().bg(bg)),
-                Span::styled(
-                    pad_to_cols(&thai_display_safe(t.category.as_deref().unwrap_or("—")), 8),
-                    Style::default().fg(theme.ink_soft).bg(bg),
-                ),
-                Span::styled(
-                    pad_to_cols(policy, 10),
-                    Style::default().fg(theme.ink_faint).bg(bg),
-                ),
-                Span::styled(" ", Style::default().bg(bg)),
-                Span::styled(
-                    format!(" {dnt}   "),
-                    Style::default().fg(theme.ink_faint).bg(bg),
-                ),
-                Span::styled(
-                    truncate_cols(&thai_display_safe(&term_note(t)), gloss_w),
-                    Style::default().fg(theme.ink_soft).bg(bg),
-                ),
-            ])));
+    /// Draw one of the two tables: header, then body, then the empty-state line
+    /// when there is nothing to show.
+    fn render_rows<T>(
+        &mut self,
+        ui: &mut crate::ui::kit::Ui,
+        area: Rect,
+        columns: &[Column],
+        rows: &[T],
+        cells: fn(&T) -> Vec<String>,
+        empty: &str,
+    ) {
+        let sort = self.sort[self.sub as usize];
+        let (head, body) = Self::table_rows(area);
+        table::render_header(ui, head, columns, sort);
+
+        if rows.is_empty() {
+            let faint = Style::default().fg(ui.theme.ink_faint).bg(ui.surface());
+            ui.text(crate::ui::kit::ctx::row_at(body, 0), empty, faint);
+            return;
         }
-        if terms.is_empty() {
-            items.push(ListItem::new(Line::from(Span::styled(
-                "   (no terms yet — n to add)",
-                Style::default().fg(theme.ink_faint),
-            ))));
+        table::render_body(ui, body, &mut self.list, columns, rows.len(), |i| {
+            cells(&rows[i])
+        });
+    }
+
+    fn render_glossary_table(&mut self, ui: &mut crate::ui::kit::Ui, area: Rect, ws: &Workspace) {
+        let terms = self.glossary(ws);
+        if self.list.selected().is_none_or(|s| s >= terms.len()) {
+            self.list.select(Some(terms.len().saturating_sub(1)));
         }
-        f.render_stateful_widget(
-            List::new(items).style(Style::default().bg(theme.bg_panel)),
-            rows[1],
-            &mut self.list,
+        let columns = glossary_columns(ui.theme);
+        self.render_rows(
+            ui,
+            area,
+            &columns,
+            &terms,
+            glossary_cells,
+            "  (no terms yet — n to add)",
         );
-        Self::scrollbar(f, rows[1], terms.len(), self.list.offset(), theme);
     }
 
     fn render_characters_table(
         &mut self,
-        f: &mut Frame,
+        ui: &mut crate::ui::kit::Ui,
         area: Rect,
         ws: &Workspace,
-        theme: &Theme,
     ) {
         let chars = self.characters(ws);
         if self.list.selected().is_none_or(|s| s >= chars.len()) {
             self.list.select(Some(chars.len().saturating_sub(1)));
         }
-        let sel = self.list.selected().unwrap_or(0);
-        let cols = character_columns(area.width);
-
-        let mut head = format!(
-            "   {} {}",
-            pad_to_cols("JP name", cols.jp),
-            pad_to_cols("Target name", cols.translated)
+        let columns = character_table_columns(ui.theme);
+        self.render_rows(
+            ui,
+            area,
+            &columns,
+            &chars,
+            character_cells,
+            "  (no characters yet — n to add)",
         );
-        if cols.gender > 0 {
-            head.push(' ');
-            head.push_str(&pad_to_cols("Gender", cols.gender));
-        }
-        if cols.extra > 0 {
-            head.push_str("  ");
-            head.push_str(&pad_to_cols("Names / Notes", cols.extra));
-        }
-        let head = Line::from(Span::styled(head, Style::default().fg(theme.ink_faint)));
-        let rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(1), Constraint::Min(0)])
-            .split(area);
-        f.render_widget(
-            Paragraph::new(head).style(Style::default().bg(theme.bg_panel)),
-            rows[0],
-        );
-        let mut items: Vec<ListItem> = Vec::new();
-        for (i, c) in chars.iter().enumerate() {
-            let selected = i == sel;
-            let bar = if selected { theme::SELECT_BAR } else { ' ' };
-            let bg = if selected {
-                theme.accent_bg
-            } else {
-                theme.bg_panel
-            };
-            let mut spans = vec![
-                Span::styled(format!(" {bar} "), Style::default().fg(theme.accent).bg(bg)),
-                Span::styled(
-                    pad_to_cols(&c.jp_name, cols.jp),
-                    Style::default().fg(theme.ink).bg(bg),
-                ),
-                Span::styled(" ", Style::default().bg(bg)),
-                Span::styled(
-                    pad_to_cols(&thai_display_safe(&c.translated_name), cols.translated),
-                    Style::default().fg(theme.translated_text).bg(bg),
-                ),
-            ];
-            if cols.gender > 0 {
-                spans.push(Span::styled(" ", Style::default().bg(bg)));
-                spans.push(Span::styled(
-                    pad_to_cols(
-                        &thai_display_safe(c.gender.as_deref().unwrap_or("—")),
-                        cols.gender,
-                    ),
-                    Style::default().fg(theme.ink_soft).bg(bg),
-                ));
-            }
-            if cols.extra > 0 {
-                spans.push(Span::styled("  ", Style::default().bg(bg)));
-                spans.push(Span::styled(
-                    truncate_cols(&thai_display_safe(&character_extra(c)), cols.extra),
-                    Style::default().fg(theme.ink_soft).bg(bg),
-                ));
-            }
-            items.push(ListItem::new(Line::from(spans)));
-        }
-        if chars.is_empty() {
-            items.push(ListItem::new(Line::from(Span::styled(
-                "   (no characters yet — n to add)",
-                Style::default().fg(theme.ink_faint),
-            ))));
-        }
-        f.render_stateful_widget(
-            List::new(items).style(Style::default().bg(theme.bg_panel)),
-            rows[1],
-            &mut self.list,
-        );
-        Self::scrollbar(f, rows[1], chars.len(), self.list.offset(), theme);
     }
 
     fn render_style(&mut self, f: &mut Frame, area: Rect, ws: &Workspace, theme: &Theme) {
@@ -1159,58 +1042,77 @@ impl LexiconScreen {
     }
 }
 
-impl Default for LexiconScreen {
-    fn default() -> Self {
-        Self::new()
-    }
+/// The glossary's columns. Width, priority and ink are declared once here
+/// rather than re-derived by the renderer, so what happens at 60 columns is a
+/// property of this table and not of whoever wrote that particular loop.
+fn glossary_columns(theme: &Theme) -> Vec<Column> {
+    vec![
+        Column::new("JP term", Width::Flex { min: 8, weight: 2 })
+            .priority(200)
+            .tint(theme.ink),
+        Column::new("Target term", Width::Flex { min: 10, weight: 2 })
+            .priority(190)
+            .tint(theme.translated_text),
+        Column::new("Cat", Width::Fixed(8)).priority(60),
+        Column::new("Policy", Width::Fixed(10)).priority(50),
+        Column::new("DNT", Width::Fixed(3)).priority(40),
+        Column::new("Notes", Width::Flex { min: 8, weight: 3 }).priority(30),
+    ]
 }
 
-#[derive(Debug, Clone, Copy)]
-struct CharacterColumns {
-    jp: usize,
-    translated: usize,
-    gender: usize,
-    extra: usize,
-}
-
-fn character_columns(width: u16) -> CharacterColumns {
-    let total = width as usize;
-    let mut jp = if total >= 78 {
-        20
-    } else if total >= 48 {
-        14
-    } else {
-        10.min(total.saturating_sub(5).max(4))
-    };
-    let mut gender = if total >= 68 { 8 } else { 0 };
-    // Width of the leading bar + JP name + Gender — everything before the translation.
-    let base = |jp: usize, gender: usize| 3 + jp + 1 + if gender > 0 { 1 + gender } else { 0 };
-    while total < base(jp, gender) + 9 {
-        if gender > 0 {
-            gender = 0;
-        } else if jp > 4 {
-            jp -= 1;
+fn glossary_cells(t: &GlossaryTerm) -> Vec<String> {
+    vec![
+        t.jp_term.clone(),
+        thai_display_safe(&t.translated_term),
+        thai_display_safe(t.category.as_deref().unwrap_or("—")),
+        policy_short(crate::workspace::glossary::effective_policy(t)).to_string(),
+        if t.do_not_translate.unwrap_or(false) {
+            "✓".into()
         } else {
-            break;
-        }
-    }
-    // Wide pane: "Names / Notes" soaks up the leftover width and the translation stays a
-    // readable fixed width. Narrow pane (no room for notes): translation absorbs the
-    // slack so the table still fills the pane with no dead space.
-    let thai_fixed = if total >= 48 { 20 } else { 12 };
-    let leftover = total.saturating_sub(base(jp, gender) + thai_fixed + 2);
-    let (translated, extra) = if leftover >= 18 {
-        (thai_fixed, leftover)
-    } else {
-        (total.saturating_sub(base(jp, gender)).max(1), 0)
-    };
-    CharacterColumns {
-        jp,
-        translated,
-        gender,
-        extra,
-    }
+            "·".into()
+        },
+        thai_display_safe(&term_note(t)),
+    ]
 }
+
+fn character_table_columns(theme: &Theme) -> Vec<Column> {
+    vec![
+        Column::new("JP name", Width::Flex { min: 8, weight: 2 })
+            .priority(200)
+            .tint(theme.ink),
+        Column::new("Target name", Width::Flex { min: 10, weight: 2 })
+            .priority(190)
+            .tint(theme.translated_text),
+        Column::new("Gender", Width::Fixed(8)).priority(60),
+        Column::new("Names / Notes", Width::Flex { min: 10, weight: 3 }).priority(30),
+    ]
+}
+
+fn character_cells(c: &Character) -> Vec<String> {
+    vec![
+        c.jp_name.clone(),
+        thai_display_safe(&c.translated_name),
+        thai_display_safe(c.gender.as_deref().unwrap_or("—")),
+        thai_display_safe(&character_extra(c)),
+    ]
+}
+
+/// Order `rows` by the same text the table shows, so what a header click sorts
+/// by is what the column under it displays.
+fn sort_rows<T>(rows: &mut [T], sort: table::Sort, cells: fn(&T) -> Vec<String>) {
+    rows.sort_by(|a, b| {
+        let key = |v: &T| {
+            cells(v)
+                .get(sort.column)
+                .cloned()
+                .unwrap_or_default()
+                .to_lowercase()
+        };
+        let ord = key(a).cmp(&key(b));
+        if sort.descending { ord.reverse() } else { ord }
+    });
+}
+
 
 fn character_matches_filter(c: &Character, q: &str) -> bool {
     let fields = [
@@ -1428,6 +1330,14 @@ mod tests {
         (base, ws)
     }
 
+    fn character_named(jp: &str, translated: &str) -> Character {
+        Character {
+            jp_name: jp.into(),
+            translated_name: translated.into(),
+            ..character()
+        }
+    }
+
     fn character() -> Character {
         Character {
             id: "char-3199b4b0".into(),
@@ -1449,30 +1359,56 @@ mod tests {
         }
     }
 
+    /// The property the bespoke width function used to guard, now a property of
+    /// the column declaration: whatever the pane width, the columns fill it
+    /// exactly, and the flexible Names/Notes column is the one that grows.
     #[test]
     fn character_columns_fill_width_no_dead_space() {
-        let used = |c: &CharacterColumns| {
-            3 + c.jp
-                + 1
-                + c.translated
-                + if c.gender > 0 { 1 + c.gender } else { 0 }
-                + if c.extra > 0 { 2 + c.extra } else { 0 }
+        let theme = crate::model::ThemeId::default().build();
+        let columns = character_table_columns(&theme);
+        for w in [10u16, 30, 47, 67, 80, 200, 1900] {
+            let cols = table::layout(&columns, w);
+            let used: u16 = cols.iter().map(|&(_, cw)| cw).sum::<u16>()
+                + cols.len().saturating_sub(1) as u16;
+            assert_eq!(used, w, "columns should fill width {w} exactly");
+        }
+        // Wide panes spend their slack on Names/Notes, not on the name columns.
+        let wide = table::layout(&columns, 200);
+        let width_of = |i: usize| wide.iter().find(|&&(c, _)| c == i).map(|&(_, w)| w);
+        assert!(
+            width_of(3) > width_of(1),
+            "Names/Notes should be the flexible column: {wide:?}"
+        );
+    }
+
+    /// Sorting is by the same text the column shows, so a header click orders
+    /// the rows the way the thing under it reads.
+    #[test]
+    fn a_header_sorts_by_what_its_column_displays() {
+        let mut rows = vec![
+            character_named("清水圭", "ชิมิซุ"),
+            character_named("安藤", "อันโด"),
+            character_named("村上", "มุราคามิ"),
+        ];
+        let names = |rows: &[Character]| -> Vec<String> {
+            rows.iter().map(|c| c.jp_name.clone()).collect()
         };
-        // Wide panes fill the full width via the flexible Names/Notes column.
-        for w in [200u16, 1900] {
-            let c = character_columns(w);
-            assert_eq!(used(&c), w as usize, "columns should fill width {w}");
-            assert!(
-                c.extra > c.translated,
-                "Names/Notes should be the flexible column"
-            );
-        }
-        // Every width fills the pane without overflowing (translation absorbs slack
-        // when there is no room for a notes column).
-        for w in [10u16, 30, 47, 67, 80] {
-            let c = character_columns(w);
-            assert_eq!(used(&c), w as usize, "no dead space at width {w}");
-        }
+
+        sort_rows(&mut rows, table::Sort::default(), character_cells);
+        let mut sorted = names(&rows);
+        sorted.sort();
+        assert_eq!(names(&rows), sorted, "ascending by the JP name column");
+
+        sort_rows(
+            &mut rows,
+            table::Sort {
+                column: 0,
+                descending: true,
+            },
+            character_cells,
+        );
+        sorted.reverse();
+        assert_eq!(names(&rows), sorted, "clicking again flips the direction");
     }
 
     #[test]

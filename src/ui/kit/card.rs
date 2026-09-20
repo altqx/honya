@@ -15,7 +15,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use super::ctx::Ui;
-use super::style::{self, State};
+use super::style::State;
 use super::tokens::GUTTER;
 use super::zones::ZoneId;
 use crate::ui::glyphs;

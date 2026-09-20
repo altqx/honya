@@ -10,12 +10,11 @@
 //! affordance and the current tables have none.
 
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use super::ctx::Ui;
 use super::list::{self, ListState};
-use super::style;
 use super::zones::{ZoneId, ZoneKind};
 use crate::ui::glyphs;
 use crate::ui::text::{col_width, pad_to_cols, truncate_cols};
@@ -48,6 +47,11 @@ pub struct Column {
     /// Columns with a lower priority are dropped first when space runs out.
     /// The highest-priority column is never dropped.
     pub priority: u8,
+    /// Ink for this column's cells. A column that means something different
+    /// from its neighbours — a translation beside its source — says so here
+    /// rather than the caller styling every cell it builds. Background is left
+    /// alone so the row's selection still shows through.
+    pub tint: Option<Color>,
 }
 
 impl Column {
@@ -58,7 +62,13 @@ impl Column {
             align: Align::Left,
             sortable: true,
             priority: 100,
+            tint: None,
         }
+    }
+
+    pub fn tint(mut self, color: Color) -> Self {
+        self.tint = Some(color);
+        self
     }
 
     pub fn align(mut self, align: Align) -> Self {
@@ -278,6 +288,7 @@ where
     };
     let cols = layout(columns, body_w);
     let aligns: Vec<Align> = cols.iter().map(|&(i, _)| columns[i].align).collect();
+    let tints: Vec<Option<Color>> = cols.iter().map(|&(i, _)| columns[i].tint).collect();
 
     list::render(
         ui,
@@ -306,7 +317,10 @@ where
                         format!("{}{}", " ".repeat(pad), text)
                     }
                 };
-                spans.push(Span::raw(text));
+                spans.push(match tints[n] {
+                    Some(fg) => Span::styled(text, Style::default().fg(fg)),
+                    None => Span::raw(text),
+                });
                 if n + 1 < cols.len() {
                     spans.push(Span::raw(" ".repeat(CELL_GAP as usize)));
                 }

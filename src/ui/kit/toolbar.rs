@@ -10,6 +10,7 @@
 //! declares its most-reached-for action first.
 
 use ratatui::layout::Rect;
+use ratatui::style::Style;
 
 use super::badge::Chip;
 use super::button::Button;
@@ -206,7 +207,18 @@ impl<'a> RowActions<'a> {
             return 0;
         };
 
-        let mut x = row.x + row.width - want;
+        // Paint the whole claimed span first: the gaps between buttons are not
+        // drawn by the buttons themselves, and a row already has text under
+        // them, which would otherwise show through in the gap columns.
+        let span = Rect {
+            x: row.x + row.width - want,
+            y: row.y,
+            width: want,
+            height: 1,
+        };
+        ui.fill(span, Style::default().bg(ui.surface()));
+
+        let mut x = span.x;
         for a in &items {
             let w = control_width(a, iconified);
             draw_control(
