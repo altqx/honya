@@ -3,7 +3,7 @@
 //! Collapsing the toast row to zero height when nothing is showing keeps the
 //! body from jumping by a line as toasts come and go.
 
-use ratatui::layout::{Constraint, Flex, Layout, Rect};
+use ratatui::layout::{Constraint, Layout, Rect};
 
 /// The six regions every primary screen is composed from.
 ///
@@ -45,16 +45,3 @@ pub fn skeleton(area: Rect, show_toast: bool, footer_h: u16) -> Skeleton {
     }
 }
 
-/// A `w`×`h` rectangle centered inside `area`; size is clamped to `area` so a
-/// modal never exceeds its host.
-pub fn centered_modal(w: u16, h: u16, area: Rect) -> Rect {
-    let w = w.min(area.width);
-    let h = h.min(area.height);
-    let [horiz] = Layout::horizontal([Constraint::Length(w)])
-        .flex(Flex::Center)
-        .areas(area);
-    let [out] = Layout::vertical([Constraint::Length(h)])
-        .flex(Flex::Center)
-        .areas(horiz);
-    out
-}

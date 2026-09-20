@@ -17,7 +17,7 @@ use super::style::State;
 use super::zones::{ZoneId, ZoneKind};
 use crate::ui::glyphs;
 use crate::ui::input::caret_halves;
-use crate::ui::text::{pad_to_cols, truncate_cols};
+use crate::ui::text::{col_width, pad_to_cols, truncate_cols};
 
 /// Zone-index bases for a field's own sub-controls, kept far apart so a form
 /// with a realistic number of fields cannot have one collide with another.
@@ -34,9 +34,36 @@ pub fn inc_id(i: usize) -> ZoneId {
     ZoneId::new(ZoneKind::Button, INC_BASE + i as u32)
 }
 
+/// Chip ids pack a chip index alongside the field's, so one row can carry a
+/// list. Decoded ahead of `INC_BASE` in [`field_of`]: this base is above it, so
+/// a chip would otherwise read back as a stepper arrow.
+pub const CHIP_BASE: u32 = 0x3000_0000;
+/// Bits a chip index gets inside its field's span.
+const CHIP_SHIFT: u32 = 12;
+
+/// The `n`th chip of field `i`. `n == items.len()` is the add affordance.
+pub fn chip_id(i: usize, n: usize) -> ZoneId {
+    ZoneId::new(
+        ZoneKind::Button,
+        CHIP_BASE + ((i as u32) << CHIP_SHIFT) + n as u32,
+    )
+}
+
+/// Which field and chip a chip id addresses, if it is one.
+pub fn chip_of(id: ZoneId) -> Option<(usize, usize)> {
+    if id.kind != ZoneKind::Button || id.index < CHIP_BASE {
+        return None;
+    }
+    let packed = id.index - CHIP_BASE;
+    Some((
+        (packed >> CHIP_SHIFT) as usize,
+        (packed & ((1 << CHIP_SHIFT) - 1)) as usize,
+    ))
+}
+
 /// Which field index a sub-control id belongs to, if any.
 pub fn field_of(id: ZoneId) -> Option<(usize, Step)> {
-    if id.kind != ZoneKind::Button {
+    if id.kind != ZoneKind::Button || id.index >= CHIP_BASE {
         return None;
     }
     if id.index >= INC_BASE {
@@ -82,9 +109,21 @@ pub enum Kind {
     Toggle {
         on: bool,
     },
-}
-
-impl Kind {
+    /// A select whose options come from the data rather than from us. Gender and
+    /// category read in the project's own language, so a fixed list would be
+    /// wrong in every project but the one it was written for; anything typed
+    /// that is not in `known` is kept as typed.
+    Combo {
+        value: String,
+        cursor: usize,
+        known: Vec<String>,
+    },
+    /// An editable list: a chip per entry, and a buffer that becomes the next.
+    Chips {
+        items: Vec<String>,
+        buffer: String,
+        cursor: usize,
+    },
 }
 
 /// One row of a form.
@@ -140,6 +179,8 @@ impl Field {
                 options.get(*index).cloned().unwrap_or_default()
             }
             Kind::Toggle { on } => if *on { "on" } else { "off" }.to_string(),
+            Kind::Combo { value, .. } => value.clone(),
+            Kind::Chips { items, .. } => items.join(", "),
         }
     }
 }
@@ -350,6 +391,16 @@ fn render_value(
         Kind::Number { .. } | Kind::Select { .. } => {
             render_stepper(ui, area, field, index, st, base);
         }
+        Kind::Combo { value, cursor, known } => {
+            render_combo(ui, area, value, *cursor, known, index, st, base);
+        }
+        Kind::Chips {
+            items,
+            buffer,
+            cursor,
+        } => {
+            render_chips(ui, area, items, buffer, *cursor, index, st, base);
+        }
         Kind::Secret { from_env, value, cursor } => {
             if *from_env {
                 ui.line(
@@ -501,6 +552,208 @@ fn render_stepper(ui: &mut Ui, area: Rect, field: &Field, index: usize, st: Stat
     }
 }
 
+/// `‹ value ›` like a stepper, but the value is also typeable — the arrows walk
+/// what the project already uses, and anything else is simply typed over it.
+#[allow(clippy::too_many_arguments)]
+fn render_combo(
+    ui: &mut Ui,
+    area: Rect,
+    value: &str,
+    cursor: usize,
+    known: &[String],
+    index: usize,
+    st: State,
+    base: Style,
+) {
+    // Nothing to cycle yet, so no arrows: an empty project should not offer a
+    // control that cannot move.
+    let cyclable = !known.is_empty() && !st.disabled;
+    let bg = base.bg.unwrap_or(ui.surface());
+    let arrow = if st.disabled {
+        Style::default()
+            .fg(ui.theme.ink_faint)
+            .bg(bg)
+            .add_modifier(Modifier::DIM)
+    } else {
+        Style::default().fg(ui.theme.accent).bg(bg)
+    };
+    let ink = Style::default()
+        .fg(if st.disabled {
+            ui.theme.ink_faint
+        } else {
+            ui.theme.ink
+        })
+        .bg(bg);
+
+    let block = STEPPER_VALUE_COLS.min(area.width.saturating_sub(2));
+    let left = Rect { width: 1, ..area };
+    if cyclable {
+        ui.zones.push_hit(left, dec_id(index));
+    }
+    ui.line(
+        left,
+        Line::from(Span::styled(
+            if cyclable { "<" } else { " " }.to_string(),
+            arrow,
+        )),
+        base,
+    );
+
+    let field = Rect {
+        x: area.x + 1,
+        width: block,
+        ..area
+    };
+    if st.focused && !st.disabled {
+        let (before, after) = caret_halves(value, cursor, block.saturating_sub(2) as usize);
+        ui.line(
+            field,
+            Line::from(vec![
+                Span::styled(" ".to_string(), ink),
+                Span::styled(before, ink),
+                Span::styled(
+                    glyphs::ACCENT_RAIL.as_str().to_string(),
+                    Style::default().fg(ui.theme.stream_cursor).bg(bg),
+                ),
+                Span::styled(after, ink),
+            ]),
+            base,
+        );
+    } else {
+        let shown = truncate_cols(value, block.saturating_sub(1) as usize);
+        ui.line(
+            field,
+            Line::from(Span::styled(
+                pad_to_cols(&format!(" {shown}"), block as usize),
+                ink,
+            )),
+            base,
+        );
+    }
+
+    let right = Rect {
+        x: area.x + 1 + block,
+        width: 1,
+        ..area
+    };
+    if right.x < area.x + area.width {
+        if cyclable {
+            ui.zones.push_hit(right, inc_id(index));
+        }
+        ui.line(
+            right,
+            Line::from(Span::styled(
+                if cyclable { ">" } else { " " }.to_string(),
+                arrow,
+            )),
+            base,
+        );
+    }
+}
+
+/// A chip per entry, then the buffer the next one is being typed into.
+///
+/// Chips register with `push_hit`, like a stepper's arrows do: a row is one
+/// stop on the focus ring however many chips it carries.
+#[allow(clippy::too_many_arguments)]
+fn render_chips(
+    ui: &mut Ui,
+    area: Rect,
+    items: &[String],
+    buffer: &str,
+    cursor: usize,
+    index: usize,
+    st: State,
+    base: Style,
+) {
+    let bg = base.bg.unwrap_or(ui.surface());
+    let dim = Style::default().fg(ui.theme.ink_faint).bg(bg);
+    let ink = Style::default()
+        .fg(if st.disabled {
+            ui.theme.ink_faint
+        } else {
+            ui.theme.ink
+        })
+        .bg(bg);
+
+    let right = area.x + area.width;
+    let mut x = area.x;
+    let mut spans: Vec<(Rect, Vec<Span<'static>>)> = Vec::new();
+
+    for (n, item) in items.iter().enumerate() {
+        let label = truncate_cols(item, 18);
+        let w = col_width(&label) as u16 + 4; // "[" + label + " ×" + "]"
+        if x + w > right {
+            break;
+        }
+        let cell = Rect {
+            x,
+            width: w,
+            height: 1,
+            ..area
+        };
+        if !st.disabled {
+            ui.zones.push_hit(cell, chip_id(index, n));
+        }
+        spans.push((
+            cell,
+            vec![
+                Span::styled("[".to_string(), dim),
+                Span::styled(label, ink),
+                Span::styled(" ×".to_string(), dim),
+                Span::styled("]".to_string(), dim),
+            ],
+        ));
+        x += w + 1;
+    }
+
+    for (cell, line) in spans {
+        ui.line(cell, Line::from(line), base);
+    }
+
+    // What is left of the row is where the next entry is typed.
+    if x >= right {
+        return;
+    }
+    let rest = Rect {
+        x,
+        width: right - x,
+        height: 1,
+        ..area
+    };
+    if st.focused && !st.disabled {
+        let (before, after) = caret_halves(buffer, cursor, rest.width.saturating_sub(1) as usize);
+        ui.line(
+            rest,
+            Line::from(vec![
+                Span::styled(before, ink),
+                Span::styled(
+                    glyphs::ACCENT_RAIL.as_str().to_string(),
+                    Style::default().fg(ui.theme.stream_cursor).bg(bg),
+                ),
+                Span::styled(after, ink),
+            ]),
+            base,
+        );
+    } else {
+        // The add affordance only claims a target when there is room to draw it.
+        if !st.disabled && rest.width >= 1 {
+            ui.zones.push_hit(
+                Rect { width: 1, ..rest },
+                chip_id(index, items.len()),
+            );
+        }
+        ui.line(
+            rest,
+            Line::from(Span::styled(
+                if items.is_empty() { "+ add" } else { "+" }.to_string(),
+                dim,
+            )),
+            base,
+        );
+    }
+}
+
 /// Draw the focused field's help text into `area`.
 pub fn render_help(ui: &mut Ui, area: Rect, field: Option<&Field>) {
     if area.width == 0 || area.height == 0 {
@@ -596,6 +849,82 @@ mod tests {
             .map(|y| (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect())
             .collect();
         (lines, zones)
+    }
+
+    /// The trap this encoding sets: `CHIP_BASE` sits above `INC_BASE`, so a
+    /// chip id decodes as a stepper arrow unless `field_of` rejects it first.
+    #[test]
+    fn a_chip_id_is_never_mistaken_for_a_stepper_arrow() {
+        for (field, chip) in [(0, 0), (2, 3), (17, 40)] {
+            let id = chip_id(field, chip);
+            assert_eq!(chip_of(id), Some((field, chip)), "chip id must round-trip");
+            assert_eq!(
+                field_of(id),
+                None,
+                "a chip decoded as a stepper arrow would step field {} on click",
+                (id.index - CHIP_BASE) >> CHIP_SHIFT
+            );
+        }
+        // …and the arrows still decode as themselves.
+        assert_eq!(field_of(inc_id(2)), Some((2, Step::Up)));
+        assert_eq!(field_of(dec_id(2)), Some((2, Step::Down)));
+        assert_eq!(chip_of(inc_id(2)), None);
+    }
+
+    #[test]
+    fn every_chip_gets_its_own_target_plus_one_to_add_with() {
+        let fields = vec![Field::new(
+            "Aliases",
+            Kind::Chips {
+                items: vec!["心愛".into(), "心愛ちゃん".into()],
+                buffer: String::new(),
+                cursor: 0,
+            },
+        )];
+        let mut st = ListState::new();
+        let (_, zones) = paint(60, 3, &Focus::new(), &mut st, &fields);
+        assert!(zones.contains(chip_id(0, 0)), "first chip unreachable");
+        assert!(zones.contains(chip_id(0, 1)), "second chip unreachable");
+        assert!(
+            zones.contains(chip_id(0, 2)),
+            "the slot past the last chip is how a new one is added"
+        );
+    }
+
+    /// A row carries however many chips it holds and is still one stop on the
+    /// focus ring — chips register with `push_hit`, as stepper arrows do.
+    #[test]
+    fn a_chip_row_is_one_stop_on_the_focus_ring() {
+        let fields = vec![Field::new(
+            "Aliases",
+            Kind::Chips {
+                items: vec!["a".into(), "b".into(), "c".into()],
+                buffer: String::new(),
+                cursor: 0,
+            },
+        )];
+        let mut st = ListState::new();
+        let (_, zones) = paint(60, 3, &Focus::new(), &mut st, &fields);
+        assert_eq!(zones.tab_order().count(), 1);
+    }
+
+    /// The point of a combo: the arrows offer what the project already uses,
+    /// and anything else is simply typed over them.
+    #[test]
+    fn a_combo_keeps_a_value_its_options_do_not_contain() {
+        let f = Field::new(
+            "Gender",
+            Kind::Combo {
+                value: "หญิง".into(),
+                cursor: 0,
+                known: vec!["female".into(), "male".into()],
+            },
+        );
+        assert_eq!(f.display_value(), "หญิง");
+
+        let mut st = ListState::new();
+        let (_, zones) = paint(60, 3, &Focus::new(), &mut st, &[f]);
+        assert!(zones.contains(dec_id(0)) && zones.contains(inc_id(0)));
     }
 
     #[test]

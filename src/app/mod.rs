@@ -6,6 +6,7 @@
 pub mod action_table;
 pub mod bindings;
 pub mod lexicon;
+pub mod lexicon_defs;
 pub mod overlay;
 pub mod project;
 pub mod qa;
@@ -84,6 +85,15 @@ pub enum Action {
     ActivateFocused,
     /// Take the keyboard off the current control without closing anything.
     ClearFocus,
+    /// Say something in the toast line. A screen that writes to disk has no
+    /// other way to report that it worked.
+    Notify {
+        level: LogLevel,
+        msg: String,
+    },
+    /// Drop the Lexicon's edit form, having asked. The confirmation needs an
+    /// action to carry, and the screen owns the form.
+    CancelLexiconEdit,
     /// Open a context menu over the active screen, listing actions from its
     /// table.
     OpenMenu(Box<crate::app::action_table::OpenMenu>),
@@ -2908,6 +2918,12 @@ impl App {
             }
             Action::ClearFocus => {
                 self.focus.clear();
+            }
+            Action::Notify { level, msg } => {
+                self.toast = Some(Toast { level, msg });
+            }
+            Action::CancelLexiconEdit => {
+                self.lexicon.discard_edit();
             }
             Action::ActivateFocused => {
                 // The focused control means the same thing however it is

@@ -1227,7 +1227,7 @@ pub enum ReviewVerdict {
 
 // Workspace metadata types, tool-mutated in CHARACTERS.md / GLOSSARY.md / VOLUME.md.
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Character {
     pub id: String,
     pub jp_name: String,
@@ -1266,7 +1266,7 @@ pub struct AltName {
     pub by: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Relationship {
     pub target_id: String,
     pub relation: String,
@@ -1286,7 +1286,7 @@ pub enum TermPolicy {
     ContextDependent,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GlossaryTerm {
     pub jp_term: String,
     #[serde(alias = "thai_term")]

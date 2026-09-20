@@ -65,6 +65,31 @@ pub fn upsert(ws: &Workspace, c: Character) -> std::io::Result<CharacterUpsertOu
     upsert_aligned(ws, c, &Alignment::default())
 }
 
+/// Replace the stored character outright, inserting when absent.
+///
+/// [`upsert`] merges, because an automatic metadata turn may only ever add — it
+/// has no way to know that something it cannot see is gone. A human editing the
+/// form is authoritative, including about what should no longer be there, and
+/// merging their edit is what made clearing a field impossible.
+pub fn replace(ws: &Workspace, mut c: Character) -> std::io::Result<()> {
+    if c.id.trim().is_empty() {
+        c.id = derive_id(&c);
+    }
+    let mut chars = load(ws);
+    let outcome = match chars.iter().position(|e| e.id == c.id) {
+        Some(i) => {
+            let into_id = c.id.clone();
+            chars[i] = c;
+            CharacterUpsertOutcome::Merged { into_id }
+        }
+        None => {
+            chars.push(c);
+            CharacterUpsertOutcome::Inserted
+        }
+    };
+    finish(ws, chars, outcome).map(|_| ())
+}
+
 /// [`upsert`], with a caller-supplied verdict folded into the uncertain tiers.
 pub fn upsert_aligned(
     ws: &Workspace,
@@ -925,6 +950,45 @@ mod tests {
         std::fs::create_dir_all(&base).unwrap();
         let ws = Workspace::new(base.clone(), 1);
         (base, ws)
+    }
+
+    /// `upsert` only ever adds an alias, so removing one in the edit form did
+    /// nothing. A human edit is authoritative about what is no longer there.
+    #[test]
+    fn replace_removes_an_alias_that_upsert_would_have_kept() {
+        let (base, ws) = temp_ws("replace_removes");
+        let seeded = Character {
+            id: "char-1".into(),
+            jp_name: "白井心愛".into(),
+            translated_name: "ชิราอิ โคโคอะ".into(),
+            aliases: vec!["心愛".into(), "ここあ".into()],
+            notes: Some("a note".into()),
+            honorific: Some("ちゃん".into()),
+            ..Character::default()
+        };
+        upsert(&ws, seeded.clone()).unwrap();
+
+        let trimmed = Character {
+            aliases: vec!["心愛".into()],
+            notes: None,
+            ..seeded.clone()
+        };
+        upsert(&ws, trimmed.clone()).unwrap();
+        let kept = &load(&ws)[0];
+        assert_eq!(kept.aliases.len(), 2, "merging cannot remove");
+        assert_eq!(kept.notes.as_deref(), Some("a note"));
+
+        replace(&ws, trimmed).unwrap();
+        let after = &load(&ws)[0];
+        assert_eq!(after.aliases, vec!["心愛".to_string()]);
+        assert_eq!(after.notes, None);
+        assert_eq!(
+            after.honorific.as_deref(),
+            Some("ちゃん"),
+            "a field the form carries is still written back"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     fn ch(id: &str, jp: &str, translated: &str, romaji: Option<&str>) -> Character {

@@ -5,20 +5,23 @@ use std::hash::{Hash, Hasher};
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
-use crate::model::{AltName, Character, GlossaryTerm, TermPolicy};
+use crate::model::{AltName, Character, GlossaryTerm, LogLevel, TermPolicy};
 use crate::theme::{self, Theme};
 use crate::ui::input::{self, EditOpts, Edited};
 use crate::ui::kit::list::ListState;
 use crate::ui::kit::table::{self, Column, Width};
 use crate::ui::mouse::{MouseGesture, MouseInput};
-use crate::ui::text::{col_width, pad_to_cols, thai_display_safe, truncate_cols};
+use crate::ui::text::{col_width, thai_display_safe, truncate_cols};
 use crate::workspace::Workspace;
 
 use super::action_table::{self, Act};
+use super::lexicon_defs::{
+    self, Def, DraftEntry, EntryKind, FieldValue, Kind, LexField,
+};
 use super::Action;
 use super::overlay::Overlay;
 
@@ -26,156 +29,253 @@ const SUB_GLOSSARY: u8 = 0;
 const SUB_CHARACTERS: u8 = 1;
 const SUB_STYLE: u8 = 2;
 
-/// Generic inline edit form for glossary terms, characters, and style notes.
+/// The entry being edited, in place.
+///
+/// The draft *is* the entry, cloned from what was on disk, so committing is a
+/// write rather than a reassembly — which is why a field with no row can no
+/// longer be dropped on the way out.
 #[derive(Debug, Clone)]
 pub struct EditForm {
-    kind: u8,
-    id: Option<String>,
-    // Field labels + current values, in tab order.
-    fields: Vec<(&'static str, String)>,
-    field: usize,
-    // Byte offset into the focused field.
+    draft: DraftEntry,
+    /// What it looked like when it opened, for the dirty check.
+    seed: DraftEntry,
+    /// An index into [`lexicon_defs::ORDER`].
+    field: u8,
+    /// Byte offset into whatever the focused row is editing.
     cursor: usize,
+    /// The entry being typed on a list row, before it becomes a chip.
+    buffer: String,
+    /// Windowing only; the selection is `field`, which `sync` mirrors into it.
+    list: ListState,
     is_new: bool,
 }
 
 impl EditForm {
-    fn new_glossary(seed: Option<&GlossaryTerm>) -> Self {
-        let g = seed.cloned().unwrap_or(GlossaryTerm {
-            jp_term: String::new(),
-            translated_term: String::new(),
-            romaji: None,
-            category: None,
-            gloss: None,
-            policy: Some(TermPolicy::Preferred),
-            forbidden_translations: Vec::new(),
-            context_rule: None,
-            protected: None,
-            do_not_translate: None,
-            first_seen_chapter: None,
-        });
-        let policy = policy_field(crate::workspace::glossary::effective_policy(&g));
-        let fields = vec![
-            ("JP term", g.jp_term),
-            ("Target term", g.translated_term),
-            ("Category", g.category.unwrap_or_default()),
-            ("Policy", policy),
-            ("Do not trans", bool_field(g.do_not_translate)),
-            ("Forbidden", g.forbidden_translations.join(", ")),
-            ("Context rule", g.context_rule.unwrap_or_default()),
-            ("Gloss", g.gloss.unwrap_or_default()),
-        ];
-        Self {
-            kind: SUB_GLOSSARY,
-            id: None,
-            cursor: fields[0].1.len(),
-            fields,
-            field: 0,
-            is_new: seed.is_none(),
+    fn new(draft: DraftEntry, is_new: bool) -> Self {
+        let field = draft.kind().first_field().unwrap_or(0);
+        let mut form = Self {
+            seed: draft.clone(),
+            draft,
+            field,
+            cursor: 0,
+            buffer: String::new(),
+            list: ListState::new(),
+            is_new,
+        };
+        form.focus_field(field);
+        form
+    }
+
+    /// Where the focused row sits among the rows this kind actually shows —
+    /// which is what the form renders and what its zone ids count from.
+    fn local(&self) -> usize {
+        self.rows()
+            .iter()
+            .position(|f| *f == self.field)
+            .unwrap_or(0)
+    }
+
+    fn kind(&self) -> EntryKind {
+        self.draft.kind()
+    }
+
+    fn rows(&self) -> Vec<u8> {
+        self.kind().fields()
+    }
+
+    fn def(&self) -> Option<&'static Def> {
+        lexicon_defs::at(self.field)
+    }
+
+    fn value(&self, field: LexField) -> FieldValue {
+        lexicon_defs::get(&self.draft, field)
+    }
+
+    fn set_value(&mut self, field: LexField, v: &FieldValue) {
+        lexicon_defs::set(&mut self.draft, field, v);
+    }
+
+    /// The text the focused row is editing: the value itself, or the pending
+    /// chip on a list row.
+    fn current_text(&self) -> String {
+        match self.def() {
+            Some(d) if matches!(d.kind, Kind::Chips | Kind::Alts) => self.buffer.clone(),
+            Some(d) => self.value(d.field).as_text().to_string(),
+            None => String::new(),
         }
     }
 
-    fn new_character(seed: Option<&Character>) -> Self {
-        let c = seed.cloned();
-        let fields = vec![
-            (
-                "JP name",
-                c.as_ref().map(|x| x.jp_name.clone()).unwrap_or_default(),
-            ),
-            (
-                "Target name",
-                c.as_ref()
-                    .map(|x| x.translated_name.clone())
-                    .unwrap_or_default(),
-            ),
-            (
-                "Aliases",
-                c.as_ref().map(format_aliases).unwrap_or_default(),
-            ),
-            (
-                "Also called",
-                c.as_ref().map(format_also_called).unwrap_or_default(),
-            ),
-            (
-                "Gender",
-                c.as_ref()
-                    .and_then(|x| x.gender.clone())
-                    .unwrap_or_default(),
-            ),
-            (
-                "Notes",
-                c.as_ref().and_then(|x| x.notes.clone()).unwrap_or_default(),
-            ),
-        ];
-        Self {
-            kind: SUB_CHARACTERS,
-            id: c.as_ref().map(|x| x.id.clone()),
-            cursor: fields[0].1.len(),
-            fields,
-            field: 0,
-            is_new: seed.is_none(),
+    /// Focus a row and drop the caret at the end of what it is editing.
+    fn focus_field(&mut self, field: u8) {
+        let rows = self.rows();
+        if rows.contains(&field) {
+            self.field = field;
+        } else if let Some(first) = rows.first() {
+            self.field = *first;
+        }
+        self.buffer.clear();
+        self.cursor = self.current_text().len();
+        let local = self.local();
+        self.list.select(Some(local));
+    }
+
+    /// Focus by position among the rendered rows, which is what a sub-control
+    /// id carries.
+    fn focus_local(&mut self, n: usize) {
+        if let Some(f) = self.rows().get(n).copied() {
+            self.focus_field(f);
         }
     }
 
-    fn current_mut(&mut self) -> &mut String {
-        &mut self.fields[self.field].1
+    fn is_last_row(&self) -> bool {
+        self.rows().last() == Some(&self.field)
     }
 
-    /// Focus a field and drop the caret at its end.
-    fn focus_field(&mut self, field: usize) {
-        self.field = field.min(self.fields.len().saturating_sub(1));
-        self.cursor = self.fields[self.field].1.len();
-    }
-
-    fn next_field(&mut self) {
-        self.focus_field((self.field + 1) % self.fields.len());
-    }
-
-    fn prev_field(&mut self) {
-        self.focus_field((self.field + self.fields.len() - 1) % self.fields.len());
-    }
-
-    fn to_glossary(&self) -> GlossaryTerm {
-        let get = |i: usize| self.fields.get(i).map(|f| f.1.clone()).unwrap_or_default();
-        let policy = parse_policy(&get(3)).unwrap_or(TermPolicy::Preferred);
-        GlossaryTerm {
-            jp_term: get(0),
-            translated_term: get(1),
-            romaji: None,
-            category: opt(get(2)),
-            gloss: opt(get(7)),
-            policy: Some(policy),
-            forbidden_translations: split_list(&get(5)),
-            context_rule: opt(get(6)),
-            protected: matches!(
-                policy,
-                TermPolicy::HardLocked | TermPolicy::Forbidden | TermPolicy::ContextDependent
-            )
-            .then_some(true),
-            do_not_translate: bool_opt(get(4)),
-            first_seen_chapter: None,
+    fn chip_count(&self) -> usize {
+        match self.def().map(|d| (d.kind, d.field)) {
+            Some((Kind::Chips, f)) => match self.value(f) {
+                FieldValue::List(items) => items.len(),
+                _ => 0,
+            },
+            Some((Kind::Alts, f)) => match self.value(f) {
+                FieldValue::Alts(alts) => alts.len(),
+                _ => 0,
+            },
+            _ => 0,
         }
     }
 
-    fn to_character(&self) -> Character {
-        let get = |i: usize| self.fields.get(i).map(|f| f.1.clone()).unwrap_or_default();
-        let jp = get(0);
-        Character {
-            id: self.id.clone().unwrap_or_else(|| slug_id(&jp)),
-            jp_name: jp,
-            translated_name: get(1),
-            romaji: None,
-            gender: opt(get(4)),
-            honorific: None,
-            speech_style: None,
-            relationships: Vec::new(),
-            aliases: split_list(&get(2)),
-            also_called: parse_also_called(&get(3)),
-            notes: opt(get(5)),
-            first_seen_chapter: None,
+    /// Write back whatever the focused row is editing.
+    fn set_current_text(&mut self, text: String) {
+        let Some(d) = self.def() else { return };
+        match d.kind {
+            Kind::Chips | Kind::Alts => self.buffer = text,
+            // A chapter beyond `u32` is not a chapter; refusing it keeps the
+            // stored value and the caret from disagreeing about what is there.
+            Kind::Numeric if !text.trim().is_empty() && text.trim().parse::<u32>().is_err() => {}
+            _ => self.set_value(d.field, &FieldValue::Text(text)),
+        }
+    }
+
+    fn step_field(&mut self, forward: bool) {
+        let rows = self.rows();
+        if rows.is_empty() {
+            return;
+        }
+        let at = rows.iter().position(|f| *f == self.field).unwrap_or(0);
+        let n = rows.len();
+        let next = if forward { (at + 1) % n } else { (at + n - 1) % n };
+        self.focus_field(rows[next]);
+    }
+
+    /// Whether anything the form shows has moved since it opened.
+    fn is_dirty(&self) -> bool {
+        if let (DraftEntry::StyleNote(now), DraftEntry::StyleNote(was)) = (&self.draft, &self.seed) {
+            return now != was;
+        }
+        self.rows().iter().any(|f| {
+            lexicon_defs::at(*f).is_some_and(|d| {
+                lexicon_defs::get(&self.draft, d.field) != lexicon_defs::get(&self.seed, d.field)
+            })
+        })
+    }
+
+    /// Commit the pending chip on a list row, if there is one.
+    fn commit_chip(&mut self) {
+        let Some(d) = self.def() else { return };
+        let text = self.buffer.trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        match d.kind {
+            Kind::Chips => {
+                let FieldValue::List(mut items) = self.value(d.field) else {
+                    return;
+                };
+                items.push(text);
+                self.set_value(d.field, &FieldValue::List(items));
+            }
+            Kind::Alts => {
+                let Some(alt) = parse_alt_name(&text) else { return };
+                let FieldValue::Alts(mut alts) = self.value(d.field) else {
+                    return;
+                };
+                alts.push(alt);
+                self.set_value(d.field, &FieldValue::Alts(alts));
+            }
+            _ => return,
+        }
+        self.buffer.clear();
+        self.cursor = 0;
+    }
+
+    /// Lift a chip back into the buffer, so one gesture serves edit and delete.
+    fn lift_chip(&mut self, n: usize) {
+        let Some(d) = self.def() else { return };
+        match d.kind {
+            Kind::Chips => {
+                let FieldValue::List(mut items) = self.value(d.field) else {
+                    return;
+                };
+                if n >= items.len() {
+                    return;
+                }
+                self.buffer = items.remove(n);
+                self.set_value(d.field, &FieldValue::List(items));
+            }
+            Kind::Alts => {
+                let FieldValue::Alts(mut alts) = self.value(d.field) else {
+                    return;
+                };
+                if n >= alts.len() {
+                    return;
+                }
+                self.buffer = format_alt_name(&alts.remove(n));
+                self.set_value(d.field, &FieldValue::Alts(alts));
+            }
+            _ => return,
+        }
+        self.cursor = self.buffer.len();
+    }
+
+    /// Cycle a Select or Combo, or flip a Toggle.
+    fn cycle(&mut self, forward: bool, known: &[String]) {
+        let Some(d) = self.def() else { return };
+        match d.kind {
+            Kind::Select => {
+                let FieldValue::Choice(i) = self.value(d.field) else {
+                    return;
+                };
+                let n = lexicon_defs::POLICIES.len();
+                let next = if forward { (i + 1) % n } else { (i + n - 1) % n };
+                self.set_value(d.field, &FieldValue::Choice(next));
+            }
+            Kind::Toggle => {
+                let FieldValue::Flag(on) = self.value(d.field) else {
+                    return;
+                };
+                self.set_value(d.field, &FieldValue::Flag(!on));
+            }
+            Kind::Combo => {
+                if known.is_empty() {
+                    return;
+                }
+                let current = self.value(d.field).as_text().to_string();
+                let at = known.iter().position(|k| *k == current);
+                let n = known.len();
+                let next = match (at, forward) {
+                    (Some(i), true) => (i + 1) % n,
+                    (Some(i), false) => (i + n - 1) % n,
+                    (None, _) => 0,
+                };
+                self.set_value(d.field, &FieldValue::Text(known[next].clone()));
+                self.cursor = self.current_text().len();
+            }
+            _ => {}
         }
     }
 }
+
 
 pub struct LexiconScreen {
     sub: u8,
@@ -202,6 +302,12 @@ pub struct LexiconScreen {
 
 /// Action ids for this screen's table. Stable within the screen: they are also
 /// the zone index every one of its controls registers under.
+/// The edit form's footer buttons. Both indices sit below `form::DEC_BASE`, so
+/// neither `form::field_of` nor `form::chip_of` can mistake one for a row's
+/// sub-control.
+const FORM_SAVE: u32 = 1;
+const FORM_CANCEL: u32 = 2;
+
 const L_NEW: u16 = 0;
 const L_SEARCH: u16 = 1;
 const L_EDIT: u16 = 2;
@@ -256,8 +362,10 @@ impl LexiconScreen {
                             .unwrap_or("")
                             .to_lowercase()
                             .contains(&q)
-                        || policy_field(crate::workspace::glossary::effective_policy(t))
-                            .contains(&q)
+                        || lexicon_defs::policy_label(
+                            crate::workspace::glossary::effective_policy(t),
+                        )
+                        .contains(&q)
                         || t.forbidden_translations
                             .iter()
                             .any(|v| v.to_lowercase().contains(&q))
@@ -381,7 +489,7 @@ impl LexiconScreen {
         ws: Option<&Workspace>,
     ) -> Action {
         if self.editing.is_some() {
-            return self.handle_edit_mouse(m);
+            return self.handle_edit_mouse(m, zone, ws);
         }
         match m.gesture {
             MouseGesture::ScrollUp => {
@@ -449,30 +557,63 @@ impl LexiconScreen {
         }
     }
 
-    fn handle_edit_mouse(&mut self, m: MouseInput) -> Action {
+    fn handle_edit_mouse(
+        &mut self,
+        m: MouseInput,
+        zone: Option<crate::ui::kit::ZoneId>,
+        ws: Option<&Workspace>,
+    ) -> Action {
+        match m.gesture {
+            MouseGesture::ScrollUp | MouseGesture::ScrollDown => {
+                if let Some(form) = self.editing.as_mut() {
+                    form.step_field(matches!(m.gesture, MouseGesture::ScrollDown));
+                }
+                Action::None
+            }
+            MouseGesture::RightClick => self.cancel_edit(),
+            MouseGesture::Click { .. } => match zone {
+                Some(id) => self.click_edit_zone(id, ws),
+                None => Action::None,
+            },
+        }
+    }
+
+    /// Route a click from the zone the form registered while drawing, so
+    /// nothing here keeps a second copy of where a row landed.
+    fn click_edit_zone(&mut self, id: crate::ui::kit::ZoneId, ws: Option<&Workspace>) -> Action {
+        use crate::ui::kit::{ZoneKind, form as kit, modal};
+
+        match id.kind {
+            ZoneKind::Backdrop => return self.cancel_edit(),
+            ZoneKind::Button => match id.index {
+                modal::CLOSE_BUTTON | FORM_CANCEL => return self.cancel_edit(),
+                FORM_SAVE => return self.commit_edit(ws),
+                _ => {}
+            },
+            ZoneKind::Field | ZoneKind::TextSurface => {}
+            _ => return Action::None,
+        }
+
         let Some(form) = self.editing.as_mut() else {
             return Action::None;
         };
-        match m.gesture {
-            MouseGesture::ScrollUp => form.prev_field(),
-            MouseGesture::ScrollDown => form.next_field(),
-            MouseGesture::Click { .. } => {
-                // Mirror `render_edit`'s field rows for hit testing.
-                let modal = crate::ui::layout::centered_modal(
-                    60,
-                    (form.fields.len() as u16) * 2 + 6,
-                    self.screen_area,
-                );
-                let inner_y = modal.y + 1;
-                for i in 0..form.fields.len() {
-                    if m.row == inner_y + 1 + (i as u16) * 2 {
-                        form.focus_field(i);
-                        break;
-                    }
-                }
-            }
-            // Back out of the form, matching Esc.
-            MouseGesture::RightClick => self.editing = None,
+        // A form row's own id counts from `ORDER`, because that is the `id_base`
+        // `render_edit` hands the form; its sub-controls count from the row's
+        // place among the rows this kind shows.
+        if id.kind == ZoneKind::Field {
+            form.focus_field(id.index as u8);
+            return Action::None;
+        }
+        if let Some((local, chip)) = kit::chip_of(id) {
+            form.focus_local(local);
+            form.lift_chip(chip);
+            return Action::None;
+        }
+        if let Some((local, step)) = kit::field_of(id) {
+            form.focus_local(local);
+            let field = form.def().map(|d| d.field);
+            let known = known_values(ws, field);
+            form.cycle(step == kit::Step::Up, &known);
         }
         Action::None
     }
@@ -487,66 +628,167 @@ impl LexiconScreen {
     }
 
     fn handle_edit_key(&mut self, key: KeyEvent, ws: Option<&Workspace>) -> Action {
+        use ratatui::crossterm::event::KeyModifiers;
+
+        // Ctrl-S saves from any row, so a long form never has to be paged to
+        // the end to be committed.
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('s') {
+            return self.commit_edit(ws);
+        }
         let Some(form) = self.editing.as_mut() else {
             return Action::None;
         };
-        // Up/Down/Tab move between fields, so the editor is single-line per field.
-        let is_nav = matches!(
-            key.code,
-            KeyCode::Up | KeyCode::Down | KeyCode::Tab | KeyCode::BackTab | KeyCode::Enter
+        let kind = form.def().map(|d| d.kind);
+        let listy = matches!(kind, Some(Kind::Chips | Kind::Alts));
+
+        if listy {
+            match key.code {
+                KeyCode::Char(',') => {
+                    form.commit_chip();
+                    return Action::None;
+                }
+                // Nothing left to erase in the buffer, so take the last chip
+                // back into it — one gesture for "edit this" and "drop this",
+                // the same one the click gives.
+                KeyCode::Backspace if form.buffer.is_empty() => {
+                    let n = form.chip_count();
+                    if n > 0 {
+                        form.lift_chip(n - 1);
+                    }
+                    return Action::None;
+                }
+                _ => {}
+            }
+        }
+
+        // Typing only reaches rows that hold text. It used to reach every row,
+        // which is why a keystroke on Policy mangled the value.
+        let types = matches!(
+            kind,
+            Some(Kind::Text | Kind::Numeric | Kind::Combo | Kind::Chips | Kind::Alts)
         );
-        if !is_nav {
-            let mut cursor = form.cursor;
-            let consumed = input::handle(form.current_mut(), &mut cursor, key, EditOpts::default())
-                != Edited::Ignored;
-            form.cursor = cursor;
-            if consumed {
+        let cycles = matches!(kind, Some(Kind::Select | Kind::Toggle | Kind::Combo));
+        let reserved = matches!(
+            key.code,
+            KeyCode::Up | KeyCode::Down | KeyCode::Tab | KeyCode::BackTab | KeyCode::Enter | KeyCode::Esc
+        ) || (cycles && matches!(key.code, KeyCode::Left | KeyCode::Right));
+
+        if types && !reserved {
+            let mut text = form.current_text();
+            let mut cursor = form.cursor.min(text.len());
+            let opts = EditOpts {
+                numeric_only: kind == Some(Kind::Numeric),
+                multiline: false,
+            };
+            if input::handle(&mut text, &mut cursor, key, opts) != Edited::Ignored {
+                form.set_current_text(text);
+                form.cursor = cursor;
                 return Action::None;
             }
         }
+
         match key.code {
-            KeyCode::Esc => {
-                self.editing = None;
-                Action::None
-            }
+            KeyCode::Esc => self.cancel_edit(),
             KeyCode::Tab | KeyCode::Down => {
-                form.next_field();
+                form.step_field(true);
                 Action::None
             }
             KeyCode::BackTab | KeyCode::Up => {
-                form.prev_field();
+                form.step_field(false);
+                Action::None
+            }
+            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') if cycles => {
+                let field = form.def().map(|d| d.field);
+                let known = known_values(ws, field);
+                form.cycle(key.code != KeyCode::Left, &known);
                 Action::None
             }
             KeyCode::Enter => {
-                // Commit on Enter from the last field, else advance.
-                if form.field + 1 < form.fields.len() {
-                    form.next_field();
-                    Action::None
-                } else {
+                if listy && !form.buffer.trim().is_empty() {
+                    form.commit_chip();
+                    return Action::None;
+                }
+                if form.is_last_row() {
                     self.commit_edit(ws)
+                } else {
+                    form.step_field(true);
+                    Action::None
                 }
             }
             _ => Action::None,
         }
     }
 
+    /// Back out, asking first when there is something to lose.
+    fn cancel_edit(&mut self) -> Action {
+        if self.editing.as_ref().is_some_and(EditForm::is_dirty) {
+            return Action::show_overlay(Overlay::confirm(
+                "Discard changes?",
+                "This entry has edits that have not been saved.".to_string(),
+                Action::CancelLexiconEdit,
+            ));
+        }
+        self.editing = None;
+        Action::None
+    }
+
+    /// Drop the form without asking. Only the discard confirmation calls this.
+    pub fn discard_edit(&mut self) {
+        self.editing = None;
+    }
+
     fn commit_edit(&mut self, ws: Option<&Workspace>) -> Action {
-        let Some(form) = self.editing.take() else {
+        let Some(mut form) = self.editing.take() else {
             return Action::None;
         };
         let Some(ws) = ws else { return Action::None };
-        let result = match form.kind {
-            SUB_CHARACTERS => {
-                crate::workspace::characters::upsert(ws, form.to_character()).map(|_| ())
+        // Whatever was half-typed on a list row is part of the entry the user
+        // is looking at, so saving has to take it.
+        form.commit_chip();
+
+        let (label, result) = match form.draft {
+            DraftEntry::Character(c) => {
+                if c.jp_name.trim().is_empty() {
+                    self.editing = Some(EditForm {
+                        draft: DraftEntry::Character(c),
+                        ..form
+                    });
+                    return Action::Notify {
+                        level: LogLevel::Warn,
+                        msg: "a character needs a JP name".to_string(),
+                    };
+                }
+                (
+                    format!("{} → {}", c.jp_name, c.translated_name),
+                    crate::workspace::characters::replace(ws, *c),
+                )
             }
-            SUB_STYLE => crate::workspace::style::append_note(
-                ws,
-                form.fields.first().map(|f| f.1.as_str()).unwrap_or(""),
+            DraftEntry::Glossary(t) => {
+                if t.jp_term.trim().is_empty() {
+                    self.editing = Some(EditForm {
+                        draft: DraftEntry::Glossary(t),
+                        ..form
+                    });
+                    return Action::Notify {
+                        level: LogLevel::Warn,
+                        msg: "a glossary entry needs a JP term".to_string(),
+                    };
+                }
+                (
+                    format!("{} → {}", t.jp_term, t.translated_term),
+                    crate::workspace::glossary::replace(ws, *t),
+                )
+            }
+            DraftEntry::StyleNote(text) => (
+                "style note".to_string(),
+                crate::workspace::style::append_note(ws, &text),
             ),
-            _ => crate::workspace::glossary::upsert(ws, form.to_glossary()),
         };
         match result {
-            Ok(()) => Action::None,
+            Ok(()) => Action::Notify {
+                level: LogLevel::Info,
+                msg: format!("saved · {}", truncate_cols(&label, 48)),
+            },
             Err(e) => Action::show_overlay(Overlay::confirm(
                 "Save failed",
                 format!("Could not write the entry: {e}"),
@@ -558,26 +800,30 @@ impl LexiconScreen {
     fn begin_edit(&mut self, ws: Option<&Workspace>) {
         let Some(ws) = ws else { return };
         let idx = self.list.selected().unwrap_or(0);
-        match self.sub {
-            SUB_CHARACTERS => {
-                let list = self.characters(ws);
-                self.editing = Some(EditForm::new_character(list.get(idx)));
-            }
-            SUB_STYLE => {
-                self.editing = Some(EditForm {
-                    kind: SUB_STYLE,
-                    id: None,
-                    fields: vec![("Style note", String::new())],
-                    field: 0,
-                    cursor: 0,
-                    is_new: true,
-                });
-            }
-            _ => {
-                let list = self.glossary(ws);
-                self.editing = Some(EditForm::new_glossary(list.get(idx)));
-            }
+        let draft = match self.sub {
+            SUB_CHARACTERS => self
+                .characters(ws)
+                .get(idx)
+                .map(|c| DraftEntry::Character(Box::new(c.clone()))),
+            SUB_STYLE => None,
+            _ => self
+                .glossary(ws)
+                .get(idx)
+                .map(|t| DraftEntry::Glossary(Box::new(t.clone()))),
+        };
+        match draft {
+            Some(draft) => self.editing = Some(EditForm::new(draft, false)),
+            None => self.begin_new(),
         }
+    }
+
+    fn begin_new(&mut self) {
+        let draft = match self.sub {
+            SUB_CHARACTERS => DraftEntry::Character(Box::default()),
+            SUB_STYLE => DraftEntry::StyleNote(String::new()),
+            _ => DraftEntry::Glossary(Box::default()),
+        };
+        self.editing = Some(EditForm::new(draft, true));
     }
 
     fn begin_delete(&mut self, ws: Option<&Workspace>) -> Action {
@@ -653,10 +899,8 @@ impl LexiconScreen {
             crate::ui::kit::toolbar::RowActions::new(&acts).render(ui, rect);
         }
 
-        let theme: &Theme = ui.theme;
-        let f: &mut Frame = ui.frame;
         if self.editing.is_some() {
-            self.render_edit(f, area, theme);
+            self.render_edit(ui, area, ws);
         }
     }
 
@@ -905,66 +1149,174 @@ impl LexiconScreen {
         );
     }
 
-    fn render_edit(&self, f: &mut Frame, area: Rect, theme: &Theme) {
+    /// The focused row's `Combo` vocabulary: what this project already uses.
+    ///
+    /// Read from the whole roster rather than `self.characters`/`self.glossary`,
+    /// which apply the `/` filter — a filtered view would silently shrink the
+    /// vocabulary to whatever happened to be on screen.
+    fn edit_fields(&self, ws: Option<&Workspace>) -> Vec<crate::ui::kit::form::Field> {
+        use crate::ui::kit::form as kit;
+
         let Some(form) = self.editing.as_ref() else {
+            return Vec::new();
+        };
+        form.rows()
+            .iter()
+            .filter_map(|f| lexicon_defs::at(*f).map(|d| (*f, d)))
+            .map(|(index, d)| {
+                let focused = index == form.field;
+                let cursor = if focused { form.cursor } else { 0 };
+                let kind = match d.kind {
+                    Kind::Text | Kind::Numeric => kit::Kind::Text {
+                        value: form.value(d.field).as_text().to_string(),
+                        cursor,
+                        placeholder: String::new(),
+                    },
+                    Kind::Combo => kit::Kind::Combo {
+                        value: form.value(d.field).as_text().to_string(),
+                        cursor,
+                        known: known_values(ws, Some(d.field)),
+                    },
+                    Kind::Select => kit::Kind::Select {
+                        options: lexicon_defs::POLICIES
+                            .iter()
+                            .map(|p| lexicon_defs::policy_label(*p).to_string())
+                            .collect(),
+                        index: match form.value(d.field) {
+                            FieldValue::Choice(i) => i,
+                            _ => 0,
+                        },
+                    },
+                    Kind::Toggle => kit::Kind::Toggle {
+                        on: matches!(form.value(d.field), FieldValue::Flag(true)),
+                    },
+                    Kind::Chips => kit::Kind::Chips {
+                        items: match form.value(d.field) {
+                            FieldValue::List(items) => items,
+                            _ => Vec::new(),
+                        },
+                        buffer: if focused {
+                            form.buffer.clone()
+                        } else {
+                            String::new()
+                        },
+                        cursor,
+                    },
+                    Kind::Alts => kit::Kind::Chips {
+                        items: match form.value(d.field) {
+                            FieldValue::Alts(alts) => alts.iter().map(format_alt_name).collect(),
+                            _ => Vec::new(),
+                        },
+                        buffer: if focused {
+                            form.buffer.clone()
+                        } else {
+                            String::new()
+                        },
+                        cursor,
+                    },
+                };
+                kit::Field::new(d.label, kind).help(d.help)
+            })
+            .collect()
+    }
+
+    fn render_edit(&mut self, ui: &mut crate::ui::kit::Ui, area: Rect, ws: Option<&Workspace>) {
+        use crate::ui::kit::button::{Button, ButtonRow};
+        use crate::ui::kit::form as kit;
+        use crate::ui::kit::modal::{self, Modal, Sizing};
+        use crate::ui::kit::zones::ZoneId;
+
+        let Some(entry) = self.editing.as_ref().map(|f| f.kind()) else {
             return;
         };
-        let modal = crate::ui::layout::centered_modal(60, (form.fields.len() as u16) * 2 + 6, area);
-        f.render_widget(ratatui::widgets::Clear, modal);
-        let title = if form.is_new {
-            "New entry"
-        } else {
-            "Edit entry"
-        };
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_set(theme::hairline_set())
-            .border_style(Style::default().fg(theme.accent))
-            .title(Span::styled(
-                format!(" {title} "),
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            ))
-            .style(Style::default().bg(theme.bg_panel));
-        let inner = block.inner(modal);
-        f.render_widget(block, modal);
-
-        let mut lines = vec![Line::raw("")];
-        for (i, (label, value)) in form.fields.iter().enumerate() {
-            let focused = i == form.field;
-            let marker = if focused { theme::SELECT_BAR } else { ' ' };
-            let val_style = if focused {
-                Style::default().fg(theme.ink).bg(theme.accent_bg)
-            } else {
-                Style::default().fg(theme.ink_soft)
-            };
-            let val_w = inner.width.saturating_sub(18) as usize;
-            let mut spans = vec![
-                Span::styled(format!(" {marker} "), Style::default().fg(theme.accent)),
-                Span::styled(pad_to_cols(label, 12), Style::default().fg(theme.ink_faint)),
-            ];
-            if focused {
-                let (before, after) = input::caret_halves(value, form.cursor, val_w);
-                spans.push(Span::styled(before, val_style));
-                spans.push(Span::styled("▏", Style::default().fg(theme.stream_cursor)));
-                spans.push(Span::styled(after, val_style));
-            } else {
-                spans.push(Span::styled(
-                    truncate_cols(&thai_display_safe(value), val_w),
-                    val_style,
-                ));
-            }
-            lines.push(Line::from(spans));
-            lines.push(Line::raw(""));
+        if entry == EntryKind::StyleNote {
+            self.render_edit_note(ui, area);
+            return;
         }
-        lines.push(Line::from(Span::styled(
-            "   ↵ save · Tab next field · Esc cancel",
-            Style::default().fg(theme.ink_faint),
-        )));
-        f.render_widget(
-            Paragraph::new(lines).style(Style::default().bg(theme.bg_panel)),
-            inner,
+
+        let fields = self.edit_fields(ws);
+        let Some(form) = self.editing.as_mut() else {
+            return;
+        };
+        let title = if form.is_new {
+            format!("New {}", entry.title())
+        } else {
+            format!("Edit {}", entry.title())
+        };
+        let frame = Modal::new(&title)
+            .sizing(
+                Sizing::medium()
+                    .fit_width(72)
+                    // Border, padding, title and the two footer rows.
+                    .fit_height(fields.len() as u16 + 7),
+            )
+            .footer(2)
+            .render(ui, area);
+
+        let base = entry.first_field().unwrap_or(0) as u32;
+        let local = form.local();
+        form.list.select(Some(local));
+        kit::render(
+            ui,
+            frame.body,
+            &mut form.list,
+            &fields,
+            kit::Opts {
+                label_cols: 16,
+                id_base: base,
+            },
+        );
+        kit::render_help(
+            ui,
+            Rect {
+                height: 1,
+                ..frame.footer
+            },
+            fields.get(local),
+        );
+        modal::render_footer(
+            ui,
+            frame.footer,
+            ButtonRow::new(vec![
+                Button::new(ZoneId::button(FORM_CANCEL), "Cancel").accel("esc"),
+                Button::new(ZoneId::button(FORM_SAVE), "Save")
+                    .accel("^s")
+                    .primary(),
+            ]),
+        );
+    }
+
+    /// A style note is prose, not a set of fields, so it gets an editor.
+    fn render_edit_note(&mut self, ui: &mut crate::ui::kit::Ui, area: Rect) {
+        use crate::ui::kit::button::{Button, ButtonRow};
+        use crate::ui::kit::editor;
+        use crate::ui::kit::modal::{self, Modal, Sizing};
+        use crate::ui::kit::zones::ZoneId;
+
+        let Some(form) = self.editing.as_mut() else {
+            return;
+        };
+        let DraftEntry::StyleNote(text) = &form.draft else {
+            return;
+        };
+        let frame = Modal::new("New style note").sizing(Sizing::small()).footer(1).render(ui, area);
+        let lines = editor::wrap(text, frame.body.width);
+        editor::render(
+            ui,
+            frame.body,
+            &editor::View::new(text, &lines).cursor(form.cursor),
+            0,
+        );
+        modal::render_footer(
+            ui,
+            frame.footer,
+            ButtonRow::new(vec![
+                Button::new(ZoneId::button(FORM_CANCEL), "Cancel").accel("esc"),
+                Button::new(ZoneId::button(FORM_SAVE), "Save")
+                    .accel("^s")
+                    .primary()
+                    .disabled(text.trim().is_empty()),
+            ]),
         );
     }
 
@@ -999,18 +1351,7 @@ impl LexiconScreen {
         Some(match id {
             L_NEW => {
                 if ws.is_some() {
-                    self.editing = Some(match self.sub {
-                        SUB_CHARACTERS => EditForm::new_character(None),
-                        SUB_STYLE => EditForm {
-                            kind: SUB_STYLE,
-                            id: None,
-                            fields: vec![("Style note", String::new())],
-                            field: 0,
-                            cursor: 0,
-                            is_new: true,
-                        },
-                        _ => EditForm::new_glossary(None),
-                    });
+                    self.begin_new();
                 }
                 Action::None
             }
@@ -1033,7 +1374,12 @@ impl LexiconScreen {
     /// no control, because the form is the control.
     pub fn hints(&self) -> &'static [(&'static str, &'static str)] {
         if self.editing.is_some() {
-            return &[("↵", "save"), ("Tab", "field"), ("Esc", "cancel")];
+            return &[
+                ("Tab", "field"),
+                ("↵", "next"),
+                ("^s", "save"),
+                ("Esc", "cancel"),
+            ];
         }
         &[("Tab", "section"), ("↑↓", "move")]
     }
@@ -1131,10 +1477,6 @@ fn character_matches_filter(c: &Character, q: &str) -> bool {
         })
 }
 
-fn format_aliases(c: &Character) -> String {
-    c.aliases.join(", ")
-}
-
 fn format_also_called(c: &Character) -> String {
     c.also_called
         .iter()
@@ -1155,13 +1497,6 @@ fn format_alt_name(a: &AltName) -> String {
         out.push_str(by);
     }
     out
-}
-
-fn parse_also_called(s: &str) -> Vec<AltName> {
-    split_list(s)
-        .into_iter()
-        .filter_map(|piece| parse_alt_name(&piece))
-        .collect()
 }
 
 fn parse_alt_name(piece: &str) -> Option<AltName> {
@@ -1200,54 +1535,37 @@ fn character_extra(c: &Character) -> String {
     parts.join(" · ")
 }
 
+/// What a `Combo` row offers: the values this project already uses.
+///
+/// Read from the whole roster rather than through the `/` filter, which would
+/// silently shrink the vocabulary to whatever happened to be on screen.
+fn known_values(ws: Option<&Workspace>, field: Option<LexField>) -> Vec<String> {
+    let (Some(ws), Some(field)) = (ws, field) else {
+        return Vec::new();
+    };
+    let mut seen: Vec<String> = match field {
+        LexField::CGender => crate::workspace::characters::load(ws)
+            .iter()
+            .filter_map(|c| c.gender.clone())
+            .collect(),
+        LexField::GCategory => crate::workspace::glossary::load(ws)
+            .iter()
+            .filter_map(|t| t.category.clone())
+            .collect(),
+        _ => Vec::new(),
+    };
+    seen.retain(|v| !v.trim().is_empty());
+    seen.sort();
+    seen.dedup();
+    seen
+}
+
 fn opt(s: String) -> Option<String> {
     let t = s.trim();
     if t.is_empty() {
         None
     } else {
         Some(t.to_string())
-    }
-}
-
-fn bool_field(v: Option<bool>) -> String {
-    match v {
-        Some(true) => "yes".to_string(),
-        Some(false) => "no".to_string(),
-        None => String::new(),
-    }
-}
-
-fn bool_opt(s: String) -> Option<bool> {
-    match s.trim().to_lowercase().as_str() {
-        "" => None,
-        "1" | "true" | "t" | "yes" | "y" | "on" | "lock" | "locked" | "protect" | "protected"
-        | "✓" => Some(true),
-        "0" | "false" | "f" | "no" | "n" | "off" | "unlock" | "unlocked" | "-" | "—" | "·" => {
-            Some(false)
-        }
-        _ => None,
-    }
-}
-
-fn policy_field(policy: TermPolicy) -> String {
-    match policy {
-        TermPolicy::HardLocked => "hard_locked".to_string(),
-        TermPolicy::Preferred => "preferred".to_string(),
-        TermPolicy::Forbidden => "forbidden".to_string(),
-        TermPolicy::ContextDependent => "context_dependent".to_string(),
-    }
-}
-
-fn parse_policy(s: &str) -> Option<TermPolicy> {
-    match s.trim().to_lowercase().replace('-', "_").as_str() {
-        "hard_locked" | "hard" | "lock" | "locked" | "protected" => Some(TermPolicy::HardLocked),
-        "preferred" | "prefer" | "default" | "soft" => Some(TermPolicy::Preferred),
-        "forbidden" | "forbid" | "ban" | "banned" => Some(TermPolicy::Forbidden),
-        "context_dependent" | "context" | "conditional" | "depends" => {
-            Some(TermPolicy::ContextDependent)
-        }
-        "" => None,
-        _ => None,
     }
 }
 
@@ -1275,20 +1593,8 @@ fn term_note(t: &GlossaryTerm) -> String {
     parts.join(" · ")
 }
 
-fn split_list(s: &str) -> Vec<String> {
-    s.split([',', ';', '\n'])
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-        .map(str::to_string)
-        .collect()
-}
-
 /// A stable id derived from a JP name (mirrors the workspace's slugify-jp rule:
 /// non-ASCII preserved, ASCII lowered, separators collapsed).
-fn slug_id(jp: &str) -> String {
-    super::slugify(jp)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1426,21 +1732,186 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// The bug this redesign exists to fix. The form presented as an editor and
+    /// behaved as a filler-in: `upsert` merges, so a blanked field kept its old
+    /// value and a removed alias came straight back on the next load.
     #[test]
-    fn character_edit_form_round_trips_id_aliases_and_alt_names() {
-        let c = character();
-        let form = EditForm::new_character(Some(&c));
-        let edited = form.to_character();
+    fn clearing_a_field_actually_clears_it() {
+        let (base, ws) = temp_ws("clear_field");
+        characters::upsert(&ws, character()).unwrap();
+        let mut screen = LexiconScreen::new();
+        screen.sub = SUB_CHARACTERS;
+        screen.list.select(Some(0));
+        screen.begin_edit(Some(&ws));
 
-        assert_eq!(edited.id, c.id);
-        assert_eq!(edited.jp_name, "清水圭");
-        assert_eq!(edited.translated_name, "ชิมิซุ เค");
-        assert_eq!(edited.aliases, vec!["圭".to_string(), "シミズ".to_string()]);
-        assert_eq!(edited.also_called.len(), 1);
-        assert_eq!(edited.also_called[0].jp, "ケ様");
-        assert_eq!(edited.also_called[0].translated_name, "ท่านเค");
-        assert_eq!(edited.also_called[0].by.as_deref(), Some("清水愛"));
-        assert_eq!(edited.gender.as_deref(), Some("female"));
-        assert_eq!(edited.notes.as_deref(), Some("นางเอก"));
+        {
+            let form = screen.editing.as_mut().expect("the row should open a form");
+            for field in [LexField::CNotes, LexField::CHonorific] {
+                form.focus_field(lexicon_defs::index_of(field));
+                form.set_current_text(String::new());
+            }
+            form.focus_field(lexicon_defs::index_of(LexField::CAliases));
+            form.lift_chip(1);
+            form.buffer.clear();
+        }
+        assert!(matches!(
+            screen.commit_edit(Some(&ws)),
+            Action::Notify {
+                level: LogLevel::Info,
+                ..
+            }
+        ));
+
+        let stored = characters::load(&ws);
+        let stored = stored.first().expect("the character should still be there");
+        assert_eq!(stored.notes, None, "a blanked note has to actually go");
+        assert_eq!(stored.honorific, None, "a blanked honorific has to actually go");
+        assert_eq!(
+            stored.aliases,
+            vec!["圭".to_string()],
+            "a removed alias must not come back"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The invariant that already held, pinned so `replace` cannot break it: a
+    /// field the form does not show is carried through an edit untouched.
+    #[test]
+    fn editing_an_entry_preserves_every_field_it_does_not_show() {
+        let (base, ws) = temp_ws("preserve_fields");
+        let mut seed = character();
+        seed.relationships = vec![crate::model::Relationship {
+            target_id: "char-ai".into(),
+            relation: "sister".into(),
+        }];
+        characters::upsert(&ws, seed.clone()).unwrap();
+
+        let mut screen = LexiconScreen::new();
+        screen.sub = SUB_CHARACTERS;
+        screen.list.select(Some(0));
+        screen.begin_edit(Some(&ws));
+        {
+            let form = screen.editing.as_mut().expect("the row should open a form");
+            form.focus_field(lexicon_defs::index_of(LexField::CNotes));
+            form.set_current_text("พระเอก".to_string());
+        }
+        screen.commit_edit(Some(&ws));
+
+        let stored = characters::load(&ws);
+        let stored = stored.first().expect("the character should still be there");
+        assert_eq!(stored.id, seed.id, "the id is the key and has no row");
+        assert_eq!(stored.relationships, seed.relationships);
+        assert_eq!(stored.romaji, seed.romaji);
+        assert_eq!(stored.notes.as_deref(), Some("พระเอก"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Every row the form draws is clickable, and the click lands on the row
+    /// under the pointer — the drift the zone registry exists to remove.
+    #[test]
+    fn every_edit_row_registers_a_zone_a_click_focuses() {
+        let mut screen = LexiconScreen::new();
+        screen.sub = SUB_CHARACTERS;
+        screen.begin_new();
+        let rows = screen.editing.as_ref().unwrap().rows();
+
+        let (_, zones) =
+            crate::ui::kit::ctx::draw_test(100, 40, |ui, area| screen.render(ui, area, None));
+        for field in &rows {
+            let id = crate::ui::kit::ZoneId::new(crate::ui::kit::ZoneKind::Field, *field as u32);
+            let rect = zones
+                .rect_of(id)
+                .unwrap_or_else(|| panic!("row {field} registered no zone"));
+            let (col, row) = (rect.x + 1, rect.y);
+            screen.handle_mouse(
+                MouseInput {
+                    gesture: MouseGesture::Click { double: false },
+                    col,
+                    row,
+                },
+                zones.at(col, row),
+                None,
+            );
+            assert_eq!(
+                screen.editing.as_ref().unwrap().field,
+                *field,
+                "clicking row {field} focused something else"
+            );
+        }
+    }
+
+    /// The old form was a hardcoded `fields * 2 + 6` rows tall, so a character
+    /// simply ran off a short terminal. The kit's form windows instead.
+    #[test]
+    fn a_long_form_scrolls_instead_of_overflowing() {
+        let mut screen = LexiconScreen::new();
+        screen.sub = SUB_CHARACTERS;
+        screen.begin_new();
+        let rows = screen.editing.as_ref().unwrap().rows();
+        let last = *rows.last().unwrap();
+        screen.editing.as_mut().unwrap().focus_field(last);
+
+        let (_, zones) =
+            crate::ui::kit::ctx::draw_test(80, 10, |ui, area| screen.render(ui, area, None));
+        let id = crate::ui::kit::ZoneId::new(crate::ui::kit::ZoneKind::Field, last as u32);
+        let rect = zones
+            .rect_of(id)
+            .expect("the focused row must be scrolled into view");
+        assert!(rect.y < 10, "the focused row must be on screen");
+        assert!(
+            zones
+                .rect_of(crate::ui::kit::ZoneId::new(
+                    crate::ui::kit::ZoneKind::Field,
+                    rows[0] as u32
+                ))
+                .is_none(),
+            "a form taller than the terminal must window, not overflow"
+        );
+    }
+
+    /// Typing used to run over every row, including the ones that hold an enum,
+    /// which is how a keystroke on Policy corrupted the value.
+    #[test]
+    fn typing_on_a_select_row_cycles_it_instead_of_mangling_it() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent};
+
+        let mut screen = LexiconScreen::new();
+        screen.sub = SUB_GLOSSARY;
+        screen.begin_new();
+        let policy = lexicon_defs::index_of(LexField::GPolicy);
+        screen.editing.as_mut().unwrap().focus_field(policy);
+
+        let before = screen.editing.as_ref().unwrap().value(LexField::GPolicy);
+        screen.handle_edit_key(KeyEvent::from(KeyCode::Char('x')), None);
+        assert_eq!(
+            screen.editing.as_ref().unwrap().value(LexField::GPolicy),
+            before,
+            "a letter must not reach a row that holds an enum"
+        );
+
+        screen.handle_edit_key(KeyEvent::from(KeyCode::Right), None);
+        assert_ne!(
+            screen.editing.as_ref().unwrap().value(LexField::GPolicy),
+            before,
+            "→ should step the enum"
+        );
+    }
+
+    /// A `Combo` offers what the project already says, in the project's own
+    /// language — a fixed list would be wrong in every project but one.
+    #[test]
+    fn a_combo_learns_its_options_from_the_project() {
+        let (base, ws) = temp_ws("combo_known");
+        characters::upsert(&ws, character()).unwrap();
+        let mut other = character_named("村上", "มุราคามิ");
+        other.id = "char-murakami".into();
+        other.gender = Some("ชาย".into());
+        characters::upsert(&ws, other).unwrap();
+
+        let known = known_values(Some(&ws), Some(LexField::CGender));
+        assert!(known.contains(&"female".to_string()));
+        assert!(known.contains(&"ชาย".to_string()));
+        assert_eq!(known.len(), 2, "duplicates should collapse: {known:?}");
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

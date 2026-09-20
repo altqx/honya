@@ -665,7 +665,6 @@ pub fn hairline_set() -> symbols::border::Set<'static> {
 }
 pub const GAUGE_FILLED: &str = "▰";
 pub const GAUGE_TRACK: &str = "▱";
-pub const SELECT_BAR: char = '▌';
 
 #[cfg(test)]
 mod tests {

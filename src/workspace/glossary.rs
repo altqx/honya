@@ -77,17 +77,39 @@ fn upsert_inner(
         outcome = GlossaryUpsertOutcome::Inserted;
     }
 
+    save_all(ws, terms)?;
+    Ok(outcome)
+}
+
+/// Sort into the stored order and write. Shared so the sort a reader depends on
+/// is decided in one place.
+fn save_all(ws: &Workspace, mut terms: Vec<GlossaryTerm>) -> std::io::Result<()> {
     // Stable order: category then jp_term.
     terms.sort_by(|a, b| {
         let ca = a.category.as_deref().unwrap_or("");
         let cb = b.category.as_deref().unwrap_or("");
         ca.cmp(cb).then_with(|| a.jp_term.cmp(&b.jp_term))
     });
-
     let body = render_table(&terms);
     let block = GlossaryBlock { terms };
-    data_block::write_with_data(&ws.glossary_md(), &body, &block)?;
-    Ok(outcome)
+    data_block::write_with_data(&ws.glossary_md(), &body, &block)
+}
+
+/// Replace the stored term outright, inserting when absent.
+///
+/// [`upsert`] merges, because an automatic metadata turn may only ever add. A
+/// human editing the form is authoritative, including about what should no
+/// longer be there — clearing a gloss or emptying the forbidden list has to
+/// mean it.
+pub fn replace(ws: &Workspace, mut t: GlossaryTerm) -> std::io::Result<()> {
+    normalize_term_controls(&mut t);
+    let key = normalize(&t.jp_term);
+    let mut terms = load(ws);
+    match terms.iter().position(|e| normalize(&e.jp_term) == key) {
+        Some(i) => terms[i] = t,
+        None => terms.push(t),
+    }
+    save_all(ws, terms)
 }
 
 /// Remove the term whose normalized `jp_term` matches. No-op if absent.
@@ -611,6 +633,41 @@ mod tests {
         std::fs::create_dir_all(&base).unwrap();
         let ws = Workspace::new(base.clone(), 1);
         (base, ws)
+    }
+
+    /// The defect `replace` exists for: `upsert` merges, so clearing a field in
+    /// the edit form left the old value on disk. Deleting has to be possible.
+    #[test]
+    fn replace_clears_what_upsert_would_have_kept() {
+        let (base, ws) = temp_ws("replace_clears");
+        let seeded = GlossaryTerm {
+            jp_term: "鬱ロック".into(),
+            translated_term: "อุตสึร็อค".into(),
+            gloss: Some("a genre".into()),
+            forbidden_translations: vec!["ร็อคเศร้า".into()],
+            ..GlossaryTerm::default()
+        };
+        upsert(&ws, seeded.clone()).unwrap();
+
+        // Merging leaves both behind, however empty the incoming entry is.
+        let cleared = GlossaryTerm {
+            gloss: None,
+            forbidden_translations: Vec::new(),
+            ..seeded.clone()
+        };
+        upsert(&ws, cleared.clone()).unwrap();
+        let kept = &load(&ws)[0];
+        assert_eq!(kept.gloss.as_deref(), Some("a genre"));
+        assert_eq!(kept.forbidden_translations.len(), 1);
+
+        // Replacing means it.
+        replace(&ws, cleared).unwrap();
+        let after = &load(&ws)[0];
+        assert_eq!(after.gloss, None, "a cleared gloss must actually clear");
+        assert!(after.forbidden_translations.is_empty());
+        assert_eq!(after.translated_term, "อุตสึร็อค", "the rest survives");
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     fn term(
