@@ -9,6 +9,7 @@ mod drawer;
 mod fonts;
 mod inspector;
 mod keys;
+mod lexicon_form;
 mod overlays;
 mod screens;
 mod settings;

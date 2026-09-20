@@ -46,6 +46,8 @@ pub struct GuiNav {
     /// Draft answers to the open `ask_user` card, one per question, keyed by
     /// prompt id so a second card cannot inherit the first one's typing.
     refine_answers: (u64, Vec<String>),
+    /// The open glossary/character form, if any.
+    pub lexicon_form: Option<super::lexicon_form::LexiconForm>,
     /// Avoid re-parsing GLOSSARY/CHARACTERS/STYLE every egui frame.
     lexicon_cache: LexiconCache,
 }
@@ -1060,6 +1062,17 @@ fn lexicon(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
                     .hint_text("Filter…")
                     .desired_width(180.0),
             );
+            // The GUI could not create either of these at all.
+            if nav.lexicon_tab < 2 && ui.button("＋ New").clicked() {
+                nav.lexicon_form = Some(super::lexicon_form::LexiconForm::new(
+                    if nav.lexicon_tab == 0 {
+                        crate::app::lexicon_defs::DraftEntry::Glossary(Box::default())
+                    } else {
+                        crate::app::lexicon_defs::DraftEntry::Character(Box::default())
+                    },
+                    true,
+                ));
+            }
         });
     });
     ui.add_space(8.0);
@@ -1104,6 +1117,15 @@ fn lexicon(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
                                     RichText::new(t.category.as_deref().unwrap_or("—"))
                                         .color(pal.ink_faint),
                                 );
+                                if ui.small_button("✎").on_hover_text("edit").clicked() {
+                                    nav.lexicon_form =
+                                        Some(super::lexicon_form::LexiconForm::new(
+                                            crate::app::lexicon_defs::DraftEntry::Glossary(
+                                                Box::new(t.clone()),
+                                            ),
+                                            false,
+                                        ));
+                                }
                                 if ui.small_button("✕").clicked() {
                                     app.apply(Action::show_overlay(Overlay::confirm(
                                         "Delete glossary term",
@@ -1156,6 +1178,15 @@ fn lexicon(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
                                         .small(),
                                 );
                                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    if ui.small_button("✎").on_hover_text("edit").clicked() {
+                                        nav.lexicon_form =
+                                            Some(super::lexicon_form::LexiconForm::new(
+                                                crate::app::lexicon_defs::DraftEntry::Character(
+                                                    Box::new(c.clone()),
+                                                ),
+                                                false,
+                                            ));
+                                    }
                                     if ui.small_button("✕").clicked() {
                                         app.apply(Action::show_overlay(Overlay::confirm(
                                             "Delete character",
@@ -1194,6 +1225,8 @@ fn lexicon(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
             });
         }
     }
+
+    lexicon_form_modal(ui, app, nav, pal);
 }
 
 // ─── Refine ──────────────────────────────────────────────────────────────────
@@ -1520,6 +1553,69 @@ fn refine(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
+
+/// The open form, over the lexicon it is editing.
+///
+/// A write rather than a merge: the draft *is* the entry, so a field the user
+/// cleared actually clears instead of coming back from the stored copy.
+fn lexicon_form_modal(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
+    use super::lexicon_form::Outcome;
+    let Some(form) = nav.lexicon_form.as_mut() else {
+        return;
+    };
+    let ws = app.active.as_ref().map(|a| &a.workspace);
+    let title = form.title();
+    let mut outcome = Outcome::Open;
+    egui::Modal::new(egui::Id::new("lexicon_form_modal")).show(ui.ctx(), |ui| {
+        ui.set_width(560.0);
+        ui.heading(RichText::new(title).color(pal.ink));
+        ui.separator();
+        egui::ScrollArea::vertical()
+            .id_salt("lexicon_form_scroll")
+            .max_height(460.0)
+            .show(ui, |ui| {
+                outcome = super::lexicon_form::show(ui, form, ws, pal);
+            });
+    });
+
+    match outcome {
+        Outcome::Open => {}
+        Outcome::Cancel => nav.lexicon_form = None,
+        Outcome::Save => {
+            if form.missing_key().is_some() {
+                return;
+            }
+            let Some(ws) = app.active.as_ref().map(|a| a.workspace.clone()) else {
+                return;
+            };
+            let saved = match &form.draft {
+                crate::app::lexicon_defs::DraftEntry::Glossary(t) => {
+                    crate::workspace::glossary::replace(&ws, (**t).clone())
+                }
+                crate::app::lexicon_defs::DraftEntry::Character(c) => {
+                    crate::workspace::characters::replace(&ws, (**c).clone())
+                }
+                crate::app::lexicon_defs::DraftEntry::StyleNote(text) => {
+                    crate::workspace::style::append_note(&ws, text)
+                }
+            };
+            match saved {
+                Ok(()) => {
+                    nav.lexicon_form = None;
+                    nav.lexicon_cache = LexiconCache::default();
+                    app.apply(Action::Notify {
+                        level: crate::model::LogLevel::Info,
+                        msg: "saved".to_string(),
+                    });
+                }
+                Err(e) => app.apply(Action::Notify {
+                    level: crate::model::LogLevel::Error,
+                    msg: format!("could not save: {e}"),
+                }),
+            }
+        }
+    }
+}
 
 fn empty_state(ui: &mut Ui, pal: &GuiPalette, title: &str, body: &str) {
     ui.vertical_centered(|ui| {
