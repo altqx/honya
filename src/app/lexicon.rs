@@ -51,6 +51,10 @@ pub struct EditForm {
 }
 
 impl EditForm {
+    fn into_draft(self) -> (DraftEntry, bool) {
+        (self.draft, self.is_new)
+    }
+
     fn new(draft: DraftEntry, is_new: bool) -> Self {
         let field = draft.kind().first_field().unwrap_or(0);
         let mut form = Self {
@@ -733,6 +737,16 @@ impl LexiconScreen {
     }
 
     /// Drop the form without asking. Only the discard confirmation calls this.
+    /// Take the open form's draft, closing it.
+    ///
+    /// For a front end that draws its own form: `L_NEW` and `L_EDIT` build the
+    /// draft from the same declarations either way, so the GUI takes it and
+    /// renders it with egui rather than needing its own way in.
+    pub fn take_draft(&mut self) -> Option<(crate::app::lexicon_defs::DraftEntry, bool)> {
+        let form = self.editing.take()?;
+        Some(form.into_draft())
+    }
+
     pub fn discard_edit(&mut self) {
         self.editing = None;
     }

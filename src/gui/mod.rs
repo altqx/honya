@@ -75,6 +75,7 @@ pub fn run(app: App, rx: UnboundedReceiver<AppEvent>) -> anyhow::Result<()> {
         layout: shell::Layout::load(),
         bindings: crate::app::keys::Bindings::load(),
         focus: focus::Focus::default(),
+        session_rename: String::new(),
         applied_theme: None,
         fonts_ready: false,
     };
@@ -119,6 +120,8 @@ struct GuiApp {
     layout: shell::Layout,
     bindings: crate::app::keys::Bindings,
     focus: focus::Focus,
+    /// Draft name in the conversation picker.
+    session_rename: String,
     applied_theme: Option<ThemeId>,
     fonts_ready: bool,
 }
@@ -285,8 +288,7 @@ impl eframe::App for GuiApp {
         }
 
         if let Some(id) = screen_command {
-            let action = self.app.run_screen_action(id);
-            self.dispatch(action);
+            self.run_command(id);
         }
 
         if !self.app.running {
@@ -389,6 +391,12 @@ impl eframe::App for GuiApp {
                 screens::render_body(ui, &mut self.app, &mut self.nav, &pal);
                 claim(ui, &mut self.focus, focus::Region::Main);
                 overlays::render(ui, &mut self.app, &pal);
+                overlays::refine_sessions(
+                    ui.ctx(),
+                    &mut self.app,
+                    &mut self.session_rename,
+                    &pal,
+                );
             });
         // A caret in any field is the composer as far as key routing cares:
         // a screen command on a bare letter must not fire into what is being
@@ -715,6 +723,20 @@ impl GuiApp {
         }
     }
 
+    /// Run one of the active screen's commands and apply what it returns.
+    ///
+    /// A command whose effect is state the TUI draws and the window does not
+    /// is handed over here — `L_NEW` and `L_EDIT` build a draft from the same
+    /// declarations, so the window takes it and renders it with egui rather
+    /// than needing a second way in.
+    fn run_command(&mut self, id: u16) {
+        let action = self.app.run_screen_action(id);
+        self.dispatch(action);
+        if let Some((draft, is_new)) = self.app.lexicon.take_draft() {
+            self.nav.lexicon_form = Some(lexicon_form::LexiconForm::new(draft, is_new));
+        }
+    }
+
     /// Apply an action, and put whatever it opens into a tab.
     ///
     /// A chapter or a conversation already open comes forward with the state
@@ -801,8 +823,7 @@ impl GuiApp {
         }
 
         if let Some(id) = command {
-            let action = self.app.run_screen_action(id);
-            self.dispatch(action);
+            self.run_command(id);
             return;
         }
 

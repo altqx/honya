@@ -1071,6 +1071,120 @@ fn palette(
         });
 }
 
+/// The Refine conversation picker, which the window replaced with a combo —
+/// switch only, no delete, no rename. `R_SESSIONS` opened state nothing here
+/// drew, so the command was a no-op from the window.
+pub fn refine_sessions(
+    ctx: &Context,
+    app: &mut crate::app::App,
+    rename: &mut String,
+    pal: &GuiPalette,
+) {
+    if !app.refine.picker_open() {
+        return;
+    }
+    let sessions = app.refine_sessions.clone();
+    let active = app.refine.active_session_id().to_string();
+    let sel = app.refine.picker_selection().unwrap_or(0);
+    let mut actions: Vec<Action> = Vec::new();
+    let mut close = false;
+    let mut pick = None;
+
+    egui::Modal::new(egui::Id::new("refine_sessions_modal")).show(ctx, |ui| {
+        ui.set_width(520.0);
+        ui.heading(RichText::new("Conversations").color(pal.ink));
+        ui.separator();
+        if sessions.is_empty() {
+            ui.label(
+                RichText::new("No saved conversations yet.")
+                    .color(pal.ink_faint)
+                    .italics(),
+            );
+        }
+        ScrollArea::vertical()
+            .id_salt("refine_sessions_list")
+            .max_height(320.0)
+            .show(ui, |ui| {
+                for (i, s) in sessions.iter().enumerate() {
+                    ui.push_id(("session_row", s.id.as_str()), |ui| {
+                        ui.horizontal(|ui| {
+                            let live = s.id == active;
+                            let label = format!(
+                                "{}  ·  {} msgs",
+                                if s.title.trim().is_empty() {
+                                    s.id.as_str()
+                                } else {
+                                    s.title.trim()
+                                },
+                                s.message_count
+                            );
+                            if ui
+                                .selectable_label(
+                                    i == sel,
+                                    RichText::new(label)
+                                        .color(if live { pal.accent } else { pal.ink }),
+                                )
+                                .clicked()
+                            {
+                                pick = Some(i);
+                            }
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui.small_button("Delete").clicked() {
+                                        actions.push(Action::RefineDeleteSession {
+                                            id: s.id.clone(),
+                                        });
+                                    }
+                                },
+                            );
+                        });
+                    });
+                }
+            });
+
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Rename").color(pal.ink_soft).small());
+            ui.add(
+                egui::TextEdit::singleline(rename)
+                    .hint_text("a name for this conversation")
+                    .desired_width(240.0),
+            );
+            if ui.button("Apply").clicked() && !rename.trim().is_empty() {
+                actions.push(Action::RefineRenameSession {
+                    title: rename.trim().to_string(),
+                });
+                rename.clear();
+            }
+        });
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            if ui.button("New conversation").clicked() {
+                actions.push(Action::RefineNewSession);
+                close = true;
+            }
+            if ui.button("Close").clicked() {
+                close = true;
+            }
+        });
+    });
+
+    if let Some(i) = pick {
+        app.refine.set_picker_selection(i);
+        if let Some(s) = sessions.get(i) {
+            actions.push(Action::RefineSwitchSession { id: s.id.clone() });
+            close = true;
+        }
+    }
+    if close {
+        app.refine.close_picker();
+    }
+    for a in actions {
+        app.apply(a);
+    }
+}
+
 // ─── QA review ───────────────────────────────────────────────────────────────
 
 fn qa_panel(

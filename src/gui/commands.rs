@@ -13,7 +13,7 @@
 use egui::{RichText, Ui};
 
 use crate::app::App;
-use crate::app::action_table::{Act, Kind};
+use crate::app::action_table::{Act, Kind, Placement};
 
 use super::theme_map::GuiPalette;
 
@@ -45,6 +45,49 @@ fn label_of(act: &Act) -> String {
     out
 }
 
+/// How a screen's declared commands are split between the surfaces that draw
+/// them. Every act lands in exactly one, which is what the parity test checks:
+/// a command in neither would be one the window silently does not have.
+pub struct Surfaces {
+    /// Drawn inline in the screen's toolbar.
+    pub toolbar: Vec<Act>,
+    /// Behind the `⋯` menu — row commands and the long tail.
+    pub menu: Vec<Act>,
+}
+
+pub fn surfaces(acts: Vec<Act>) -> Surfaces {
+    let (toolbar, menu) = acts
+        .into_iter()
+        .partition(|a| a.placement == Placement::Toolbar);
+    Surfaces { toolbar, menu }
+}
+
+/// Draw the screen's toolbar commands inline. Returns the id the user ran.
+///
+/// Replaces the hand-written button literals: the key printed on a control is
+/// the key that runs it, an unavailable command greys rather than vanishing,
+/// and a command added to a screen appears without anyone remembering to add
+/// it here.
+pub fn toolbar(ui: &mut Ui, app: &App, pal: &GuiPalette) -> Option<u16> {
+    let mut ran = None;
+    for act in surfaces(app.screen_actions()).toolbar {
+        ui.push_id(("act", act.id), |ui| {
+            let selected = matches!(act.kind, Kind::Toggle(true));
+            let text = RichText::new(label_of(&act))
+                .small()
+                .color(if act.enabled { pal.ink } else { pal.ink_faint });
+            if ui
+                .add_enabled(act.enabled, egui::Button::selectable(selected, text))
+                .on_hover_text(format!("{}  ·  {}", act.label, accel_text(&act)))
+                .clicked()
+            {
+                ran = Some(act.id);
+            }
+        });
+    }
+    ran
+}
+
 /// Every command the active screen declares, with the key that runs it.
 ///
 /// A menu rather than a second button row: each screen still designs its own
@@ -57,17 +100,19 @@ pub fn menu(ui: &mut Ui, app: &App, pal: &GuiPalette) -> Option<u16> {
     }
     let mut ran = None;
     let running = acts.iter().filter(|a| a.enabled).count();
+    let total = acts.len();
+    let Surfaces { menu, .. } = surfaces(acts);
     ui.menu_button(RichText::new("⋯").color(pal.ink_soft), |ui| {
         ui.label(
-            RichText::new(format!("{running} of {} available", acts.len()))
+            RichText::new(format!("{running} of {total} available"))
                 .color(pal.ink_faint)
                 .small(),
         );
         ui.separator();
         let mut placement = None;
-        for act in &acts {
-            // Toolbar commands first, then row, then the long tail — the order
-            // the table declares, with a rule where it changes.
+        for act in &menu {
+            // The half the toolbar does not draw: row commands and the long
+            // tail. Between the two surfaces, nothing declared is unreachable.
             if placement.is_some_and(|p| p != act.placement) {
                 ui.separator();
             }
@@ -152,6 +197,39 @@ mod tests {
                 );
                 assert!(!label_of(&a).is_empty());
             }
+        }
+    }
+
+    /// The ratchet the plan asks for: every command a screen declares has to
+    /// land on a surface the window draws. One in neither is one the window
+    /// silently does not have — which is how 23 of 89 actions went missing.
+    #[test]
+    fn every_screen_action_is_reachable_from_the_gui() {
+        for screen in [
+            crate::app::Screen::Shelf,
+            crate::app::Screen::Project,
+            crate::app::Screen::Translate,
+            crate::app::Screen::Reader,
+            crate::app::Screen::Lexicon,
+            crate::app::Screen::Refine,
+        ] {
+            let declared = crate::app::bindings::commands_for(screen);
+            let s = surfaces(declared.clone());
+            for act in &declared {
+                let on_toolbar = s.toolbar.iter().any(|a| a.id == act.id);
+                let in_menu = s.menu.iter().any(|a| a.id == act.id);
+                assert!(
+                    on_toolbar || in_menu,
+                    "{screen:?}/{} is declared but reaches no surface",
+                    act.label
+                );
+                assert!(
+                    !(on_toolbar && in_menu),
+                    "{screen:?}/{} is drawn twice",
+                    act.label
+                );
+            }
+            assert_eq!(s.toolbar.len() + s.menu.len(), declared.len());
         }
     }
 }

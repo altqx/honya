@@ -414,6 +414,7 @@ fn project(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
 
     let marked = app.project.marked_count();
     let mut clear_marks = false;
+    let mut ran = None;
     toolbar_row(ui, |ui| {
         // The mark set is what batch queue and batch delete act on; without a
         // count there is nothing to tell you a later action is about to touch
@@ -441,62 +442,21 @@ fn project(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
             egui::Label::new(RichText::new(title).color(pal.ink).strong().size(17.0)).truncate(),
         );
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if primary_button(ui, pal, &format!("Translate Vol.{active_vol}")).clicked() {
-                app.apply(Action::StartVolumeTranslation { vol: active_vol });
-            }
-            if ui.button("Translate all").clicked() {
-                app.apply(Action::StartProjectTranslation);
-            }
-            if ui.button("QA").clicked() {
-                app.apply(Action::show_overlay(Overlay::qa_placeholder()));
-            }
-            if ui.button("Export…").clicked() {
-                app.apply(Action::show_overlay(Overlay::export(active_vol)));
-            }
-            ui.menu_button("⋯", |ui| {
-                if ui.button("Edit volume synopsis…").clicked() {
-                    let data = crate::workspace::volume::load(
-                        &app.active.as_ref().expect("active project").workspace,
-                    );
-                    app.apply(Action::show_overlay(Overlay::synopsis_edit(
-                        data.synopsis_raw,
-                        data.translated_synopsis,
-                        active_vol,
-                        project.title.clone(),
-                        project.target_language,
-                    )));
-                }
-                if ui.button("Edit project title…").clicked() {
-                    app.apply(Action::show_overlay(Overlay::project_title_edit(
-                        project.id.clone(),
-                        project.title.clone(),
-                        project.translated_title.clone(),
-                        project.target_language,
-                    )));
-                }
-                ui.separator();
-                if ui.button("Add volume…").clicked() {
-                    app.apply(Action::AddVolume);
-                }
-                if ui.button("Add chapters to this volume…").clicked() {
-                    app.apply(Action::AddChapters { vol: active_vol });
-                }
-                if ui.button("Update volume images…").clicked() {
-                    app.apply(Action::show_overlay(Overlay::confirm(
-                        "Update volume images",
-                        format!(
-                            "Re-import the source for Vol.{active_vol:02} and rewrite image links. Translation prose stays unchanged."
-                        ),
-                        Action::RefreshVolumeImages { vol: active_vol },
-                    )));
-                }
-            });
+            // Drawn from the screen's own table rather than written out: nine
+            // of these were literals that had to be kept in step by hand, and
+            // the ones nobody remembered are why the window was missing
+            // commands the terminal had.
+            ran = super::commands::toolbar(ui, app, pal);
         });
     });
     ui.add_space(6.0);
 
     if clear_marks {
         app.project.clear_marks();
+    }
+    if let Some(id) = ran {
+        let action = app.run_screen_action(id);
+        app.apply(action);
     }
 
     let body_h = ui.available_height();
@@ -848,6 +808,7 @@ fn status_label(s: ChapterStatus) -> &'static str {
 
 fn translate(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
     let th = app.theme.clone();
+    let mut ran = None;
     if app.active.is_none() {
         empty_state(ui, pal, "No project open", "Open a project to start translating.");
         return;
@@ -885,26 +846,17 @@ fn translate(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
             egui::Label::new(RichText::new(phase).color(phase_color).strong()),
         );
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            // Always allocate pause/stop slots so the bar doesn't reflow mid-run.
-            let can_pause = running;
-            let can_resume = paused;
-            let can_stop = running || paused;
-            if can_stop && ui.button(RichText::new("Stop").color(pal.status_failed)).clicked() {
-                app.apply(Action::StopRun);
-            } else if !can_stop {
-                ui.add_enabled(false, egui::Button::new("Stop"));
-            }
-            if can_pause || can_resume {
-                let label = if can_resume { "Resume" } else { "Pause" };
-                if ui.button(label).clicked() {
-                    app.apply(Action::PauseRun);
-                }
-            } else {
-                ui.add_enabled(false, egui::Button::new("Pause"));
-            }
+            // Stop now goes through its declared command, which raises the
+            // confirm dialog the TUI has always had; this button fired
+            // `StopRun` outright.
+            ran = super::commands::toolbar(ui, app, pal);
         });
     });
     ui.add_space(6.0);
+    if let Some(id) = ran {
+        let action = app.run_screen_action(id);
+        app.apply(action);
+    }
 
     // Chapter + progress strip — always same height (progress bar always shown).
     card_frame(pal).show(ui, |ui| {
@@ -1121,6 +1073,7 @@ fn translate(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
 // ─── Reader ──────────────────────────────────────────────────────────────────
 
 fn reader(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
+    let mut ran = None;
     let Some(active) = app.active.as_ref() else {
         empty_state(ui, pal, "No project open", "Open a project to read translations.");
         return;
@@ -1186,25 +1139,19 @@ fn reader(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
             app.apply(Action::ReaderStepChapter { forward: true });
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            // Through the declared action, not `copy_text`: `A_COPY` strips
-            // the `[REVIEW NEEDED]` banners and reports how many lines went,
-            // and this button used to copy the raw markdown with them in.
-            if ui.button("Copy translation").clicked() {
-                let action = app.run_screen_action(crate::app::reader::A_COPY);
-                app.apply(action);
-            }
-            if ui.button("QA").clicked() {
-                app.apply(Action::show_overlay(Overlay::qa_placeholder()));
-            }
-            if ui.button("Jump…").clicked() {
-                app.apply(Action::show_overlay(Overlay::reader_jump_placeholder()));
-            }
-            if ui.button("Search…").clicked() {
-                app.apply(Action::show_overlay(Overlay::reader_search()));
-            }
+            // Twenty declared commands, six of which the window used to draw.
+            // Drawn from the table, the other fourteen came with them — diff,
+            // bookmarks, the review-flag jump, the layout modes, search
+            // next/prev — and the copy button stopped duplicating `A_COPY`
+            // badly.
+            ran = super::commands::toolbar(ui, app, pal);
         });
     });
     ui.add_space(8.0);
+    if let Some(id) = ran {
+        let action = app.run_screen_action(id);
+        app.apply(action);
+    }
 
     if chapter == 0 && ja.is_empty() && translated.is_empty() {
         empty_state(

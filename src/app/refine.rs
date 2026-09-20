@@ -677,6 +677,21 @@ impl RefineScreen {
         self.picker.is_some()
     }
 
+    /// Which row the picker is on, for a front end that draws its own list.
+    pub fn picker_selection(&self) -> Option<usize> {
+        self.picker
+    }
+
+    pub fn set_picker_selection(&mut self, sel: usize) {
+        if self.picker.is_some() {
+            self.picker = Some(sel);
+        }
+    }
+
+    pub fn close_picker(&mut self) {
+        self.picker = None;
+    }
+
     pub fn clear(&mut self) {
         self.blocks.clear();
         self.renders.clear();
