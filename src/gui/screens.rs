@@ -48,6 +48,11 @@ pub struct GuiNav {
     refine_answers: (u64, Vec<String>),
     /// The open glossary/character form, if any.
     pub lexicon_form: Option<super::lexicon_form::LexiconForm>,
+    /// Parsed markdown per pane, so a redraw is not a re-parse.
+    md_ja: super::markdown::MarkdownCache,
+    md_translated: super::markdown::MarkdownCache,
+    md_style: super::markdown::MarkdownCache,
+    md_preview: super::markdown::MarkdownCache,
     /// Avoid re-parsing GLOSSARY/CHARACTERS/STYLE every egui frame.
     lexicon_cache: LexiconCache,
 }
@@ -123,8 +128,8 @@ pub fn render_body(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalett
     match app.screen {
         Screen::Shelf => shelf(ui, app, nav, pal),
         Screen::Project => project(ui, app, nav, pal),
-        Screen::Translate => translate(ui, app, pal),
-        Screen::Reader => reader(ui, app, pal),
+        Screen::Translate => translate(ui, app, nav, pal),
+        Screen::Reader => reader(ui, app, nav, pal),
         Screen::Lexicon => lexicon(ui, app, nav, pal),
         Screen::Refine => refine(ui, app, nav, pal),
     }
@@ -643,7 +648,8 @@ fn status_label(s: ChapterStatus) -> &'static str {
 
 // ─── Translate ───────────────────────────────────────────────────────────────
 
-fn translate(ui: &mut Ui, app: &mut App, pal: &GuiPalette) {
+fn translate(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
+    let th = app.theme.clone();
     if app.active.is_none() {
         empty_state(ui, pal, "No project open", "Open a project to start translating.");
         return;
@@ -901,7 +907,13 @@ fn translate(ui: &mut Ui, app: &mut App, pal: &GuiPalette) {
                             .italics(),
                     );
                 } else {
-                    ui.label(RichText::new(&preview).color(pal.translated_text).size(15.0));
+                    super::markdown::show(
+                        ui,
+                        &mut nav.md_preview,
+                        &preview,
+                        &th,
+                        pal.translated_text,
+                    );
                 }
             });
         });
@@ -910,7 +922,7 @@ fn translate(ui: &mut Ui, app: &mut App, pal: &GuiPalette) {
 
 // ─── Reader ──────────────────────────────────────────────────────────────────
 
-fn reader(ui: &mut Ui, app: &mut App, pal: &GuiPalette) {
+fn reader(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
     let Some(active) = app.active.as_ref() else {
         empty_state(ui, pal, "No project open", "Open a project to read translations.");
         return;
@@ -976,8 +988,12 @@ fn reader(ui: &mut Ui, app: &mut App, pal: &GuiPalette) {
             app.apply(Action::ReaderStepChapter { forward: true });
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if ui.button("Copy translation").clicked() && !translated.is_empty() {
-                ui.ctx().copy_text(translated.clone());
+            // Through the declared action, not `copy_text`: `A_COPY` strips
+            // the `[REVIEW NEEDED]` banners and reports how many lines went,
+            // and this button used to copy the raw markdown with them in.
+            if ui.button("Copy translation").clicked() {
+                let action = app.run_screen_action(crate::app::reader::A_COPY);
+                app.apply(action);
             }
             if ui.button("QA").clicked() {
                 app.apply(Action::show_overlay(Overlay::qa_placeholder()));
@@ -1003,6 +1019,7 @@ fn reader(ui: &mut Ui, app: &mut App, pal: &GuiPalette) {
     }
 
     let body_h = ui.available_height();
+    let th = &app.theme;
     ui.columns(2, |cols| {
         for c in cols.iter_mut() {
             c.set_min_height(body_h);
@@ -1012,7 +1029,9 @@ fn reader(ui: &mut Ui, app: &mut App, pal: &GuiPalette) {
             ui.label(RichText::new("原文  Source").color(pal.ink_soft).strong());
             ui.add_space(4.0);
             scroll_y("reader_ja").show(ui, |ui| {
-                ui.label(RichText::new(&ja).color(pal.ja_text).size(15.0));
+                // Rendered rather than printed: ruby, image links and review
+                // banners used to arrive as literal markdown.
+                super::markdown::show(ui, &mut nav.md_ja, &ja, th, pal.ja_text);
             });
         });
         card_fill(&mut cols[1], pal, |ui| {
@@ -1026,7 +1045,13 @@ fn reader(ui: &mut Ui, app: &mut App, pal: &GuiPalette) {
                             .italics(),
                     );
                 } else {
-                    ui.label(RichText::new(&translated).color(pal.translated_text).size(15.0));
+                    super::markdown::show(
+                        ui,
+                        &mut nav.md_translated,
+                        &translated,
+                        th,
+                        pal.translated_text,
+                    );
                 }
             });
         });
@@ -1036,6 +1061,7 @@ fn reader(ui: &mut Ui, app: &mut App, pal: &GuiPalette) {
 // ─── Lexicon ─────────────────────────────────────────────────────────────────
 
 fn lexicon(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
+    let th = &app.theme;
     let Some(active) = app.active.as_ref() else {
         empty_state(ui, pal, "No project open", "Open a project to browse the lexicon.");
         return;
@@ -1219,7 +1245,13 @@ fn lexicon(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
                                 .italics(),
                         );
                     } else {
-                        ui.label(RichText::new(style_md).color(pal.ink));
+                        super::markdown::show(
+                            ui,
+                            &mut nav.md_style,
+                            &style_md,
+                            th,
+                            pal.ink,
+                        );
                     }
                 });
             });

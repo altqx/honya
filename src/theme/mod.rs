@@ -19,6 +19,9 @@ const fn rgb(r: u8, g: u8, b: u8) -> Color {
     Color::Rgb(r, g, b)
 }
 
+/// Plain colour slots, so a caller that needs one past a mutable borrow can
+/// take a copy rather than restructure around it.
+#[derive(Clone)]
 pub struct Theme {
     pub bg: Color,        // washi paper
     pub bg_panel: Color,  // recessed list panels
