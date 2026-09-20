@@ -218,6 +218,9 @@ pub enum Action {
     /// Stop one running sub-agent. It stops at its next round boundary and
     /// keeps its checkpoint, so the work can be resumed.
     RefineCancelSubagent { id: String },
+    /// Run one of the active screen's declared commands by id — what the
+    /// palette carries, since a screen command is resolved, not precomputed.
+    RunScreenCommand { id: u16 },
     ReaderCopy {
         text: String,
         lines: usize,
@@ -2711,6 +2714,62 @@ impl App {
         }
     }
 
+    /// The palette, with what exists added to what is always there.
+    ///
+    /// Twenty fixed navigation entries could not reach a chapter, a
+    /// conversation, or any command a screen declares — the things you open a
+    /// palette to find.
+    fn build_palette_overlay(&self) -> Overlay {
+        use crate::app::overlay::PaletteItem;
+        let mut st = match Overlay::palette() {
+            Overlay::Palette(st) => st,
+            other => return other,
+        };
+        let mut extra = Vec::new();
+
+        // Everything this screen can do, by the name it is declared with.
+        let screen = self.screen;
+        for act in self.screen_actions() {
+            if !act.enabled {
+                continue;
+            }
+            extra.push(PaletteItem::new(
+                format!("{}: {}", crate::app::keys::screen_slug(screen), act.label),
+                Action::RunScreenCommand { id: act.id },
+            ));
+        }
+
+        if let Some(active) = self.active.as_ref() {
+            for vol in &active.project.volumes {
+                for ch in &vol.chapters {
+                    let title = ch.title.trim();
+                    extra.push(PaletteItem::new(
+                        if title.is_empty() {
+                            format!("読 v{}/c{}", vol.number, ch.number)
+                        } else {
+                            format!("読 v{}/c{}  {title}", vol.number, ch.number)
+                        },
+                        Action::OpenChapter { chapter: ch.number },
+                    ));
+                }
+            }
+        }
+
+        for s in &self.refine_sessions {
+            let title = s.title.trim();
+            extra.push(PaletteItem::new(
+                format!(
+                    "磨 {}",
+                    if title.is_empty() { s.id.as_str() } else { title }
+                ),
+                Action::RefineSwitchSession { id: s.id.clone() },
+            ));
+        }
+
+        st.extend(extra);
+        Overlay::Palette(st)
+    }
+
     /// Run one of the active screen's actions, however it was reached.
     pub(crate) fn run_screen_action(&mut self, id: u16) -> Action {
         let ran = match self.screen {
@@ -2985,6 +3044,9 @@ impl App {
                     // Reader jump placeholders carry no targets; rebuild the
                     // chapter/section/bookmark list from live state on show.
                     Overlay::ReaderJump(_) => self.build_jump_overlay(),
+                    // The palette's fixed entries are navigation; what you
+                    // actually want to reach is named by the project.
+                    Overlay::Palette(_) => self.build_palette_overlay(),
                     other => other,
                 };
                 self.sync_settings_remote();
@@ -3423,6 +3485,10 @@ impl App {
             }
             Action::OpenAuthUrl => self.open_auth_url(),
             Action::CopyAuthCode => self.copy_auth_code(),
+            Action::RunScreenCommand { id } => {
+                let next = self.run_screen_action(id);
+                self.apply(next);
+            }
             Action::RefineCancelSubagent { id } => {
                 if self.refine_subagents.cancel(&id) {
                     self.toast = Some(Toast::info(format!("stopping sub-agent · {id}")));
@@ -7947,5 +8013,77 @@ mod live_settings_tests {
         st.openrouter_key = "sk-something-new".into();
         app.apply(st.save_action());
         assert!(app.refine_stale, "the agent holds a client built from the key");
+    }
+}
+
+#[cfg(test)]
+mod palette_context_tests {
+    use super::*;
+
+    fn app() -> App {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        App::new(EventTx(tx), AppConfig::default())
+    }
+
+    #[test]
+    fn the_palette_offers_what_the_screen_can_actually_do() {
+        let mut app = app();
+        app.screen = Screen::Shelf;
+        let Overlay::Palette(st) = app.build_palette_overlay() else {
+            panic!("a palette");
+        };
+        // The fixed navigation entries are still there...
+        assert!(st.items.iter().any(|i| i.label.starts_with("Go: ")));
+        // ...and so is every command the screen declares right now.
+        for act in app.screen_actions().into_iter().filter(|a| a.enabled) {
+            assert!(
+                st.items
+                    .iter()
+                    .any(|i| i.label.ends_with(act.label)
+                        && matches!(i.action, Action::RunScreenCommand { id } if id == act.id)),
+                "{} is declared but the palette cannot reach it",
+                act.label
+            );
+        }
+    }
+
+    #[test]
+    fn a_palette_entry_for_a_command_runs_that_command() {
+        let mut app = app();
+        app.screen = Screen::Shelf;
+        let want = app
+            .screen_actions()
+            .into_iter()
+            .find(|a| a.enabled)
+            .expect("the shelf declares something");
+        // Routing through `apply` is the point: a screen command cannot be
+        // precomputed into an `Action`, it has to be resolved when it runs.
+        app.apply(Action::RunScreenCommand { id: want.id });
+        // It resolved to *something*; a missing arm logs rather than silently
+        // doing nothing, so an empty log is the assertion.
+        assert!(
+            !app.log.iter().any(|(_, m)| m.contains("no run arm")),
+            "the id resolved to a real command"
+        );
+    }
+
+    #[test]
+    fn the_palette_can_reach_a_conversation_by_name() {
+        use crate::workspace::refine_session::SessionMeta;
+        let mut app = app();
+        app.refine_sessions = vec![SessionMeta {
+            id: "sess-1".into(),
+            title: "ch12 honorifics".into(),
+            updated: chrono::Utc::now(),
+            message_count: 4,
+        }];
+        let Overlay::Palette(st) = app.build_palette_overlay() else {
+            panic!("a palette");
+        };
+        assert!(
+            st.items.iter().any(|i| i.label.contains("ch12 honorifics")
+                && matches!(&i.action, Action::RefineSwitchSession { id } if id == "sess-1")),
+            "a conversation is one of the things you open a palette to find"
+        );
     }
 }

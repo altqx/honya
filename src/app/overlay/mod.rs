@@ -3396,12 +3396,12 @@ mod tests {
         };
         // Force a selection past the first page of a short modal.
         st.select(st.items.len().saturating_sub(1));
-        let last_label = st.items[st.sel()].label;
+        let last_label = st.items[st.sel()].label.clone();
 
         let (lines, _) = render_overlay(&mut ov, 80, 16);
         let glyphs: String = lines.concat();
         assert!(
-            glyphs.contains(last_label),
+            glyphs.contains(&last_label),
             "selected palette row should stay in view: missing {last_label:?} in {glyphs:?}"
         );
     }

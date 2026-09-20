@@ -1328,67 +1328,78 @@ pub struct PaletteState {
 
 #[derive(Debug, Clone)]
 pub struct PaletteItem {
-    pub label: &'static str,
+    /// Owned, because most of what belongs here is named by the project — a
+    /// chapter, a conversation — not by a literal in this file.
+    pub label: String,
     pub action: Action,
+}
+
+impl PaletteItem {
+    pub fn new(label: impl Into<String>, action: Action) -> Self {
+        Self {
+            label: label.into(),
+            action,
+        }
+    }
 }
 
 impl PaletteState {
     pub(super) fn new() -> Self {
         let items = vec![
             PaletteItem {
-                label: "Getting started",
+                label: "Getting started".to_string(),
                 action: Action::show_overlay(Overlay::welcome_placeholder()),
             },
             PaletteItem {
-                label: "Go: Shelf",
+                label: "Go: Shelf".to_string(),
                 action: Action::Goto(Screen::Shelf),
             },
             PaletteItem {
-                label: "Go: Project",
+                label: "Go: Project".to_string(),
                 action: Action::Goto(Screen::Project),
             },
             PaletteItem {
-                label: "Go: Translate",
+                label: "Go: Translate".to_string(),
                 action: Action::Goto(Screen::Translate),
             },
             PaletteItem {
-                label: "Translate whole project",
+                label: "Translate whole project".to_string(),
                 action: Action::StartProjectTranslation,
             },
             PaletteItem {
-                label: "Go: Reader",
+                label: "Go: Reader".to_string(),
                 action: Action::Goto(Screen::Reader),
             },
             PaletteItem {
-                label: "Go: Lexicon",
+                label: "Go: Lexicon".to_string(),
                 action: Action::Goto(Screen::Lexicon),
             },
             PaletteItem {
-                label: "Go: Refine",
+                label: "Go: Refine".to_string(),
                 action: Action::Goto(Screen::Refine),
             },
             PaletteItem {
-                label: "Settings",
+                label: "Settings".to_string(),
                 action: Action::show_overlay(Overlay::settings_placeholder()),
             },
             PaletteItem {
-                label: "Theme",
+                label: "Theme".to_string(),
                 action: Action::show_overlay(Overlay::theme_placeholder()),
             },
             PaletteItem {
-                label: "Help",
+                label: "Help".to_string(),
                 action: Action::show_overlay(Overlay::Help(0)),
             },
             PaletteItem {
-                label: "About",
+                label: "About".to_string(),
                 action: Action::show_overlay(Overlay::About),
             },
             PaletteItem {
-                label: "QA review",
+                label: "QA review".to_string(),
                 action: Action::show_overlay(Overlay::qa_placeholder()),
             },
             PaletteItem {
-                label: "Activity log",
+                label: "Activity log".to_string(),
                 action: Action::show_overlay(Overlay::Log(0)),
             },
         ];
@@ -1411,8 +1422,13 @@ impl PaletteState {
     pub fn picker_items(&self) -> Vec<picker::Item> {
         self.items
             .iter()
-            .map(|i| picker::Item::new(i.label))
+            .map(|i| picker::Item::new(i.label.clone()))
             .collect()
+    }
+
+    /// Add what the project itself offers, after the fixed commands.
+    pub fn extend(&mut self, items: impl IntoIterator<Item = PaletteItem>) {
+        self.items.extend(items);
     }
 
     /// Which match the cursor is on.

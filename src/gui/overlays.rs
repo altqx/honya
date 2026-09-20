@@ -1032,8 +1032,22 @@ fn palette(
                 st.picker.on_query_changed();
             }
             let matches = st.matches();
-            // The palette is modal, so a bare Enter can only mean "run the top match".
-            let submit = ui.input(|i| i.key_pressed(egui::Key::Enter));
+            // The palette is modal, so arrows and Enter belong to it. Enter ran
+            // `matches.first()` while the highlight sat on `st.sel()`, so
+            // clicking a row and pressing Enter ran a different command.
+            let (submit, step) = ui.input(|i| {
+                (
+                    i.key_pressed(egui::Key::Enter),
+                    i.key_pressed(egui::Key::ArrowDown) as isize
+                        - i.key_pressed(egui::Key::ArrowUp) as isize,
+                )
+            });
+            if step != 0 && !matches.is_empty() {
+                let last = matches.len() - 1;
+                let next = (st.sel() as isize + step).clamp(0, last as isize) as usize;
+                st.select(next);
+            }
+            let sel = st.sel().min(matches.len().saturating_sub(1));
             ui.add_space(4.0);
             ScrollArea::vertical()
                 .id_salt("palette_list")
@@ -1041,7 +1055,10 @@ fn palette(
                 .show(ui, |ui| {
                     for (row, &i) in matches.iter().enumerate() {
                         let item = &st.items[i];
-                        if ui.selectable_label(row == st.sel(), item.label).clicked() {
+                        let hit = ui.push_id(("palette", i), |ui| {
+                            ui.selectable_label(row == sel, &item.label).clicked()
+                        });
+                        if hit.inner {
                             actions.push(Action::CloseOverlay);
                             actions.push(item.action.clone());
                         }
@@ -1050,7 +1067,7 @@ fn palette(
                         ui.label(RichText::new("no matches").color(pal.ink_faint).italics());
                     }
                 });
-            if submit && let Some(&i) = matches.first() {
+            if submit && let Some(&i) = matches.get(sel) {
                 actions.push(Action::CloseOverlay);
                 actions.push(st.items[i].action.clone());
             }
@@ -1329,8 +1346,23 @@ fn reader_jump(
             }
             ui.add_space(4.0);
             let matches = st.matches();
-            if ui.input(|i| i.key_pressed(egui::Key::Enter))
-                && let Some(item) = matches.first().and_then(|&i| st.items.get(i))
+            // Same bug as the palette had: the highlight moved with the mouse
+            // while Enter always took the top row.
+            let (submit, step) = ui.input(|i| {
+                (
+                    i.key_pressed(egui::Key::Enter),
+                    i.key_pressed(egui::Key::ArrowDown) as isize
+                        - i.key_pressed(egui::Key::ArrowUp) as isize,
+                )
+            });
+            if step != 0 && !matches.is_empty() {
+                let last = matches.len() - 1;
+                let next = (st.sel() as isize + step).clamp(0, last as isize) as usize;
+                st.select(next);
+            }
+            let sel = st.sel().min(matches.len().saturating_sub(1));
+            if submit
+                && let Some(item) = matches.get(sel).and_then(|&i| st.items.get(i))
             {
                 actions.push(Action::CloseOverlay);
                 actions.push(Action::OpenChapterAt {
@@ -1350,7 +1382,7 @@ fn reader_jump(
                             JumpKind::Bookmark => "◈",
                         };
                         if ui
-                            .selectable_label(row == st.sel(), format!("{glyph}  {}", item.label))
+                            .selectable_label(row == sel, format!("{glyph}  {}", item.label))
                             .clicked()
                         {
                             actions.push(Action::CloseOverlay);
