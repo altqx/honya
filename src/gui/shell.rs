@@ -180,42 +180,6 @@ pub fn drawer_tabs(
     picked
 }
 
-/// The activity log, as a pane rather than a dialog.
-///
-/// Unlike the modal it replaces, this honours the whole buffer instead of the
-/// last four hundred lines: a log you cannot scroll back through is a log that
-/// hides the thing you opened it for.
-pub fn activity_pane(ui: &mut egui::Ui, log: &[(crate::model::LogLevel, String)], pal: &GuiPalette) {
-    use crate::model::LogLevel;
-    if log.is_empty() {
-        ui.label(
-            RichText::new("Nothing has happened yet.")
-                .color(pal.ink_faint)
-                .italics()
-                .small(),
-        );
-        return;
-    }
-    egui::ScrollArea::vertical()
-        .id_salt("drawer_activity")
-        .auto_shrink([false, false])
-        .stick_to_bottom(true)
-        .show_rows(ui, ui.text_style_height(&egui::TextStyle::Small), log.len(), |ui, rows| {
-            for (level, msg) in &log[rows.start..rows.end.min(log.len())] {
-                let (tag, color) = match level {
-                    LogLevel::Error => ("ERR", pal.status_failed),
-                    LogLevel::Warn => ("WRN", pal.status_warn),
-                    LogLevel::Info => ("INF", pal.ink_soft),
-                    LogLevel::Trace => ("TRC", pal.ink_faint),
-                };
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(tag).color(color).monospace().small());
-                    ui.label(RichText::new(msg).color(pal.ink).small());
-                });
-            }
-        });
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

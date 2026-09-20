@@ -4,6 +4,7 @@
 //! dialogs — over the same `App` state, Action funnel, and theme palettes as
 //! the TUI; not a terminal grid in a window.
 
+mod drawer;
 mod fonts;
 mod inspector;
 mod overlays;
@@ -63,6 +64,7 @@ pub fn run(app: App, rx: UnboundedReceiver<AppEvent>) -> anyhow::Result<()> {
         tick_every: Duration::from_millis(100),
         nav: GuiNav::default(),
         tree: tree::TreeState::default(),
+        qa: drawer::QaCache::default(),
         layout: shell::Layout::load(),
         applied_theme: None,
         fonts_ready: false,
@@ -103,6 +105,7 @@ struct GuiApp {
     tick_every: Duration,
     nav: GuiNav,
     tree: tree::TreeState,
+    qa: drawer::QaCache,
     layout: shell::Layout,
     applied_theme: Option<ThemeId>,
     fonts_ready: bool,
@@ -633,7 +636,10 @@ impl GuiApp {
             .app
             .run_queue
             .as_ref()
-            .map(|q| q.snapshot().1.len() as u32)
+            .map(|q| {
+                let (running, pending) = q.snapshot();
+                pending.len() as u32 + u32::from(running.is_some())
+            })
             .unwrap_or(0);
         let picked = shell::drawer_tabs(ui, pal, self.layout.drawer_tab, |tab| match tab {
             shell::DrawerTab::Activity => Some(log_len),
@@ -645,16 +651,17 @@ impl GuiApp {
             self.layout.drawer_tab = tab;
         }
         ui.separator();
-        match self.layout.drawer_tab {
-            shell::DrawerTab::Activity => shell::activity_pane(ui, &self.app.log, pal),
-            other => {
-                ui.label(
-                    RichText::new(format!("{} — not wired up yet.", other.label().trim()))
-                        .color(pal.ink_faint)
-                        .italics()
-                        .small(),
-                );
-            }
+        let mut actions = Vec::new();
+        drawer::show(
+            ui,
+            &self.app,
+            self.layout.drawer_tab,
+            &mut self.qa,
+            pal,
+            &mut actions,
+        );
+        for a in actions {
+            self.app.apply(a);
         }
     }
 

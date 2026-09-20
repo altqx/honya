@@ -346,6 +346,20 @@ impl AskSession {
     }
 }
 
+/// One run, as a caller outside this module sees it.
+pub struct SubagentView<'a> {
+    pub id: &'a str,
+    pub title: &'a str,
+    pub role: &'a str,
+    pub model: &'a str,
+    pub background: bool,
+    pub status: RefineSubagentStatus,
+    pub activity: &'a str,
+    pub summary: &'a str,
+    pub elapsed: std::time::Duration,
+    pub plan: &'a [PlanStep],
+}
+
 #[derive(Debug, Clone)]
 struct SubagentRun {
     id: String,
@@ -2983,6 +2997,28 @@ impl RefineScreen {
             .find(|b| b.subagent_id() == Some(id))
             .map(|b| b.detail.clone())
             .unwrap_or_default()
+    }
+
+    /// A read-only view of every run this session started, newest first with
+    /// the running ones ahead of the rest — the order the tasks pane wants and
+    /// the same one the TUI's own pane uses.
+    pub fn subagent_views(&self) -> Vec<SubagentView<'_>> {
+        let mut out: Vec<_> = self.subagents.iter().enumerate().collect();
+        out.sort_by_key(|(i, r)| (r.status != RefineSubagentStatus::Running, std::cmp::Reverse(*i)));
+        out.into_iter()
+            .map(|(_, r)| SubagentView {
+                id: &r.id,
+                title: &r.title,
+                role: &r.role,
+                model: &r.model,
+                background: r.background,
+                status: r.status,
+                activity: &r.activity,
+                summary: &r.summary,
+                elapsed: r.elapsed(),
+                plan: &r.plan,
+            })
+            .collect()
     }
 
     /// Whether anything is still moving on this screen — a spinner to animate.
