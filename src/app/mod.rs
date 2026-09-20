@@ -5,6 +5,7 @@
 
 pub mod action_table;
 pub mod bindings;
+pub mod keys;
 pub mod lexicon;
 pub mod lexicon_defs;
 pub mod overlay;

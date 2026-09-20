@@ -8,6 +8,7 @@ mod commands;
 mod drawer;
 mod fonts;
 mod inspector;
+mod keys;
 mod overlays;
 mod screens;
 mod settings;
@@ -69,6 +70,7 @@ pub fn run(app: App, rx: UnboundedReceiver<AppEvent>) -> anyhow::Result<()> {
         tabs: tabs::Tabs::default(),
         qa: drawer::QaCache::default(),
         layout: shell::Layout::load(),
+        bindings: crate::app::keys::Bindings::load(),
         applied_theme: None,
         fonts_ready: false,
     };
@@ -111,6 +113,7 @@ struct GuiApp {
     tabs: tabs::Tabs,
     qa: drawer::QaCache,
     layout: shell::Layout,
+    bindings: crate::app::keys::Bindings,
     applied_theme: Option<ThemeId>,
     fonts_ready: bool,
 }
@@ -156,6 +159,9 @@ impl eframe::App for GuiApp {
         // Global shortcuts that don't fight text fields.
         // Snapshot before the input borrow — digit keys must not steal focus from edits.
         let text_focused = ctx.text_edit_focused();
+        // Collected inside the input borrow and run after it, because running
+        // one mutates the screen the table came from.
+        let mut screen_command: Option<u16> = None;
         ctx.input(|i| {
             for ev in &i.events {
                 if let egui::Event::Key {
@@ -194,6 +200,24 @@ impl eframe::App for GuiApp {
                         }
                         continue;
                     }
+                    // A screen's own commands resolve from the table it
+                    // declares them in, so a chord means the same thing here as
+                    // it does in the terminal — and a user binding moves both.
+                    if matches!(self.app.overlay, Overlay::None)
+                        && !text_focused
+                        && let Some(ev) = keys::to_crossterm(*key, *modifiers)
+                    {
+                        let mut acts = self.app.screen_actions();
+                        self.bindings.apply(self.app.screen, &mut acts);
+                        match crate::app::action_table::hit(&acts, &ev) {
+                            crate::app::action_table::KeyHit::Run(id) => {
+                                screen_command = Some(id);
+                                continue;
+                            }
+                            crate::app::action_table::KeyHit::Blocked => continue,
+                            crate::app::action_table::KeyHit::Miss => {}
+                        }
+                    }
                     // Digits switch tabs when no overlay / text field is capturing.
                     if matches!(self.app.overlay, Overlay::None) && !text_focused {
                         let screen = match key {
@@ -224,6 +248,11 @@ impl eframe::App for GuiApp {
                 }
             }
         });
+
+        if let Some(id) = screen_command {
+            let action = self.app.run_screen_action(id);
+            self.dispatch(action);
+        }
 
         if !self.app.running {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
