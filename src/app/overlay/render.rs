@@ -1265,6 +1265,8 @@ impl Overlay {
             SField::RefineModel => st.models.refine.model.clone(),
             SField::CloudflareAccount => st.cloudflare_account_id.clone(),
             SField::MaxAttempts => st.max_attempts.clone(),
+            SField::RetryAttempts => st.retry_attempts.clone(),
+            SField::RetryCooldown => st.retry_cooldown_secs.clone(),
             SField::ContinuitySentences => st.continuity_sentences.clone(),
             SField::LoopStall => st.loop_stall_secs.clone(),
             SField::Retranslates => st.max_chapter_retranslates.clone(),

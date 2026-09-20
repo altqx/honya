@@ -309,6 +309,8 @@ impl Overlay {
         Overlay::Settings(Box::new(SettingsState {
             models: crate::model::ModelSet::default(),
             theme: crate::model::ThemeId::default(),
+            retry_attempts: String::new(),
+            retry_cooldown_secs: String::new(),
             openrouter_key: String::new(),
             api_key_env: false,
             tokenrouter_key: String::new(),

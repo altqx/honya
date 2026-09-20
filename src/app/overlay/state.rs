@@ -805,6 +805,10 @@ pub struct SettingsState {
     pub preferred_language: TargetLanguage,
     /// Max Translator↔Reviewer retry attempts per chunk, as typed (digits only).
     pub max_attempts: String,
+    /// HTTP send attempts per call, as typed (digits only).
+    pub retry_attempts: String,
+    /// Cap on one backoff in seconds, as typed (digits only).
+    pub retry_cooldown_secs: String,
     /// Prior translated sentences injected per chunk, as typed (digits only).
     pub continuity_sentences: String,
     /// Loop-watchdog stall window in seconds, as typed (digits only; 0 disables).
@@ -872,6 +876,8 @@ impl SettingsState {
             coherence_check: cfg.coherence_check,
             preferred_language: cfg.preferred_language,
             max_attempts: cfg.max_attempts.to_string(),
+            retry_attempts: cfg.retry_attempts.to_string(),
+            retry_cooldown_secs: cfg.retry_cooldown_secs.to_string(),
             continuity_sentences: cfg.continuity_sentences.to_string(),
             loop_stall_secs: cfg.loop_stall_secs.to_string(),
             max_chapter_retranslates: cfg.max_chapter_retranslates.to_string(),
@@ -924,6 +930,8 @@ impl SettingsState {
             SField::CloudflareAccount => &mut self.cloudflare_account_id,
             SField::CloudflareToken => &mut self.cloudflare_api_token,
             SField::MaxAttempts => &mut self.max_attempts,
+            SField::RetryAttempts => &mut self.retry_attempts,
+            SField::RetryCooldown => &mut self.retry_cooldown_secs,
             SField::ContinuitySentences => &mut self.continuity_sentences,
             SField::LoopStall => &mut self.loop_stall_secs,
             SField::Retranslates => &mut self.max_chapter_retranslates,
@@ -1149,6 +1157,24 @@ impl SettingsState {
             .clamp(1, 20)
     }
 
+    /// Clamped to the range the registry advertises, so a typo cannot disable
+    /// retrying by accident or let one call wait for minutes.
+    pub(super) fn retry_attempts_value(&self) -> u32 {
+        self.retry_attempts
+            .trim()
+            .parse::<u32>()
+            .unwrap_or(3)
+            .clamp(1, 10)
+    }
+
+    pub(super) fn retry_cooldown_value(&self) -> u64 {
+        self.retry_cooldown_secs
+            .trim()
+            .parse::<u64>()
+            .unwrap_or(20)
+            .clamp(1, 120)
+    }
+
     /// Target chunk size. Clamped to the range the registry advertises, so a
     /// typo cannot produce a chunk no provider will accept.
     pub(super) fn chunk_target_tokens_value(&self) -> usize {
@@ -1227,6 +1253,8 @@ impl SettingsState {
             service_tier: self.service_tier,
             preferred_language: self.preferred_language,
             max_attempts: self.max_attempts_value(),
+            retry_attempts: self.retry_attempts_value(),
+            retry_cooldown_secs: self.retry_cooldown_value(),
             continuity_sentences: self.continuity_sentences_value(),
             loop_stall_secs: self.loop_stall_secs_value(),
             max_chapter_retranslates: self.max_chapter_retranslates_value(),

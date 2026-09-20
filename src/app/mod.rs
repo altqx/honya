@@ -303,6 +303,10 @@ pub enum Action {
         preferred_language: crate::model::TargetLanguage,
         /// Max Translator↔Reviewer retry attempts per chunk (already clamped 1..=20).
         max_attempts: u32,
+        /// HTTP send attempts per call, and the cap on one backoff, for every
+        /// transport (already clamped to the registry's ranges).
+        retry_attempts: u32,
+        retry_cooldown_secs: u64,
         /// Prior translated sentences injected per chunk (already clamped 0..=100).
         continuity_sentences: usize,
         /// Loop-watchdog stall window in seconds (already clamped; 0 disables it).
@@ -3295,6 +3299,8 @@ impl App {
                 service_tier,
                 preferred_language,
                 max_attempts,
+                retry_attempts,
+                retry_cooldown_secs,
                 continuity_sentences,
                 loop_stall_secs,
                 max_chapter_retranslates,
@@ -3319,6 +3325,8 @@ impl App {
                     service_tier,
                     preferred_language,
                     max_attempts,
+                    retry_attempts,
+                    retry_cooldown_secs,
                     continuity_sentences,
                     loop_stall_secs,
                     max_chapter_retranslates,
@@ -5044,6 +5052,8 @@ impl App {
         service_tier: Option<crate::model::ServiceTier>,
         preferred_language: crate::model::TargetLanguage,
         max_attempts: u32,
+        retry_attempts: u32,
+        retry_cooldown_secs: u64,
         continuity_sentences: usize,
         loop_stall_secs: u64,
         max_chapter_retranslates: u32,
@@ -5068,6 +5078,10 @@ impl App {
         let language_changed = self.cfg.preferred_language != preferred_language;
         self.cfg.preferred_language = preferred_language;
         self.cfg.max_attempts = max_attempts;
+        let retry_changed = self.cfg.retry_attempts != retry_attempts
+            || self.cfg.retry_cooldown_secs != retry_cooldown_secs;
+        self.cfg.retry_attempts = retry_attempts;
+        self.cfg.retry_cooldown_secs = retry_cooldown_secs;
         self.cfg.continuity_sentences = continuity_sentences;
         self.cfg.loop_stall_secs = loop_stall_secs;
         self.cfg.max_chapter_retranslates = max_chapter_retranslates;
@@ -5123,7 +5137,7 @@ impl App {
         }
         // Rebuild the active clients so changed keys, providers, or service tier
         // (snapshotted into ClientConfig) take hold without reopening.
-        if keys_changed || tier_changed || models_changed || system_one_changed {
+        if keys_changed || tier_changed || models_changed || system_one_changed || retry_changed {
             if let Some(active) = self.active.as_mut() {
                 active.clients = crate::build_clients(&self.cfg).ok();
             }

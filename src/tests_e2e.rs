@@ -12,6 +12,14 @@ use crate::app::overlay::Overlay;
 use crate::app::{Action, ActiveProject, App, Screen, Toast};
 use crate::model::{AppConfig, EventTx, LogLevel, ModelSet, TargetLanguage};
 
+/// A settings row's index, asked of the registry rather than written down.
+/// Hardcoding these is how three of these tests broke the last time a row was
+/// inserted.
+#[cfg(test)]
+fn row(f: crate::app::settings_defs::SField) -> u8 {
+    crate::app::settings_defs::index_of(f)
+}
+
 fn fresh_app() -> App {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     App::new(EventTx(tx), AppConfig::default())
@@ -353,7 +361,7 @@ fn settings_api_key_field_edits_and_respects_env_override() {
     let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::empty());
 
     // Editable case: type into the OpenRouter key field, Enter → SaveSettings{openrouter_key}.
-    let mut ov = Overlay::Settings(Box::new(SettingsState::for_test(12)));
+    let mut ov = Overlay::Settings(Box::new(SettingsState::for_test(row(crate::app::settings_defs::SField::OpenRouterKey))));
     for c in "sk-or-1".chars() {
         ov.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::empty()));
     }
@@ -368,7 +376,7 @@ fn settings_api_key_field_edits_and_respects_env_override() {
     let mut ov = Overlay::Settings(Box::new(SettingsState {
         api_key_env: true,
         openrouter_key: "saved".into(),
-        ..SettingsState::for_test(12)
+        ..SettingsState::for_test(row(crate::app::settings_defs::SField::OpenRouterKey))
     }));
     ov.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::empty()));
     ov.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::empty()));
@@ -399,7 +407,7 @@ fn settings_ctrl_u_toggles_update_mode_and_saves_it() {
 
     // Focus the OpenRouter key field (a text field) to prove Ctrl-U is a toggle,
     // not a keystroke into the field.
-    let mut ov = Overlay::Settings(Box::new(SettingsState::for_test(12)));
+    let mut ov = Overlay::Settings(Box::new(SettingsState::for_test(row(crate::app::settings_defs::SField::OpenRouterKey))));
 
     // Ctrl-U flips Auto → Notify without typing into the focused field.
     ov.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
@@ -426,7 +434,7 @@ fn settings_ctrl_g_toggles_release_channel_and_saves_it() {
     use crate::model::ReleaseChannel;
 
     // Focus the OpenRouter key field (a text field) to prove Ctrl-G is a toggle.
-    let mut ov = Overlay::Settings(Box::new(SettingsState::for_test(12)));
+    let mut ov = Overlay::Settings(Box::new(SettingsState::for_test(row(crate::app::settings_defs::SField::OpenRouterKey))));
 
     ov.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL));
     match &ov {
@@ -451,7 +459,7 @@ fn settings_preferred_language_defaults_to_thai_and_saves_english() {
     use crate::app::overlay::SettingsState;
     use crate::model::TargetLanguage;
 
-    let mut ov = Overlay::Settings(Box::new(SettingsState::for_test(17)));
+    let mut ov = Overlay::Settings(Box::new(SettingsState::for_test(row(crate::app::settings_defs::SField::PreferredLanguageField))));
     match &ov {
         Overlay::Settings(st) => assert_eq!(st.preferred_language, TargetLanguage::Thai),
         _ => panic!("settings overlay"),
@@ -471,7 +479,7 @@ fn settings_parallel_lookahead_defaults_on_and_saves_disabled() {
     use crate::app::Action;
     use crate::app::overlay::SettingsState;
 
-    let mut ov = Overlay::Settings(Box::new(SettingsState::for_test(23)));
+    let mut ov = Overlay::Settings(Box::new(SettingsState::for_test(row(crate::app::settings_defs::SField::ParallelLookahead))));
     match &ov {
         Overlay::Settings(st) => assert!(st.parallel_lookahead),
         _ => panic!("settings overlay"),
@@ -496,10 +504,10 @@ fn settings_retries_field_is_digit_only_and_clamped() {
     let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::empty());
 
     let mk = || {
-        // Focus the "Retry attempts" numeric field (index 18) with an empty buffer.
+        // Focus the "Retry attempts" numeric field with an empty buffer.
         Overlay::Settings(Box::new(SettingsState {
             max_attempts: String::new(),
-            ..SettingsState::for_test(18)
+            ..SettingsState::for_test(row(crate::app::settings_defs::SField::MaxAttempts))
         }))
     };
 
@@ -540,13 +548,13 @@ fn settings_continuity_sentences_is_digit_only_and_clamped() {
     use crate::app::overlay::SettingsState;
 
     let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::empty());
-    let seeded = SettingsState::for_test(19);
+    let seeded = SettingsState::for_test(row(crate::app::settings_defs::SField::ContinuitySentences));
     assert_eq!(seeded.continuity_sentences, "10");
 
     let mk = || {
         Overlay::Settings(Box::new(SettingsState {
             continuity_sentences: String::new(),
-            ..SettingsState::for_test(19)
+            ..SettingsState::for_test(row(crate::app::settings_defs::SField::ContinuitySentences))
         }))
     };
 
@@ -640,14 +648,14 @@ fn text_box_cursor_moves_and_edits_mid_string() {
 fn settings_field_caret_inserts_mid_value() {
     use crate::app::overlay::SettingsState;
 
-    // Focus the Orchestrator model field (index 1, a text field) holding "htp".
+    // Focus the Orchestrator model field (a text field) holding "htp".
     let mut ov = Overlay::Settings(Box::new(SettingsState {
         models: crate::model::ModelSet {
             orchestrator: crate::model::AgentModel::openrouter("htp"),
             ..crate::model::ModelSet::default()
         },
         cursor: 3, // end of "htp"
-        ..SettingsState::for_test(1)
+        ..SettingsState::for_test(row(crate::app::settings_defs::SField::OrchModel))
     }));
     // Caret after 't', insert the missing 't' → "http".
     ov.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::empty()));

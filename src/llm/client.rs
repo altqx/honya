@@ -191,7 +191,13 @@ impl RetryPolicy {
         let cap = self.cooldown_cap.as_secs().max(1);
         let secs = match retry_after {
             Some(hint) => hint.min(cap),
-            None => (1u64 << (retry.saturating_sub(1)).min(5)).min(cap),
+            // Doubling until the cap binds, rather than stopping at a fixed
+            // rung: the cap is configurable, so a ceiling of its own here would
+            // silently ignore anything set above it.
+            None => 1u64
+                .checked_shl(retry.saturating_sub(1))
+                .unwrap_or(u64::MAX)
+                .min(cap),
         };
         Duration::from_secs(secs)
     }
@@ -1276,6 +1282,44 @@ mod tests {
                 finish_reason: "length".into(),
             }
             .is_retryable()
+        );
+    }
+
+    /// The two settings have to reach the transport, or dialling them does
+    /// nothing. Every client is built from an `AppConfig`, so this is the join.
+    #[test]
+    fn the_configured_budget_reaches_the_transport() {
+        let cfg = AppConfig {
+            retry_attempts: 7,
+            retry_cooldown_secs: 45,
+            ..AppConfig::default()
+        };
+
+        let policy = ClientConfig::from_app_config(&cfg, "k".into()).send_policy();
+        assert_eq!(policy.max_attempts, 7);
+        assert_eq!(policy.backoff(9, None), Duration::from_secs(45));
+        assert_eq!(policy.backoff(1, Some(600)), Duration::from_secs(45));
+    }
+
+    /// Cloudflare clears the tier after construction, so the bump has to be read
+    /// at use time rather than baked into the field.
+    #[test]
+    fn clearing_the_tier_drops_the_tier_bump() {
+        let cfg = AppConfig {
+            service_tier: Some(ServiceTier::Flex),
+            ..AppConfig::default()
+        };
+        assert_eq!(
+            ClientConfig::from_app_config(&cfg, "k".into())
+                .send_policy()
+                .max_attempts,
+            5
+        );
+        assert_eq!(
+            ClientConfig::for_cloudflare_workers_ai(&cfg, "acct", "t".into())
+                .send_policy()
+                .max_attempts,
+            3
         );
     }
 
