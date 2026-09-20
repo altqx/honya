@@ -539,6 +539,25 @@ impl ReaderScreen {
     }
 
     /// The chapter currently loaded (0 = none), for the App's jump-overlay builder.
+    /// The old-versus-new comparison, when this chapter has been retranslated
+    /// and `A_DIFF` is showing it. Per side: label, prose, which lines changed,
+    /// and what that run cost.
+    pub fn diff_view(&self) -> Option<DiffView<'_>> {
+        let c = self.compare.as_ref().filter(|_| self.diff_mode)?;
+        Some(DiffView {
+            old_label: &c.old_label,
+            new_label: &c.new_label,
+            old_translation: &c.old_translation,
+            new_translation: &c.new_translation,
+            old_changed: &c.line.old_changed,
+            new_changed: &c.line.new_changed,
+            removed: c.line.removed,
+            added: c.line.added,
+            old_cost: c.old_cost,
+            new_cost: c.new_cost,
+        })
+    }
+
     /// Which panes are showing: what `A_MODE` cycles. A caller that draws its
     /// own panes has to ask, or the toggle changes nothing it can see.
     pub fn shows_source(&self) -> bool {
@@ -1496,6 +1515,20 @@ impl QaTrend {
 
 /// Side-by-side rerun comparison: archived previous translation vs the live new one, plus
 /// the cost / QA / glossary deltas between the two runs that produced them.
+/// One retranslation comparison, for a caller that draws its own panes.
+pub struct DiffView<'a> {
+    pub old_label: &'a str,
+    pub new_label: &'a str,
+    pub old_translation: &'a str,
+    pub new_translation: &'a str,
+    pub old_changed: &'a [bool],
+    pub new_changed: &'a [bool],
+    pub removed: usize,
+    pub added: usize,
+    pub old_cost: Option<f64>,
+    pub new_cost: Option<f64>,
+}
+
 struct RerunCompare {
     old_label: String,
     new_label: String,

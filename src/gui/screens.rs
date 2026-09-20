@@ -645,6 +645,64 @@ fn project(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
     });
 }
 
+/// Old against new, for a chapter that has been retranslated.
+///
+/// Changed lines are tinted rather than prefixed, because the text is prose
+/// and a `+`/`-` gutter in the middle of a sentence reads as punctuation.
+fn reader_diff(ui: &mut Ui, app: &App, pal: &GuiPalette) {
+    let Some(d) = app.reader.diff_view() else {
+        return;
+    };
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new(format!("−{} removed   +{} added", d.removed, d.added))
+                .color(pal.ink_soft)
+                .small(),
+        );
+        if let (Some(old), Some(new)) = (d.old_cost, d.new_cost) {
+            ui.label(
+                RichText::new(format!("${old:.4} → ${new:.4}"))
+                    .color(pal.ink_faint)
+                    .small(),
+            );
+        }
+    });
+    ui.add_space(4.0);
+
+    let body_h = ui.available_height();
+    ui.columns(2, |cols| {
+        for c in cols.iter_mut() {
+            c.set_min_height(body_h);
+            c.set_max_height(body_h);
+        }
+        for (n, (label, text, changed, tint)) in [
+            (d.old_label, d.old_translation, d.old_changed, pal.status_failed),
+            (d.new_label, d.new_translation, d.new_changed, pal.status_done),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            card_fill(&mut cols[n], pal, |ui| {
+                ui.label(RichText::new(label).color(pal.ink_soft).strong());
+                ui.add_space(4.0);
+                scroll_y(if n == 0 { "reader_diff_old" } else { "reader_diff_new" }).show(
+                    ui,
+                    |ui| {
+                        for (i, line) in text.lines().enumerate() {
+                            let hot = changed.get(i).copied().unwrap_or(false);
+                            ui.label(
+                                RichText::new(line)
+                                    .color(if hot { tint } else { pal.ink_soft })
+                                    .size(15.0),
+                            );
+                        }
+                    },
+                );
+            });
+        }
+    });
+}
+
 /// The Reader's own status line: what the search found, how many bookmarks and
 /// review flags this chapter carries. None of it was visible in the window.
 fn reader_status(ui: &mut Ui, app: &App, pal: &GuiPalette) {
@@ -1155,6 +1213,13 @@ fn reader(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
             "No chapter loaded",
             "Pick a chapter above, or open one from the Project tree.",
         );
+        return;
+    }
+
+    // A retranslated chapter can be read against its previous version. `d`
+    // entered that mode already; the window simply kept drawing the panes.
+    if app.reader.diff_view().is_some() {
+        reader_diff(ui, app, pal);
         return;
     }
 
