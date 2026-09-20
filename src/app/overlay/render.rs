@@ -21,6 +21,23 @@ use super::*;
 
 impl Overlay {
     pub fn render(
+        &mut self,
+        ui: &mut crate::ui::kit::Ui,
+        area: Rect,
+        cfg: &AppConfig,
+        log: &[(LogLevel, String)],
+    ) {
+        // The two pickers own a selection and a scroll offset, so they take a
+        // mutable borrow the rest of the match cannot share.
+        match self {
+            Overlay::Palette(st) => return render_palette(ui, area, st),
+            Overlay::ReaderJump(st) => return render_reader_jump(ui, area, st),
+            _ => {}
+        }
+        self.render_static(ui, area, cfg, log);
+    }
+
+    fn render_static(
         &self,
         ui: &mut crate::ui::kit::Ui,
         area: Rect,
@@ -30,7 +47,7 @@ impl Overlay {
         // Overlays still on the old path draw straight to the frame. They are
         // converted a batch at a time; `is_kit_rendered` says which are done.
         match self {
-            Overlay::None => {}
+            Overlay::None | Overlay::Palette(_) | Overlay::ReaderJump(_) => {}
             Overlay::Help(off) => self.render_help_kit(ui, area, *off),
             Overlay::About => self.render_about_kit(ui, area),
             Overlay::Log(off) => self.render_log_kit(ui, area, log, *off),
@@ -42,7 +59,6 @@ impl Overlay {
             Overlay::Import(st) => self.render_import_kit(ui, area, st),
             Overlay::ImageSource(st) => self.render_image_source_kit(ui, area, st),
             Overlay::Settings(st) => self.render_settings_kit(ui, area, cfg, st),
-            Overlay::Palette(st) => self.render_palette_kit(ui, area, st),
             Overlay::Synopsis(st) => self.render_synopsis_kit(ui, area, st),
             Overlay::ProjectTitle(st) => self.render_project_title_kit(ui, area, st),
             Overlay::Qa(st) => self.render_qa_kit(ui, area, st),
@@ -50,7 +66,6 @@ impl Overlay {
             Overlay::ReaderInspect(st) => self.render_reader_inspect_kit(ui, area, st),
             Overlay::ReaderEdit(st) => self.render_reader_edit_kit(ui, area, st),
             Overlay::ReaderSearch(st) => self.render_reader_search_kit(ui, area, st),
-            Overlay::ReaderJump(st) => self.render_reader_jump_kit(ui, area, st),
         }
     }
 
@@ -312,155 +327,6 @@ impl Overlay {
     /// Reader's jump list both are.
     ///
     /// `rows` is already filtered and ranked; this only draws it. Matched
-    /// characters are lifted so it is visible *why* a row ranked where it did.
-    fn render_query_list(
-        &self,
-        ui: &mut crate::ui::kit::Ui,
-        body: Rect,
-        query: &str,
-        cursor: usize,
-        sel: usize,
-        rows: &[(String, Option<String>)],
-    ) {
-        use crate::ui::kit::list::{self, ListState, Row};
-
-        let bg = ui.theme.bg_elevated;
-        let prompt = Style::default()
-            .fg(ui.theme.accent)
-            .bg(bg)
-            .add_modifier(Modifier::BOLD);
-        let typed = Style::default().fg(ui.theme.ink).bg(bg);
-        let caret = Style::default().fg(ui.theme.stream_cursor).bg(bg);
-
-        // Query line.
-        let (before, after) = input::caret_halves(
-            query,
-            cursor,
-            body.width.saturating_sub(4) as usize,
-        );
-        ui.line(
-            crate::ui::kit::ctx::row_at(body, 0),
-            Line::from(vec![
-                Span::styled(
-                    format!("{} ", crate::ui::glyphs::CHEVRON_RIGHT.as_str()),
-                    prompt,
-                ),
-                Span::styled(before, typed),
-                Span::styled(crate::ui::glyphs::ACCENT_RAIL.as_str().to_string(), caret),
-                Span::styled(after, typed),
-            ]),
-            Style::default().bg(bg),
-        );
-
-        let list_area = Rect {
-            y: body.y + 1,
-            height: body.height.saturating_sub(1),
-            ..body
-        };
-        if rows.is_empty() {
-            ui.text(
-                crate::ui::kit::ctx::row_at(list_area, 0),
-                "no matches",
-                Style::default().fg(ui.theme.ink_faint).bg(bg),
-            );
-            return;
-        }
-
-        let hit = Style::default()
-            .fg(ui.theme.accent)
-            .add_modifier(Modifier::BOLD);
-        let plain = Style::default().fg(ui.theme.ink);
-        let dim = Style::default().fg(ui.theme.ink_faint);
-        let owned_query = query.to_string();
-
-        let mut st = ListState::new();
-        st.select(Some(sel.min(rows.len().saturating_sub(1))));
-        list::render(
-            ui,
-            list_area,
-            &mut st,
-            rows.len(),
-            list::Opts {
-                rail: true,
-                scrollbar: true,
-                kind: ZoneKind::Row,
-                id_base: 0,
-            },
-            |i| {
-                let (label, detail) = &rows[i];
-                let positions = crate::ui::kit::picker::score(&owned_query, label)
-                    .map(|(_, p)| p)
-                    .unwrap_or_default();
-                let mut spans: Vec<Span<'static>> = label
-                    .chars()
-                    .enumerate()
-                    .map(|(n, ch)| {
-                        let style = if positions.contains(&n) { hit } else { plain };
-                        Span::styled(ch.to_string(), style)
-                    })
-                    .collect();
-                if let Some(d) = detail {
-                    spans.push(Span::styled(format!("   {d}"), dim));
-                }
-                Row::new(Line::from(spans))
-            },
-        );
-    }
-
-    /// The command bar: every action that has a name, one search away.
-    fn render_palette_kit(&self, ui: &mut crate::ui::kit::Ui, area: Rect, st: &PaletteState) {
-        use crate::ui::kit::modal::{Modal, Sizing};
-
-        let matches = st.matches();
-        // Query line, rule, and one row per match — capped so a long list still
-        // scrolls rather than growing past the terminal.
-        let rows = (matches.len() as u16).clamp(1, 14) + 2 + 4;
-        let frame = Modal::new("Command bar")
-            .sizing(Sizing::medium().fit_height(rows))
-            .subtitle(format!("{} of {}", matches.len(), st.items.len()))
-            .render(ui, area);
-
-        let rows: Vec<(String, Option<String>)> = matches
-            .iter()
-            .map(|&i| (st.items[i].label.to_string(), None))
-            .collect();
-        self.render_query_list(ui, frame.body, &st.query, st.cursor, st.sel, &rows);
-    }
-
-    /// The Reader's jump list: chapters, sections and bookmarks together.
-    fn render_reader_jump_kit(
-        &self,
-        ui: &mut crate::ui::kit::Ui,
-        area: Rect,
-        st: &ReaderJumpState,
-    ) {
-        use crate::ui::kit::modal::{Modal, Sizing};
-
-        let matches = st.matches();
-        let rows = (matches.len() as u16).clamp(1, 16) + 2 + 4;
-        let frame = Modal::new("Jump to")
-            .sizing(Sizing::medium().fit_height(rows))
-            .subtitle(truncate_cols(&thai_display_safe(&st.title), 40))
-            .render(ui, area);
-
-        let rows: Vec<(String, Option<String>)> = matches
-            .iter()
-            .map(|&i| {
-                let it = &st.items[i];
-                let kind = match it.kind {
-                    JumpKind::Chapter => "chapter",
-                    JumpKind::Section => "section",
-                    JumpKind::Bookmark => "bookmark",
-                };
-                (
-                    thai_display_safe(&it.label),
-                    Some(format!("{kind} · ch.{:03}", it.chapter)),
-                )
-            })
-            .collect();
-        self.render_query_list(ui, frame.body, &st.query, st.cursor, st.sel, &rows);
-    }
-
     /// Reader search: one query line, applied to both panes.
     fn render_reader_search_kit(
         &self,
@@ -474,7 +340,14 @@ impl Overlay {
             .sizing(Sizing::small())
             .footer(1)
             .render(ui, area);
-        self.render_query_list(ui, frame.body, &st.query, st.cursor, 0, &[]);
+        crate::ui::kit::picker::render_query(
+            ui,
+            crate::ui::kit::ctx::row_at(frame.body, 0),
+            &st.query,
+            st.cursor,
+            "Search both panes…",
+            None,
+        );
         modal::footer_hint(ui, frame.footer, "  ↵ search both panes · Esc cancel");
     }
 
@@ -1787,4 +1660,40 @@ impl Overlay {
             "  the selection previews live — Esc puts the old one back",
         );
     }
+}
+
+/// The command bar: every action that has a name, one search away.
+fn render_palette(ui: &mut crate::ui::kit::Ui, area: Rect, st: &mut PaletteState) {
+    use crate::ui::kit::modal::{Modal, Sizing};
+
+    let items = st.picker_items();
+    let matches = crate::ui::kit::picker::filter(&st.picker.query, &items);
+    // Query line, rule, and one row per match — capped so a long list still
+    // scrolls rather than growing past the terminal.
+    let rows = (matches.len() as u16).clamp(1, 14) + 2 + 4;
+    let frame = Modal::new("Command bar")
+        .sizing(Sizing::medium().fit_height(rows))
+        .subtitle(format!("{} of {}", matches.len(), st.items.len()))
+        .render(ui, area);
+    crate::ui::kit::picker::render(ui, frame.body, &mut st.picker, &items, "Type a command…");
+}
+
+/// The Reader's jump list: chapters, sections and bookmarks together.
+fn render_reader_jump(ui: &mut crate::ui::kit::Ui, area: Rect, st: &mut ReaderJumpState) {
+    use crate::ui::kit::modal::{Modal, Sizing};
+
+    let items = st.picker_items();
+    let matches = crate::ui::kit::picker::filter(&st.picker.query, &items);
+    let rows = (matches.len() as u16).clamp(1, 16) + 2 + 4;
+    let frame = Modal::new("Jump to")
+        .sizing(Sizing::medium().fit_height(rows))
+        .subtitle(truncate_cols(&thai_display_safe(&st.title), 40))
+        .render(ui, area);
+    crate::ui::kit::picker::render(
+        ui,
+        frame.body,
+        &mut st.picker,
+        &items,
+        "Chapter · section · bookmark…",
+    );
 }

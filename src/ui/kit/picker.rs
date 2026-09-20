@@ -11,6 +11,7 @@
 //! matches that run consecutively, because those are the ones a person meant.
 
 use ratatui::layout::Rect;
+use unicode_segmentation::UnicodeSegmentation;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
@@ -204,7 +205,14 @@ pub fn render(
         height: 1,
         ..area
     };
-    render_query(ui, query_rect, state, placeholder, matches.len());
+    render_query(
+        ui,
+        query_rect,
+        &state.query,
+        state.cursor,
+        placeholder,
+        Some(matches.len()),
+    );
 
     if area.height < 3 {
         return matches;
@@ -257,16 +265,22 @@ pub fn render(
     matches
 }
 
-fn render_query(
+/// The query line on its own: prompt, typed text with a caret, and an optional
+/// match count right-aligned.
+///
+/// Public because a search field with nothing to list — the Reader's — is the
+/// same line without the rest of the picker.
+pub fn render_query(
     ui: &mut Ui,
     rect: Rect,
-    state: &PickerState,
+    query: &str,
+    cursor: usize,
     placeholder: &str,
-    count: usize,
+    count: Option<usize>,
 ) {
     let bg = ui.surface();
     ui.fill(rect, Style::default().bg(bg));
-    let tally = format!(" {count} ");
+    let tally = count.map(|n| format!(" {n} ")).unwrap_or_default();
     let tally_cols = tally.chars().count() as u16;
     let field_w = rect.width.saturating_sub(tally_cols + 2);
 
@@ -280,7 +294,7 @@ fn render_query(
         format!("{} ", glyphs::CHEVRON_RIGHT.as_str()),
         prompt,
     )];
-    if state.query.is_empty() {
+    if query.is_empty() {
         spans.push(Span::styled(
             glyphs::ACCENT_RAIL.as_str().to_string(),
             Style::default().fg(ui.theme.stream_cursor).bg(bg),
@@ -290,8 +304,7 @@ fn render_query(
             Style::default().fg(ui.theme.ink_faint).bg(bg),
         ));
     } else {
-        let (before, after) =
-            caret_halves(&state.query, state.cursor, field_w.saturating_sub(2) as usize);
+        let (before, after) = caret_halves(query, cursor, field_w.saturating_sub(2) as usize);
         spans.push(Span::styled(before, text));
         spans.push(Span::styled(
             glyphs::ACCENT_RAIL.as_str().to_string(),
@@ -302,7 +315,7 @@ fn render_query(
     ui.line(rect, Line::from(spans), Style::default().bg(bg));
 
     // Match count, right-aligned.
-    if rect.width > tally_cols {
+    if tally_cols > 0 && rect.width > tally_cols {
         ui.text(
             Rect {
                 x: rect.x + rect.width - tally_cols,
@@ -345,10 +358,20 @@ fn item_line(styles: RowStyles, item: &Item, query: &str, width: u16) -> Line<'s
         .map(|(_, p)| p)
         .unwrap_or_default();
 
+    // One span per grapheme, not per char. A Thai vowel or tone mark split into
+    // its own span is a zero-width cell of its own, which the terminal drops —
+    // so "บทที่หนึ่ง" arrived as "บททหนง". A cluster is lifted whole when any of
+    // its characters matched.
     let mut spans: Vec<Span<'static>> = Vec::new();
-    for (i, ch) in item.label.chars().enumerate() {
-        let style = if positions.contains(&i) { hit } else { plain };
-        spans.push(Span::styled(ch.to_string(), style));
+    let mut at = 0usize;
+    for g in item.label.graphemes(true) {
+        let n = g.chars().count();
+        let matched = (at..at + n).any(|i| positions.contains(&i));
+        spans.push(Span::styled(
+            g.to_string(),
+            if matched { hit } else { plain },
+        ));
+        at += n;
     }
     if let Some(d) = &item.detail {
         spans.push(Span::styled(format!("  {d}"), dim));
@@ -487,6 +510,29 @@ mod tests {
         assert!(
             positions.windows(2).all(|w| w[0] < w[1]),
             "positions must be strictly increasing"
+        );
+    }
+
+    /// A Thai label must survive being drawn: the marks belong to their base
+    /// character's span, or the terminal drops them.
+    #[test]
+    fn a_row_keeps_thai_clusters_whole() {
+        let item = Item::new("บทที่หนึ่ง");
+        let line = item_line(
+            RowStyles {
+                hit: Style::default(),
+                plain: Style::default(),
+                dim: Style::default(),
+            },
+            &item,
+            "",
+            40,
+        );
+        let drawn: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(drawn, "บทที่หนึ่ง", "no character may be dropped");
+        assert!(
+            line.spans.iter().all(|s| !s.content.is_empty()),
+            "a bare combining mark in its own span renders as nothing"
         );
     }
 

@@ -1023,13 +1023,13 @@ fn palette(
         .show(ctx, |ui| {
             ui.set_width(420.0);
             let resp = ui.add(
-                TextEdit::singleline(&mut st.query)
+                TextEdit::singleline(&mut st.picker.query)
                     .hint_text("Type a command…")
                     .desired_width(f32::INFINITY),
             );
             resp.request_focus();
             if resp.changed() {
-                st.sel = 0;
+                st.picker.on_query_changed();
             }
             let matches = st.matches();
             // The palette is modal, so a bare Enter can only mean "run the top match".
@@ -1041,7 +1041,7 @@ fn palette(
                 .show(ui, |ui| {
                     for (row, &i) in matches.iter().enumerate() {
                         let item = &st.items[i];
-                        if ui.selectable_label(row == st.sel, item.label).clicked() {
+                        if ui.selectable_label(row == st.sel(), item.label).clicked() {
                             actions.push(Action::CloseOverlay);
                             actions.push(item.action.clone());
                         }
@@ -1319,13 +1319,13 @@ fn reader_jump(
         .show(ctx, |ui| {
             ui.set_width(460.0);
             let resp = ui.add(
-                TextEdit::singleline(&mut st.query)
+                TextEdit::singleline(&mut st.picker.query)
                     .hint_text("Filter chapters · sections · bookmarks…")
                     .desired_width(f32::INFINITY),
             );
             resp.request_focus();
             if resp.changed() {
-                st.sel = 0;
+                st.picker.on_query_changed();
             }
             ui.add_space(4.0);
             let matches = st.matches();
@@ -1350,7 +1350,7 @@ fn reader_jump(
                             JumpKind::Bookmark => "◈",
                         };
                         if ui
-                            .selectable_label(row == st.sel, format!("{glyph}  {}", item.label))
+                            .selectable_label(row == st.sel(), format!("{glyph}  {}", item.label))
                             .clicked()
                         {
                             actions.push(Action::CloseOverlay);

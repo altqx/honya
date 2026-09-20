@@ -17,6 +17,7 @@ use crate::model::{
 use crate::theme::ALL_THEMES;
 use crate::ui::input::{self, EditOpts, Edited};
 use crate::ui::text::thai_display_safe;
+use crate::ui::kit::picker::{self, PickerState};
 
 use crate::app::qa;
 use crate::app::settings_defs::{self, Group, SField};
@@ -77,23 +78,6 @@ impl ImportStep {
     pub fn is_optional(self) -> bool {
         matches!(self, ImportStep::Title | ImportStep::Synopsis)
     }
-}
-
-/// Rank `labels` against `query` with the kit's matcher, best first.
-///
-/// An empty query keeps the caller's own ordering, which for the command bar
-/// is a deliberate arrangement rather than an alphabetical accident.
-pub(super) fn fuzzy_rank(query: &str, labels: &[&str]) -> Vec<usize> {
-    if query.trim().is_empty() {
-        return (0..labels.len()).collect();
-    }
-    let mut scored: Vec<(i32, usize)> = labels
-        .iter()
-        .enumerate()
-        .filter_map(|(i, l)| crate::ui::kit::picker::score(query, l).map(|(sc, _)| (sc, i)))
-        .collect();
-    scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-    scored.into_iter().map(|(_, i)| i).collect()
 }
 
 /// The four ways into the app from the first-run menu, with a note on each.
@@ -1288,11 +1272,10 @@ impl ThemePickerState {
 /// Command palette: a fuzzy-ish filtered list of navigation commands.
 #[derive(Debug, Clone)]
 pub struct PaletteState {
-    pub query: String,
-    /// Caret byte-offset into `query`.
-    pub cursor: usize,
     pub items: Vec<PaletteItem>,
-    pub sel: usize,
+    /// Query, caret and selection all live in the picker, which is also what
+    /// filters and draws them.
+    pub picker: PickerState,
 }
 
 #[derive(Debug, Clone)]
@@ -1362,10 +1345,8 @@ impl PaletteState {
             },
         ];
         Self {
-            query: String::new(),
-            cursor: 0,
             items,
-            sel: 0,
+            picker: PickerState::new(),
         }
     }
 
@@ -1375,8 +1356,24 @@ impl PaletteState {
     /// "Go: Refine" — which is the difference between the command bar being a
     /// filter and being something you can actually aim.
     pub fn matches(&self) -> Vec<usize> {
-        let labels: Vec<&str> = self.items.iter().map(|i| i.label).collect();
-        fuzzy_rank(&self.query, &labels)
+        picker::filter(&self.picker.query, &self.picker_items())
+    }
+
+    /// What the picker matches against.
+    pub fn picker_items(&self) -> Vec<picker::Item> {
+        self.items
+            .iter()
+            .map(|i| picker::Item::new(i.label))
+            .collect()
+    }
+
+    /// Which match the cursor is on.
+    pub fn sel(&self) -> usize {
+        self.picker.list.selected().unwrap_or(0)
+    }
+
+    pub fn select(&mut self, index: usize) {
+        self.picker.list.select(Some(index));
     }
 }
 
@@ -1477,18 +1474,40 @@ pub struct JumpTarget {
 #[derive(Debug, Clone)]
 pub struct ReaderJumpState {
     pub title: String,
-    pub query: String,
-    /// Caret byte-offset into `query`.
-    pub cursor: usize,
     pub items: Vec<JumpTarget>,
-    pub sel: usize,
+    pub picker: PickerState,
 }
 
 impl ReaderJumpState {
+    /// What the picker matches against: the label, plus the kind and chapter as
+    /// a searchable detail, so "bookmark" or "ch.012" narrows the list.
+    pub fn picker_items(&self) -> Vec<picker::Item> {
+        self.items
+            .iter()
+            .map(|t| {
+                let kind = match t.kind {
+                    JumpKind::Chapter => "chapter",
+                    JumpKind::Section => "section",
+                    JumpKind::Bookmark => "bookmark",
+                };
+                picker::Item::new(thai_display_safe(&t.label))
+                    .detail(format!("{kind} · ch.{:03}", t.chapter))
+            })
+            .collect()
+    }
+
     /// Indices of items matching the current query, best match first.
     pub fn matches(&self) -> Vec<usize> {
-        let labels: Vec<&str> = self.items.iter().map(|i| i.label.as_str()).collect();
-        fuzzy_rank(&self.query, &labels)
+        picker::filter(&self.picker.query, &self.picker_items())
+    }
+
+    /// Which match the cursor is on.
+    pub fn sel(&self) -> usize {
+        self.picker.list.selected().unwrap_or(0)
+    }
+
+    pub fn select(&mut self, index: usize) {
+        self.picker.list.select(Some(index));
     }
 }
 

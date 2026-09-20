@@ -15,6 +15,7 @@ use crate::model::{
 };
 use crate::theme::{ALL_THEMES, Theme};
 use crate::ui::input::{self, EditOpts, Edited};
+use crate::ui::kit::picker::PickerState;
 use crate::ui::mouse::{MouseGesture, MouseInput};
 use crate::ui::kit::{ZoneId, ZoneKind};
 use crate::ui::text::{thai_display_safe, truncate_cols};
@@ -231,10 +232,8 @@ impl Overlay {
     pub fn reader_jump(title: String, items: Vec<JumpTarget>) -> Self {
         Overlay::ReaderJump(ReaderJumpState {
             title,
-            query: String::new(),
-            cursor: 0,
             items,
-            sel: 0,
+            picker: PickerState::new(),
         })
     }
 
@@ -243,10 +242,8 @@ impl Overlay {
     pub fn reader_jump_placeholder() -> Self {
         Overlay::ReaderJump(ReaderJumpState {
             title: String::new(),
-            query: String::new(),
-            cursor: 0,
             items: Vec::new(),
-            sel: 0,
+            picker: PickerState::new(),
         })
     }
 
@@ -608,8 +605,8 @@ impl Overlay {
             // enough statement of intent.
             Overlay::Palette(st) => match id.kind {
                 ZoneKind::Row if (id.index as usize) < st.matches().len() => {
-                    let already = st.sel == id.index as usize;
-                    st.sel = id.index as usize;
+                    let already = st.sel() == id.index as usize;
+                    st.select(id.index as usize);
                     if double || already {
                         self.handle_key(synth(KeyCode::Enter))
                     } else {
@@ -620,8 +617,8 @@ impl Overlay {
             },
             Overlay::ReaderJump(st) => match id.kind {
                 ZoneKind::Row if (id.index as usize) < st.matches().len() => {
-                    let already = st.sel == id.index as usize;
-                    st.sel = id.index as usize;
+                    let already = st.sel() == id.index as usize;
+                    st.select(id.index as usize);
                     if double || already {
                         self.handle_key(synth(KeyCode::Enter))
                     } else {
@@ -1268,32 +1265,33 @@ impl Overlay {
         let Overlay::Palette(st) = self else {
             return Action::None;
         };
-        match input::handle(&mut st.query, &mut st.cursor, key, EditOpts::default()) {
+        match input::handle(
+            &mut st.picker.query,
+            &mut st.picker.cursor,
+            key,
+            EditOpts::default(),
+        ) {
             Edited::Changed => {
-                st.sel = 0;
+                st.picker.on_query_changed();
                 return Action::None;
             }
             Edited::Moved => return Action::None,
             Edited::Ignored => {}
         }
+        let n = st.matches().len();
         match key.code {
             KeyCode::Esc => Action::CloseOverlay,
             KeyCode::Up => {
-                if st.sel > 0 {
-                    st.sel -= 1;
-                }
+                st.picker.list.move_by(-1, n);
                 Action::None
             }
             KeyCode::Down => {
-                let n = st.matches().len();
-                if n > 0 && st.sel + 1 < n {
-                    st.sel += 1;
-                }
+                st.picker.list.move_by(1, n);
                 Action::None
             }
             KeyCode::Enter => {
                 let matches = st.matches();
-                if let Some(&idx) = matches.get(st.sel) {
+                if let Some(&idx) = matches.get(st.sel()) {
                     st.items[idx].action.clone()
                 } else {
                     Action::CloseOverlay
@@ -1491,31 +1489,34 @@ impl Overlay {
         let Overlay::ReaderJump(st) = self else {
             return Action::None;
         };
-        match input::handle(&mut st.query, &mut st.cursor, key, EditOpts::default()) {
+        match input::handle(
+            &mut st.picker.query,
+            &mut st.picker.cursor,
+            key,
+            EditOpts::default(),
+        ) {
             Edited::Changed => {
-                st.sel = 0;
+                st.picker.on_query_changed();
                 return Action::None;
             }
             Edited::Moved => return Action::None,
             Edited::Ignored => {}
         }
+        let n = st.matches().len();
         match key.code {
             KeyCode::Esc => Action::CloseOverlay,
             KeyCode::Up => {
-                st.sel = st.sel.saturating_sub(1);
+                st.picker.list.move_by(-1, n);
                 Action::None
             }
             KeyCode::Down => {
-                let n = st.matches().len();
-                if n > 0 {
-                    st.sel = (st.sel + 1).min(n - 1);
-                }
+                st.picker.list.move_by(1, n);
                 Action::None
             }
             KeyCode::Enter => {
                 let target = st
                     .matches()
-                    .get(st.sel)
+                    .get(st.sel())
                     .and_then(|&i| st.items.get(i))
                     .map(|t| (t.chapter, t.line));
                 match target {
@@ -1527,9 +1528,9 @@ impl Overlay {
                 }
             }
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                st.query.clear();
-                st.cursor = 0;
-                st.sel = 0;
+                st.picker.query.clear();
+                st.picker.cursor = 0;
+                st.picker.on_query_changed();
                 Action::None
             }
             _ => Action::None,
@@ -1865,14 +1866,15 @@ mod tests {
             target_language: TargetLanguage::Thai,
             syn: st.clone(),
         });
-        render_overlay(&ov, 80, 20).0.concat()
+        let mut ov = ov;
+        render_overlay(&mut ov, 80, 20).0.concat()
     }
 
     /// Render `ov` at `w`x`h` and hand back the painted lines plus the zones it
     /// registered. Kit-rendered overlays declare their own geometry, so this is
     /// how a test asks what is on screen and what is clickable at once.
     fn render_overlay(
-        ov: &Overlay,
+        ov: &mut Overlay,
         w: u16,
         h: u16,
     ) -> (Vec<String>, crate::ui::kit::Zones) {
@@ -1881,7 +1883,7 @@ mod tests {
 
     /// As [`render_overlay`], at a chosen animation frame.
     fn render_overlay_at(
-        ov: &Overlay,
+        ov: &mut Overlay,
         w: u16,
         h: u16,
         frame: u64,
@@ -1981,9 +1983,9 @@ mod tests {
     fn every_kit_overlay_registers_only_what_it_drew() {
         // The invariant the whole phase is for: no zone outside the frame, and
         // no point inside a registered rect that hit-tests to nothing.
-        for ov in kit_overlays() {
+        for mut ov in kit_overlays() {
             for (w, h) in [(60u16, 20u16), (80, 24), (120, 40)] {
-                let (_, zones) = render_overlay(&ov, w, h);
+                let (_, zones) = render_overlay(&mut ov, w, h);
                 assert!(
                     !zones.is_empty(),
                     "{ov:?} at {w}x{h} registered nothing at all"
@@ -2006,8 +2008,8 @@ mod tests {
     #[test]
     fn every_kit_overlay_shields_the_screen_behind_it() {
         // A click beside a modal must reach the backdrop, never the screen.
-        for ov in kit_overlays() {
-            let (_, zones) = render_overlay(&ov, 100, 30);
+        for mut ov in kit_overlays() {
+            let (_, zones) = render_overlay(&mut ov, 100, 30);
             assert_eq!(
                 zones.at(0, 0),
                 Some(ZoneId::bare(ZoneKind::Backdrop)),
@@ -2018,8 +2020,8 @@ mod tests {
 
     #[test]
     fn every_kit_overlay_traps_the_focus_ring() {
-        for ov in kit_overlays() {
-            let (_, zones) = render_overlay(&ov, 100, 30);
+        for mut ov in kit_overlays() {
+            let (_, zones) = render_overlay(&mut ov, 100, 30);
             assert!(
                 zones.is_trapped(),
                 "{ov:?} did not trap focus, so Tab could wander behind it"
@@ -2042,7 +2044,7 @@ mod tests {
                 Action::CloseOverlay,
             )
         };
-        let (_, zones) = render_overlay(&mk(), 100, 30);
+        let (_, zones) = render_overlay(&mut mk(), 100, 30);
 
         for (button, code) in [
             (DIALOG_CONFIRM, KeyCode::Enter),
@@ -2081,7 +2083,7 @@ mod tests {
     #[test]
     fn clicking_an_export_format_toggles_just_that_one() {
         let mut ov = Overlay::export(1);
-        let (_, zones) = render_overlay(&ov, 100, 30);
+        let (_, zones) = render_overlay(&mut ov, 100, 30);
         let before = match &ov {
             Overlay::Export(st) => st.formats,
             _ => unreachable!(),
@@ -2106,7 +2108,7 @@ mod tests {
     #[test]
     fn clicking_a_theme_previews_and_double_clicking_keeps_it() {
         let mut ov = Overlay::theme(ThemeId::default());
-        let (_, zones) = render_overlay(&ov, 100, 30);
+        let (_, zones) = render_overlay(&mut ov, 100, 30);
         let rect = zones.rect_of(ZoneId::row(3)).expect("theme row 3");
 
         let preview = ov.handle_mouse_zones(
@@ -2148,8 +2150,8 @@ mod tests {
     /// action it wraps. Both are Esc; only one of them is visible from here.
     #[test]
     fn the_close_glyph_and_the_backdrop_both_mean_esc() {
-        for ov in kit_overlays() {
-            let (_, zones) = render_overlay(&ov, 100, 30);
+        for mut ov in kit_overlays() {
+            let (_, zones) = render_overlay(&mut ov, 100, 30);
             let close = zones
                 .rect_of(ZoneId::button(crate::ui::kit::modal::CLOSE_BUTTON))
                 // A dialog is answered, not dismissed, so it offers no close.
@@ -2186,13 +2188,13 @@ mod tests {
             unreachable!()
         };
         // An abbreviation no substring search could ever resolve.
-        st.query = "twp".into();
+        st.picker.query = "twp".into();
         let hits = st.matches();
         assert!(!hits.is_empty(), "\"twp\" should reach the whole-project run");
         assert_eq!(st.items[hits[0]].label, "Translate whole project");
 
         // Every screen is reachable by name, including the sixth.
-        st.query = "refine".into();
+        st.picker.query = "refine".into();
         let hits = st.matches();
         assert!(
             hits.iter().any(|&i| st.items[i].label == "Go: Refine"),
@@ -2200,14 +2202,14 @@ mod tests {
         );
 
         // And an empty query keeps the caller's deliberate ordering.
-        st.query.clear();
+        st.picker.query.clear();
         assert_eq!(st.matches(), (0..st.items.len()).collect::<Vec<_>>());
     }
 
     #[test]
     fn clicking_a_command_bar_row_runs_that_command() {
         let mut ov = Overlay::palette();
-        let (_, zones) = render_overlay(&ov, 100, 30);
+        let (_, zones) = render_overlay(&mut ov, 100, 30);
         let target = match &ov {
             Overlay::Palette(st) => st.matches()[2],
             _ => unreachable!(),
@@ -2256,7 +2258,7 @@ mod tests {
             },
             sel: 0,
         });
-        let (lines, zones) = render_overlay(&ov, 100, 30);
+        let (lines, zones) = render_overlay(&mut ov, 100, 30);
         let joined = lines.join("\n");
         assert!(joined.contains("clean"), "summary missing:\n{joined}");
 
@@ -2283,7 +2285,7 @@ mod tests {
 
     #[test]
     fn a_finding_with_no_reason_still_says_something() {
-        let ov = Overlay::Qa(QaState {
+        let mut ov = Overlay::Qa(QaState {
             title: "proj".into(),
             report: qa::QaReport {
                 issues: vec![qa::QaIssue {
@@ -2298,7 +2300,7 @@ mod tests {
             },
             sel: 0,
         });
-        let (lines, _) = render_overlay(&ov, 100, 20);
+        let (lines, _) = render_overlay(&mut ov, 100, 20);
         let joined = lines.join("\n");
         let expected = qa_default_detail(&qa::QaIssue {
             chapter: Some(1),
@@ -2408,7 +2410,7 @@ mod tests {
     fn settings_rail_and_rows_answer_to_the_pointer() {
         let cfg = AppConfig::default();
         let mut ov = Overlay::settings_with_field(&cfg, 0);
-        let (_, zones) = render_overlay(&ov, 100, 34);
+        let (_, zones) = render_overlay(&mut ov, 100, 34);
 
         // The rail entry for a section other than the one open.
         let target = SettingsTab::ALL
@@ -2432,7 +2434,7 @@ mod tests {
         assert_eq!(st.tab, SettingsTab::Pipeline, "clicking the rail must switch section");
 
         // And a field row focuses that field.
-        let (_, zones) = render_overlay(&ov, 100, 34);
+        let (_, zones) = render_overlay(&mut ov, 100, 34);
         let want = settings_defs::index_of(SField::MaxAttempts);
         let rect = zones
             .rect_of(ZoneId::new(ZoneKind::Field, want as u32))
@@ -2457,7 +2459,7 @@ mod tests {
         let cfg = AppConfig::default();
         let mut ov = Overlay::settings_with_field(&cfg, settings_defs::index_of(SField::MaxAttempts))
             ;
-        let (_, zones) = render_overlay(&ov, 100, 34);
+        let (_, zones) = render_overlay(&mut ov, 100, 34);
         let before = match &ov {
             Overlay::Settings(st) => st.max_attempts.clone(),
             _ => unreachable!(),
@@ -2489,7 +2491,7 @@ mod tests {
     /// This is the whole reason the column-width helpers exist.
     #[test]
     fn theme_rows_align_despite_cjk_names() {
-        let (lines, _) = render_overlay(&Overlay::theme(ThemeId::default()), 100, 30);
+        let (lines, _) = render_overlay(&mut Overlay::theme(ThemeId::default()), 100, 30);
 
         let mut columns: Vec<(&str, usize)> = Vec::new();
         for id in ALL_THEMES {
@@ -2963,8 +2965,8 @@ mod tests {
         st.syn.raw = "คำสาปแห่งดาบ".to_string();
         for step in ImportStep::ALL {
             st.step = step;
-            let ov = Overlay::Import(st.clone());
-            let glyphs: String = render_overlay(&ov, 80, 26).0.concat();
+            let mut ov = Overlay::Import(st.clone());
+            let glyphs: String = render_overlay(&mut ov, 80, 26).0.concat();
             assert!(
                 !glyphs.contains('\u{0E33}'),
                 "raw SARA AM leaked into wizard step {step:?}"
@@ -3176,8 +3178,8 @@ mod tests {
     #[test]
     fn settings_overlay_renders_at_every_focus() {
         for field in 0..settings_fields() {
-            let ov = Overlay::Settings(SettingsState::for_test(field));
-            let (lines, _) = render_overlay(&ov, 80, 24);
+            let mut ov = Overlay::Settings(SettingsState::for_test(field));
+            let (lines, _) = render_overlay(&mut ov, 80, 24);
             let glyphs: String = lines.concat();
             if field == settings_defs::index_of(SField::ContinuitySentences) {
                 assert!(glyphs.contains("Continuity sentences"));
@@ -3205,7 +3207,7 @@ mod tests {
     fn about_card_renders_across_animation_frames() {
         let mut saw_full_line = false;
         for frame in 0..80u64 {
-            let (lines, _) = render_overlay_at(&Overlay::About, 80, 24, frame);
+            let (lines, _) = render_overlay_at(&mut Overlay::About, 80, 24, frame);
             let glyphs: String = lines.concat();
             assert!(
                 !glyphs.contains('\u{0E33}'),
@@ -3266,9 +3268,9 @@ mod tests {
             ImportStep::Synopsis,
         ] {
             st.step = step;
-            let ov = Overlay::Import(st.clone());
+            let mut ov = Overlay::Import(st.clone());
             for w in [50u16, 66, 80, 120] {
-                let (_, zones) = render_overlay(&ov, w, 26);
+                let (_, zones) = render_overlay(&mut ov, w, 26);
                 assert!(
                     zones.contains(ZoneId::button(DIALOG_CONFIRM)),
                     "{step:?} at {w}: the forward action was dropped"
@@ -3293,10 +3295,10 @@ mod tests {
             unreachable!()
         };
         // Force a selection past the first page of a short modal.
-        st.sel = st.items.len().saturating_sub(1);
-        let last_label = st.items[st.sel].label;
+        st.select(st.items.len().saturating_sub(1));
+        let last_label = st.items[st.sel()].label;
 
-        let (lines, _) = render_overlay(&ov, 80, 16);
+        let (lines, _) = render_overlay(&mut ov, 80, 16);
         let glyphs: String = lines.concat();
         assert!(
             glyphs.contains(last_label),
