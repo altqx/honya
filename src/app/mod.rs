@@ -290,6 +290,9 @@ pub enum Action {
         cloudflare_account_id: Option<String>,
         /// New Cloudflare API token (same `Some`/`None` semantics as `openrouter_key`).
         cloudflare_api_token: Option<String>,
+        /// The theme chosen in Appearance. Already live as a preview; this is
+        /// what persists it.
+        theme: crate::model::ThemeId,
         /// Startup update behavior (auto-install vs. notify only).
         update_mode: crate::model::UpdateMode,
         /// Update channel: stable releases vs latest git built from source.
@@ -2931,6 +2934,11 @@ impl App {
                 self.sync_settings_remote();
             }
             Action::CloseOverlay => {
+                // Appearance recolours as it is cycled, so closing without
+                // saving has a preview to undo.
+                if matches!(self.overlay, Overlay::Settings(_)) {
+                    self.theme = self.cfg.theme.build_adaptive();
+                }
                 self.overlay = Overlay::None;
             }
             Action::RefineSubmit { text } => {
@@ -3260,6 +3268,7 @@ impl App {
                 google_key,
                 cloudflare_account_id,
                 cloudflare_api_token,
+                theme,
                 update_mode,
                 release_channel,
                 service_tier,
@@ -3283,6 +3292,7 @@ impl App {
                     google_key,
                     cloudflare_account_id,
                     cloudflare_api_token,
+                    theme,
                     update_mode,
                     release_channel,
                     service_tier,
@@ -5003,6 +5013,7 @@ impl App {
         google_key: Option<String>,
         cloudflare_account_id: Option<String>,
         cloudflare_api_token: Option<String>,
+        theme: crate::model::ThemeId,
         update_mode: crate::model::UpdateMode,
         release_channel: crate::model::ReleaseChannel,
         service_tier: Option<crate::model::ServiceTier>,
@@ -5021,6 +5032,9 @@ impl App {
     ) {
         let models_changed = self.cfg.models != models;
         self.cfg.models = models.clone();
+        // Already live as a preview; this is what makes it survive a restart.
+        self.cfg.theme = theme;
+        self.theme = theme.build_adaptive();
         self.cfg.update_mode = update_mode;
         let channel_changed = self.cfg.release_channel != release_channel;
         self.cfg.release_channel = release_channel;

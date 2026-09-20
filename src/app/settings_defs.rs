@@ -55,6 +55,7 @@ pub enum SField {
     FeatEntityAlignment,
     FeatSegmentation,
     FeatReferenceScope,
+    Theme,
     UpdateModeField,
     ReleaseChannelField,
 }
@@ -251,6 +252,8 @@ pub const ORDER: &[Def] = &[
         "Add what the substring test missed from a chunk's reference bundle."),
 
     // --- Appearance.
+    def(SField::Theme, "Theme", Group::Appearance, Kind::Select,
+        "Recolours as you cycle. Esc puts the saved one back."),
     def(SField::UpdateModeField, "Auto-update", Group::Appearance, Kind::Select,
         "Whether a new release is fetched and staged automatically."),
     def(SField::ReleaseChannelField, "Update channel", Group::Appearance, Kind::Select,

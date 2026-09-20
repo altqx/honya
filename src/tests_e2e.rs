@@ -353,7 +353,7 @@ fn settings_api_key_field_edits_and_respects_env_override() {
     let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::empty());
 
     // Editable case: type into the OpenRouter key field, Enter → SaveSettings{openrouter_key}.
-    let mut ov = Overlay::Settings(SettingsState::for_test(12));
+    let mut ov = Overlay::Settings(Box::new(SettingsState::for_test(12)));
     for c in "sk-or-1".chars() {
         ov.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::empty()));
     }
@@ -365,11 +365,11 @@ fn settings_api_key_field_edits_and_respects_env_override() {
     }
 
     // Env-override case: typing is ignored and save passes openrouter_key: None.
-    let mut ov = Overlay::Settings(SettingsState {
+    let mut ov = Overlay::Settings(Box::new(SettingsState {
         api_key_env: true,
         openrouter_key: "saved".into(),
         ..SettingsState::for_test(12)
-    });
+    }));
     ov.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::empty()));
     ov.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::empty()));
     match &ov {
@@ -399,7 +399,7 @@ fn settings_ctrl_u_toggles_update_mode_and_saves_it() {
 
     // Focus the OpenRouter key field (a text field) to prove Ctrl-U is a toggle,
     // not a keystroke into the field.
-    let mut ov = Overlay::Settings(SettingsState::for_test(12));
+    let mut ov = Overlay::Settings(Box::new(SettingsState::for_test(12)));
 
     // Ctrl-U flips Auto → Notify without typing into the focused field.
     ov.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
@@ -426,7 +426,7 @@ fn settings_ctrl_g_toggles_release_channel_and_saves_it() {
     use crate::model::ReleaseChannel;
 
     // Focus the OpenRouter key field (a text field) to prove Ctrl-G is a toggle.
-    let mut ov = Overlay::Settings(SettingsState::for_test(12));
+    let mut ov = Overlay::Settings(Box::new(SettingsState::for_test(12)));
 
     ov.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL));
     match &ov {
@@ -451,7 +451,7 @@ fn settings_preferred_language_defaults_to_thai_and_saves_english() {
     use crate::app::overlay::SettingsState;
     use crate::model::TargetLanguage;
 
-    let mut ov = Overlay::Settings(SettingsState::for_test(17));
+    let mut ov = Overlay::Settings(Box::new(SettingsState::for_test(17)));
     match &ov {
         Overlay::Settings(st) => assert_eq!(st.preferred_language, TargetLanguage::Thai),
         _ => panic!("settings overlay"),
@@ -471,7 +471,7 @@ fn settings_parallel_lookahead_defaults_on_and_saves_disabled() {
     use crate::app::Action;
     use crate::app::overlay::SettingsState;
 
-    let mut ov = Overlay::Settings(SettingsState::for_test(23));
+    let mut ov = Overlay::Settings(Box::new(SettingsState::for_test(23)));
     match &ov {
         Overlay::Settings(st) => assert!(st.parallel_lookahead),
         _ => panic!("settings overlay"),
@@ -497,10 +497,10 @@ fn settings_retries_field_is_digit_only_and_clamped() {
 
     let mk = || {
         // Focus the "Retry attempts" numeric field (index 18) with an empty buffer.
-        Overlay::Settings(SettingsState {
+        Overlay::Settings(Box::new(SettingsState {
             max_attempts: String::new(),
             ..SettingsState::for_test(18)
-        })
+        }))
     };
 
     // Non-digits are dropped; digits accumulate.
@@ -544,10 +544,10 @@ fn settings_continuity_sentences_is_digit_only_and_clamped() {
     assert_eq!(seeded.continuity_sentences, "10");
 
     let mk = || {
-        Overlay::Settings(SettingsState {
+        Overlay::Settings(Box::new(SettingsState {
             continuity_sentences: String::new(),
             ..SettingsState::for_test(19)
-        })
+        }))
     };
 
     let mut ov = mk();
@@ -641,14 +641,14 @@ fn settings_field_caret_inserts_mid_value() {
     use crate::app::overlay::SettingsState;
 
     // Focus the Orchestrator model field (index 1, a text field) holding "htp".
-    let mut ov = Overlay::Settings(SettingsState {
+    let mut ov = Overlay::Settings(Box::new(SettingsState {
         models: crate::model::ModelSet {
             orchestrator: crate::model::AgentModel::openrouter("htp"),
             ..crate::model::ModelSet::default()
         },
         cursor: 3, // end of "htp"
         ..SettingsState::for_test(1)
-    });
+    }));
     // Caret after 't', insert the missing 't' → "http".
     ov.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::empty()));
     ov.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::empty()));

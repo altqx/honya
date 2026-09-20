@@ -996,86 +996,144 @@ impl Overlay {
         }
     }
 
-    /// The Account section: sign-in state and the remote link, which are
-    /// actions rather than settings and so have no registry rows.
+    /// The Account section: the two sign-ins and the remote link. These are
+    /// actions rather than settings, so they have no registry rows and carry
+    /// their own controls.
     fn render_settings_account(
         &self,
         ui: &mut crate::ui::kit::Ui,
         area: Rect,
         st: &SettingsState,
     ) {
+        use crate::app::overlay::state::{ACCOUNT_CODEX, ACCOUNT_GITHUB, ACCOUNT_REMOTE};
         use crate::remote::protocol::RemoteState;
+        use crate::ui::kit::button::Button;
         use crate::ui::kit::ctx::row_at;
 
         let bg = ui.theme.bg_elevated;
         let dim = Style::default().fg(ui.theme.ink_faint).bg(bg);
-        let mut row = 0u16;
-        let mut put = |ui: &mut crate::ui::kit::Ui, spans: Vec<Span<'static>>| {
-            let r = row_at(area, row);
-            if r.height > 0 {
-                ui.line(r, Line::from(spans), Style::default().bg(bg));
+
+        // label · status · the control that changes it, one row each.
+        let rows: [(u16, &str, String, ratatui::style::Color, &str, &str); 3] = [
+            (
+                ACCOUNT_GITHUB,
+                "GitHub",
+                match &st.account_login {
+                    Some(login) => format!("signed in as {login}"),
+                    None => "not signed in".into(),
+                },
+                match st.account_login {
+                    Some(_) => ui.theme.status_done,
+                    None => ui.theme.ink_soft,
+                },
+                if st.account_login.is_some() { "sign out" } else { "sign in" },
+                if st.account_login.is_some() { "^O" } else { "^A" },
+            ),
+            (
+                ACCOUNT_CODEX,
+                "Codex",
+                match &st.codex_account {
+                    // An older token carries no account id, so being signed in
+                    // is all there is to report.
+                    Some(id) if id.is_empty() => "signed in".into(),
+                    // The account id is a UUID; enough of it to recognise is
+                    // all that earns the room.
+                    Some(id) => {
+                        format!("signed in · {}", id.chars().take(8).collect::<String>())
+                    }
+                    None => "not signed in".into(),
+                },
+                match st.codex_account {
+                    Some(_) => ui.theme.status_done,
+                    None => ui.theme.ink_soft,
+                },
+                if st.codex_account.is_some() { "sign out" } else { "sign in" },
+                "^X",
+            ),
+            (
+                ACCOUNT_REMOTE,
+                "Remote",
+                match st.remote_state {
+                    RemoteState::Connected => {
+                        format!("connected · {} watching", st.remote_watchers)
+                    }
+                    RemoteState::Connecting => "connecting…".into(),
+                    RemoteState::Pairing => "pairing…".into(),
+                    RemoteState::Error => "error".into(),
+                    RemoteState::Disconnected if st.remote_enabled => "enabled".into(),
+                    RemoteState::Disconnected => "off".into(),
+                },
+                match st.remote_state {
+                    RemoteState::Connected => ui.theme.status_done,
+                    RemoteState::Connecting | RemoteState::Pairing => ui.theme.status_working,
+                    RemoteState::Error => ui.theme.status_failed,
+                    RemoteState::Disconnected => ui.theme.ink_soft,
+                },
+                if st.remote_enabled { "disable" } else { "enable" },
+                "^R",
+            ),
+        ];
+
+        for (n, (id, label, status, color, verb, accel)) in rows.into_iter().enumerate() {
+            let row = row_at(area, n as u16 * 2);
+            if row.height == 0 {
+                continue;
             }
-            row += 1;
-        };
-
-        let (account, color) = match &st.account_login {
-            Some(login) => (format!("signed in as {login}"), ui.theme.status_done),
-            None => ("not signed in".to_string(), ui.theme.ink_soft),
-        };
-        put(
-            ui,
-            vec![
-                Span::styled("GitHub        ", dim),
-                Span::styled(account, Style::default().fg(color).bg(bg)),
-            ],
-        );
-        put(ui, vec![Span::styled("  Ctrl-A sign in · Ctrl-O sign out", dim)]);
-        put(ui, vec![]);
-
-        let (link, link_color) = match st.remote_state {
-            RemoteState::Connected => (
-                format!("connected · {} watching", st.remote_watchers),
-                ui.theme.status_done,
-            ),
-            RemoteState::Connecting => ("connecting…".into(), ui.theme.status_working),
-            RemoteState::Pairing => ("pairing…".into(), ui.theme.status_working),
-            RemoteState::Error => ("error".into(), ui.theme.status_failed),
-            RemoteState::Disconnected => (
-                if st.remote_enabled { "enabled".into() } else { "off".to_string() },
-                ui.theme.ink_soft,
-            ),
-        };
-        put(
-            ui,
-            vec![
-                Span::styled("Remote        ", dim),
-                Span::styled(link, Style::default().fg(link_color).bg(bg)),
-            ],
-        );
-        put(ui, vec![Span::styled("  Ctrl-R toggle the relay link", dim)]);
+            ui.line(
+                row,
+                Line::from(vec![
+                    Span::styled(format!("{label:<14}"), dim),
+                    Span::styled(status, Style::default().fg(color).bg(bg)),
+                ]),
+                Style::default().bg(bg),
+            );
+            // The relay needs an account before it has anything to link.
+            let blocked = id == ACCOUNT_REMOTE && st.account_login.is_none();
+            let button = Button::new(crate::ui::kit::ZoneId::action(id), verb)
+                .accel(accel)
+                .disabled(blocked);
+            let w = button.width();
+            if row.width > w + 2 {
+                button.render(
+                    ui,
+                    Rect {
+                        x: row.x + row.width - w,
+                        width: w,
+                        ..row
+                    },
+                );
+            }
+        }
 
         if let Some(prompt) = &st.remote_auth_code {
-            put(ui, vec![]);
-            put(
-                ui,
-                vec![
-                    Span::styled("Code          ", dim),
-                    Span::styled(
-                        prompt.code.clone(),
-                        Style::default()
-                            .fg(ui.theme.accent)
-                            .bg(bg)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                ],
-            );
-            put(
-                ui,
-                vec![Span::styled(
-                    format!("  {}   Ctrl-B open · Ctrl-K copy", prompt.uri),
-                    dim,
-                )],
-            );
+            let row = row_at(area, 6);
+            if row.height > 0 {
+                ui.line(
+                    row,
+                    Line::from(vec![
+                        Span::styled("Code          ", dim),
+                        Span::styled(
+                            prompt.code.clone(),
+                            Style::default()
+                                .fg(ui.theme.accent)
+                                .bg(bg)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                    ]),
+                    Style::default().bg(bg),
+                );
+            }
+            let hint = row_at(area, 7);
+            if hint.height > 0 {
+                ui.line(
+                    hint,
+                    Line::from(Span::styled(
+                        format!("  {}   Ctrl-B open · Ctrl-K copy", prompt.uri),
+                        dim,
+                    )),
+                    Style::default().bg(bg),
+                );
+            }
         }
     }
 
@@ -1167,6 +1225,16 @@ impl Overlay {
             }
             SField::GateMode => st.system_one.review_gate.label().to_string(),
             SField::GateProvider => st.system_one.provider.label().to_string(),
+            // "Terminal (adaptive) · adaptive" says it twice and overflows the
+            // stepper's value column; the name alone already carries the tone.
+            SField::Theme => {
+                let (name, tone) = (st.theme.label(), st.theme.tone());
+                if name.to_lowercase().contains(tone) {
+                    name.to_string()
+                } else {
+                    format!("{name} · {tone}")
+                }
+            }
             SField::UpdateModeField => st.update_mode.label().to_string(),
             SField::ReleaseChannelField => st.release_channel.label().to_string(),
             _ => String::new(),

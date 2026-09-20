@@ -37,7 +37,9 @@ pub enum Overlay {
     Welcome(WelcomeState),
     Import(ImportState),
     ImageSource(ImageSourceState),
-    Settings(SettingsState),
+    /// Boxed: much the largest variant, and `Overlay` is stored on `App` and
+    /// matched on every frame.
+    Settings(Box<SettingsState>),
     /// Live-preview color theme picker.
     Theme(ThemePickerState),
     /// Activity log; the `u16` is the scroll-back offset (0 = newest tail).
@@ -139,7 +141,7 @@ impl Overlay {
     /// Settings built from live config with a specific field pre-focused (0 = top;
     /// the Welcome overlay's "Set API key" shortcut focuses the key field).
     pub fn settings_with_field(cfg: &AppConfig, field: u8) -> Self {
-        Overlay::Settings(SettingsState::from_cfg_focus(cfg, field))
+        Overlay::Settings(Box::new(SettingsState::from_cfg_focus(cfg, field)))
     }
 
     pub fn theme(current: ThemeId) -> Self {
@@ -304,8 +306,9 @@ impl Overlay {
     /// handle (palette, Welcome); the App swaps in the real config field values on
     /// show, preserving the requested focused `field`.
     pub fn settings_at(field: u8) -> Self {
-        Overlay::Settings(SettingsState {
+        Overlay::Settings(Box::new(SettingsState {
             models: crate::model::ModelSet::default(),
+            theme: crate::model::ThemeId::default(),
             openrouter_key: String::new(),
             api_key_env: false,
             tokenrouter_key: String::new(),
@@ -338,12 +341,13 @@ impl Overlay {
             cursor: 0,
             codex_models: default_codex_models(),
             account_login: None,
+            codex_account: None,
             remote_enabled: false,
             remote_state: crate::remote::protocol::RemoteState::Disconnected,
             remote_watchers: 0,
             remote_auth_code: None,
             session_label: None,
-        })
+        }))
     }
 
     fn settings_placeholder() -> Self {
@@ -729,6 +733,17 @@ impl Overlay {
                     st.focus(id.index as u8);
                     Action::None
                 }
+                // The Account section's controls, which mean exactly what their
+                // Ctrl- accelerators do.
+                ZoneKind::Action => match id.index as u16 {
+                    state::ACCOUNT_GITHUB if st.account_login.is_some() => Action::RemoteLogout,
+                    state::ACCOUNT_GITHUB => Action::StartRemoteLogin,
+                    state::ACCOUNT_CODEX => Action::ToggleCodexSignIn,
+                    state::ACCOUNT_REMOTE if st.account_login.is_none() => Action::StartRemoteLogin,
+                    state::ACCOUNT_REMOTE if st.remote_enabled => Action::DisableRemote,
+                    state::ACCOUNT_REMOTE => Action::EnableRemote,
+                    _ => Action::None,
+                },
                 // A stepper arrow moves the value under it. The form numbers
                 // its arrows within the group it drew, so the group's first
                 // row is added back to reach the real field.
@@ -744,7 +759,7 @@ impl Overlay {
                     if !st.step_number(up) {
                         st.cycle(up);
                     }
-                    Action::None
+                    preview_if_theme(st)
                 }
                 _ => Action::None,
             },
@@ -1221,7 +1236,7 @@ impl Overlay {
                 if st.tab_has_fields() && !st.current_is_editable_text() =>
             {
                 st.cycle(matches!(key.code, KeyCode::Right));
-                Action::None
+                preview_if_theme(st)
             }
             _ if !st.tab_has_fields() => Action::None,
             _ => {
@@ -1754,6 +1769,16 @@ pub(super) fn volume_chips(volumes: &[(u32, usize)]) -> String {
 /// Phase-dependent footer hints for the synopsis editor (shared by the wizard
 /// step and the standalone overlay); `wizard` switches the accept label, since
 /// accepting in the wizard starts the import while standalone accept saves.
+/// Cycling the theme row recolours the app immediately, so the choice is judged
+/// where it will actually be seen. `CloseOverlay` puts the saved one back.
+fn preview_if_theme(st: &SettingsState) -> Action {
+    if st.current() == settings_defs::SField::Theme {
+        Action::PreviewTheme(st.theme)
+    } else {
+        Action::None
+    }
+}
+
 fn synopsis_hints(st: &SynopsisState, wizard: bool) -> &'static [(&'static str, &'static str)] {
     if st.edit_translation {
         return &[
@@ -3083,8 +3108,10 @@ mod tests {
         let appearance = Group::Appearance.fields();
         let mut st = SettingsState::for_test(appearance[0]);
         assert_eq!(st.tab, SettingsTab::Appearance);
-        st.next_field();
-        assert_eq!(st.field, appearance[1]);
+        for expected in &appearance[1..] {
+            st.next_field();
+            assert_eq!(st.field, *expected);
+        }
         st.next_field();
         assert_eq!(
             st.field, appearance[0],
@@ -3158,8 +3185,8 @@ mod tests {
             );
         }
         assert_eq!(
-            settings_defs::ORDER[settings_defs::index_of(SField::FeatAudit) as usize + SystemOneFeature::ALL.len()].field,
-            SField::UpdateModeField,
+            settings_defs::index_of(SField::FeatAudit) as usize + SystemOneFeature::ALL.len(),
+            Group::Appearance.first_field().expect("Appearance has rows") as usize,
             "the feature block must end where the Appearance tab begins"
         );
     }
@@ -3249,7 +3276,7 @@ mod tests {
     #[test]
     fn settings_overlay_renders_at_every_focus() {
         for field in 0..settings_fields() {
-            let mut ov = Overlay::Settings(SettingsState::for_test(field));
+            let mut ov = Overlay::Settings(Box::new(SettingsState::for_test(field)));
             let (lines, _) = render_overlay(&mut ov, 80, 24);
             let glyphs: String = lines.concat();
             if field == settings_defs::index_of(SField::ContinuitySentences) {

@@ -757,6 +757,12 @@ pub(super) fn step(i: usize, len: usize, forward: bool) -> usize {
     }
 }
 
+/// The Account section's controls. They ride [`crate::ui::kit::ZoneKind::Action`]
+/// because the form has already claimed `Button` for its stepper arrows.
+pub(super) const ACCOUNT_GITHUB: u16 = 0;
+pub(super) const ACCOUNT_CODEX: u16 = 1;
+pub(super) const ACCOUNT_REMOTE: u16 = 2;
+
 /// Settings: per-agent provider/model/effort, provider keys, pipeline limits, and
 /// the appearance + account controls.
 #[derive(Debug, Clone)]
@@ -784,6 +790,9 @@ pub struct SettingsState {
     pub cloudflare_api_token: String,
     /// True when an env var supplies the Cloudflare API token (shown read-only).
     pub cloudflare_api_token_env: bool,
+    /// Theme being previewed. Live from the moment it is cycled; only written
+    /// to config on save, and put back by `CloseOverlay` otherwise.
+    pub theme: ThemeId,
     /// Startup update behavior (cycle field; also Ctrl-U).
     pub update_mode: UpdateMode,
     /// Update channel (cycle field; also Ctrl-G).
@@ -828,6 +837,9 @@ pub struct SettingsState {
     /// Codex model picker options.
     pub codex_models: Vec<String>,
     pub account_login: Option<String>,
+    /// ChatGPT account id when signed in to Codex, so the Account section can
+    /// say so. `Some("")` still means signed in — an older token carries no id.
+    pub codex_account: Option<String>,
     pub remote_enabled: bool,
     pub remote_state: crate::remote::protocol::RemoteState,
     pub remote_watchers: u32,
@@ -873,7 +885,9 @@ impl SettingsState {
             field: 0,
             cursor: 0,
             codex_models: default_codex_models(),
+            theme: cfg.theme,
             account_login: cfg.account.as_ref().map(|a| a.github_login.clone()),
+            codex_account: cfg.codex_auth.as_ref().map(|a| a.account_id.clone()),
             // App syncs live remote values after opening Settings.
             remote_enabled: false,
             remote_state: crate::remote::protocol::RemoteState::Disconnected,
@@ -1044,6 +1058,11 @@ impl SettingsState {
                 let slot = self.system_one.feature_mut(feature);
                 *slot = !*slot;
             }
+            SField::Theme => {
+                let i = self.theme.index();
+                let n = ALL_THEMES.len();
+                self.theme = ALL_THEMES[step(i, n, forward)];
+            }
             SField::UpdateModeField => self.update_mode = self.update_mode.toggled(),
             SField::ReleaseChannelField => self.release_channel = self.release_channel.toggled(),
             _ => {}
@@ -1202,6 +1221,7 @@ impl SettingsState {
                 .then(|| self.cloudflare_account_id.clone()),
             cloudflare_api_token: (!self.cloudflare_api_token_env)
                 .then(|| self.cloudflare_api_token.clone()),
+            theme: self.theme,
             update_mode: self.update_mode,
             release_channel: self.release_channel,
             service_tier: self.service_tier,
