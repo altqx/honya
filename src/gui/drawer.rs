@@ -59,12 +59,13 @@ pub fn show(
     app: &App,
     tab: DrawerTab,
     qa: &mut QaCache,
+    subject: &mut Option<super::tree::Selection>,
     pal: &GuiPalette,
     actions: &mut Vec<Action>,
 ) {
     match tab {
         DrawerTab::Activity => activity(ui, &app.log, pal),
-        DrawerTab::Tasks => tasks(ui, app, pal, actions),
+        DrawerTab::Tasks => tasks(ui, app, subject, pal, actions),
         DrawerTab::Qa => qa_pane(ui, app, qa, pal, actions),
         DrawerTab::Queue => queue(ui, app, pal, actions),
     }
@@ -106,7 +107,13 @@ fn activity(ui: &mut Ui, log: &[(LogLevel, String)], pal: &GuiPalette) {
 /// Every Refine sub-agent this session started, with what it is allowed to do,
 /// what it costs and what it is doing — the things you need before deciding to
 /// stop one. The GUI could not see these at all.
-fn tasks(ui: &mut Ui, app: &App, pal: &GuiPalette, actions: &mut Vec<Action>) {
+fn tasks(
+    ui: &mut Ui,
+    app: &App,
+    subject: &mut Option<super::tree::Selection>,
+    pal: &GuiPalette,
+    actions: &mut Vec<Action>,
+) {
     let runs = app.refine.subagent_views();
     if runs.is_empty() {
         empty(ui, pal, "No sub-agents have run in this conversation.");
@@ -124,9 +131,19 @@ fn tasks(ui: &mut Ui, app: &App, pal: &GuiPalette, actions: &mut Vec<Action>) {
                         RefineSubagentStatus::Failed => ("!", pal.status_failed),
                         RefineSubagentStatus::Canceled => ("×", pal.ink_faint),
                     };
+                    let chosen =
+                        *subject == Some(super::tree::Selection::Subagent(run.id.to_string()));
                     ui.horizontal(|ui| {
                         ui.label(RichText::new(mark).color(color).monospace().small());
-                        ui.label(RichText::new(run.title).color(pal.ink).small());
+                        // Picking a run puts it in the inspector, which is
+                        // where its plan and its own conversation are.
+                        if ui
+                            .selectable_label(chosen, RichText::new(run.title).color(pal.ink).small())
+                            .clicked()
+                        {
+                            *subject =
+                                Some(super::tree::Selection::Subagent(run.id.to_string()));
+                        }
                         let mut tags = Vec::new();
                         if !run.role.is_empty() {
                             tags.push(run.role.to_string());

@@ -21,6 +21,12 @@ pub enum Selection {
     Volume { vol: u32 },
     Chapter { vol: u32, ch: u32 },
     Session(String),
+    /// A running or finished sub-agent, picked in the tasks pane.
+    Subagent(String),
+    /// A lexicon entry, picked on the Lexicon screen. The id is the JP surface,
+    /// which is what both kinds are keyed by.
+    Character(String),
+    Term(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -32,7 +38,6 @@ enum NodeKey {
 #[derive(Default)]
 pub struct TreeState {
     pub filter: String,
-    pub selection: Option<Selection>,
     /// Folds the user has set by hand. Absent means the default, which is that
     /// the open project and its active volume are expanded and nothing else is
     /// — so opening a project shows you its chapters without a second click,
@@ -149,7 +154,16 @@ fn section(ui: &mut Ui, pal: &GuiPalette, title: &str) {
 }
 
 /// Draw the tree and return the actions the user's clicks asked for.
-pub fn show(ui: &mut Ui, app: &App, st: &mut TreeState, pal: &GuiPalette) -> Vec<Action> {
+/// Draw the tree. `subject` is what the inspector is about — owned outside,
+/// because the tasks pane and the Lexicon set it too and two copies of it
+/// would disagree.
+pub fn show(
+    ui: &mut Ui,
+    app: &App,
+    st: &mut TreeState,
+    subject: &mut Option<Selection>,
+    pal: &GuiPalette,
+) -> Vec<Action> {
     let mut actions = Vec::new();
 
     ui.horizontal(|ui| {
@@ -185,7 +199,7 @@ pub fn show(ui: &mut Ui, app: &App, st: &mut TreeState, pal: &GuiPalette) -> Vec
                 let is_active = active_id.as_deref() == Some(project.id.as_str());
                 let key = NodeKey::Project(project.id.clone());
                 let open = st.filtering() || st.is_open(&key, is_active);
-                let selected = st.selection == Some(Selection::Project(project.id.clone()));
+                let selected = *subject == Some(Selection::Project(project.id.clone()));
                 let title = RichText::new(&project.title)
                     .color(if is_active { pal.ink } else { pal.ink_soft })
                     .strong();
@@ -205,7 +219,7 @@ pub fn show(ui: &mut Ui, app: &App, st: &mut TreeState, pal: &GuiPalette) -> Vec
                     st.toggle(key.clone(), is_active);
                 }
                 if activated {
-                    st.selection = Some(Selection::Project(project.id.clone()));
+                    *subject = Some(Selection::Project(project.id.clone()));
                     if !is_active {
                         actions.push(Action::OpenProject(project.id.clone()));
                     }
@@ -239,7 +253,7 @@ pub fn show(ui: &mut Ui, app: &App, st: &mut TreeState, pal: &GuiPalette) -> Vec
                     let text = RichText::new(format!("{label}   {done}/{}", vol.chapters.len()))
                         .color(if vol_is_active { pal.ink } else { pal.ink_soft })
                         .small();
-                    let selected = st.selection == Some(Selection::Volume { vol: vol.number });
+                    let selected = *subject == Some(Selection::Volume { vol: vol.number });
                     let (toggled, activated) = row(
                         ui,
                         pal,
@@ -256,7 +270,7 @@ pub fn show(ui: &mut Ui, app: &App, st: &mut TreeState, pal: &GuiPalette) -> Vec
                         st.toggle(vkey.clone(), vol_is_active);
                     }
                     if activated {
-                        st.selection = Some(Selection::Volume { vol: vol.number });
+                        *subject = Some(Selection::Volume { vol: vol.number });
                         if !is_active {
                             actions.push(Action::OpenProject(project.id.clone()));
                         }
@@ -277,7 +291,7 @@ pub fn show(ui: &mut Ui, app: &App, st: &mut TreeState, pal: &GuiPalette) -> Vec
                         } else {
                             format!("c{}  {}", ch.number, ch.title.trim())
                         };
-                        let selected = st.selection
+                        let selected = *subject
                             == Some(Selection::Chapter {
                                 vol: vol.number,
                                 ch: ch.number,
@@ -295,7 +309,7 @@ pub fn show(ui: &mut Ui, app: &App, st: &mut TreeState, pal: &GuiPalette) -> Vec
                             },
                         );
                         if activated {
-                            st.selection = Some(Selection::Chapter {
+                            *subject = Some(Selection::Chapter {
                                 vol: vol.number,
                                 ch: ch.number,
                             });
@@ -323,7 +337,7 @@ pub fn show(ui: &mut Ui, app: &App, st: &mut TreeState, pal: &GuiPalette) -> Vec
                         continue;
                     }
                     let live = app.refine_session_id == s.id;
-                    let selected = st.selection == Some(Selection::Session(s.id.clone()));
+                    let selected = *subject == Some(Selection::Session(s.id.clone()));
                     let (_, activated) = row(
                         ui,
                         pal,
@@ -339,7 +353,7 @@ pub fn show(ui: &mut Ui, app: &App, st: &mut TreeState, pal: &GuiPalette) -> Vec
                         },
                     );
                     if activated {
-                        st.selection = Some(Selection::Session(s.id.clone()));
+                        *subject = Some(Selection::Session(s.id.clone()));
                         if !live {
                             actions.push(Action::RefineSwitchSession { id: s.id.clone() });
                         }

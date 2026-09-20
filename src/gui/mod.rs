@@ -70,6 +70,7 @@ pub fn run(app: App, rx: UnboundedReceiver<AppEvent>) -> anyhow::Result<()> {
         tick_every: Duration::from_millis(100),
         nav: GuiNav::default(),
         tree: tree::TreeState::default(),
+        subject: None,
         tabs: tabs::Tabs::default(),
         qa: drawer::QaCache::default(),
         context: inspector::ContextCache::default(),
@@ -116,6 +117,9 @@ struct GuiApp {
     tick_every: Duration,
     nav: GuiNav,
     tree: tree::TreeState,
+    /// What the inspector is about. Owned here because the tree, the tasks
+    /// pane and the Lexicon all set it.
+    subject: Option<tree::Selection>,
     tabs: tabs::Tabs,
     qa: drawer::QaCache,
     context: inspector::ContextCache,
@@ -392,7 +396,13 @@ impl eframe::App for GuiApp {
             )
             .show_inside(ui, |ui| {
                 self.tab_strip(ui, &pal);
-                screens::render_body(ui, &mut self.app, &mut self.nav, &pal);
+                screens::render_body(
+                    ui,
+                    &mut self.app,
+                    &mut self.nav,
+                    &mut self.subject,
+                    &pal,
+                );
                 claim(ui, &mut self.focus, focus::Region::Main);
                 overlays::render(ui, &mut self.app, &pal);
                 overlays::refine_sessions(
@@ -657,7 +667,7 @@ impl GuiApp {
 
         let tree_h = (ui.available_height() - 70.0).max(80.0);
         ui.allocate_ui(egui::vec2(ui.available_width(), tree_h), |ui| {
-            for action in tree::show(ui, &self.app, &mut self.tree, pal) {
+            for action in tree::show(ui, &self.app, &mut self.tree, &mut self.subject, pal) {
                 self.dispatch(action);
             }
         });
@@ -885,7 +895,7 @@ impl GuiApp {
                 inspector::show(
                     ui,
                     &self.app,
-                    self.tree.selection.as_ref(),
+                    self.subject.as_ref(),
                     &mut self.context,
                     pal,
                     &mut actions,
@@ -926,6 +936,7 @@ impl GuiApp {
             &self.app,
             self.layout.drawer_tab,
             &mut self.qa,
+            &mut self.subject,
             pal,
             &mut actions,
         );

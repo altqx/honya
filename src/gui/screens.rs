@@ -161,13 +161,19 @@ impl LexiconCache {
     }
 }
 
-pub fn render_body(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
+pub fn render_body(
+    ui: &mut Ui,
+    app: &mut App,
+    nav: &mut GuiNav,
+    subject: &mut Option<super::tree::Selection>,
+    pal: &GuiPalette,
+) {
     match app.screen {
         Screen::Shelf => shelf(ui, app, nav, pal),
         Screen::Project => project(ui, app, nav, pal),
         Screen::Translate => translate(ui, app, nav, pal),
         Screen::Reader => reader(ui, app, nav, pal),
-        Screen::Lexicon => lexicon(ui, app, nav, pal),
+        Screen::Lexicon => lexicon(ui, app, nav, subject, pal),
         Screen::Refine => refine(ui, app, nav, pal),
     }
 }
@@ -1347,7 +1353,13 @@ fn reader(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
 
 // ─── Lexicon ─────────────────────────────────────────────────────────────────
 
-fn lexicon(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
+fn lexicon(
+    ui: &mut Ui,
+    app: &mut App,
+    nav: &mut GuiNav,
+    subject: &mut Option<super::tree::Selection>,
+    pal: &GuiPalette,
+) {
     let th = &app.theme;
     let Some(active) = app.active.as_ref() else {
         empty_state(ui, pal, "No project open", "Open a project to browse the lexicon.");
@@ -1422,7 +1434,23 @@ fn lexicon(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
                             ui.label("");
                             ui.end_row();
                             for t in &terms {
-                                ui.label(RichText::new(&t.jp_term).color(pal.ja_text));
+                                // Picking a row puts the whole entry in the
+                                // inspector — the table shows three columns of
+                                // what a term actually carries.
+                                if ui
+                                    .selectable_label(
+                                        *subject
+                                            == Some(super::tree::Selection::Term(
+                                                t.jp_term.clone(),
+                                            )),
+                                        RichText::new(&t.jp_term).color(pal.ja_text),
+                                    )
+                                    .clicked()
+                                {
+                                    *subject = Some(super::tree::Selection::Term(
+                                        t.jp_term.clone(),
+                                    ));
+                                }
                                 ui.label(
                                     RichText::new(&t.translated_term).color(pal.translated_text),
                                 );
@@ -1478,7 +1506,20 @@ fn lexicon(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
                         inset_frame(pal).show(ui, |ui| {
                             ui.set_min_width(ui.available_width());
                             ui.horizontal(|ui| {
-                                ui.label(RichText::new(&c.jp_name).color(pal.ja_text).strong());
+                                if ui
+                                    .selectable_label(
+                                        *subject
+                                            == Some(super::tree::Selection::Character(
+                                                c.jp_name.clone(),
+                                            )),
+                                        RichText::new(&c.jp_name).color(pal.ja_text).strong(),
+                                    )
+                                    .clicked()
+                                {
+                                    *subject = Some(super::tree::Selection::Character(
+                                        c.jp_name.clone(),
+                                    ));
+                                }
                                 ui.label(RichText::new("→").color(pal.ink_faint));
                                 ui.label(
                                     RichText::new(&c.translated_name)

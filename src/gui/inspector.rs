@@ -106,6 +106,9 @@ pub fn show(
             }
         }
         Selection::Session(id) => session_detail(ui, app, &id, pal),
+        Selection::Subagent(id) => subagent_detail(ui, app, &id, pal, actions),
+        Selection::Character(jp) => entry_detail(ui, app, &jp, true, pal),
+        Selection::Term(jp) => entry_detail(ui, app, &jp, false, pal),
     }
     // Always last: the reference data is about the project whatever is
     // selected inside it.
@@ -338,6 +341,141 @@ fn status_label(s: ChapterStatus) -> &'static str {
         ChapterStatus::Failed => "failed",
         ChapterStatus::Paused => "paused",
         ChapterStatus::Partial => "partial",
+    }
+}
+
+/// A sub-agent, and its own conversation. The window could see neither.
+fn subagent_detail(
+    ui: &mut Ui,
+    app: &App,
+    id: &str,
+    pal: &GuiPalette,
+    actions: &mut Vec<Action>,
+) {
+    let Some(run) = app.refine.subagent_views().into_iter().find(|r| r.id == id) else {
+        missing(ui, pal, "That sub-agent is no longer listed.");
+        return;
+    };
+    heading(ui, pal, run.title);
+    row(ui, pal, "role", if run.role.is_empty() { "—" } else { run.role });
+    row(ui, pal, "model", if run.model.is_empty() { "—" } else { run.model });
+    row(
+        ui,
+        pal,
+        "status",
+        match run.status {
+            crate::model::RefineSubagentStatus::Running => "running",
+            crate::model::RefineSubagentStatus::Succeeded => "done",
+            crate::model::RefineSubagentStatus::Failed => "failed",
+            crate::model::RefineSubagentStatus::Canceled => "cancelled",
+        },
+    );
+    row(ui, pal, "elapsed", format!("{}s", run.elapsed.as_secs()));
+    if run.background {
+        row(ui, pal, "", "running in the background");
+    }
+
+    if !run.plan.is_empty() {
+        ui.add_space(6.0);
+        for step in run.plan {
+            let (mark, color) = match step.status {
+                crate::model::PlanStepStatus::Completed => ("✓", pal.status_done),
+                crate::model::PlanStepStatus::InProgress => ("▸", pal.accent),
+                crate::model::PlanStepStatus::Pending => ("◻", pal.ink_soft),
+            };
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(mark).color(color).monospace().small());
+                ui.label(RichText::new(step.step.trim()).color(pal.ink_soft).small());
+            });
+        }
+    }
+
+    if run.status == crate::model::RefineSubagentStatus::Running {
+        ui.add_space(8.0);
+        if ui.button("Stop this sub-agent").clicked() {
+            actions.push(Action::RefineCancelSubagent { id: id.to_string() });
+        }
+    }
+
+    // Its own conversation, which only ever existed inside the block's fold.
+    let transcript = app
+        .refine
+        .blocks
+        .iter()
+        .find(|b| b.subagent_id() == Some(id))
+        .map(|b| b.detail.clone())
+        .unwrap_or_default();
+    ui.add_space(8.0);
+    ui.label(RichText::new("ITS CONVERSATION").color(pal.ink_faint).small().strong());
+    ui.add_space(2.0);
+    if transcript.trim().is_empty() {
+        missing(ui, pal, "Nothing reported yet.");
+    } else {
+        for line in transcript.lines() {
+            ui.label(RichText::new(line).color(pal.ink_soft).monospace().small());
+        }
+    }
+}
+
+/// One glossary term or character, by its Japanese surface.
+fn entry_detail(ui: &mut Ui, app: &App, jp: &str, character: bool, pal: &GuiPalette) {
+    let Some(active) = app.active.as_ref() else {
+        return;
+    };
+    let ws = &active.workspace;
+    if character {
+        let Some(c) = crate::workspace::characters::load(ws)
+            .into_iter()
+            .find(|c| c.jp_name == jp)
+        else {
+            missing(ui, pal, "That character is gone.");
+            return;
+        };
+        heading(ui, pal, &c.jp_name);
+        row(ui, pal, "translated", &c.translated_name);
+        for (label, v) in [
+            ("romaji", &c.romaji),
+            ("gender", &c.gender),
+            ("honorific", &c.honorific),
+            ("speech", &c.speech_style),
+            ("notes", &c.notes),
+        ] {
+            if let Some(v) = v.as_ref().filter(|v| !v.trim().is_empty()) {
+                row(ui, pal, label, v.clone());
+            }
+        }
+        if !c.aliases.is_empty() {
+            row(ui, pal, "aliases", c.aliases.join(", "));
+        }
+        if !c.also_called.is_empty() {
+            ui.add_space(4.0);
+            ui.label(RichText::new("ALSO CALLED").color(pal.ink_faint).small().strong());
+            for a in &c.also_called {
+                row(ui, pal, &a.jp, &a.translated_name);
+            }
+        }
+        return;
+    }
+    let Some(t) = crate::workspace::glossary::load(ws)
+        .into_iter()
+        .find(|t| t.jp_term == jp)
+    else {
+        missing(ui, pal, "That term is gone.");
+        return;
+    };
+    heading(ui, pal, &t.jp_term);
+    row(ui, pal, "translated", &t.translated_term);
+    for (label, v) in [
+        ("romaji", &t.romaji),
+        ("category", &t.category),
+        ("gloss", &t.gloss),
+    ] {
+        if let Some(v) = v.as_ref().filter(|v| !v.trim().is_empty()) {
+            row(ui, pal, label, v.clone());
+        }
+    }
+    if !t.forbidden_translations.is_empty() {
+        row(ui, pal, "forbidden", t.forbidden_translations.join(", "));
     }
 }
 
