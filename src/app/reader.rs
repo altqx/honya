@@ -362,11 +362,12 @@ impl ReaderScreen {
         self.content_rev = self.content_rev.wrapping_add(1);
     }
 
-    pub fn handle_key(&mut self, key: KeyEvent) -> Action {
+    /// `acts` is the resolved table the App serves, user bindings already
+    /// folded in — the screen must not rebuild it.
+    pub fn handle_key(&mut self, key: KeyEvent, acts: &[Act]) -> Action {
         // Commands come from the table, so the key printed on a chip or listed
         // in the menu is the one that runs it. Only navigation is left here.
-        let acts = self.actions();
-        match action_table::hit(&acts, &key) {
+        match action_table::hit(acts, &key) {
             action_table::KeyHit::Run(id) => return self.run(id).unwrap_or(Action::None),
             action_table::KeyHit::Blocked => return Action::None,
             action_table::KeyHit::Miss => {}
@@ -441,7 +442,7 @@ impl ReaderScreen {
         }
     }
 
-    pub fn render(&mut self, ui: &mut crate::ui::kit::Ui, area: Rect) {
+    pub fn render(&mut self, ui: &mut crate::ui::kit::Ui, area: Rect, acts: &[Act]) {
         if self.diff_mode {
             if self.compare.is_some() {
                 self.render_diff(ui, area);
@@ -522,7 +523,7 @@ impl ReaderScreen {
             }
         }
 
-        self.render_status(ui, rows[1]);
+        self.render_status(ui, rows[1], acts);
     }
 
     fn effective_translation_scroll(&self) -> u16 {
@@ -1120,7 +1121,7 @@ impl ReaderScreen {
     /// them. As chips they look like the controls they always were, and each
     /// registers itself, so the bar no longer keeps its own parallel list of
     /// where everything landed.
-    fn render_status(&mut self, ui: &mut crate::ui::kit::Ui, area: Rect) {
+    fn render_status(&mut self, ui: &mut crate::ui::kit::Ui, area: Rect, acts: &[Act]) {
         use crate::ui::kit::badge::Chip;
         use crate::ui::kit::toolbar::Toolbar;
 
@@ -1169,9 +1170,8 @@ impl ReaderScreen {
             x += w + 1;
         }
 
-        let acts = self.actions();
         let budget = right.saturating_sub(x).saturating_sub(pw + 2);
-        Toolbar::new(&acts).has_menu(true).render(
+        Toolbar::new(acts).has_menu(true).render(
             ui,
             Rect {
                 x,
@@ -1672,6 +1672,13 @@ impl Default for ReaderScreen {
 mod tests {
     use super::*;
 
+    /// Press a key the way `App` does: resolve the table first, then dispatch
+    /// from it. The screen no longer builds its own.
+    fn press(r: &mut ReaderScreen, k: KeyEvent) -> Action {
+        let acts = r.actions();
+        r.handle_key(k, &acts)
+    }
+
     fn run(id: &str, secs: i64, archived: Option<&str>) -> ChapterRun {
         ChapterRun {
             chapter: 1,
@@ -1825,7 +1832,10 @@ mod tests {
         use ratatui::crossterm::event::KeyModifiers;
 
         let mut r = screen_with("raw ja", "translated text");
-        let (_, zones) = crate::ui::kit::ctx::draw_test(140, 24, |ui, area| r.render(ui, area));
+        let acts = r.actions();
+        let (_, zones) = crate::ui::kit::ctx::draw_test(140, 24, |ui, area| {
+            r.render(ui, area, &acts)
+        });
 
         for act in r.actions() {
             if act.placement != action_table::Placement::Toolbar {
@@ -1841,7 +1851,7 @@ mod tests {
         // A click resolves to the action id the router then runs, so running
         // the id and pressing the key must leave the same state.
         let by_key = |r: &mut ReaderScreen, c: char| {
-            r.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+            press(r, KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
         };
 
         assert!(r.sync);
@@ -1871,11 +1881,11 @@ mod tests {
         let mut r = screen_with("raw ja", "translated text");
         r.chapter = 4;
         assert!(matches!(
-            r.handle_key(KeyEvent::new(KeyCode::Char(']'), ratatui::crossterm::event::KeyModifiers::NONE)),
+            press(&mut r, KeyEvent::new(KeyCode::Char(']'), ratatui::crossterm::event::KeyModifiers::NONE)),
             Action::ReaderStepChapter { forward: true }
         ));
         assert!(matches!(
-            r.handle_key(KeyEvent::new(KeyCode::Char('['), ratatui::crossterm::event::KeyModifiers::NONE)),
+            press(&mut r, KeyEvent::new(KeyCode::Char('['), ratatui::crossterm::event::KeyModifiers::NONE)),
             Action::ReaderStepChapter { forward: false }
         ));
 

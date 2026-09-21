@@ -490,11 +490,13 @@ impl TranslateScreen {
             && self.thought_glossary.trim().is_empty()
     }
 
-    pub fn handle_key(&mut self, key: KeyEvent) -> Action {
+    /// `acts` is the resolved table the App serves, user bindings already
+    /// folded in — the screen must not rebuild it, or a rebound key would work
+    /// at the App level and the original would keep working here.
+    pub fn handle_key(&mut self, key: KeyEvent, acts: &[Act]) -> Action {
         // Commands come from the table; panel focus, scrolling and the queue
         // cursor are navigation and stay here.
-        let acts = self.actions();
-        match action_table::hit(&acts, &key) {
+        match action_table::hit(acts, &key) {
             action_table::KeyHit::Run(id) => return self.run(id).unwrap_or(Action::None),
             action_table::KeyHit::Blocked => return Action::None,
             action_table::KeyHit::Miss => {}
@@ -747,6 +749,7 @@ impl TranslateScreen {
         ui: &mut crate::ui::kit::Ui,
         area: Rect,
         service_tier: Option<ServiceTier>,
+        acts: &[Act],
     ) {
         // The band under the pipeline header carries the run controls, and the
         // tier disclaimer shares it when one is configured — the trade-off
@@ -762,8 +765,7 @@ impl TranslateScreen {
         let band = rows[1];
         let body = rows[2];
 
-        let acts = self.actions();
-        let toolbar = crate::ui::kit::toolbar::Toolbar::new(&acts)
+        let toolbar = crate::ui::kit::toolbar::Toolbar::new(acts)
             .has_menu(true)
             .render(ui, Rect { x: band.x + 1, ..band });
 
@@ -790,7 +792,7 @@ impl TranslateScreen {
         if queue_col.is_some()
             && let Some(rect) = ui.zones.rect_of(crate::ui::kit::ZoneId::row(self.queue_sel))
         {
-            crate::ui::kit::toolbar::RowActions::new(&acts).render(ui, rect);
+            crate::ui::kit::toolbar::RowActions::new(acts).render(ui, rect);
         }
 
         let theme: &Theme = ui.theme;
@@ -1578,6 +1580,13 @@ fn preview_tail(s: &str) -> &str {
 #[cfg(test)]
 mod queue_panel_tests {
     use super::*;
+
+    /// Press a key the way `App` does: resolve the table first, then dispatch
+    /// from it. The screen no longer builds its own.
+    fn press(screen: &mut TranslateScreen, k: KeyEvent) -> Action {
+        let acts = screen.actions();
+        screen.handle_key(k, &acts)
+    }
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     fn key(c: char) -> KeyEvent {
@@ -1629,8 +1638,9 @@ mod queue_panel_tests {
                 screen.queue_focused = true;
                 screen.queue_sel = 1;
                 screen.set_queue(rows());
+                let acts = screen.actions();
                 crate::ui::kit::ctx::draw_test(w, h, |ui, area| {
-                    screen.render(ui, area, tier)
+                    screen.render(ui, area, tier, &acts)
                 });
             }
         }
@@ -1737,7 +1747,8 @@ mod queue_panel_tests {
         assert_eq!(screen.thought_scene, "final tone");
         assert_eq!(screen.thought_glossary, "final term");
 
-        crate::ui::kit::ctx::draw_test(90, 24, |ui, area| screen.render(ui, area, None));
+        let acts = screen.actions();
+        crate::ui::kit::ctx::draw_test(90, 24, |ui, area| screen.render(ui, area, None, &acts));
     }
 
     #[test]
@@ -1808,26 +1819,26 @@ mod queue_panel_tests {
     fn keys_focus_move_sort_and_remove_pending_only() {
         let mut screen = TranslateScreen::new();
         screen.set_queue(rows());
-        assert!(matches!(screen.handle_key(key('g')), Action::None));
+        assert!(matches!(press(&mut screen, key('g')), Action::None));
         assert!(screen.queue_focused);
-        match screen.handle_key(key('J')) {
+        match press(&mut screen, key('J')) {
             Action::QueueMoveDown { vol, ch } => assert_eq!((vol, ch), (1, 4)),
             other => panic!("expected QueueMoveDown, got {other:?}"),
         }
         assert_eq!(screen.queue_sel, 1);
-        match screen.handle_key(key('K')) {
+        match press(&mut screen, key('K')) {
             Action::QueueMoveUp { vol, ch } => assert_eq!((vol, ch), (2, 7)),
             other => panic!("expected QueueMoveUp, got {other:?}"),
         }
         assert_eq!(screen.queue_sel, 0);
-        assert!(matches!(screen.handle_key(key('S')), Action::SortQueue));
-        match screen.handle_key(key('x')) {
+        assert!(matches!(press(&mut screen, key('S')), Action::SortQueue));
+        match press(&mut screen, key('x')) {
             Action::DequeueChapter { vol, ch } => assert_eq!((vol, ch), (1, 4)),
             other => panic!("expected DequeueChapter, got {other:?}"),
         }
         // Esc unfocuses; j then scrolls the preview rather than the queue.
         assert!(matches!(
-            screen.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty())),
+            press(&mut screen, KeyEvent::new(KeyCode::Esc, KeyModifiers::empty())),
             Action::None
         ));
         assert!(!screen.queue_focused);
@@ -1838,8 +1849,8 @@ mod queue_panel_tests {
         let mut screen = TranslateScreen::new();
         screen.set_queue(rows());
         assert!(!screen.queue_focused);
-        assert!(matches!(screen.handle_key(key('j')), Action::None));
-        assert!(matches!(screen.handle_key(key('k')), Action::None));
+        assert!(matches!(press(&mut screen, key('j')), Action::None));
+        assert!(matches!(press(&mut screen, key('k')), Action::None));
         assert!(!screen.queue_focused);
     }
 

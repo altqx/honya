@@ -86,10 +86,11 @@ impl ShelfScreen {
         key: KeyEvent,
         projects: &[Project],
         preferred_language: crate::model::TargetLanguage,
+        acts: &[Act],
     ) -> Action {
-        // Commands come from the table; only navigation is left here.
-        let acts = self.actions(projects);
-        match action_table::hit(&acts, &key) {
+        // Commands come from the table the App serves, user bindings already
+        // folded in; only navigation is left here.
+        match action_table::hit(acts, &key) {
             action_table::KeyHit::Run(id) => {
                 return self
                     .run(id, projects, preferred_language)
@@ -234,6 +235,7 @@ impl ShelfScreen {
         area: Rect,
         projects: &[Project],
         foreign_busy: &[std::path::PathBuf],
+        acts: &[Act],
     ) {
         use crate::ui::kit::list::{self, ListState, Row};
         use crate::ui::kit::toolbar::{RowActions, Toolbar};
@@ -284,8 +286,7 @@ impl ShelfScreen {
 
         // The row between the title and the list was already blank, so the
         // toolbar costs this screen nothing.
-        let acts = self.actions(projects);
-        Toolbar::new(&acts).render(
+        Toolbar::new(acts).render(
             ui,
             Rect {
                 x: area.x + 2,
@@ -396,7 +397,7 @@ impl ShelfScreen {
             && matches!(rows.get(i), Some(ShelfRow::Project(_)))
             && let Some(rect) = ui.zones.rect_of(ZoneId::row(i))
         {
-            RowActions::new(&acts).render(ui, rect);
+            RowActions::new(acts).render(ui, rect);
         }
     }
 
@@ -719,7 +720,8 @@ mod tests {
         let mut b = ShelfScreen::new();
         b.list.select(Some(0));
 
-        let by_key = a.handle_key(key('d'), &projects, lang);
+        let acts = a.actions(&projects);
+        let by_key = a.handle_key(key('d'), &projects, lang, &acts);
         let by_id = b.run(S_DELETE, &projects, lang).unwrap();
         assert_eq!(
             format!("{by_key:?}"),
@@ -737,7 +739,7 @@ mod tests {
         screen.list.select(Some(0));
         let acts = screen.actions(&projects);
         let (_, zones) = crate::ui::kit::ctx::draw_test(100, 24, |ui, area| {
-            screen.render(ui, area, &projects, &[]);
+            screen.render(ui, area, &projects, &[], &acts);
         });
         for act in &acts {
             assert!(
@@ -759,8 +761,9 @@ mod tests {
     fn click_selects_then_opens() {
         let projects = vec![proj("alpha"), proj("beta")];
         let mut s = ShelfScreen::new();
+        let acts = s.actions(&projects);
         let (_, zones) = crate::ui::kit::ctx::draw_test(90, 20, |ui, area| {
-            s.render(ui, area, &projects, &[])
+            s.render(ui, area, &projects, &[], &acts)
         });
         // Ask the registry where the second project row landed rather than
         // working it out from the list area a second time.

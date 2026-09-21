@@ -624,7 +624,11 @@ impl App {
             frame: 0,
             tx,
             cfg,
-            bindings: crate::app::keys::Bindings::load(),
+            // Defaults here, loaded by the caller: `config_dir()` honours
+            // `XDG_CONFIG_HOME` even under `cfg(test)`, so reading the file in
+            // the constructor would make every test that builds an `App`
+            // depend on whatever the developer has bound.
+            bindings: crate::app::keys::Bindings::default(),
             theme,
             projects,
             active: None,
@@ -2991,21 +2995,29 @@ impl App {
     }
 
     fn route_to_screen(&mut self, k: KeyEvent) -> Action {
+        // Resolved once, here, so the screen dispatches from the same table the
+        // toolbar prints and the palette lists — user bindings included. A
+        // screen that rebuilt its own would answer to the original key as well
+        // as the rebound one.
+        let acts = self.screen_actions();
         match self.screen {
-            Screen::Shelf => self
-                .shelf
-                .handle_key(k, &self.projects, self.cfg.preferred_language),
-            Screen::Project => self.project.handle_key(k, self.active.as_ref()),
-            Screen::Translate => self.translate.handle_key(k),
-            Screen::Reader => self.reader.handle_key(k),
-            Screen::Lexicon => self
-                .lexicon
-                .handle_key(k, self.active.as_ref().map(|a| &a.workspace)),
+            Screen::Shelf => {
+                self.shelf
+                    .handle_key(k, &self.projects, self.cfg.preferred_language, &acts)
+            }
+            Screen::Project => self.project.handle_key(k, self.active.as_ref(), &acts),
+            Screen::Translate => self.translate.handle_key(k, &acts),
+            Screen::Reader => self.reader.handle_key(k, &acts),
+            Screen::Lexicon => {
+                self.lexicon
+                    .handle_key(k, self.active.as_ref().map(|a| &a.workspace), &acts)
+            }
             // Refine is per-project: ignore keys until a project is open.
             Screen::Refine if self.active.is_none() => Action::None,
-            Screen::Refine => self
-                .refine
-                .handle_key(k, self.active.as_ref().map(|a| &a.project)),
+            Screen::Refine => {
+                self.refine
+                    .handle_key(k, self.active.as_ref().map(|a| &a.project), &acts)
+            }
         }
     }
 
@@ -3043,6 +3055,10 @@ impl App {
                 let root = working_root();
                 self.shelf.rescan(&root);
                 self.projects = crate::workspace::scan::scan_projects(&root);
+                // Nothing downstream folds an event for this, and the snapshot
+                // reads `projects`, so a watching dashboard would otherwise
+                // stay on the old shelf until some unrelated event moved it.
+                self.push_remote_snapshot();
             }
             Action::DismissToast => {
                 self.toast = None;
@@ -5808,6 +5824,9 @@ impl App {
         let foreign = matches!(self.screen, Screen::Shelf)
             .then(|| self.foreign_busy_dirs())
             .unwrap_or_default();
+        // Resolved before `ui` borrows the registry, and owned, so the toolbar
+        // a screen draws is the same table its keys dispatch from.
+        let acts = self.screen_actions();
         let mut ui = Ui::new(
             f,
             &mut self.zones,
@@ -5818,17 +5837,29 @@ impl App {
             self.frame,
         );
         match self.screen {
-            Screen::Shelf => self.shelf.render(&mut ui, body, &self.projects, &foreign),
-            Screen::Project => self.project.render(&mut ui, body, self.active.as_ref()),
+            Screen::Shelf => {
+                self.shelf
+                    .render(&mut ui, body, &self.projects, &foreign, &acts)
+            }
+            Screen::Project => {
+                self.project
+                    .render(&mut ui, body, self.active.as_ref(), &acts)
+            }
             Screen::Translate => {
-                self.translate.render(&mut ui, body, self.cfg.service_tier)
+                self.translate
+                    .render(&mut ui, body, self.cfg.service_tier, &acts)
             }
-            Screen::Reader => self.reader.render(&mut ui, body),
-            Screen::Lexicon => {
-                self.lexicon
-                    .render(&mut ui, body, self.active.as_ref().map(|a| &a.workspace))
+            Screen::Reader => self.reader.render(&mut ui, body, &acts),
+            Screen::Lexicon => self.lexicon.render(
+                &mut ui,
+                body,
+                self.active.as_ref().map(|a| &a.workspace),
+                &acts,
+            ),
+            Screen::Refine => {
+                self.refine
+                    .render(&mut ui, body, self.active.is_some(), &acts)
             }
-            Screen::Refine => self.refine.render(&mut ui, body, self.active.is_some()),
         }
     }
 
@@ -7703,6 +7734,26 @@ mod remote_tests {
             }
         }
         assert!(saw_log, "a Log event should project a Log delta");
+    }
+
+    /// Routing the rescan through `apply` was only half of it: the projection
+    /// is driven by folded events, and this action folds none, so a watching
+    /// dashboard stayed on the old shelf until something unrelated moved it.
+    #[test]
+    fn rescanning_the_shelf_publishes_it_to_a_watching_dashboard() {
+        let mut app = app();
+        let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel::<RemoteOutbound>();
+        app.remote_out = Some(out_tx);
+
+        app.apply(Action::RescanShelf);
+
+        let mut saw_snapshot = false;
+        while let Ok(msg) = out_rx.try_recv() {
+            if matches!(msg, RemoteOutbound::Snapshot(_)) {
+                saw_snapshot = true;
+            }
+        }
+        assert!(saw_snapshot, "the shelf changed and nobody was told");
     }
 
     #[test]

@@ -2634,6 +2634,14 @@ fn a_user_binding_reaches_every_reader_of_the_action_table() {
 
     let mut app = fresh_app();
     app.screen = Screen::Shelf;
+    // `config_dir()` honours `XDG_CONFIG_HOME` even under `cfg(test)`, so a
+    // constructor that read the file would make this depend on whatever the
+    // developer happens to have bound. `App::new` starts from the defaults and
+    // `main` does the loading.
+    assert!(
+        app.bindings.is_empty(),
+        "a freshly built App must not have read anyone's keybindings"
+    );
 
     let before = app.screen_actions();
     let rescan = before.iter().find(|a| a.label == "rescan").unwrap();
@@ -2651,5 +2659,34 @@ fn a_user_binding_reaches_every_reader_of_the_action_table() {
         rescan.accel,
         Accel::ctrl('j'),
         "the rebound key reaches the table every surface reads"
+    );
+}
+
+/// Rebinding has to move a key, not just add one. The screens used to rebuild
+/// their own table inside `handle_key`, so the App dispatched the rebound chord
+/// and the screen went on answering to the original — both keys worked, and the
+/// toolbar still printed the one that was supposed to be gone.
+#[test]
+fn a_rebound_command_stops_answering_to_its_old_key() {
+    use crate::app::keys::{Bindings, Rule};
+
+    let mut app = fresh_app();
+    app.screen = Screen::Shelf;
+    app.bindings = Bindings::from_rules(vec![Rule {
+        key: "ctrl+j".into(),
+        command: "shelf.import".into(),
+        when: None,
+    }]);
+
+    app.on_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::empty()));
+    assert!(
+        matches!(app.overlay, Overlay::None),
+        "the old key must no longer open the import wizard"
+    );
+
+    app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL));
+    assert!(
+        matches!(app.overlay, Overlay::Import(_)),
+        "the rebound chord must run it"
     );
 }

@@ -139,6 +139,7 @@ pub async fn classify_spine(
 
     let mut roles: Vec<Option<DocRole>> = vec![None; docs.len()];
     let mut decided = 0usize;
+    let mut answered = false;
     let mut usage = crate::llm::Usage::default();
     for batch in (0..docs.len()).collect::<Vec<_>>().chunks(QUESTIONS_PER_REQUEST) {
         let questions = batch
@@ -165,6 +166,7 @@ pub async fn classify_spine(
         else {
             continue;
         };
+        answered = true;
         usage.add(&resp.usage);
 
         for &i in batch {
@@ -181,9 +183,13 @@ pub async fn classify_spine(
         }
     }
 
-    if decided == 0 {
+    // Nothing was ever asked — no call, nothing to report.
+    if !answered {
         return None;
     }
+    // A batch that came back with nothing confident enough still cost what it
+    // cost. Every document falls back to the heuristic either way, which is
+    // what an all-`None` roles vector already means to `segment_with_roles`.
     let total = docs.len();
     Some(SpineOutcome {
         roles,
@@ -262,7 +268,13 @@ mod tests {
             Ok(DecisionsResponse {
                 model: "typesafe/jev-1.13".to_string(),
                 answers,
-                usage: DecisionsUsage::default(),
+                // Non-zero so the accounting is observable: a response that
+                // reports nothing billed cannot show whether it was.
+                usage: DecisionsUsage {
+                    input_tokens: 900,
+                    output_tokens: 40,
+                    cost: Some(0.00003),
+                },
             })
         }
     }
@@ -336,6 +348,29 @@ mod tests {
         assert_eq!(out.roles[1], None, "below the confidence threshold");
         assert_eq!(out.roles[2], None, "an option that is not a role");
         assert_eq!(out.roles[3], Some(DocRole::Continuation));
+    }
+
+    /// Every document below the threshold is still an answered request. The
+    /// spine falls back to the heuristics exactly as before, but the call is
+    /// reported rather than vanishing from the import's accounting.
+    #[tokio::test]
+    async fn an_all_unconfident_batch_still_reports_what_it_cost() {
+        let b = FakeBackend::new(&[
+            ("d0", "front_matter", 0.10),
+            ("d1", "nav_toc", 0.20),
+            ("d2", "chapter_start", 0.30),
+            ("d3", "continuation", 0.40),
+        ]);
+        let h = handle(b, true);
+        let out = classify_spine(Some(&h), &spine())
+            .await
+            .expect("a call went out");
+        assert!(
+            out.roles.iter().all(|r| r.is_none()),
+            "nothing was confident enough to override a heuristic"
+        );
+        assert!(out.usage.total_tokens > 0, "but the request was billed");
+        assert!(out.summary.contains("0/4"));
     }
 
     #[tokio::test]

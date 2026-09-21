@@ -139,11 +139,26 @@ impl Check {
 }
 
 /// What the gate decided, ready for the pipeline to fold in.
+///
+/// `try_review` returning `None` means no call was made. A `GateOutcome` whose
+/// `review` is `None` means one was made and the gate is deferring anyway —
+/// still a billed call, so it reports what it cost rather than disappearing
+/// from the run's totals.
 pub struct GateOutcome {
-    pub review: ReviewerOut,
+    /// The verdict, or `None` to defer to the LLM reviewer.
+    pub review: Option<ReviewerOut>,
     pub usage: Usage,
     /// One-line summary for the activity log.
     pub summary: String,
+}
+
+/// A call that went out and settled nothing: the LLM reviewer decides.
+fn defer(usage: Usage, why: &str) -> Option<GateOutcome> {
+    Some(GateOutcome {
+        review: None,
+        usage,
+        summary: format!("review gate: deferred — {why}"),
+    })
 }
 
 fn build_state(
@@ -198,8 +213,13 @@ pub async fn try_review(
     let resp = s1.ask(Switch::ReviewGate, state, questions).await?;
     let usage = resp.usage;
 
-    let verdict = resp.answers.get(VERDICT)?;
-    let approved_verdict = verdict.as_choice()? == "approve";
+    let Some(verdict) = resp.answers.get(VERDICT) else {
+        return defer(usage, "no verdict in the answer");
+    };
+    let Some(choice) = verdict.as_choice() else {
+        return defer(usage, "the verdict was not a choice");
+    };
+    let approved_verdict = choice == "approve";
     let confidence = verdict.confidence();
     let threshold = s1.confidence_threshold();
 
@@ -207,8 +227,13 @@ pub async fn try_review(
     // unusable — defer rather than guess.
     let mut failures = Vec::new();
     for axis in &axes {
-        let answer = resp.answers.get(axis.key)?;
-        if !axis.check.passes(answer)? {
+        let Some(answer) = resp.answers.get(axis.key) else {
+            return defer(usage, "an axis went unanswered");
+        };
+        let Some(passed) = axis.check.passes(answer) else {
+            return defer(usage, "an axis came back as the wrong primitive");
+        };
+        if !passed {
             failures.push(axis.complaint);
         }
     }
@@ -216,10 +241,10 @@ pub async fn try_review(
     let clean = approved_verdict && failures.is_empty();
     if clean && confidence >= threshold {
         return Some(GateOutcome {
-            review: ReviewerOut {
+            review: Some(ReviewerOut {
                 status: ReviewVerdict::Approve,
                 feedback: Vec::new(),
-            },
+            }),
             usage,
             summary: format!("review gate: approved (confidence {confidence:.2})"),
         });
@@ -227,7 +252,7 @@ pub async fn try_review(
 
     match mode {
         // Anything short of a confident clean pass goes to the real reviewer.
-        ReviewGateMode::Gate | ReviewGateMode::Off => None,
+        ReviewGateMode::Gate | ReviewGateMode::Off => defer(usage, "not a confident clean pass"),
         ReviewGateMode::Standalone => {
             // A confident-but-unclean result is a reject; an *unconfident* one
             // has no prose reviewer to fall back on here, so it is also a
@@ -242,10 +267,10 @@ pub async fn try_review(
             }
             let n = feedback.len();
             Some(GateOutcome {
-                review: ReviewerOut {
+                review: Some(ReviewerOut {
                     status: ReviewVerdict::Reject,
                     feedback,
-                },
+                }),
                 usage,
                 summary: format!(
                     "review gate: rejected, {n} issue(s) (confidence {confidence:.2})"
@@ -363,6 +388,17 @@ mod tests {
         }
     }
 
+    /// The gate's verdict, flattening "never asked" and "asked and deferred" —
+    /// a distinction most of these tests do not care about. The one that does
+    /// asserts on `run` directly.
+    async fn verdict(
+        backend: &Arc<FakeBackend>,
+        mode: ReviewGateMode,
+        audit: &[String],
+    ) -> Option<ReviewerOut> {
+        run(backend, mode, audit).await.and_then(|o| o.review)
+    }
+
     async fn run(
         backend: &Arc<FakeBackend>,
         mode: ReviewGateMode,
@@ -384,8 +420,9 @@ mod tests {
     async fn confident_clean_pass_approves_and_reports_usage() {
         let b = Arc::new(FakeBackend::passing());
         let out = run(&b, ReviewGateMode::Gate, &[]).await.unwrap();
-        assert!(out.review.approved());
-        assert!(out.review.feedback.is_empty());
+        let review = out.review.expect("a confident clean pass approves");
+        assert!(review.approved());
+        assert!(review.feedback.is_empty());
         assert_eq!(out.usage.prompt_tokens, 400);
         assert_eq!(b.calls(), 1);
     }
@@ -400,7 +437,7 @@ mod tests {
             },
         ));
         assert!(
-            run(&b, ReviewGateMode::Gate, &[]).await.is_none(),
+            verdict(&b, ReviewGateMode::Gate, &[]).await.is_none(),
             "an approval below the threshold must fall through to the LLM reviewer"
         );
     }
@@ -408,7 +445,32 @@ mod tests {
     #[tokio::test]
     async fn failing_axis_defers_in_gate_mode() {
         let b = Arc::new(FakeBackend::passing().with("residue", Answer::Noul { noul: 0.9 }));
-        assert!(run(&b, ReviewGateMode::Gate, &[]).await.is_none());
+        assert!(verdict(&b, ReviewGateMode::Gate, &[]).await.is_none());
+    }
+
+    /// Deferring is not the same as never asking. A gate that called out and
+    /// then handed the chunk to the LLM reviewer has still been billed, so it
+    /// reports what it cost; only `None` means no call was made.
+    #[tokio::test]
+    async fn a_gate_that_defers_still_reports_what_the_call_cost() {
+        let b = Arc::new(FakeBackend::passing().with(
+            "verdict",
+            Answer::Choice {
+                choice: "approve".to_string(),
+                confidence: Some(0.42),
+            },
+        ));
+        let out = run(&b, ReviewGateMode::Gate, &[])
+            .await
+            .expect("a call went out");
+        assert!(out.review.is_none(), "the LLM reviewer decides this one");
+        assert_eq!(out.usage.prompt_tokens, 400, "and it was still billed");
+        assert_eq!(b.calls(), 1);
+
+        // Nothing asked, nothing to report.
+        let quiet = Arc::new(FakeBackend::passing());
+        assert!(run(&quiet, ReviewGateMode::Off, &[]).await.is_none());
+        assert_eq!(quiet.calls(), 0);
     }
 
     #[tokio::test]
@@ -450,12 +512,13 @@ mod tests {
         );
 
         let out = run(&b, ReviewGateMode::Standalone, &[]).await.unwrap();
-        assert!(!out.review.approved());
-        assert_eq!(out.review.feedback.len(), 1);
+        let review = out.review.expect("standalone always reaches a verdict");
+        assert!(!review.approved());
+        assert_eq!(review.feedback.len(), 1);
         assert!(
-            out.review.feedback[0].starts_with("Residue:"),
+            review.feedback[0].starts_with("Residue:"),
             "feedback must name the failing axis: {:?}",
-            out.review.feedback
+            review.feedback
         );
     }
 
@@ -469,8 +532,9 @@ mod tests {
             },
         ));
         let out = run(&b, ReviewGateMode::Standalone, &[]).await.unwrap();
-        assert!(!out.review.approved());
-        assert!(!out.review.feedback.is_empty(), "a reject must carry actionable feedback");
+        let review = out.review.expect("standalone always reaches a verdict");
+        assert!(!review.approved());
+        assert!(!review.feedback.is_empty(), "a reject must carry actionable feedback");
     }
 
     #[tokio::test]
@@ -483,7 +547,7 @@ mod tests {
                 confidence: Some(0.9),
             },
         ));
-        assert!(run(&b, ReviewGateMode::Gate, &[]).await.is_none());
+        assert!(verdict(&b, ReviewGateMode::Gate, &[]).await.is_none());
     }
 
     #[tokio::test]
@@ -521,6 +585,6 @@ mod tests {
             &[],
         )
         .await;
-        assert!(out.is_some_and(|o| o.review.approved()));
+        assert!(out.and_then(|o| o.review).is_some_and(|r| r.approved()));
     }
 }

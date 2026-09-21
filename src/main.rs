@@ -90,6 +90,7 @@ async fn main() -> anyhow::Result<()> {
         codex::models::spawn_fetch_models(auth, etx.clone());
     }
     let mut app = App::new(etx, cfg);
+    app.bindings = app::keys::Bindings::load();
 
     app.init_recovery_prompt();
 

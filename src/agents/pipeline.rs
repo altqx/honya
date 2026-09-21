@@ -2999,7 +2999,9 @@ async fn process_chunk_with_lookahead(
         };
 
         // Missing Reviewer verdicts retry in place; the Thai already passed audit.
-        let (review, r_usage) = match gate_outcome {
+        // The gate's spend counts whether or not it reached a verdict: a call
+        // that went out and deferred is still a call that was billed.
+        let (gate_review, gate_usage) = match gate_outcome {
             Some(out) => {
                 wd.ping();
                 ctx.tx.send(AppEvent::Log {
@@ -3008,6 +3010,12 @@ async fn process_chunk_with_lookahead(
                 });
                 (out.review, out.usage)
             }
+            None => (None, Usage::default()),
+        };
+        acc.fold(&gate_usage);
+
+        let (review, r_usage) = match gate_review {
+            Some(review) => (review, Usage::default()),
             None => {
             let mut review_attempt = 1u32;
             loop {

@@ -130,7 +130,7 @@ pub async fn run_prepass(
         ..ChatRequest::default()
     };
 
-    let (out, usage) =
+    let (out, mut usage) =
         chat_structured::<PrepassOut>(client, req, "prepass_result", prepass_schema(), 1).await?;
 
     // Preserve earlier-volume renderings; the prepass may only enrich the roster.
@@ -179,10 +179,15 @@ pub async fn run_prepass(
         let alignment = if aligning {
             let roster = characters::load(ws);
             let candidates = characters::alignment_candidates(&roster, &character);
-            crate::agents::entity_align::align(system_one, &character, &candidates)
-                .await
-                .map(|out| out.alignment)
-                .unwrap_or_default()
+            match crate::agents::entity_align::align(system_one, &character, &candidates).await {
+                // Seeding the roster can run one alignment per extracted
+                // character, so this is the pass's own spend, not a stray call.
+                Some(out) => {
+                    usage.add(&out.usage);
+                    out.alignment
+                }
+                None => characters::Alignment::default(),
+            }
         } else {
             characters::Alignment::default()
         };

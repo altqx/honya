@@ -133,7 +133,10 @@ fn control(ui: &mut egui::Ui, st: &mut SettingsState, d: &settings_defs::Def, pa
             return;
         }
         let current = st.select_index(d.field);
-        let mut picked = current;
+        // A stored value that is not on offer has no index, so the sentinel
+        // keeps every real option a change — otherwise picking the first one
+        // would compare equal to a defaulted 0 and quietly do nothing.
+        let mut picked = current.unwrap_or(usize::MAX);
         ComboBox::from_id_salt(id)
             .selected_text(st.settings_select_label(d.field))
             .width(240.0)
@@ -142,7 +145,7 @@ fn control(ui: &mut egui::Ui, st: &mut SettingsState, d: &settings_defs::Def, pa
                     ui.selectable_value(&mut picked, i, o);
                 }
             });
-        if picked != current {
+        if Some(picked) != current {
             st.set_select(d.field, picked);
         }
         return;
@@ -413,6 +416,33 @@ mod tests {
                 field
             );
         }
+    }
+
+    /// A Codex model saved against an account that no longer offers it has no
+    /// index in the domain. Reporting that as 0 made picking the first option
+    /// compare equal to "no change", so the stale model stayed configured while
+    /// the form showed something else.
+    #[test]
+    fn a_stored_value_that_is_no_longer_offered_can_be_replaced() {
+        let mut st = SettingsState::for_test(0);
+        st.models.orchestrator.provider = crate::model::Provider::Codex;
+        st.models.orchestrator.model = "gpt-5-codex-retired".to_string();
+        st.codex_models = vec!["gpt-5-codex".to_string(), "gpt-5-codex-mini".to_string()];
+
+        let field = SField::OrchModel;
+        assert!(
+            st.is_codex_model_of(field),
+            "precondition: this row is a choice row"
+        );
+        assert_eq!(
+            st.select_index(field),
+            None,
+            "the stored model is not on offer"
+        );
+
+        st.set_select(field, 0);
+        assert_eq!(st.models.orchestrator.model, "gpt-5-codex");
+        assert_eq!(st.select_index(field), Some(0));
     }
 
     /// Theme is drawn by hand because swatches say more than a name does.

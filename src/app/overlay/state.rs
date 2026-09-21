@@ -895,6 +895,11 @@ impl SettingsState {
             }
             SField::UpdateModeField => self.update_mode.label().to_string(),
             SField::ReleaseChannelField => self.release_channel.label().to_string(),
+            // A Codex model row is picked from the account's list rather than
+            // typed, so it has a current value like any other choice row.
+            SField::OrchModel | SField::TransModel | SField::ReviewModel | SField::RefineModel => {
+                self.agent_model_of(f).unwrap_or_default().to_string()
+            }
             _ => String::new(),
         }
     }
@@ -1070,6 +1075,25 @@ impl SettingsState {
             }
             SField::RefineProvider | SField::RefineModel | SField::RefineEffort => {
                 &mut self.models.refine
+            }
+            _ => return None,
+        })
+    }
+
+    /// The model id on an agent row, read-only.
+    pub(crate) fn agent_model_of(&self, f: SField) -> Option<&str> {
+        Some(match f {
+            SField::OrchProvider | SField::OrchModel | SField::OrchEffort => {
+                self.models.orchestrator.model.as_str()
+            }
+            SField::TransProvider | SField::TransModel | SField::TransEffort => {
+                self.models.translator.model.as_str()
+            }
+            SField::ReviewProvider | SField::ReviewModel | SField::ReviewEffort => {
+                self.models.reviewer.model.as_str()
+            }
+            SField::RefineProvider | SField::RefineModel | SField::RefineEffort => {
+                self.models.refine.model.as_str()
             }
             _ => return None,
         })
@@ -1317,12 +1341,14 @@ impl SettingsState {
     }
 
     /// Where this row's current value sits in [`Self::select_domain`].
-    pub(crate) fn select_index(&self, f: SField) -> usize {
+    ///
+    /// `None` when the stored value is not on offer at all — a Codex model
+    /// saved against an account that no longer lists it. Reporting that as
+    /// index 0 would make picking the first option a no-op, leaving the stale
+    /// value configured with the form showing something else.
+    pub(crate) fn select_index(&self, f: SField) -> Option<usize> {
         let current = self.settings_select_label(f);
-        self.select_domain(f)
-            .iter()
-            .position(|o| *o == current)
-            .unwrap_or(0)
+        self.select_domain(f).iter().position(|o| *o == current)
     }
 
     /// Move a select row to `target`, by walking the cycle rather than by
@@ -1333,8 +1359,10 @@ impl SettingsState {
         if n == 0 || target >= n {
             return;
         }
-        for _ in 0..n {
-            if self.select_index(f) == target {
+        // `n + 1` because a value that is not in the domain spends the first
+        // step getting into it.
+        for _ in 0..=n {
+            if self.select_index(f) == Some(target) {
                 return;
             }
             self.cycle_field(f, true);

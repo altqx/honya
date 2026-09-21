@@ -10,6 +10,7 @@
 //! becomes a suggestion, and a confident "this is someone new" only ever
 //! *withholds* a merge the name rules would have made on their own.
 
+use crate::llm::Usage;
 use crate::llm::decisions::{Question, SystemOneHandle};
 use crate::model::{Character, SystemOneFeature};
 use crate::workspace::characters::Alignment;
@@ -26,9 +27,22 @@ const ALREADY: &str = "already_on_roster";
 
 pub struct AlignOutcome {
     pub alignment: Alignment,
-    pub usage: crate::llm::Usage,
+    pub usage: Usage,
     /// One-line summary for the activity log.
     pub summary: Option<String>,
+}
+
+/// A call that went out and came back unusable.
+///
+/// It has no opinion — the name rules decide alone, exactly as before — but it
+/// still reports what it cost, because it was billed. `None` stays reserved for
+/// "nothing was asked".
+fn unusable(usage: Usage) -> AlignOutcome {
+    AlignOutcome {
+        alignment: Alignment::default(),
+        usage,
+        summary: None,
+    }
 }
 
 fn describe(c: &Character) -> serde_json::Value {
@@ -94,11 +108,20 @@ pub async fn align(
         .await?;
     let usage = resp.usage;
 
-    let already = resp.answers.get(ALREADY)?.as_noul()?;
-    let which = resp.answers.get(WHICH)?;
-    let best = which.as_choice()?;
+    let Some(already) = resp.answers.get(ALREADY).and_then(|a| a.as_noul()) else {
+        return Some(unusable(usage));
+    };
+    let Some(which) = resp.answers.get(WHICH) else {
+        return Some(unusable(usage));
+    };
     // An id the model invented is not an alignment.
-    let best = roster.iter().find(|c| c.id == best).map(|c| c.id.clone())?;
+    let best = which
+        .as_choice()
+        .and_then(|id| roster.iter().find(|c| c.id == id))
+        .map(|c| c.id.clone());
+    let Some(best) = best else {
+        return Some(unusable(usage));
+    };
     let confident = which.confidence() >= s1.confidence_threshold();
 
     let (alignment, verdict) = if already >= SAME_PERSON_AT && confident {
@@ -301,11 +324,17 @@ mod tests {
         assert_eq!(out.alignment, Alignment::default());
     }
 
+    /// An id the model invented settles nothing, but the call still went out
+    /// and was still billed — so it reports what it cost rather than vanishing
+    /// from the run's totals.
     #[tokio::test]
-    async fn an_invented_id_is_not_an_alignment() {
+    async fn an_invented_id_settles_nothing_but_still_reports_its_cost() {
         let (inc, roster) = nickname_case();
-        let (h, _b) = handle(FakeBackend::new("someone-else", 0.99, 0.99), true);
-        assert!(align(Some(&h), &inc, &roster).await.is_none());
+        let (h, b) = handle(FakeBackend::new("someone-else", 0.99, 0.99), true);
+        let out = align(Some(&h), &inc, &roster).await.unwrap();
+        assert_eq!(out.alignment, Alignment::default(), "no opinion");
+        assert_eq!(out.usage.total_tokens, 530, "but a billed one");
+        assert_eq!(b.calls(), 1);
     }
 
     #[tokio::test]
