@@ -75,7 +75,6 @@ pub fn run(app: App, rx: UnboundedReceiver<AppEvent>) -> anyhow::Result<()> {
         qa: drawer::QaCache::default(),
         context: inspector::ContextCache::default(),
         layout: shell::Layout::load(),
-        bindings: crate::app::keys::Bindings::load(),
         focus: focus::Focus::default(),
         session_rename: String::new(),
         applied_theme: None,
@@ -124,7 +123,6 @@ struct GuiApp {
     qa: drawer::QaCache,
     context: inspector::ContextCache,
     layout: shell::Layout,
-    bindings: crate::app::keys::Bindings,
     focus: focus::Focus,
     /// Draft name in the conversation picker.
     session_rename: String,
@@ -245,8 +243,7 @@ impl eframe::App for GuiApp {
                     if self.focus.accepts_command_keys(text_focused)
                         && let Some(ev) = keys::to_crossterm(*key, *modifiers)
                     {
-                        let mut acts = self.app.screen_actions();
-                        self.bindings.apply(self.app.screen, &mut acts);
+                        let acts = self.app.screen_actions();
                         match crate::app::action_table::hit(&acts, &ev) {
                             crate::app::action_table::KeyHit::Run(id) => {
                                 screen_command = Some(id);

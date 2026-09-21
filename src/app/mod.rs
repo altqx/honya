@@ -472,6 +472,9 @@ pub struct App {
     pub frame: u64,
     pub tx: EventTx,
     pub cfg: AppConfig,
+    /// User keybindings, folded into `screen_actions` so every reader of the
+    /// table sees the rebound key.
+    pub bindings: crate::app::keys::Bindings,
     pub theme: Theme,
     pub projects: Vec<Project>,
     pub active: Option<ActiveProject>,
@@ -609,6 +612,7 @@ impl App {
             frame: 0,
             tx,
             cfg,
+            bindings: crate::app::keys::Bindings::load(),
             theme,
             projects,
             active: None,
@@ -2702,8 +2706,13 @@ impl App {
     /// One call site for all six screens: the key router, the toolbar, the
     /// context menu, the footer and the help overlay all read this, which is
     /// what stops any two of them disagreeing about what a key does.
+    ///
+    /// User bindings are folded in *here* rather than by the caller, because a
+    /// caller that forgets leaves the rebound key working in one surface and
+    /// not the others — which is exactly what happened while `Bindings::apply`
+    /// was the caller's job and only one of eight call sites did it.
     pub(crate) fn screen_actions(&self) -> Vec<Act> {
-        match self.screen {
+        let mut acts = match self.screen {
             Screen::Shelf => self.shelf.actions(&self.projects),
             Screen::Project => self.project.actions(self.active.as_ref()),
             Screen::Translate => self.translate.actions(),
@@ -2714,7 +2723,9 @@ impl App {
             // Refine is per-project: it offers nothing until one is open.
             Screen::Refine if self.active.is_none() => Vec::new(),
             Screen::Refine => self.refine.actions(self.active.as_ref().map(|a| &a.project)),
-        }
+        };
+        self.bindings.apply(self.screen, &mut acts);
+        acts
     }
 
     /// The palette, with what exists added to what is always there.

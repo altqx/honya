@@ -7,6 +7,10 @@
 //! key in the TUI's `handle_key`, in the toolbar label, in help, and in the
 //! GUI's menu, because all four read the same `Act`.
 //!
+//! The rewrite happens inside [`super::App::screen_actions`], the one place
+//! that serves the table. Applying it at a call site instead left the other
+//! seven reading the unmodified declarations.
+//!
 //! `~/.config/honya/keybindings.json`:
 //!
 //! ```json
@@ -63,8 +67,10 @@ impl Bindings {
     /// Rewrite each act's accelerator where the user bound its command.
     ///
     /// Applied to the table, not to the dispatch, so the key printed on a
-    /// control stays the key that runs it.
-    pub fn apply(&self, screen: Screen, acts: &mut [Act]) {
+    /// control stays the key that runs it. Reached only through
+    /// `App::screen_actions`, which is what makes that true of every surface
+    /// rather than of whichever caller remembered to ask.
+    pub(crate) fn apply(&self, screen: Screen, acts: &mut [Act]) {
         if self.rules.is_empty() {
             return;
         }

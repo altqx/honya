@@ -2622,3 +2622,34 @@ fn refine_undo_restores_prior_chapter_text() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The ratchet the binding seam was missing: `Bindings::apply` was correct and
+/// tested, but only one of eight readers of the table called it, so a rebind
+/// did nothing in the terminal. Asserting through `screen_actions` pins the
+/// *wiring*, which is where the defect actually lived.
+#[test]
+fn a_user_binding_reaches_every_reader_of_the_action_table() {
+    use crate::app::action_table::Accel;
+    use crate::app::keys::{Bindings, Rule};
+
+    let mut app = fresh_app();
+    app.screen = Screen::Shelf;
+
+    let before = app.screen_actions();
+    let rescan = before.iter().find(|a| a.label == "rescan").unwrap();
+    assert_eq!(rescan.accel, Accel::key('r'), "the declared key");
+
+    app.bindings = Bindings::from_rules(vec![Rule {
+        key: "ctrl+j".into(),
+        command: "shelf.rescan".into(),
+        when: None,
+    }]);
+
+    let after = app.screen_actions();
+    let rescan = after.iter().find(|a| a.label == "rescan").unwrap();
+    assert_eq!(
+        rescan.accel,
+        Accel::ctrl('j'),
+        "the rebound key reaches the table every surface reads"
+    );
+}
