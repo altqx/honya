@@ -14,7 +14,7 @@
 //! unconfident falls back to the heuristics on its own, so a partial answer is
 //! still worth having.
 
-use crate::llm::decisions::{DecisionsRequest, Question, SystemOneHandle};
+use crate::llm::decisions::{Question, SystemOneHandle};
 use crate::model::SystemOneFeature;
 
 use super::segment::{DocInput, DocRole};
@@ -29,12 +29,11 @@ const QUESTIONS_PER_REQUEST: usize = 32;
 const MAX_DOCS: usize = 120;
 /// Leading characters of each document's cleansed markdown put in the table.
 const EXCERPT_CHARS: usize = 160;
-/// Char budget for the shared state, matching the other judgements.
-const MAX_STATE_CHARS: usize = 24_000;
 
 pub struct SpineOutcome {
     /// One entry per input document, in order; `None` means "use the heuristic".
     pub roles: Vec<Option<DocRole>>,
+    pub usage: crate::llm::Usage,
     pub summary: String,
 }
 
@@ -114,7 +113,7 @@ fn build_state(docs: &[DocInput]) -> Option<serde_json::Value> {
                 .map(|(i, d)| describe(i, d, chars))
                 .collect::<Vec<_>>(),
         });
-        if state.to_string().chars().count() <= MAX_STATE_CHARS {
+        if SystemOneHandle::state_fits(&state) {
             return Some(state);
         }
     }
@@ -128,7 +127,7 @@ pub async fn classify_spine(
     docs: &[DocInput],
 ) -> Option<SpineOutcome> {
     let s1 = system_one?;
-    if !s1.config.feature(SystemOneFeature::Segmentation) || docs.is_empty() {
+    if !s1.is_on(SystemOneFeature::Segmentation) || docs.is_empty() {
         return None;
     }
     if docs.len() > MAX_DOCS {
@@ -136,10 +135,11 @@ pub async fn classify_spine(
     }
     let state = build_state(docs)?;
     let criteria = role_criteria();
-    let threshold = s1.config.confidence_threshold();
+    let threshold = s1.confidence_threshold();
 
     let mut roles: Vec<Option<DocRole>> = vec![None; docs.len()];
     let mut decided = 0usize;
+    let mut usage = crate::llm::Usage::default();
     for batch in (0..docs.len()).collect::<Vec<_>>().chunks(QUESTIONS_PER_REQUEST) {
         let questions = batch
             .iter()
@@ -159,17 +159,13 @@ pub async fn classify_spine(
             .collect();
 
         // A failed batch is not fatal: its documents keep `None` and fall back.
-        let Ok(resp) = s1
-            .backend
-            .decide(&DecisionsRequest {
-                model: s1.config.model.clone(),
-                state: state.clone(),
-                questions,
-            })
+        let Some(resp) = s1
+            .ask(SystemOneFeature::Segmentation, state.clone(), questions)
             .await
         else {
             continue;
         };
+        usage.add(&resp.usage);
 
         for &i in batch {
             let Some(answer) = resp.answers.get(&format!("d{i}")) else {
@@ -191,6 +187,7 @@ pub async fn classify_spine(
     let total = docs.len();
     Some(SpineOutcome {
         roles,
+        usage,
         summary: format!("spine: {decided}/{total} document(s) classified"),
     })
 }
@@ -199,7 +196,8 @@ pub async fn classify_spine(
 mod tests {
     use super::*;
     use crate::llm::decisions::{
-        Answer, DecisionsBackend, DecisionsResponse, DecisionsUsage, SystemOneHandle,
+        Answer, DecisionsBackend, DecisionsRequest, DecisionsResponse, DecisionsUsage,
+        MAX_STATE_CHARS, SystemOneHandle,
     };
     use crate::model::{DecisionsProvider, SystemOne};
     use std::collections::BTreeMap;

@@ -9,13 +9,8 @@
 
 use crate::agents::audit::{SemanticCandidate, SemanticCheck, SemanticFinding};
 use crate::llm::Usage;
-use crate::llm::decisions::{DecisionsBackend, DecisionsRequest, Question};
-use crate::model::{SystemOne, SystemOneFeature};
-
-/// Same budget as the review gate: Jev's window is 32k tokens and Thai runs
-/// near one token per char. An oversized chunk falls back rather than being
-/// truncated.
-const MAX_STATE_CHARS: usize = 24_000;
+use crate::llm::decisions::{Question, Switch, SystemOneHandle};
+use crate::model::SystemOneFeature;
 
 /// Probability bands, matching the review gate's `Affirm`/`Deny` axes. Between
 /// them the answer is not worth acting on, and the heuristic decides.
@@ -76,8 +71,8 @@ fn build_state(
 
 /// Which toggle governs a check. They share one request — the state is what
 /// costs — but each is asked only when its own feature is on.
-fn asks(system_one: &SystemOne, check: SemanticCheck) -> bool {
-    system_one.feature(match check {
+fn asks(s1: &SystemOneHandle, check: SemanticCheck) -> bool {
+    s1.is_on(match check {
         SemanticCheck::ContinuityEcho => SystemOneFeature::Continuity,
         _ => SystemOneFeature::Audit,
     })
@@ -86,16 +81,16 @@ fn asks(system_one: &SystemOne, check: SemanticCheck) -> bool {
 /// Decide `candidates`. `None` means fall back to the heuristic verdict for all
 /// of them; an individual answer that is unusable falls back on its own.
 pub async fn judge(
-    backend: &dyn DecisionsBackend,
-    system_one: &SystemOne,
+    system_one: Option<&SystemOneHandle>,
     source_jp: &str,
     translated: &str,
     candidates: &[SemanticCandidate],
 ) -> Option<JudgeOutcome> {
+    let s1 = system_one?;
     let questions: std::collections::BTreeMap<_, _> = candidates
         .iter()
         .enumerate()
-        .filter(|(_, c)| asks(system_one, c.check))
+        .filter(|(_, c)| asks(s1, c.check))
         .map(|(i, c)| (format!("c{i}"), question(c.check, i)))
         .collect();
     // Nothing to ask — a clean chunk, or every check switched off. Either way
@@ -106,18 +101,7 @@ pub async fn judge(
 
     let asked = questions.len();
     let state = build_state(source_jp, translated, candidates);
-    if state.to_string().chars().count() > MAX_STATE_CHARS {
-        return None;
-    }
-
-    let resp = backend
-        .decide(&DecisionsRequest {
-            model: system_one.model.clone(),
-            state,
-            questions,
-        })
-        .await
-        .ok()?;
+    let resp = s1.ask(Switch::PerQuestion, state, questions).await?;
 
     let mut deferred = 0usize;
     let verdicts: Vec<bool> = candidates
@@ -133,7 +117,7 @@ pub async fn judge(
                 Some(p) if p <= DISMISS_BELOW => false,
                 // Not asked, unanswered, mistyped, or too close to call.
                 _ => {
-                    if asks(system_one, c.check) {
+                    if asks(s1, c.check) {
                         deferred += 1;
                     }
                     c.heuristic
@@ -146,7 +130,7 @@ pub async fn judge(
     let n = findings.len();
     Some(JudgeOutcome {
         findings,
-        usage: resp.usage.to_usage(),
+        usage: resp.usage,
         summary: Some(format!(
             "audit judge: {asked} candidate(s) → {n} finding(s), {deferred} deferred to heuristic"
         )),
@@ -157,8 +141,11 @@ pub async fn judge(
 mod tests {
     use super::*;
     use crate::agents::audit;
-    use crate::llm::decisions::{Answer, DecisionsResponse, DecisionsUsage};
-    use crate::model::{DecisionsProvider, TargetLanguage};
+    use crate::llm::decisions::{
+        Answer, DecisionsBackend, DecisionsRequest, DecisionsResponse, DecisionsUsage,
+        MAX_STATE_CHARS,
+    };
+    use crate::model::{DecisionsProvider, SystemOne, TargetLanguage};
     use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -228,6 +215,22 @@ mod tests {
         }
     }
 
+    fn handle(backend: FakeBackend, audit: bool) -> (SystemOneHandle, std::sync::Arc<FakeBackend>) {
+        handle_cfg(backend, system_one(audit))
+    }
+
+    fn handle_cfg(
+        backend: FakeBackend,
+        config: SystemOne,
+    ) -> (SystemOneHandle, std::sync::Arc<FakeBackend>) {
+        let backend = std::sync::Arc::new(backend);
+        let handle = SystemOneHandle {
+            backend: backend.clone(),
+            config,
+        };
+        (handle, backend)
+    }
+
     /// A transliteration built from syllables the word list never learned. The
     /// scan finds it; only the judgement can call it.
     const UNLISTED_GLOSS: &str = "ยัยคุณหนู (โอโจซามะ) ยิ้มให้";
@@ -245,8 +248,8 @@ mod tests {
             "precondition: the hand-tuned predicate misses this one"
         );
 
-        let b = FakeBackend::answering(&[("c0", 0.94)]);
-        let out = judge(&b, &system_one(true), "お嬢様は微笑んだ。", UNLISTED_GLOSS, &c)
+        let (h, _b) = handle(FakeBackend::answering(&[("c0", 0.94)]), true);
+        let out = judge(Some(&h), "お嬢様は微笑んだ。", UNLISTED_GLOSS, &c)
             .await
             .unwrap();
         assert_eq!(out.findings.len(), 1);
@@ -262,8 +265,8 @@ mod tests {
         let c = candidates(text);
         assert_eq!(c.len(), 1);
 
-        let b = FakeBackend::answering(&[("c0", 0.02)]);
-        let out = judge(&b, &system_one(true), "彼はマーケティングの達人だ。", text, &c)
+        let (h, _b) = handle(FakeBackend::answering(&[("c0", 0.02)]), true);
+        let out = judge(Some(&h), "彼はマーケティングの達人だ。", text, &c)
             .await
             .unwrap();
         assert!(
@@ -279,8 +282,8 @@ mod tests {
         let c = candidates(text);
         assert!(c[0].heuristic, "precondition: the heuristic flags this");
 
-        let b = FakeBackend::answering(&[("c0", 0.5)]);
-        let out = judge(&b, &system_one(true), "俺が行く。", text, &c)
+        let (h, _b) = handle(FakeBackend::answering(&[("c0", 0.5)]), true);
+        let out = judge(Some(&h), "俺が行く。", text, &c)
             .await
             .unwrap();
         assert_eq!(out.findings.len(), 1, "a coin flip must not drop a finding");
@@ -291,8 +294,8 @@ mod tests {
     async fn a_missing_or_mistyped_answer_falls_back_per_candidate() {
         let text = "กูจะไปเอง";
         let c = candidates(text);
-        let b = FakeBackend::answering(&[]);
-        let out = judge(&b, &system_one(true), "俺が行く。", text, &c)
+        let (h, _b) = handle(FakeBackend::answering(&[]), true);
+        let out = judge(Some(&h), "俺が行く。", text, &c)
             .await
             .unwrap();
         assert_eq!(out.findings.len(), 1);
@@ -301,9 +304,9 @@ mod tests {
     #[tokio::test]
     async fn backend_failure_defers_the_whole_set() {
         let c = candidates("กูจะไปเอง");
-        let b = FakeBackend::broken();
+        let (h, _b) = handle(FakeBackend::broken(), true);
         assert!(
-            judge(&b, &system_one(true), "俺が行く。", "กูจะไปเอง", &c)
+            judge(Some(&h), "俺が行く。", "กูจะไปเอง", &c)
                 .await
                 .is_none(),
             "a failed judgement must hand back to the heuristic, never fail the chunk"
@@ -313,8 +316,8 @@ mod tests {
     #[tokio::test]
     async fn feature_off_never_calls_the_backend() {
         let c = candidates("กูจะไปเอง");
-        let b = FakeBackend::answering(&[("c0", 0.99)]);
-        assert!(judge(&b, &system_one(false), "俺が行く。", "กูจะไปเอง", &c)
+        let (h, b) = handle(FakeBackend::answering(&[("c0", 0.99)]), false);
+        assert!(judge(Some(&h), "俺が行く。", "กูจะไปเอง", &c)
             .await
             .is_none());
         assert_eq!(b.calls(), 0);
@@ -326,9 +329,9 @@ mod tests {
     async fn a_clean_chunk_costs_no_call() {
         let c = candidates("แมวกำลังนอนอยู่ริมหน้าต่าง");
         assert!(c.is_empty());
-        let b = FakeBackend::answering(&[]);
+        let (h, b) = handle(FakeBackend::answering(&[]), true);
         assert!(
-            judge(&b, &system_one(true), "猫が眠っている。", "แมว", &c)
+            judge(Some(&h), "猫が眠っている。", "แมว", &c)
                 .await
                 .is_none()
         );
@@ -344,18 +347,18 @@ mod tests {
         assert_eq!(c.len(), 2, "one echo candidate plus one span candidate");
 
         // Continuity off, audit on: only the span question is sent.
-        let b = FakeBackend::answering(&[("c1", 0.99)]);
-        let mut s1 = system_one(true);
-        s1.continuity = false;
-        let out = judge(&b, &s1, "俺が行く。", "กูจะไปเอง", &c).await.unwrap();
+        let mut cfg = system_one(true);
+        cfg.continuity = false;
+        let (h, _b) = handle_cfg(FakeBackend::answering(&[("c1", 0.99)]), cfg);
+        let out = judge(Some(&h), "俺が行く。", "กูจะไปเอง", &c).await.unwrap();
         assert!(out.summary.unwrap().contains("1 candidate"));
 
         // Audit off, continuity on: only the echo question is sent, and a
         // confident yes produces the echo finding.
-        let b = FakeBackend::answering(&[("c0", 0.96)]);
-        let mut s1 = system_one(true);
-        s1.audit = false;
-        let out = judge(&b, &s1, "俺が行く。", "กูจะไปเอง", &c).await.unwrap();
+        let mut cfg = system_one(true);
+        cfg.audit = false;
+        let (h, _b) = handle_cfg(FakeBackend::answering(&[("c0", 0.96)]), cfg);
+        let out = judge(Some(&h), "俺が行く。", "กูจะไปเอง", &c).await.unwrap();
         assert!(
             out.findings.iter().any(|f| f.message.contains("continuity")),
             "{:?}",
@@ -363,11 +366,11 @@ mod tests {
         );
 
         // Both off: nothing is asked and nothing is sent.
-        let b = FakeBackend::answering(&[("c0", 0.96), ("c1", 0.99)]);
-        let mut s1 = system_one(true);
-        s1.audit = false;
-        s1.continuity = false;
-        assert!(judge(&b, &s1, "俺が行く。", "กูจะไปเอง", &c).await.is_none());
+        let mut cfg = system_one(true);
+        cfg.audit = false;
+        cfg.continuity = false;
+        let (h, b) = handle_cfg(FakeBackend::answering(&[("c0", 0.96), ("c1", 0.99)]), cfg);
+        assert!(judge(Some(&h), "俺が行く。", "กูจะไปเอง", &c).await.is_none());
         assert_eq!(b.calls(), 0);
     }
 
@@ -384,8 +387,8 @@ mod tests {
             "precondition: normalized substring matching misses a reworded echo"
         );
 
-        let b = FakeBackend::answering(&[("c0", 0.91)]);
-        let out = judge(&b, &system_one(true), "彼は振り返らずに出て行った。", reworded, &c)
+        let (h, _b) = handle(FakeBackend::answering(&[("c0", 0.91)]), true);
+        let out = judge(Some(&h), "彼は振り返らずに出て行った。", reworded, &c)
             .await
             .unwrap();
         assert_eq!(out.findings.len(), 1);
@@ -396,8 +399,8 @@ mod tests {
     async fn oversized_state_defers_without_calling() {
         let huge = format!("{}{}", "ก".repeat(MAX_STATE_CHARS), "กูจะไปเอง");
         let c = candidates(&huge);
-        let b = FakeBackend::answering(&[("c0", 0.99)]);
-        assert!(judge(&b, &system_one(true), "俺", &huge, &c).await.is_none());
+        let (h, b) = handle(FakeBackend::answering(&[("c0", 0.99)]), true);
+        assert!(judge(Some(&h), "俺", &huge, &c).await.is_none());
         assert_eq!(b.calls(), 0);
     }
 }

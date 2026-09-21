@@ -6572,9 +6572,11 @@ async fn prepare_epub_import(
     // per-publisher thresholds only guess at what this answers directly.
     let roles = match crate::epub::judge::classify_spine(system_one, &docs).await {
         Some(out) => {
+            // An import is not a run, so there is no usage accumulator to fold
+            // into here; the log line is where this spend is accounted for.
             tx.send(AppEvent::Log {
                 level: LogLevel::Info,
-                msg: out.summary,
+                msg: format!("{} ({} tok)", out.summary, out.usage.total_tokens),
             });
             out.roles
         }

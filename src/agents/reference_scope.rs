@@ -19,7 +19,7 @@
 //! is a round trip on the critical path. It is asked only when the answer could
 //! change the bundle: nothing to add and nothing to trim means no call.
 
-use crate::llm::decisions::{DecisionsRequest, Question, SystemOneHandle};
+use crate::llm::decisions::{Question, SystemOneHandle};
 use crate::model::{Character, GlossaryTerm, SystemOneFeature};
 
 /// Roster members put to a presence question per chunk. The bundle caps at 40
@@ -29,14 +29,13 @@ const MAX_PRESENCE_CANDIDATES: usize = 24;
 /// above a coin flip: a spurious character in the bundle spends context and can
 /// mislead the Translator's pronoun choice.
 const PRESENT_AT: f64 = 0.7;
-/// Char budget for the state, matching the other judgements.
-const MAX_STATE_CHARS: usize = 24_000;
 
 pub struct ScopeOutcome {
     /// Roster ids the passage refers to without naming them.
     pub implied: Vec<String>,
     /// `(index into the ranked terms, probability)`, most relevant first.
     pub term_order: Vec<usize>,
+    pub usage: crate::llm::Usage,
     pub summary: String,
 }
 
@@ -60,9 +59,6 @@ pub async fn scope(
     overflow: &[GlossaryTerm],
 ) -> Option<ScopeOutcome> {
     let s1 = system_one?;
-    if !s1.config.feature(SystemOneFeature::ReferenceScope) {
-        return None;
-    }
     let absent = &absent[..absent.len().min(MAX_PRESENCE_CANDIDATES)];
     if absent.is_empty() && overflow.is_empty() {
         return None;
@@ -76,10 +72,6 @@ pub async fn scope(
             .map(|t| serde_json::json!({ "jp_term": t.jp_term, "translated": t.translated_term }))
             .collect::<Vec<_>>(),
     });
-    if state.to_string().chars().count() > MAX_STATE_CHARS {
-        return None;
-    }
-
     let mut questions = std::collections::BTreeMap::new();
     for i in 0..absent.len() {
         questions.insert(
@@ -103,14 +95,8 @@ pub async fn scope(
     }
 
     let resp = s1
-        .backend
-        .decide(&DecisionsRequest {
-            model: s1.config.model.clone(),
-            state,
-            questions,
-        })
-        .await
-        .ok()?;
+        .ask(SystemOneFeature::ReferenceScope, state, questions)
+        .await?;
 
     let implied: Vec<String> = absent
         .iter()
@@ -145,6 +131,7 @@ pub async fn scope(
     Some(ScopeOutcome {
         implied,
         term_order: ranked.into_iter().map(|(j, _)| j).collect(),
+        usage: resp.usage,
         summary: format!("reference scope: +{n_implied} implied character(s), {n_ranked} term(s) ranked"),
     })
 }
@@ -152,7 +139,9 @@ pub async fn scope(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm::decisions::{Answer, DecisionsBackend, DecisionsResponse, DecisionsUsage};
+    use crate::llm::decisions::{
+        Answer, DecisionsBackend, DecisionsRequest, DecisionsResponse, DecisionsUsage,
+    };
     use crate::model::{DecisionsProvider, SystemOne, TermPolicy};
     use std::collections::BTreeMap;
     use std::sync::Arc;

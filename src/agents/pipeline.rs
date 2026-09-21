@@ -1553,7 +1553,8 @@ async fn build_scoped_reference_ctx(
     target_language: TargetLanguage,
     system_one: Option<&crate::llm::decisions::SystemOneHandle>,
     tx: Option<&EventTx>,
-) -> String {
+) -> (String, Usage) {
+    let mut scope_usage = Usage::default();
     let mut terms = glossary_matches(ws, chunk_text);
     let (mut named, absent) = character_matches(ws, chunk_text, prev_chunk_text);
 
@@ -1567,6 +1568,7 @@ async fn build_scoped_reference_ctx(
     )
     .await
     {
+        scope_usage.add(&out.usage);
         if let Some(tx) = tx {
             tx.send(AppEvent::Log {
                 level: LogLevel::Info,
@@ -1589,7 +1591,10 @@ async fn build_scoped_reference_ctx(
 
     terms.truncate(MAX_GLOSSARY_IN_CTX);
     named.truncate(MAX_CHARACTERS_IN_CTX);
-    render_reference_ctx(ws, terms, named, target_language)
+    (
+        render_reference_ctx(ws, terms, named, target_language),
+        scope_usage,
+    )
 }
 
 /// Assemble the reference context bundled into every Translator/Reviewer call:
@@ -2022,8 +2027,8 @@ async fn fresh_translator_input(
     chunk: &Chunk,
     previous_source: Option<&str>,
     current_pov: Option<&str>,
-) -> TranslatorInput {
-    let reference_ctx = build_scoped_reference_ctx(
+) -> (TranslatorInput, Usage) {
+    let (reference_ctx, scope_usage) = build_scoped_reference_ctx(
         &ctx.ws,
         &chunk.text,
         previous_source,
@@ -2034,14 +2039,17 @@ async fn fresh_translator_input(
     .await;
     let previous_translation =
         continuity::last_translated_sentences(&ctx.ws, chapter, ctx.cfg.continuity_sentences).await;
-    translator_input(
-        ctx,
-        &reference_ctx,
-        &previous_translation,
-        current_pov,
-        &chunk.text,
-        None,
-        1,
+    (
+        translator_input(
+            ctx,
+            &reference_ctx,
+            &previous_translation,
+            current_pov,
+            &chunk.text,
+            None,
+            1,
+        ),
+        scope_usage,
     )
 }
 
@@ -2418,7 +2426,7 @@ async fn process_chunk_with_lookahead(
     });
 
     // Context and continuity are stable across this chunk's attempts.
-    let reference_ctx = build_scoped_reference_ctx(
+    let (reference_ctx, scope_usage) = build_scoped_reference_ctx(
         &ctx.ws,
         &chunk.text,
         prev_chunk_text,
@@ -2427,6 +2435,7 @@ async fn process_chunk_with_lookahead(
         Some(&ctx.tx),
     )
     .await;
+    acc.fold(&scope_usage);
     let audit_characters = target_characters(
         characters_for_chunk(&ctx.ws, &chunk.text, prev_chunk_text, MAX_CHARACTERS_IN_CTX),
         ctx.target_language,
@@ -2850,17 +2859,10 @@ async fn process_chunk_with_lookahead(
         // The judgement-shaped checks are decided separately: System One when it
         // is on, otherwise the same hand-tuned predicates as before.
         let candidates = audit::semantic_candidates(ctx.target_language, &translated, &previous_translation);
-        let judged = match ctx.clients.decisions() {
-            Some(backend) => {
+        let judged = match ctx.system_one() {
+            Some(s1) => {
                 let _wait = wd.external_wait();
-                audit_judge::judge(
-                    backend.as_ref(),
-                    &ctx.cfg.system_one,
-                    &chunk.text,
-                    &translated,
-                    &candidates,
-                )
-                .await
+                audit_judge::judge(Some(&s1), &chunk.text, &translated, &candidates).await
             }
             None => None,
         };
@@ -2917,8 +2919,8 @@ async fn process_chunk_with_lookahead(
         // The System One gate screens the chunk first when it is on. `None`
         // means defer, which is also where every gate failure lands — so the
         // gate can only save a reviewer call, never block or fail the chunk.
-        let gate_outcome = match ctx.clients.decisions() {
-            Some(backend) => {
+        let gate_outcome = match ctx.system_one() {
+            Some(s1) => {
                 wd.ping();
                 ctx.tx.send(AppEvent::ReviewerRequested {
                     chapter,
@@ -2927,8 +2929,7 @@ async fn process_chunk_with_lookahead(
                 });
                 let _wait = wd.external_wait();
                 review_gate::try_review(
-                    backend.as_ref(),
-                    &ctx.cfg.system_one,
+                    Some(&s1),
                     ctx.target_language,
                     &chunk.text,
                     &translated,
@@ -3147,9 +3148,10 @@ async fn process_chunk_with_lookahead(
             if lookahead.enabled
                 && let Some(next) = next_chunk
             {
-                let input =
+                let (input, scope_usage) =
                     fresh_translator_input(ctx, chapter, next, Some(&chunk.text), pov.as_deref())
                         .await;
+                acc.fold(&scope_usage);
                 match spawn_lookahead(ctx, chapter, next, input, owner) {
                     Ok(draft) => spawned_lookahead = Some(draft),
                     Err(error) => ctx.tx.send(AppEvent::Log {
@@ -3518,7 +3520,11 @@ async fn run_orchestrator_metadata_turn(
     .await
     .map_err(|e| anyhow::anyhow!("orchestrator tool loop failed: {e}"))?;
 
-    Ok((outcome.usage, outcome.tool_calls))
+    // A tool may have asked System One to align a character. That spend has no
+    // accumulator of its own down there, so it rides back with the turn's.
+    let mut usage = outcome.usage;
+    usage.add(&executor.take_judgement_usage());
+    Ok((usage, outcome.tool_calls))
 }
 
 /// Run the whole-chapter coherence sweep over the assembled Thai and persist any
@@ -3539,7 +3545,7 @@ async fn run_coherence_sweep(
     }
     // Scope the reference bundle to the whole chapter source so every character and
     // term the chapter uses is available to the auditor.
-    let reference_ctx = build_scoped_reference_ctx(
+    let (reference_ctx, scope_usage) = build_scoped_reference_ctx(
         &ctx.ws,
         raw,
         None,
@@ -3548,6 +3554,7 @@ async fn run_coherence_sweep(
         Some(&ctx.tx),
     )
     .await;
+    acc.fold(&scope_usage);
 
     let coherence_client = match ctx.client_for(&ctx.models.reviewer) {
         Ok(c) => c,
@@ -4659,29 +4666,29 @@ mod tests {
             est_tokens: 10,
         };
 
-        let baseline = fresh_translator_input(&ctx, 1, &chunk, None, None).await;
+        let baseline = fresh_translator_input(&ctx, 1, &chunk, None, None).await.0;
         glossary::upsert(&ws, term("聖剣", "ดาบศักดิ์สิทธิ์")).unwrap();
-        let irrelevant_term = fresh_translator_input(&ctx, 1, &chunk, None, None).await;
+        let irrelevant_term = fresh_translator_input(&ctx, 1, &chunk, None, None).await.0;
         assert_eq!(baseline, irrelevant_term);
 
         glossary::upsert(&ws, term("魔剣", "ดาบมาร")).unwrap();
-        let glossary_changed = fresh_translator_input(&ctx, 1, &chunk, None, None).await;
+        let glossary_changed = fresh_translator_input(&ctx, 1, &chunk, None, None).await.0;
         assert_ne!(irrelevant_term, glossary_changed);
 
         characters::upsert(&ws, character("alice", "アリス", "อลิซ")).unwrap();
-        let character_changed = fresh_translator_input(&ctx, 1, &chunk, None, None).await;
+        let character_changed = fresh_translator_input(&ctx, 1, &chunk, None, None).await.0;
         assert_ne!(glossary_changed, character_changed);
 
         crate::workspace::style::append_note(&ws, "Use clipped action prose.").unwrap();
-        let style_changed = fresh_translator_input(&ctx, 1, &chunk, None, None).await;
+        let style_changed = fresh_translator_input(&ctx, 1, &chunk, None, None).await.0;
         assert_ne!(character_changed, style_changed);
 
         volume::set_synopsis(&ws, "剣の物語", "เรื่องราวของดาบ").unwrap();
-        let synopsis_changed = fresh_translator_input(&ctx, 1, &chunk, None, None).await;
+        let synopsis_changed = fresh_translator_input(&ctx, 1, &chunk, None, None).await.0;
         assert_ne!(style_changed, synopsis_changed);
 
         volume::set_recap(&ws, "metadata not injected into Translator reference").unwrap();
-        let recap_changed = fresh_translator_input(&ctx, 1, &chunk, None, None).await;
+        let recap_changed = fresh_translator_input(&ctx, 1, &chunk, None, None).await.0;
         assert_eq!(synopsis_changed, recap_changed);
 
         let _ = std::fs::remove_dir_all(&base);
@@ -6513,7 +6520,8 @@ mod tests {
         let (handle, backend) = presence_handle(true);
         let scoped =
             build_scoped_reference_ctx(&ws, chunk, None, TargetLanguage::Thai, Some(&handle), None)
-                .await;
+                .await
+            .0;
         assert!(
             scoped.contains("ฮิคาริ"),
             "implied character must reach the Translator:\n{scoped}"
@@ -6524,12 +6532,13 @@ mod tests {
         let (handle, _) = presence_handle(false);
         let scoped =
             build_scoped_reference_ctx(&ws, chunk, None, TargetLanguage::Thai, Some(&handle), None)
-                .await;
+                .await
+            .0;
         assert!(!scoped.contains("ฮิคาริ"));
 
         // No handle at all: the string test is in charge, byte for byte.
         let unscoped =
-            build_scoped_reference_ctx(&ws, chunk, None, TargetLanguage::Thai, None, None).await;
+            build_scoped_reference_ctx(&ws, chunk, None, TargetLanguage::Thai, None, None).await.0;
         assert_eq!(unscoped, build_reference_ctx(&ws, chunk, None));
 
         let _ = std::fs::remove_dir_all(&base);
@@ -6561,7 +6570,7 @@ mod tests {
         .unwrap();
 
         let (handle, backend) = presence_handle(true);
-        let scoped = build_scoped_reference_ctx(
+        let (scoped, _) = build_scoped_reference_ctx(
             &ws,
             "ひかりは振り返った。",
             None,

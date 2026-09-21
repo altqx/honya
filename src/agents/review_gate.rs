@@ -11,14 +11,8 @@
 //! block or fail a run.
 
 use crate::llm::Usage;
-use crate::llm::decisions::{Answer, DecisionsBackend, DecisionsRequest, Question};
-use crate::model::{ReviewGateMode, ReviewVerdict, ReviewerOut, SystemOne, TargetLanguage};
-
-/// Char budget for the serialized state. Jev's window is 32k tokens and the
-/// question set alone costs ~400; CJK runs near one token per char, so this
-/// stays conservative. An oversized chunk defers rather than being truncated —
-/// a gate judging half a chunk would be worse than no gate.
-const MAX_STATE_CHARS: usize = 24_000;
+use crate::llm::decisions::{Answer, Question, Switch, SystemOneHandle};
+use crate::model::{ReviewGateMode, ReviewVerdict, ReviewerOut, TargetLanguage};
 
 /// How an answer is turned into pass/fail.
 #[derive(Debug, Clone, Copy)]
@@ -172,12 +166,11 @@ fn build_state(
 
 /// Screen one chunk. `None` means defer to the LLM reviewer.
 ///
-/// Callers pass the backend explicitly (rather than a whole `PipelineCtx`) so
-/// the decision logic stays unit-testable without a live pipeline.
+/// Callers pass a [`SystemOneHandle`] rather than a whole `PipelineCtx`, so the
+/// decision logic stays unit-testable without a live pipeline.
 #[allow(clippy::too_many_arguments)]
 pub async fn try_review(
-    backend: &dyn DecisionsBackend,
-    system_one: &SystemOne,
+    system_one: Option<&SystemOneHandle>,
     target_language: TargetLanguage,
     source_jp: &str,
     translated: &str,
@@ -185,10 +178,8 @@ pub async fn try_review(
     previous_translation: &[String],
     audit_findings: &[String],
 ) -> Option<GateOutcome> {
-    let mode = system_one.review_gate_mode();
-    if !mode.is_on() {
-        return None;
-    }
+    let s1 = system_one?;
+    let mode = s1.config.review_gate_mode();
     // The deterministic audit already forces a reject downstream, and only the
     // LLM reviewer can say how to fix it — so the call would be wasted.
     if !audit_findings.is_empty() {
@@ -196,9 +187,6 @@ pub async fn try_review(
     }
 
     let state = build_state(source_jp, translated, reference_ctx, previous_translation);
-    if state.to_string().chars().count() > MAX_STATE_CHARS {
-        return None;
-    }
 
     let axes = axes(target_language, !reference_ctx.trim().is_empty());
     let mut questions = std::collections::BTreeMap::new();
@@ -207,20 +195,13 @@ pub async fn try_review(
         questions.insert(axis.key.to_string(), axis.question.clone());
     }
 
-    let resp = backend
-        .decide(&DecisionsRequest {
-            model: system_one.model.clone(),
-            state,
-            questions,
-        })
-        .await
-        .ok()?;
-    let usage = resp.usage.to_usage();
+    let resp = s1.ask(Switch::ReviewGate, state, questions).await?;
+    let usage = resp.usage;
 
     let verdict = resp.answers.get(VERDICT)?;
     let approved_verdict = verdict.as_choice()? == "approve";
     let confidence = verdict.confidence();
-    let threshold = system_one.confidence_threshold();
+    let threshold = s1.confidence_threshold();
 
     // Any axis answered with the wrong primitive makes the whole response
     // unusable — defer rather than guess.
@@ -277,9 +258,12 @@ pub async fn try_review(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm::decisions::{DecisionsResponse, DecisionsUsage};
-    use crate::model::DecisionsProvider;
+    use crate::llm::decisions::{
+        DecisionsBackend, DecisionsRequest, DecisionsResponse, DecisionsUsage, MAX_STATE_CHARS,
+    };
+    use crate::model::{DecisionsProvider, SystemOne};
     use std::collections::BTreeMap;
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct FakeBackend {
@@ -372,14 +356,20 @@ mod tests {
         }
     }
 
+    fn handle(backend: &Arc<FakeBackend>, mode: ReviewGateMode) -> SystemOneHandle {
+        SystemOneHandle {
+            backend: backend.clone(),
+            config: gate(mode),
+        }
+    }
+
     async fn run(
-        backend: &FakeBackend,
-        system_one: &SystemOne,
+        backend: &Arc<FakeBackend>,
+        mode: ReviewGateMode,
         audit: &[String],
     ) -> Option<GateOutcome> {
         try_review(
-            backend,
-            system_one,
+            Some(&handle(backend, mode)),
             TargetLanguage::Thai,
             "猫が窓辺で眠っている。",
             "แมวกำลังนอนอยู่ริมหน้าต่าง",
@@ -392,8 +382,8 @@ mod tests {
 
     #[tokio::test]
     async fn confident_clean_pass_approves_and_reports_usage() {
-        let b = FakeBackend::passing();
-        let out = run(&b, &gate(ReviewGateMode::Gate), &[]).await.unwrap();
+        let b = Arc::new(FakeBackend::passing());
+        let out = run(&b, ReviewGateMode::Gate, &[]).await.unwrap();
         assert!(out.review.approved());
         assert!(out.review.feedback.is_empty());
         assert_eq!(out.usage.prompt_tokens, 400);
@@ -402,62 +392,64 @@ mod tests {
 
     #[tokio::test]
     async fn low_confidence_defers_even_when_every_axis_passes() {
-        let b = FakeBackend::passing().with(
+        let b = Arc::new(FakeBackend::passing().with(
             "verdict",
             Answer::Choice {
                 choice: "approve".to_string(),
                 confidence: Some(0.42),
             },
-        );
+        ));
         assert!(
-            run(&b, &gate(ReviewGateMode::Gate), &[]).await.is_none(),
+            run(&b, ReviewGateMode::Gate, &[]).await.is_none(),
             "an approval below the threshold must fall through to the LLM reviewer"
         );
     }
 
     #[tokio::test]
     async fn failing_axis_defers_in_gate_mode() {
-        let b = FakeBackend::passing().with("residue", Answer::Noul { noul: 0.9 });
-        assert!(run(&b, &gate(ReviewGateMode::Gate), &[]).await.is_none());
+        let b = Arc::new(FakeBackend::passing().with("residue", Answer::Noul { noul: 0.9 }));
+        assert!(run(&b, ReviewGateMode::Gate, &[]).await.is_none());
     }
 
     #[tokio::test]
     async fn audit_findings_skip_the_call_entirely() {
-        let b = FakeBackend::passing();
+        let b = Arc::new(FakeBackend::passing());
         let audit = vec!["Japanese punctuation residue".to_string()];
-        assert!(run(&b, &gate(ReviewGateMode::Gate), &audit).await.is_none());
+        assert!(run(&b, ReviewGateMode::Gate, &audit).await.is_none());
         assert_eq!(b.calls(), 0, "a chunk the audit already rejected must not cost a gate call");
     }
 
     #[tokio::test]
     async fn mode_off_never_calls_the_backend() {
-        let b = FakeBackend::passing();
-        assert!(run(&b, &gate(ReviewGateMode::Off), &[]).await.is_none());
+        let b = Arc::new(FakeBackend::passing());
+        assert!(run(&b, ReviewGateMode::Off, &[]).await.is_none());
         assert_eq!(b.calls(), 0);
     }
 
     #[tokio::test]
     async fn backend_error_defers() {
-        let b = FakeBackend::failing_backend();
+        let b = Arc::new(FakeBackend::failing_backend());
         assert!(
-            run(&b, &gate(ReviewGateMode::Gate), &[]).await.is_none(),
+            run(&b, ReviewGateMode::Gate, &[]).await.is_none(),
             "a gate failure must degrade to the existing reviewer, never fail the chunk"
         );
     }
 
     #[tokio::test]
     async fn standalone_synthesizes_feedback_naming_the_failing_axis() {
-        let b = FakeBackend::passing()
-            .with(
-                "verdict",
-                Answer::Choice {
-                    choice: "revise".to_string(),
-                    confidence: Some(0.91),
-                },
-            )
-            .with("residue", Answer::Noul { noul: 0.88 });
+        let b = Arc::new(
+            FakeBackend::passing()
+                .with(
+                    "verdict",
+                    Answer::Choice {
+                        choice: "revise".to_string(),
+                        confidence: Some(0.91),
+                    },
+                )
+                .with("residue", Answer::Noul { noul: 0.88 }),
+        );
 
-        let out = run(&b, &gate(ReviewGateMode::Standalone), &[]).await.unwrap();
+        let out = run(&b, ReviewGateMode::Standalone, &[]).await.unwrap();
         assert!(!out.review.approved());
         assert_eq!(out.review.feedback.len(), 1);
         assert!(
@@ -469,14 +461,14 @@ mod tests {
 
     #[tokio::test]
     async fn standalone_rejects_rather_than_approving_on_low_confidence() {
-        let b = FakeBackend::passing().with(
+        let b = Arc::new(FakeBackend::passing().with(
             "verdict",
             Answer::Choice {
                 choice: "approve".to_string(),
                 confidence: Some(0.3),
             },
-        );
-        let out = run(&b, &gate(ReviewGateMode::Standalone), &[]).await.unwrap();
+        ));
+        let out = run(&b, ReviewGateMode::Standalone, &[]).await.unwrap();
         assert!(!out.review.approved());
         assert!(!out.review.feedback.is_empty(), "a reject must carry actionable feedback");
     }
@@ -484,23 +476,22 @@ mod tests {
     #[tokio::test]
     async fn wrong_primitive_in_an_answer_defers() {
         // A score answer where a noul was asked for: unusable, so defer.
-        let b = FakeBackend::passing().with(
+        let b = Arc::new(FakeBackend::passing().with(
             "residue",
             Answer::Score {
                 score: 1.0,
                 confidence: Some(0.9),
             },
-        );
-        assert!(run(&b, &gate(ReviewGateMode::Gate), &[]).await.is_none());
+        ));
+        assert!(run(&b, ReviewGateMode::Gate, &[]).await.is_none());
     }
 
     #[tokio::test]
     async fn oversized_chunk_defers_without_calling() {
-        let b = FakeBackend::passing();
+        let b = Arc::new(FakeBackend::passing());
         let huge = "猫".repeat(MAX_STATE_CHARS + 1);
         let out = try_review(
-            &b,
-            &gate(ReviewGateMode::Gate),
+            Some(&handle(&b, ReviewGateMode::Gate)),
             TargetLanguage::Thai,
             &huge,
             "แมว",
@@ -517,11 +508,11 @@ mod tests {
     async fn glossary_axis_is_omitted_without_a_reference_bundle() {
         // No reference => the glossary answer is never required, so a response
         // lacking it still yields a decision.
-        let mut b = FakeBackend::passing();
-        b.answers.remove("glossary");
+        let mut fb = FakeBackend::passing();
+        fb.answers.remove("glossary");
+        let b = Arc::new(fb);
         let out = try_review(
-            &b,
-            &gate(ReviewGateMode::Gate),
+            Some(&handle(&b, ReviewGateMode::Gate)),
             TargetLanguage::English,
             "猫",
             "cat",

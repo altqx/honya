@@ -174,21 +174,17 @@ pub async fn run_prepass(
         }
         // The roster fills as this loop runs, so a nickname extracted from the
         // same sample as its full name can still be aligned onto it.
-        let alignment = match system_one {
-            Some(s1) => {
-                let roster = characters::load(ws);
-                let candidates = characters::alignment_candidates(&roster, &character);
-                crate::agents::entity_align::align(
-                    s1.backend.as_ref(),
-                    &s1.config,
-                    &character,
-                    &candidates,
-                )
+        let aligning = system_one
+            .is_some_and(|s1| s1.is_on(crate::model::SystemOneFeature::EntityAlignment));
+        let alignment = if aligning {
+            let roster = characters::load(ws);
+            let candidates = characters::alignment_candidates(&roster, &character);
+            crate::agents::entity_align::align(system_one, &character, &candidates)
                 .await
                 .map(|out| out.alignment)
                 .unwrap_or_default()
-            }
-            None => characters::Alignment::default(),
+        } else {
+            characters::Alignment::default()
         };
         // Best-effort: a single bad row must not sink the whole seed.
         if characters::upsert_aligned(ws, character, &alignment).is_ok() {

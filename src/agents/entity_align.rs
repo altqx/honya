@@ -10,14 +10,9 @@
 //! becomes a suggestion, and a confident "this is someone new" only ever
 //! *withholds* a merge the name rules would have made on their own.
 
-use crate::llm::decisions::{DecisionsBackend, DecisionsRequest, Question};
-use crate::model::{Character, SystemOne, SystemOneFeature};
+use crate::llm::decisions::{Question, SystemOneHandle};
+use crate::model::{Character, SystemOneFeature};
 use crate::workspace::characters::Alignment;
-
-/// Same budget as the other judgements; a roster this large would be truncated
-/// rather than judged, and a truncated roster hides the very entry we are
-/// looking for.
-const MAX_STATE_CHARS: usize = 24_000;
 
 /// Probability that the incoming entry already has a roster entry, above which
 /// a merge is allowed at all.
@@ -31,9 +26,8 @@ const ALREADY: &str = "already_on_roster";
 
 pub struct AlignOutcome {
     pub alignment: Alignment,
-    /// One-line summary for the activity log. The tool executor has no route to
-    /// the run's usage accumulator, so the token count rides along here rather
-    /// than going unreported.
+    pub usage: crate::llm::Usage,
+    /// One-line summary for the activity log.
     pub summary: Option<String>,
 }
 
@@ -54,12 +48,12 @@ fn describe(c: &Character) -> serde_json::Value {
 /// Decide whether `incoming` is someone already on the roster. `None` means the
 /// name rules decide alone, exactly as before.
 pub async fn align(
-    backend: &dyn DecisionsBackend,
-    system_one: &SystemOne,
+    system_one: Option<&SystemOneHandle>,
     incoming: &Character,
     roster: &[Character],
 ) -> Option<AlignOutcome> {
-    if !system_one.feature(SystemOneFeature::EntityAlignment) || roster.is_empty() {
+    let s1 = system_one?;
+    if roster.is_empty() {
         return None;
     }
 
@@ -67,10 +61,6 @@ pub async fn align(
         "incoming": describe(incoming),
         "roster": roster.iter().map(describe).collect::<Vec<_>>(),
     });
-    if state.to_string().chars().count() > MAX_STATE_CHARS {
-        return None;
-    }
-
     // The options are the roster ids themselves, so the answer is always an
     // entry that exists; the companion Noul decides whether any of them applies,
     // which keeps "nobody" from having to win a ranking it cannot win.
@@ -99,22 +89,17 @@ pub async fn align(
     .into_iter()
     .collect();
 
-    let resp = backend
-        .decide(&DecisionsRequest {
-            model: system_one.model.clone(),
-            state,
-            questions,
-        })
-        .await
-        .ok()?;
-    let usage = resp.usage.to_usage();
+    let resp = s1
+        .ask(SystemOneFeature::EntityAlignment, state, questions)
+        .await?;
+    let usage = resp.usage;
 
     let already = resp.answers.get(ALREADY)?.as_noul()?;
     let which = resp.answers.get(WHICH)?;
     let best = which.as_choice()?;
     // An id the model invented is not an alignment.
     let best = roster.iter().find(|c| c.id == best).map(|c| c.id.clone())?;
-    let confident = which.confidence() >= system_one.confidence_threshold();
+    let confident = which.confidence() >= s1.confidence_threshold();
 
     let (alignment, verdict) = if already >= SAME_PERSON_AT && confident {
         (
@@ -144,11 +129,13 @@ pub async fn align(
         (Alignment::default(), "undecided".to_string())
     };
 
+    let tokens = usage.total_tokens;
     Some(AlignOutcome {
         alignment,
+        usage,
         summary: Some(format!(
-            "alignment: {} — {verdict} ({} tok)",
-            incoming.jp_name, usage.total_tokens
+            "alignment: {} — {verdict} ({tokens} tok)",
+            incoming.jp_name
         )),
     })
 }
@@ -156,9 +143,12 @@ pub async fn align(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm::decisions::{Answer, DecisionsResponse, DecisionsUsage};
-    use crate::model::DecisionsProvider;
+    use crate::llm::decisions::{
+        Answer, DecisionsBackend, DecisionsRequest, DecisionsResponse, DecisionsUsage,
+    };
+    use crate::model::{DecisionsProvider, SystemOne};
     use std::collections::BTreeMap;
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct FakeBackend {
@@ -234,6 +224,15 @@ mod tests {
         }
     }
 
+    fn handle(backend: FakeBackend, on: bool) -> (SystemOneHandle, Arc<FakeBackend>) {
+        let backend = Arc::new(backend);
+        let handle = SystemOneHandle {
+            backend: backend.clone(),
+            config: system_one(on),
+        };
+        (handle, backend)
+    }
+
     fn character(id: &str, jp: &str, translated: &str) -> Character {
         Character {
             id: id.to_string(),
@@ -266,8 +265,8 @@ mod tests {
     #[tokio::test]
     async fn a_confident_match_merges_a_nickname_into_the_full_name() {
         let (inc, roster) = nickname_case();
-        let b = FakeBackend::new("takahashi-hina", 0.93, 0.95);
-        let out = align(&b, &system_one(true), &inc, &roster).await.unwrap();
+        let (h, _b) = handle(FakeBackend::new("takahashi-hina", 0.93, 0.95), true);
+        let out = align(Some(&h), &inc, &roster).await.unwrap();
         assert_eq!(out.alignment.same_as.as_deref(), Some("takahashi-hina"));
         assert!(out.alignment.maybe.is_empty());
         assert!(out.summary.unwrap().contains("530 tok"));
@@ -276,8 +275,8 @@ mod tests {
     #[tokio::test]
     async fn an_unconfident_match_only_suggests() {
         let (inc, roster) = nickname_case();
-        let b = FakeBackend::new("takahashi-hina", 0.44, 0.9);
-        let out = align(&b, &system_one(true), &inc, &roster).await.unwrap();
+        let (h, _b) = handle(FakeBackend::new("takahashi-hina", 0.44, 0.9), true);
+        let out = align(Some(&h), &inc, &roster).await.unwrap();
         assert_eq!(
             out.alignment.same_as, None,
             "a wrong merge is the costly direction, so it needs confidence"
@@ -288,8 +287,8 @@ mod tests {
     #[tokio::test]
     async fn a_confident_new_person_withholds_weak_name_matches() {
         let (inc, roster) = nickname_case();
-        let b = FakeBackend::new("takahashi-hina", 0.9, 0.03);
-        let out = align(&b, &system_one(true), &inc, &roster).await.unwrap();
+        let (h, _b) = handle(FakeBackend::new("takahashi-hina", 0.9, 0.03), true);
+        let out = align(Some(&h), &inc, &roster).await.unwrap();
         assert_eq!(out.alignment.same_as, None);
         assert_eq!(out.alignment.ruled_out.len(), roster.len());
     }
@@ -297,31 +296,34 @@ mod tests {
     #[tokio::test]
     async fn a_middling_answer_leaves_the_name_rules_alone() {
         let (inc, roster) = nickname_case();
-        let b = FakeBackend::new("takahashi-hina", 0.9, 0.5);
-        let out = align(&b, &system_one(true), &inc, &roster).await.unwrap();
+        let (h, _b) = handle(FakeBackend::new("takahashi-hina", 0.9, 0.5), true);
+        let out = align(Some(&h), &inc, &roster).await.unwrap();
         assert_eq!(out.alignment, Alignment::default());
     }
 
     #[tokio::test]
     async fn an_invented_id_is_not_an_alignment() {
         let (inc, roster) = nickname_case();
-        let b = FakeBackend::new("someone-else", 0.99, 0.99);
-        assert!(align(&b, &system_one(true), &inc, &roster).await.is_none());
+        let (h, _b) = handle(FakeBackend::new("someone-else", 0.99, 0.99), true);
+        assert!(align(Some(&h), &inc, &roster).await.is_none());
     }
 
     #[tokio::test]
     async fn backend_failure_leaves_the_name_rules_alone() {
         let (inc, roster) = nickname_case();
-        let b = FakeBackend::broken();
-        assert!(align(&b, &system_one(true), &inc, &roster).await.is_none());
+        let (h, _b) = handle(FakeBackend::broken(), true);
+        assert!(align(Some(&h), &inc, &roster).await.is_none());
     }
 
     #[tokio::test]
     async fn feature_off_or_empty_roster_never_calls() {
         let (inc, roster) = nickname_case();
-        let b = FakeBackend::new("takahashi-hina", 0.99, 0.99);
-        assert!(align(&b, &system_one(false), &inc, &roster).await.is_none());
-        assert!(align(&b, &system_one(true), &inc, &[]).await.is_none());
-        assert_eq!(b.calls(), 0);
+        let (off, b_off) = handle(FakeBackend::new("takahashi-hina", 0.99, 0.99), false);
+        assert!(align(Some(&off), &inc, &roster).await.is_none());
+        let (on, b_on) = handle(FakeBackend::new("takahashi-hina", 0.99, 0.99), true);
+        assert!(align(Some(&on), &inc, &[]).await.is_none());
+        assert!(align(None, &inc, &roster).await.is_none());
+        assert_eq!(b_off.calls(), 0);
+        assert_eq!(b_on.calls(), 0);
     }
 }
