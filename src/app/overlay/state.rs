@@ -1870,7 +1870,11 @@ impl ExportState {
     }
 
     /// Selected formats in display order.
-    pub(super) fn selected_formats(&self) -> Vec<ExportFormat> {
+    ///
+    /// `pub(crate)` because both front ends need it: while it was `pub(super)`
+    /// the GUI could not reach it and re-derived the answer against a hardcoded
+    /// index-to-label pairing of its own.
+    pub(crate) fn selected_formats(&self) -> Vec<ExportFormat> {
         ExportFormat::ALL
             .iter()
             .zip(self.formats)
@@ -1879,3 +1883,103 @@ impl ExportState {
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn import(files: Vec<(PathBuf, u64)>) -> ImportState {
+        ImportState::new(files, Vec::new(), TargetLanguage::Thai)
+    }
+
+    /// Both renderers draw the wizard rail from `visible_steps`, so its shape
+    /// is a shared contract rather than one front end's detail. The GUI used to
+    /// re-derive it from string literals, which is a second answer to a
+    /// question only this has the right to answer.
+    #[test]
+    fn the_wizard_rail_is_always_an_ordered_run_from_pick_to_import() {
+        let full = import(Vec::new());
+        let into = ImportState::new_into(
+            Vec::new(),
+            Vec::new(),
+            "Project".to_string(),
+            2,
+            TargetLanguage::Thai,
+        );
+        let append = ImportState::new_append(
+            Vec::new(),
+            Vec::new(),
+            "Project".to_string(),
+            2,
+            TargetLanguage::Thai,
+        );
+
+        for (name, st) in [("full", &full), ("into", &into), ("append", &append)] {
+            let steps = st.visible_steps();
+            assert_eq!(
+                steps.first(),
+                Some(&ImportStep::Pick),
+                "{name}: every flow starts at the source file"
+            );
+            assert_eq!(
+                steps.last(),
+                Some(&ImportStep::Importing),
+                "{name}: every flow ends by importing"
+            );
+            assert!(
+                steps.windows(2).all(|w| w[0] < w[1]),
+                "{name}: the rail must run forwards: {steps:?}"
+            );
+            assert!(
+                steps.iter().all(|s| ImportStep::ALL.contains(s)),
+                "{name}: the rail only shows declared steps"
+            );
+            assert!(
+                steps.contains(&st.step),
+                "{name}: the rail cannot highlight a step it does not show"
+            );
+        }
+
+        assert_eq!(full.visible_steps().len(), ImportStep::ALL.len());
+        assert_eq!(
+            append.visible_steps(),
+            vec![ImportStep::Pick, ImportStep::Importing],
+            "appending chapters skips everything but the file"
+        );
+        assert!(
+            into.visible_steps().len() < full.visible_steps().len(),
+            "adding a volume to a named project skips the naming steps"
+        );
+    }
+
+    /// The export checklist and the formats actually exported are the same
+    /// array read twice, so they have to agree for every combination. The GUI
+    /// used to pair index to label by hand, which is where they could not.
+    #[test]
+    fn selected_formats_follow_the_checklist() {
+        let all = ExportFormat::ALL;
+        for bits in 0..8u8 {
+            let mut st = ExportState::new(1);
+            for (i, slot) in st.formats.iter_mut().enumerate() {
+                *slot = bits & (1 << i) != 0;
+            }
+            let expected: Vec<ExportFormat> = all
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| bits & (1 << i) != 0)
+                .map(|(_, f)| *f)
+                .collect();
+            assert_eq!(
+                st.selected_formats(),
+                expected,
+                "checklist {bits:03b} must export exactly what it shows"
+            );
+        }
+
+        assert_eq!(
+            ExportState::new(1).selected_formats().len(),
+            all.len(),
+            "a fresh export opts in to everything"
+        );
+    }
+}
