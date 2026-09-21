@@ -2399,6 +2399,110 @@ async fn resolve_prepared_lookahead(
     Some(completion.run)
 }
 
+/// What the audit makes of one draft, before anyone acts on it.
+///
+/// Returned rather than emitted: the caller folds the usage and writes the log
+/// line, so this can be asked "what do you make of this translation?" without a
+/// run, an accumulator or an event channel behind it.
+struct DraftAssessment {
+    /// Findings that force a retry.
+    blocking: Vec<String>,
+    /// Non-gating signals handed to the Reviewer to verify.
+    advisory: Vec<String>,
+    /// What the judgement cost. Zero when none was asked.
+    usage: Usage,
+    /// One-line summary for the activity log, when a judgement ran.
+    summary: Option<String>,
+}
+
+/// Run the deterministic audit over `translated`, with System One deciding the
+/// judgement-shaped checks where it is on.
+///
+/// The three tiers are all here — mechanical checks, the character pronoun
+/// rules, and the semantic candidates that `audit_judge` decides or the
+/// hand-tuned predicates settle — because they answer one question together and
+/// separating them would only mean a caller reassembling the answer.
+async fn assess_draft(
+    ctx: &PipelineCtx,
+    chunk: &Chunk,
+    translated: &str,
+    previous_translation: &[String],
+    audit_characters: &[crate::model::Character],
+    pov: Option<&str>,
+    wd: &Watchdog,
+) -> DraftAssessment {
+    let audit_terms = target_glossary_terms(
+        glossary_terms_for_chunk(&ctx.ws, &chunk.text, MAX_GLOSSARY_IN_CTX),
+        ctx.target_language,
+    );
+    let mut blocking = audit::audit_translation_mechanical(
+        ctx.target_language,
+        &chunk.text,
+        translated,
+        &audit_terms,
+    );
+    blocking.extend(audit_character_pronoun_rules(
+        &chunk.text,
+        translated,
+        pov,
+        audit_characters,
+    ));
+
+    // The judgement-shaped checks are decided separately: System One when it
+    // is on, otherwise the same hand-tuned predicates as before.
+    let candidates = audit::semantic_candidates(ctx.target_language, translated, previous_translation);
+    let judged = match ctx.system_one() {
+        Some(s1) => {
+            let _wait = wd.external_wait();
+            audit_judge::judge(Some(&s1), &chunk.text, translated, &candidates).await
+        }
+        None => None,
+    };
+    let (semantic, usage, summary) = match judged {
+        Some(out) => {
+            wd.ping();
+            (out.findings, out.usage, out.summary)
+        }
+        None => (
+            audit::semantic_findings(&candidates, |_, c| c.heuristic),
+            Usage::default(),
+            None,
+        ),
+    };
+    blocking.extend(
+        semantic
+            .iter()
+            .filter(|f| !f.advisory)
+            .map(|f| f.message.clone()),
+    );
+
+    // Non-gating signals for the Reviewer to verify.
+    let advisory = audit::advisory_findings_with_references_mechanical(
+        ctx.target_language,
+        &chunk.text,
+        translated,
+        audit_characters,
+        {
+            let mut base =
+                audit::advisory_findings_mechanical(ctx.target_language, &chunk.text, translated);
+            base.extend(
+                semantic
+                    .iter()
+                    .filter(|f| f.advisory)
+                    .map(|f| f.message.clone()),
+            );
+            base
+        },
+    );
+
+    DraftAssessment {
+        blocking,
+        advisory,
+        usage,
+        summary,
+    }
+}
+
 /// Translate and review one chunk. Approved output is appended deterministically;
 /// exhausted attempts commit the best/empty NeedsReview block. Only a Translator
 /// that never yields anything can fail the chapter.
@@ -2840,73 +2944,25 @@ async fn process_chunk_with_lookahead(
             }
         }
 
-        let audit_terms = target_glossary_terms(
-            glossary_terms_for_chunk(&ctx.ws, &chunk.text, MAX_GLOSSARY_IN_CTX),
-            ctx.target_language,
-        );
-        let mut audit_findings = audit::audit_translation_mechanical(
-            ctx.target_language,
-            &chunk.text,
+        let assessment = assess_draft(
+            ctx,
+            chunk,
             &translated,
-            &audit_terms,
-        );
-        audit_findings.extend(audit_character_pronoun_rules(
-            &chunk.text,
-            &translated,
+            &previous_translation,
+            &audit_characters,
             pov.as_deref(),
-            &audit_characters,
-        ));
-        // The judgement-shaped checks are decided separately: System One when it
-        // is on, otherwise the same hand-tuned predicates as before.
-        let candidates = audit::semantic_candidates(ctx.target_language, &translated, &previous_translation);
-        let judged = match ctx.system_one() {
-            Some(s1) => {
-                let _wait = wd.external_wait();
-                audit_judge::judge(Some(&s1), &chunk.text, &translated, &candidates).await
-            }
-            None => None,
-        };
-        let semantic = match judged {
-            Some(out) => {
-                wd.ping();
-                acc.fold(&out.usage);
-                if let Some(summary) = out.summary {
-                    ctx.tx.send(AppEvent::Log {
-                        level: LogLevel::Info,
-                        msg: format!("ch{chapter} chunk{} {summary}", chunk.index),
-                    });
-                }
-                out.findings
-            }
-            None => audit::semantic_findings(&candidates, |_, c| c.heuristic),
-        };
-        audit_findings.extend(
-            semantic
-                .iter()
-                .filter(|f| !f.advisory)
-                .map(|f| f.message.clone()),
-        );
-        // Non-gating signals for the Reviewer to verify.
-        let advisory = audit::advisory_findings_with_references_mechanical(
-            ctx.target_language,
-            &chunk.text,
-            &translated,
-            &audit_characters,
-            {
-                let mut base = audit::advisory_findings_mechanical(
-                    ctx.target_language,
-                    &chunk.text,
-                    &translated,
-                );
-                base.extend(
-                    semantic
-                        .iter()
-                        .filter(|f| f.advisory)
-                        .map(|f| f.message.clone()),
-                );
-                base
-            },
-        );
+            wd,
+        )
+        .await;
+        acc.fold(&assessment.usage);
+        if let Some(summary) = &assessment.summary {
+            ctx.tx.send(AppEvent::Log {
+                level: LogLevel::Info,
+                msg: format!("ch{chapter} chunk{} {summary}", chunk.index),
+            });
+        }
+        let audit_findings = assessment.blocking;
+        let advisory = assessment.advisory;
         ctx.tx.send(AppEvent::ChunkStateChanged {
             chapter,
             chunk: chunk.index,
@@ -3931,6 +3987,82 @@ mod tests {
         std::fs::create_dir_all(&base).unwrap();
         let ws = Workspace::new(base.clone(), 1);
         (base, ws)
+    }
+
+    /// A context with no clients at all, to make the point that assessing a
+    /// draft asks nobody anything.
+    fn audit_only_ctx(ws: &Workspace) -> (PipelineCtx, tokio::sync::mpsc::UnboundedReceiver<AppEvent>) {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        (
+            PipelineCtx {
+                clients: ClientSet::default(),
+                ws: ws.clone(),
+                models: ModelSet::default(),
+                cfg: AppConfig::default(),
+                target_language: TargetLanguage::Thai,
+                tx: EventTx(tx),
+                ctl: RunControl::new(),
+                queue: ChapterQueue::default(),
+            },
+            rx,
+        )
+    }
+
+    fn chunk_of(text: &str) -> Chunk {
+        Chunk {
+            index: 0,
+            text: text.to_string(),
+            est_tokens: 8,
+        }
+    }
+
+    /// The audit had no seam of its own: the only way to ask what it made of a
+    /// draft was to run a chunk through the whole pipeline and read the verdict
+    /// back out of the event stream as a string.
+    #[tokio::test]
+    async fn a_draft_can_be_assessed_without_a_run() {
+        let (dir, ws) = temp_ws("assess_draft");
+        let (ctx, _rx) = audit_only_ctx(&ws);
+        let wd = Watchdog::new(&ctx.cfg);
+
+        let clean = assess_draft(
+            &ctx,
+            &chunk_of("猫が窓辺で眠っている。"),
+            "แมวกำลังนอนอยู่ริมหน้าต่าง",
+            &[],
+            &[],
+            None,
+            &wd,
+        )
+        .await;
+        assert!(
+            clean.blocking.is_empty(),
+            "a clean draft blocks nothing: {:?}",
+            clean.blocking
+        );
+
+        // Raw markup carried through from the source is a mechanical catch.
+        let residue = assess_draft(
+            &ctx,
+            &chunk_of("猫が窓辺で眠っている。"),
+            "แมวกำลังนอน&nbsp;<b>อยู่</b>",
+            &[],
+            &[],
+            None,
+            &wd,
+        )
+        .await;
+        assert!(
+            !residue.blocking.is_empty(),
+            "markup left in the target text must force a retry"
+        );
+
+        // With no System One configured the heuristics decide, so the
+        // assessment costs nothing and has nothing to say to the log.
+        assert_eq!(residue.usage.total_tokens, 0);
+        assert!(residue.summary.is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn term(jp: &str, translated: &str) -> GlossaryTerm {
