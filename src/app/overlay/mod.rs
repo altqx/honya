@@ -1956,7 +1956,6 @@ mod tests {
         use crate::ui::kit::{Ui, Zones};
 
         let theme = Theme::washi();
-        let cfg = AppConfig::default();
         let mut zones = Zones::new();
         let focus = Focus::new();
         let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
@@ -1969,7 +1968,7 @@ mod tests {
         term.draw(|f| {
             let metrics = Metrics::new(area, false);
             let mut ui = Ui::new(f, &mut zones, &theme, metrics, &focus, Hover::default(), frame);
-            ov.render(&mut ui, area, &cfg, &[]);
+            ov.render(&mut ui, area, &[]);
         })
         .unwrap();
         let buf = term.backend().buffer().clone();

@@ -10,8 +10,8 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
-use crate::app::settings_defs::{self, Group, SField};
-use crate::model::{AppConfig, LogLevel};
+use crate::app::settings_defs::{self, Group};
+use crate::model::LogLevel;
 use crate::theme::ALL_THEMES;
 use crate::ui::input;
 use crate::ui::kit::{ZoneId, ZoneKind};
@@ -24,7 +24,6 @@ impl Overlay {
         &mut self,
         ui: &mut crate::ui::kit::Ui,
         area: Rect,
-        cfg: &AppConfig,
         log: &[(LogLevel, String)],
     ) {
         // The two pickers own a selection and a scroll offset, so they take a
@@ -34,14 +33,13 @@ impl Overlay {
             Overlay::ReaderJump(st) => return render_reader_jump(ui, area, st),
             _ => {}
         }
-        self.render_static(ui, area, cfg, log);
+        self.render_static(ui, area, log);
     }
 
     fn render_static(
         &self,
         ui: &mut crate::ui::kit::Ui,
         area: Rect,
-        cfg: &AppConfig,
         log: &[(LogLevel, String)],
     ) {
         // Overlays still on the old path draw straight to the frame. They are
@@ -58,7 +56,7 @@ impl Overlay {
             Overlay::Welcome(st) => self.render_welcome_kit(ui, area, st),
             Overlay::Import(st) => self.render_import_kit(ui, area, st),
             Overlay::ImageSource(st) => self.render_image_source_kit(ui, area, st),
-            Overlay::Settings(st) => self.render_settings_kit(ui, area, cfg, st),
+            Overlay::Settings(st) => self.render_settings_kit(ui, area, st),
             Overlay::Synopsis(st) => self.render_synopsis_kit(ui, area, st),
             Overlay::ProjectTitle(st) => self.render_project_title_kit(ui, area, st),
             Overlay::Qa(st) => self.render_qa_kit(ui, area, st),
@@ -876,7 +874,6 @@ impl Overlay {
         &self,
         ui: &mut crate::ui::kit::Ui,
         area: Rect,
-        cfg: &AppConfig,
         st: &SettingsState,
     ) {
         use crate::ui::kit::form;
@@ -914,7 +911,7 @@ impl Overlay {
             .group()
             .fields()
             .into_iter()
-            .filter_map(|i| settings_defs::at(i).map(|d| self.settings_field(cfg, st, d)))
+            .filter_map(|i| settings_defs::at(i).map(|d| self.settings_field(st, d)))
             .collect();
         let group_start = st.tab.group().first_field().unwrap_or(0);
         let mut ls = ListState::new();
@@ -1140,7 +1137,6 @@ impl Overlay {
     /// One registry row as a live form field.
     fn settings_field(
         &self,
-        cfg: &AppConfig,
         st: &SettingsState,
         d: &settings_defs::Def,
     ) -> crate::ui::kit::form::Field {
@@ -1154,16 +1150,16 @@ impl Overlay {
         };
         let kind = match d.kind {
             DKind::Toggle => Kind::Toggle {
-                on: self.settings_toggle(st, d.field),
+                on: st.settings_toggle(d.field),
             },
             DKind::Select => Kind::Select {
                 // The current value only: the list is cycled through the
                 // arrows, which is how these have always been edited.
-                options: vec![self.settings_select_label(cfg, st, d.field)],
+                options: vec![st.settings_select_label(d.field)],
                 index: 0,
             },
             DKind::Secret => {
-                let (value, from_env) = self.settings_secret(st, d.field);
+                let (value, from_env) = st.settings_secret(d.field);
                 Kind::Secret {
                     value,
                     cursor,
@@ -1171,8 +1167,8 @@ impl Overlay {
                 }
             }
             DKind::Number { min, max } => Kind::Number {
-                value: self
-                    .settings_text(st, d.field)
+                value: st
+                    .settings_text(d.field)
                     .trim()
                     .parse::<i64>()
                     .unwrap_or(min),
@@ -1180,124 +1176,16 @@ impl Overlay {
                 max,
             },
             DKind::Text => Kind::Text {
-                value: self.settings_text(st, d.field),
+                value: st.settings_text(d.field),
                 cursor,
                 placeholder: "unset".into(),
             },
         };
         Field::new(d.label, kind)
             .help(d.help)
-            .disabled(self.settings_disabled(st, d.field))
+            .disabled(st.settings_disabled(d.field))
     }
 
-    /// The live value of a toggle row.
-    fn settings_toggle(&self, st: &SettingsState, f: SField) -> bool {
-        match f {
-            SField::ParallelLookahead => st.parallel_lookahead,
-            SField::PrepassExtract => st.prepass_extract,
-            SField::CoherenceCheck => st.coherence_check,
-            SField::SystemOneEnabled => st.system_one.enabled,
-            other => settings_defs::feature_of(other)
-                .map(|feat| st.system_one.armed(feat))
-                .unwrap_or(false),
-        }
-    }
-
-    /// The label a cycle row currently shows.
-    fn settings_select_label(
-        &self,
-        _cfg: &AppConfig,
-        st: &SettingsState,
-        f: SField,
-    ) -> String {
-        match f {
-            SField::OrchProvider => st.models.orchestrator.provider.label().to_string(),
-            SField::TransProvider => st.models.translator.provider.label().to_string(),
-            SField::ReviewProvider => st.models.reviewer.provider.label().to_string(),
-            SField::RefineProvider => st.models.refine.provider.label().to_string(),
-            SField::OrchEffort => crate::model::Effort::label(st.models.orchestrator.effort).to_string(),
-            SField::TransEffort => crate::model::Effort::label(st.models.translator.effort).to_string(),
-            SField::ReviewEffort => crate::model::Effort::label(st.models.reviewer.effort).to_string(),
-            SField::RefineEffort => crate::model::Effort::label(st.models.refine.effort).to_string(),
-            SField::PreferredLanguageField => st.preferred_language.label().to_string(),
-            SField::ServiceTierField => {
-                crate::model::ServiceTier::label(st.service_tier).to_string()
-            }
-            SField::GateMode => st.system_one.review_gate.label().to_string(),
-            SField::GateProvider => st.system_one.provider.label().to_string(),
-            // "Terminal (adaptive) · adaptive" says it twice and overflows the
-            // stepper's value column; the name alone already carries the tone.
-            SField::Theme => {
-                let (name, tone) = (st.theme.label(), st.theme.tone());
-                if name.to_lowercase().contains(tone) {
-                    name.to_string()
-                } else {
-                    format!("{name} · {tone}")
-                }
-            }
-            SField::UpdateModeField => st.update_mode.label().to_string(),
-            SField::ReleaseChannelField => st.release_channel.label().to_string(),
-            _ => String::new(),
-        }
-    }
-
-    /// A secret row's value, and whether the environment already supplies it.
-    fn settings_secret(&self, st: &SettingsState, f: SField) -> (String, bool) {
-        match f {
-            SField::OpenRouterKey => (st.openrouter_key.clone(), st.api_key_env),
-            SField::TokenrouterKey => (st.tokenrouter_key.clone(), st.tokenrouter_key_env),
-            SField::GoogleKey => (st.google_key.clone(), st.google_key_env),
-            SField::CloudflareToken => (
-                st.cloudflare_api_token.clone(),
-                st.cloudflare_api_token_env,
-            ),
-            SField::GateKey => (st.typesafe_key.clone(), st.typesafe_key_env),
-            _ => (String::new(), false),
-        }
-    }
-
-    /// A text or numeric row's current contents.
-    fn settings_text(&self, st: &SettingsState, f: SField) -> String {
-        match f {
-            SField::OrchModel => st.models.orchestrator.model.clone(),
-            SField::TransModel => st.models.translator.model.clone(),
-            SField::ReviewModel => st.models.reviewer.model.clone(),
-            SField::RefineModel => st.models.refine.model.clone(),
-            SField::CloudflareAccount => st.cloudflare_account_id.clone(),
-            SField::MaxAttempts => st.max_attempts.clone(),
-            SField::RetryAttempts => st.retry_attempts.clone(),
-            SField::RetryCooldown => st.retry_cooldown_secs.clone(),
-            SField::ContinuitySentences => st.continuity_sentences.clone(),
-            SField::LoopStall => st.loop_stall_secs.clone(),
-            SField::Retranslates => st.max_chapter_retranslates.clone(),
-            SField::ChunkTargetTokens => st.chunk_target_tokens.clone(),
-            SField::ChunkHardCapTokens => st.chunk_hard_cap_tokens.clone(),
-            SField::GateModel => st.system_one.model.clone(),
-            SField::GateConfidence => st.system_one_confidence.clone(),
-            _ => String::new(),
-        }
-    }
-
-    /// Whether a row is currently inert.
-    ///
-    /// The System One block is the only case: with the master switch off, every
-    /// judgement row below it does nothing, and saying so is better than
-    /// letting someone set five toggles that have no effect.
-    fn settings_disabled(&self, st: &SettingsState, f: SField) -> bool {
-        if matches!(f, SField::SystemOneEnabled) {
-            return false;
-        }
-        let in_block = settings_defs::feature_of(f).is_some()
-            || matches!(
-                f,
-                SField::GateMode
-                    | SField::GateProvider
-                    | SField::GateModel
-                    | SField::GateKey
-                    | SField::GateConfidence
-            );
-        in_block && !st.system_one.enabled
-    }
 
     /// The import wizard.
     ///

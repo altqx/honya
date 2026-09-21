@@ -9,42 +9,13 @@ use egui::{Align, ComboBox, Context, Layout, RichText, ScrollArea, TextEdit};
 
 use crate::app::Action;
 use crate::app::overlay::{SettingsState, SettingsTab};
-use crate::model::{
-    DecisionsProvider, Effort, Provider, ReviewGateMode, ServiceTier, TargetLanguage, ThemeId,
-};
+use crate::app::settings_defs::{self, Group, Kind, SField};
+use crate::model::ThemeId;
 use crate::remote::protocol::RemoteState;
 use crate::theme::ALL_THEMES;
 
 use super::theme_map::GuiPalette;
 use super::widgets::{hint, numeric_edit, primary_button, secret_edit, section, theme_swatch};
-
-const PROVIDERS: [Provider; 5] = [
-    Provider::OpenRouter,
-    Provider::Tokenrouter,
-    Provider::Google,
-    Provider::Cloudflare,
-    Provider::Codex,
-];
-
-const EFFORTS: [Option<Effort>; 6] = [
-    None,
-    Some(Effort::Minimal),
-    Some(Effort::Low),
-    Some(Effort::Medium),
-    Some(Effort::High),
-    Some(Effort::Xhigh),
-];
-
-const TIERS: [Option<ServiceTier>; 3] = [None, Some(ServiceTier::Flex), Some(ServiceTier::Priority)];
-
-const GATE_MODES: [ReviewGateMode; 3] = [
-    ReviewGateMode::Off,
-    ReviewGateMode::Gate,
-    ReviewGateMode::Standalone,
-];
-
-const GATE_PROVIDERS: [DecisionsProvider; 2] =
-    [DecisionsProvider::OpenRouter, DecisionsProvider::TypeSafe];
 
 /// Render the Settings window. `saved_theme` is the persisted `cfg.theme`;
 /// `codex_signed_in` mirrors `cfg.codex_auth`. Emits deferred actions.
@@ -110,6 +81,101 @@ pub fn render(
         });
 }
 
+/// Draw every row a group declares, in declared order.
+///
+/// The form is *generated* from `settings_defs::ORDER` rather than written out
+/// a second time. The Pipeline tab once silently omitted six settings that
+/// `save_action` still wrote, so a GUI-only user could neither see nor change
+/// them; a row cannot go missing here now without being removed from the
+/// declarations both front ends read.
+fn declared_rows(
+    ui: &mut egui::Ui,
+    st: &mut SettingsState,
+    group: Group,
+    pal: &GuiPalette,
+    custom: &[SField],
+) {
+    egui::Grid::new(format!("settings_grid_{group:?}"))
+        .num_columns(2)
+        .spacing([16.0, 10.0])
+        .show(ui, |ui| {
+            for i in group.fields() {
+                let Some(d) = settings_defs::at(i) else {
+                    continue;
+                };
+                if custom.contains(&d.field) {
+                    continue;
+                }
+                let disabled = st.settings_disabled(d.field);
+                ui.label(RichText::new(d.label).color(pal.ink));
+                ui.add_enabled_ui(!disabled, |ui| {
+                    ui.vertical(|ui| {
+                        control(ui, st, d, pal);
+                        hint(ui, pal, d.help);
+                    });
+                });
+                ui.end_row();
+            }
+        });
+}
+
+/// One row's control, chosen by the `Kind` the row was declared with.
+fn control(ui: &mut egui::Ui, st: &mut SettingsState, d: &settings_defs::Def, pal: &GuiPalette) {
+    let id = format!("set_{:?}", d.field);
+    // A Codex model row is picked from the signed-in account's list rather
+    // than typed, so it is a choice row whatever its declared kind says.
+    let as_choice = matches!(d.kind, Kind::Select) || st.is_codex_model_of(d.field);
+
+    if as_choice {
+        let options = st.select_domain(d.field);
+        if options.is_empty() {
+            ui.label(RichText::new("unavailable").color(pal.ink_faint).italics());
+            return;
+        }
+        let current = st.select_index(d.field);
+        let mut picked = current;
+        ComboBox::from_id_salt(id)
+            .selected_text(st.settings_select_label(d.field))
+            .width(240.0)
+            .show_ui(ui, |ui| {
+                for (i, o) in options.iter().enumerate() {
+                    ui.selectable_value(&mut picked, i, o);
+                }
+            });
+        if picked != current {
+            st.set_select(d.field, picked);
+        }
+        return;
+    }
+
+    match d.kind {
+        Kind::Toggle => {
+            // `cycle_field` is the one write path for a choice row, so the
+            // checkbox asks it to advance rather than assigning the flag.
+            let mut on = st.settings_toggle(d.field);
+            if ui.checkbox(&mut on, "").changed() {
+                st.cycle_field(d.field, true);
+            }
+        }
+        Kind::Secret => {
+            let (_, from_env) = st.settings_secret(d.field);
+            if let Some(buf) = st.text_field_mut_of(d.field) {
+                secret_edit(ui, pal, buf, from_env);
+            }
+        }
+        Kind::Number { .. } => {
+            if let Some(buf) = st.text_field_mut_of(d.field) {
+                numeric_edit(ui, buf, 90.0);
+            }
+        }
+        Kind::Text | Kind::Select => {
+            if let Some(buf) = st.text_field_mut_of(d.field) {
+                ui.add(TextEdit::singleline(buf).desired_width(240.0));
+            }
+        }
+    }
+}
+
 fn agents_tab(ui: &mut egui::Ui, st: &mut SettingsState, pal: &GuiPalette) {
     section(ui, pal, "Agents — provider · model · reasoning effort");
     hint(
@@ -118,73 +184,7 @@ fn agents_tab(ui: &mut egui::Ui, st: &mut SettingsState, pal: &GuiPalette) {
         "Each pipeline agent picks its own provider and model. Effort is sent as the request's reasoning parameter when set.",
     );
     ui.add_space(6.0);
-
-    let codex_models = st.codex_models.clone();
-    for (i, label) in [
-        (0, "◆ Orchestrator"),
-        (1, "▲ Translator"),
-        (2, "■ Reviewer"),
-        (3, "◇ Refine"),
-    ] {
-        let provider = agent(st, i).provider;
-        ui.label(RichText::new(label).color(pal.ink).strong());
-        ui.horizontal(|ui| {
-            let mut next = provider;
-            ComboBox::from_id_salt(format!("prov_{i}"))
-                .selected_text(provider.label())
-                .width(130.0)
-                .show_ui(ui, |ui| {
-                    for p in PROVIDERS {
-                        ui.selectable_value(&mut next, p, p.label());
-                    }
-                });
-            if next != provider {
-                st.switch_agent_provider(i, next);
-            }
-
-            let a = agent(st, i);
-            if a.provider == Provider::Codex {
-                let mut model = a.model.clone();
-                ComboBox::from_id_salt(format!("model_{i}"))
-                    .selected_text(model.clone())
-                    .width(240.0)
-                    .show_ui(ui, |ui| {
-                        for m in &codex_models {
-                            ui.selectable_value(&mut model, m.clone(), m);
-                        }
-                    });
-                if model != a.model {
-                    a.set_model(model);
-                }
-            } else {
-                let mut model = a.model.clone();
-                let resp = ui.add(TextEdit::singleline(&mut model).desired_width(240.0));
-                if resp.changed() {
-                    a.set_model(model);
-                }
-            }
-
-            let a = agent(st, i);
-            ComboBox::from_id_salt(format!("effort_{i}"))
-                .selected_text(Effort::label(a.effort))
-                .width(90.0)
-                .show_ui(ui, |ui| {
-                    for e in EFFORTS {
-                        ui.selectable_value(&mut a.effort, e, Effort::label(e));
-                    }
-                });
-        });
-        ui.add_space(6.0);
-    }
-}
-
-fn agent(st: &mut SettingsState, i: usize) -> &mut crate::model::AgentModel {
-    match i {
-        0 => &mut st.models.orchestrator,
-        1 => &mut st.models.translator,
-        2 => &mut st.models.reviewer,
-        _ => &mut st.models.refine,
-    }
+    declared_rows(ui, st, Group::Agents, pal, &[]);
 }
 
 fn providers_tab(ui: &mut egui::Ui, st: &mut SettingsState, pal: &GuiPalette) {
@@ -195,220 +195,23 @@ fn providers_tab(ui: &mut egui::Ui, st: &mut SettingsState, pal: &GuiPalette) {
         "Keys are stored in ~/.config/honya/config.json (mode 0600). Environment variables always win over saved keys.",
     );
     ui.add_space(6.0);
-
-    ui.label(RichText::new("OpenRouter API key").color(pal.ink).strong());
-    secret_edit(ui, pal, &mut st.openrouter_key, st.api_key_env);
-    hint(ui, pal, "HONYA_API_KEY / OPENROUTER_API_KEY");
-    ui.add_space(8.0);
-
-    ui.label(RichText::new("Tokenrouter API key").color(pal.ink).strong());
-    secret_edit(ui, pal, &mut st.tokenrouter_key, st.tokenrouter_key_env);
-    hint(ui, pal, "HONYA_TOKENROUTER_API_KEY / TOKENROUTER_API_KEY");
-    ui.add_space(8.0);
-
-    ui.label(RichText::new("Google API key").color(pal.ink).strong());
-    secret_edit(ui, pal, &mut st.google_key, st.google_key_env);
-    ui.add_space(8.0);
-
-    ui.label(
-        RichText::new("Cloudflare account ID")
-            .color(pal.ink)
-            .strong(),
-    );
-    if st.cloudflare_account_id_env {
-        hint(ui, pal, "set by environment variable (read-only)");
-    } else {
-        ui.add(TextEdit::singleline(&mut st.cloudflare_account_id).desired_width(f32::INFINITY));
-    }
-    ui.add_space(8.0);
-
-    ui.label(
-        RichText::new("Cloudflare API token")
-            .color(pal.ink)
-            .strong(),
-    );
-    secret_edit(
-        ui,
-        pal,
-        &mut st.cloudflare_api_token,
-        st.cloudflare_api_token_env,
-    );
-    ui.add_space(8.0);
-
-    section(ui, pal, "Codex (ChatGPT)");
-    hint(
-        ui,
-        pal,
-        "Codex signs in with ChatGPT instead of a key — see the Account tab.",
-    );
+    declared_rows(ui, st, Group::Providers, pal, &[]);
 }
 
 fn pipeline_tab(ui: &mut egui::Ui, st: &mut SettingsState, pal: &GuiPalette) {
     section(ui, pal, "Pipeline");
-    ui.add_space(6.0);
-
-    egui::Grid::new("pipeline_grid")
-        .num_columns(2)
-        .spacing([16.0, 10.0])
-        .show(ui, |ui| {
-            ui.label(RichText::new("New-project language").color(pal.ink));
-            ComboBox::from_id_salt("pref_lang")
-                .selected_text(st.preferred_language.label())
-                .width(140.0)
-                .show_ui(ui, |ui| {
-                    for l in [TargetLanguage::Thai, TargetLanguage::English] {
-                        ui.selectable_value(&mut st.preferred_language, l, l.label());
-                    }
-                });
-            ui.end_row();
-
-            ui.label(RichText::new("Max retry attempts / chunk").color(pal.ink));
-            numeric_edit(ui, &mut st.max_attempts, 80.0);
-            ui.end_row();
-
-            ui.label(RichText::new("Continuity sentences").color(pal.ink));
-            numeric_edit(ui, &mut st.continuity_sentences, 80.0);
-            ui.end_row();
-
-            ui.label(RichText::new("Loop watchdog stall (s)").color(pal.ink));
-            numeric_edit(ui, &mut st.loop_stall_secs, 80.0);
-            ui.end_row();
-
-            ui.label(RichText::new("Max chapter re-translates").color(pal.ink));
-            numeric_edit(ui, &mut st.max_chapter_retranslates, 80.0);
-            ui.end_row();
-
-            // These six were written on save but had no control, so a
-            // GUI-only user could not change them and was never told they
-            // existed.
-            ui.label(RichText::new("HTTP retry attempts").color(pal.ink));
-            numeric_edit(ui, &mut st.retry_attempts, 80.0);
-            ui.end_row();
-
-            ui.label(RichText::new("Retry cooldown (s)").color(pal.ink));
-            numeric_edit(ui, &mut st.retry_cooldown_secs, 80.0);
-            ui.end_row();
-
-            ui.label(RichText::new("Chunk target tokens").color(pal.ink));
-            numeric_edit(ui, &mut st.chunk_target_tokens, 80.0);
-            ui.end_row();
-
-            ui.label(RichText::new("Chunk hard cap").color(pal.ink));
-            numeric_edit(ui, &mut st.chunk_hard_cap_tokens, 80.0);
-            ui.end_row();
-
-            ui.label(RichText::new("Prepass extract").color(pal.ink));
-            ui.checkbox(&mut st.prepass_extract, "seed the roster before translating");
-            ui.end_row();
-
-            ui.label(RichText::new("Coherence sweep").color(pal.ink));
-            ui.checkbox(&mut st.coherence_check, "re-read the chapter as a whole");
-            ui.end_row();
-
-            ui.label(RichText::new("Service tier").color(pal.ink));
-            ComboBox::from_id_salt("tier")
-                .selected_text(ServiceTier::label(st.service_tier))
-                .width(140.0)
-                .show_ui(ui, |ui| {
-                    for t in TIERS {
-                        ui.selectable_value(&mut st.service_tier, t, ServiceTier::label(t));
-                    }
-                });
-            ui.end_row();
-
-            ui.label(RichText::new("Parallel lookahead").color(pal.ink));
-            ui.checkbox(&mut st.parallel_lookahead, "speculative next-chunk draft");
-            ui.end_row();
-        });
-
-    ui.add_space(4.0);
-    hint(ui, pal, ServiceTier::desc(st.service_tier));
     hint(
         ui,
         pal,
-        "Retries cap at 20 · continuity at 100 sentences · stall at 3600 s (0 disables) · re-translates at 10.",
-    );
-
-    ui.add_space(12.0);
-    section(ui, pal, "System One (Jev)");
-    hint(
-        ui,
-        pal,
-        "Jev answers typed questions instead of writing prose. Each judgement below replaces a hand-tuned heuristic and falls back to it whenever the answer is unusable or unconfident.",
+        "How a run is shaped: retries, chunking, and the System One judgements. With the master switch off, every judgement below it is inert.",
     );
     ui.add_space(6.0);
-    ui.checkbox(
-        &mut st.system_one.enabled,
-        "Enable System One (master switch)",
-    );
-    hint(
-        ui,
-        pal,
-        "Off means no typed-judgement call is made, whatever the per-feature toggles say.",
-    );
-    ui.add_space(6.0);
-
-    ui.add_enabled_ui(st.system_one.enabled, |ui| {
-        egui::Grid::new("system_one_grid")
-            .num_columns(2)
-            .spacing([16.0, 10.0])
-            .show(ui, |ui| {
-                ui.label(RichText::new("Review gate").color(pal.ink));
-                ComboBox::from_id_salt("gate_mode")
-                    .selected_text(st.system_one.review_gate.label())
-                    .width(140.0)
-                    .show_ui(ui, |ui| {
-                        for m in GATE_MODES {
-                            ui.selectable_value(&mut st.system_one.review_gate, m, m.label());
-                        }
-                    });
-                ui.end_row();
-
-                ui.label(RichText::new("Transport").color(pal.ink));
-                let current = st.system_one.provider;
-                let mut next = current;
-                ComboBox::from_id_salt("gate_provider")
-                    .selected_text(current.label())
-                    .width(140.0)
-                    .show_ui(ui, |ui| {
-                        for p in GATE_PROVIDERS {
-                            ui.selectable_value(&mut next, p, p.label());
-                        }
-                    });
-                if next != current {
-                    st.system_one.switch_provider(next);
-                }
-                ui.end_row();
-
-                ui.label(RichText::new("Model").color(pal.ink));
-                ui.add(TextEdit::singleline(&mut st.system_one.model).desired_width(240.0));
-                ui.end_row();
-
-                ui.label(RichText::new("Min confidence (%)").color(pal.ink));
-                numeric_edit(ui, &mut st.system_one_confidence, 80.0);
-                ui.end_row();
-            });
-
-        ui.add_space(8.0);
-        for feature in crate::model::SystemOneFeature::ALL {
-            ui.checkbox(st.system_one.feature_mut(feature), feature.label());
-            hint(ui, pal, feature.desc());
-        }
-    });
-
-    if st.system_one.provider == DecisionsProvider::TypeSafe {
-        ui.add_space(8.0);
-        ui.label(RichText::new("TypeSafe API key").color(pal.ink).strong());
-        secret_edit(ui, pal, &mut st.typesafe_key, st.typesafe_key_env);
-        hint(ui, pal, "HONYA_TYPESAFE_API_KEY / TYPESAFE_API_KEY");
-    } else {
-        hint(
-            ui,
-            pal,
-            "Over OpenRouter System One reuses your OpenRouter key — no extra credential.",
-        );
-    }
+    declared_rows(ui, st, Group::Pipeline, pal, &[]);
 }
+
+/// Theme is the one row drawn by hand: a list of swatches says more about a
+/// theme than its name does, and that is worth a custom control.
+const CUSTOM_APPEARANCE_ROWS: [SField; 1] = [SField::Theme];
 
 fn appearance_tab(
     ui: &mut egui::Ui,
@@ -418,38 +221,7 @@ fn appearance_tab(
 ) {
     section(ui, pal, "Updates");
     ui.add_space(4.0);
-    egui::Grid::new("appearance_grid")
-        .num_columns(2)
-        .spacing([16.0, 10.0])
-        .show(ui, |ui| {
-            ui.label(RichText::new("Update install").color(pal.ink));
-            ComboBox::from_id_salt("update_mode")
-                .selected_text(st.update_mode.label())
-                .width(160.0)
-                .show_ui(ui, |ui| {
-                    for m in [
-                        crate::model::UpdateMode::Auto,
-                        crate::model::UpdateMode::Notify,
-                    ] {
-                        ui.selectable_value(&mut st.update_mode, m, m.label());
-                    }
-                });
-            ui.end_row();
-
-            ui.label(RichText::new("Release channel").color(pal.ink));
-            ComboBox::from_id_salt("channel")
-                .selected_text(st.release_channel.label())
-                .width(160.0)
-                .show_ui(ui, |ui| {
-                    for c in [
-                        crate::model::ReleaseChannel::Stable,
-                        crate::model::ReleaseChannel::Dev,
-                    ] {
-                        ui.selectable_value(&mut st.release_channel, c, c.label());
-                    }
-                });
-            ui.end_row();
-        });
+    declared_rows(ui, st, Group::Appearance, pal, &CUSTOM_APPEARANCE_ROWS);
 
     ui.add_space(10.0);
     section(ui, pal, "Theme");
@@ -593,58 +365,83 @@ fn account_tab(
 
 #[cfg(test)]
 mod tests {
-    use crate::app::settings_defs::{Group, ORDER};
+    use super::*;
+    use crate::app::settings_defs::{Kind, ORDER};
 
-    /// The Pipeline tab silently omitted six settings that `save_action` still
-    /// wrote, so a GUI-only user could never change them and was given no sign
-    /// they existed. This is the ratchet: the source of the form is the
-    /// declaration, so a setting added there has to gain a control here.
+    /// The Pipeline tab once silently omitted six settings that `save_action`
+    /// still wrote, so a GUI-only user could neither see nor change them.
+    ///
+    /// The old guard against that was a substring grep over this file's own
+    /// source text, which covered one group of five and passed on a label that
+    /// appeared only in a comment. Now the form is generated, so the thing
+    /// worth asserting is that every declared row is *renderable*: a choice row
+    /// has choices to offer, and an editable row has a buffer to edit.
     #[test]
-    fn every_pipeline_setting_has_a_control_in_the_gui() {
-        let source = include_str!("settings.rs");
-        let missing: Vec<&str> = ORDER
-            .iter()
-            .filter(|d| d.group == Group::Pipeline)
-            .filter(|d| !rendered_generically(d.field) && !mentions(source, d.label))
-            .map(|d| d.label)
-            .collect();
-        assert!(
-            missing.is_empty(),
-            "declared but not editable in the GUI: {missing:?}"
-        );
+    fn every_declared_row_can_be_rendered_by_the_generic_form() {
+        let mut st = SettingsState::for_test(0);
+        // The Codex model lists are empty until a signed-in account supplies
+        // them, and a row with nothing to pick is drawn as unavailable.
+        st.codex_models = vec!["gpt-5-codex".to_string()];
+
+        for d in ORDER {
+            if d.group == Group::Account {
+                continue; // actions only: sign in, sign out, remote toggle
+            }
+            let field = d.field;
+            if matches!(d.kind, Kind::Select) || st.is_codex_model_of(field) {
+                let options = st.select_domain(field);
+                assert!(
+                    !options.is_empty(),
+                    "{:?} is a choice row with no choices",
+                    field
+                );
+                assert!(
+                    options.contains(&st.settings_select_label(field)),
+                    "{:?} shows {:?}, which is not one of {:?}",
+                    field,
+                    st.settings_select_label(field),
+                    options
+                );
+                continue;
+            }
+            if matches!(d.kind, Kind::Toggle) {
+                continue; // driven by cycle_field, no buffer needed
+            }
+            assert!(
+                st.text_field_mut_of(field).is_some(),
+                "{:?} is an editable row with no buffer behind it",
+                field
+            );
+        }
     }
 
-    /// The per-judgement toggles are drawn by looping `SystemOneFeature::ALL`
-    /// rather than written out, so adding one is covered without anyone
-    /// remembering to — which is the shape every row here should have
-    /// eventually, and why this list is an exception rather than a waiver.
-    fn rendered_generically(field: crate::app::settings_defs::SField) -> bool {
-        use crate::app::settings_defs::SField;
-        matches!(
-            field,
-            SField::FeatAudit
-                | SField::FeatContinuity
-                | SField::FeatEntityAlignment
-                | SField::FeatSegmentation
-                | SField::FeatReferenceScope
-        )
+    /// Theme is drawn by hand because swatches say more than a name does.
+    /// Anything else claiming a custom control has to say so here.
+    #[test]
+    fn theme_is_the_only_row_the_appearance_tab_draws_itself() {
+        assert_eq!(CUSTOM_APPEARANCE_ROWS, [SField::Theme]);
     }
 
-    /// A control is "there" when the tab names it. Labels are allowed to
-    /// differ in punctuation, so compare on the words.
-    fn mentions(source: &str, label: &str) -> bool {
-        let words: Vec<String> = label
-            .split_whitespace()
-            .map(|w| {
-                w.chars()
-                    .filter(|c| c.is_alphanumeric())
-                    .collect::<String>()
-                    .to_lowercase()
-            })
-            .filter(|w| !w.is_empty())
-            .collect();
-        let hay = source.to_lowercase();
-        words.iter().all(|w| hay.contains(w.as_str()))
+    /// Picking an option puts that option on the row, for every choice row.
+    /// `set_select` walks the cycle rather than assigning, so this also pins
+    /// that the cycle reaches every member of the domain it advertises.
+    #[test]
+    fn choosing_an_option_selects_it() {
+        for d in ORDER {
+            if !matches!(d.kind, Kind::Select) {
+                continue;
+            }
+            let mut st = SettingsState::for_test(0);
+            let options = st.select_domain(d.field);
+            for (i, expected) in options.iter().enumerate() {
+                st.set_select(d.field, i);
+                assert_eq!(
+                    &st.settings_select_label(d.field),
+                    expected,
+                    "{:?} could not be set to option {i}",
+                    d.field
+                );
+            }
+        }
     }
 }
-

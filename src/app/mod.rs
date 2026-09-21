@@ -5766,7 +5766,7 @@ impl App {
                 self.hover,
                 frame_count,
             );
-            self.overlay.render(&mut ui, area, &self.cfg, &self.log);
+            self.overlay.render(&mut ui, area, &self.log);
         }
 
         // Settle focus and hover against what was actually drawn. A list can
