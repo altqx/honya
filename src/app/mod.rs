@@ -186,6 +186,18 @@ pub enum Action {
     /// Re-discover importable source files while the import wizard is open (its
     /// pick step's `r`), so a freshly-dropped file shows up without reopening.
     RescanImports,
+    /// Re-read the shelf from disk: loose source files and the project list.
+    ///
+    /// Touches disk, so it belongs on this side of the funnel rather than in a
+    /// render pass — and going through `apply` is what lets the projection see
+    /// that the shelf changed.
+    RescanShelf,
+    /// Clear the toast line.
+    ///
+    /// An `Action` rather than a bare assignment because three front-end sites
+    /// and the key router each did it themselves, which is three too many
+    /// places for one field.
+    DismissToast,
     /// Export the given volume of the open project to the chosen deliverable
     /// formats (merged Markdown / EPUB / DOCX), written under `<root>/exports/`.
     ExportVolume {
@@ -2489,10 +2501,7 @@ impl App {
                 }
             }
             ZoneKind::RemoteChip => Some(Action::show_overlay(Overlay::settings_account())),
-            ZoneKind::ToastBody | ZoneKind::ToastClose => {
-                self.toast = None;
-                Some(Action::None)
-            }
+            ZoneKind::ToastBody | ZoneKind::ToastClose => Some(Action::DismissToast),
             ZoneKind::Hint => match id.index as usize {
                 chrome::HELP_HINT => Some(Action::show_overlay(Overlay::Help(0))),
                 chrome::PALETTE_HINT => Some(Action::show_overlay(Overlay::palette())),
@@ -2669,8 +2678,7 @@ impl App {
                 return Action::show_overlay(Overlay::Log(0));
             }
             KeyCode::Esc | KeyCode::Backspace if self.toast.is_some() => {
-                self.toast = None;
-                return Action::None;
+                return Action::DismissToast;
             }
             _ => {}
         }
@@ -3030,6 +3038,14 @@ impl App {
             Action::None => {}
             Action::Quit => {
                 self.running = false;
+            }
+            Action::RescanShelf => {
+                let root = working_root();
+                self.shelf.rescan(&root);
+                self.projects = crate::workspace::scan::scan_projects(&root);
+            }
+            Action::DismissToast => {
+                self.toast = None;
             }
             Action::FocusNext => {
                 self.focus.next(&self.zones);
@@ -7030,6 +7046,32 @@ mod mouse_tests {
     fn render(app: &mut App, w: u16, h: u16) {
         let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
         term.draw(|f| app.render(f)).unwrap();
+    }
+
+    /// `route_key` decides what a key means; `apply` is what changes anything.
+    ///
+    /// Toast dismissal used to clear the field inside the router and return
+    /// `Action::None`, so the one state change a keystroke made was the one the
+    /// funnel never saw — and the same three lines were repeated in the GUI.
+    #[test]
+    fn dismissing_a_toast_is_decided_by_the_router_and_done_by_apply() {
+        for key in [KeyCode::Esc, KeyCode::Backspace] {
+            let mut app = app();
+            app.toast = Some(Toast::info("something happened"));
+
+            let action = app.route_key(KeyEvent::new(key, KeyModifiers::empty()));
+            assert!(
+                matches!(action, Action::DismissToast),
+                "{key:?} should resolve to an action"
+            );
+            assert!(
+                app.toast.is_some(),
+                "routing must not have cleared it on its own"
+            );
+
+            app.apply(action);
+            assert!(app.toast.is_none(), "apply is what clears it");
+        }
     }
 
     fn ev(kind: MouseEventKind, col: u16, row: u16) -> MouseEvent {

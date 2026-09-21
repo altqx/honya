@@ -280,7 +280,7 @@ impl eframe::App for GuiApp {
                                 self.app.apply(Action::CloseOverlay);
                             }
                         } else if self.app.toast.is_some() {
-                            self.app.toast = None;
+                            self.app.apply(Action::DismissToast);
                         }
                     }
                 }
@@ -432,7 +432,7 @@ impl eframe::App for GuiApp {
         self.layout.tabs = self.tabs.open_ids();
         self.layout.active_tab = self.tabs.active_index();
         self.layout.save();
-        self.app.running = false;
+        self.app.apply(Action::Quit);
     }
 }
 
@@ -992,7 +992,7 @@ impl GuiApp {
                         .on_hover_text("click to dismiss")
                         .clicked()
                     {
-                        self.app.toast = None;
+                        self.app.apply(Action::DismissToast);
                     }
                 }
 

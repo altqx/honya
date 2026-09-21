@@ -179,16 +179,12 @@ pub fn render_body(
 
 // ─── Shelf ───────────────────────────────────────────────────────────────────
 
-fn rescan_shelf(app: &mut App) {
-    let root = std::env::current_dir().unwrap_or_default();
-    app.shelf.rescan(&root);
-    app.projects = crate::workspace::scan::scan_projects(&root);
-}
-
 fn shelf(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
     if nav.rescan_requested {
         nav.rescan_requested = false;
-        rescan_shelf(app);
+        // A disk scan writing `App` from inside a paint was invisible to the
+        // remote projection, which only ever sees what `apply` folds.
+        app.apply(Action::RescanShelf);
     }
 
     toolbar_row(ui, |ui| {
@@ -201,7 +197,7 @@ fn shelf(ui: &mut Ui, app: &mut App, nav: &mut GuiNav, pal: &GuiPalette) {
                 app.apply(Action::CreateSample);
             }
             if ui.button("Rescan").clicked() {
-                rescan_shelf(app);
+                app.apply(Action::RescanShelf);
             }
         });
     });
