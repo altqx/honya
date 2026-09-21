@@ -71,6 +71,21 @@ pub fn write_with_data<T: Serialize>(
     atomic_write(path, &out)
 }
 
+/// Replace the Markdown body, leaving the data block exactly as it was.
+///
+/// For the files whose body is the point rather than a rendered view of the
+/// JSON — STYLE.md is free-form prose the agents append to. Without this a
+/// caller has to find the delimiter itself, which is how `style.rs` came to
+/// carry its own copy of `"<!-- honya:data"` and splice around it by hand.
+pub fn write_body(path: &Path, body: &str) -> std::io::Result<()> {
+    let existing = std::fs::read_to_string(path).unwrap_or_default();
+    let out = match existing.find(BLOCK_OPEN) {
+        Some(i) => format!("{}\n\n{}", body.trim_end(), existing[i..].trim_start()),
+        None => format!("{}\n", body.trim_end()),
+    };
+    atomic_write(path, &out)
+}
+
 /// Atomic write via temp sibling + replace. Windows falls back to remove-then-rename
 /// because `fs::rename` cannot overwrite an existing destination there.
 pub fn atomic_write(path: &Path, contents: &str) -> std::io::Result<()> {
@@ -126,5 +141,94 @@ fn temp_sibling(path: &Path) -> std::path::PathBuf {
     match path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent.join(tmp_name),
         _ => std::path::PathBuf::from(tmp_name),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::Deserialize;
+
+    #[derive(Debug, Default, PartialEq, Serialize, Deserialize)]
+    struct Block {
+        items: Vec<String>,
+    }
+
+    fn temp_file(tag: &str) -> std::path::PathBuf {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("honya_db_{tag}_{}_{stamp}", std::process::id()))
+    }
+
+    #[test]
+    fn body_and_data_round_trip() {
+        let path = temp_file("roundtrip").join("nested").join("FILE.md");
+        let data = Block {
+            items: vec!["猫".to_string(), "แมว".to_string()],
+        };
+        write_with_data(&path, "# Title\n\n| a |\n", &data).unwrap();
+
+        assert_eq!(read_data_block::<Block>(&path), data);
+        assert_eq!(read_body(&path), "# Title\n\n| a |");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap().parent().unwrap());
+    }
+
+    /// A partial or hand-edited file must never take the pipeline down, so
+    /// every unreadable shape yields the default rather than an error.
+    #[test]
+    fn unreadable_shapes_all_read_as_default() {
+        let missing = temp_file("missing");
+        assert_eq!(read_data_block::<Block>(&missing), Block::default());
+        assert_eq!(read_body(&missing), "");
+
+        let no_block = temp_file("noblock");
+        std::fs::write(&no_block, "just prose\n").unwrap();
+        assert_eq!(read_data_block::<Block>(&no_block), Block::default());
+        assert_eq!(
+            read_body(&no_block),
+            "just prose",
+            "a file with no block is all body"
+        );
+
+        let bad = temp_file("badjson");
+        std::fs::write(&bad, "body\n\n<!-- honya:data\n{not json\nhonya:data -->\n").unwrap();
+        assert_eq!(read_data_block::<Block>(&bad), Block::default());
+        assert_eq!(read_body(&bad), "body");
+
+        let empty_block = temp_file("emptyblock");
+        std::fs::write(&empty_block, "body\n\n<!-- honya:data\n\nhonya:data -->\n").unwrap();
+        assert_eq!(read_data_block::<Block>(&empty_block), Block::default());
+
+        for p in [&missing, &no_block, &bad, &empty_block] {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+
+    /// STYLE.md's case: the body is the point and the block is none of the
+    /// caller's business, so rewriting one must leave the other byte-identical.
+    #[test]
+    fn write_body_leaves_the_data_block_alone() {
+        let path = temp_file("writebody");
+        let data = Block {
+            items: vec!["kept".to_string()],
+        };
+        write_with_data(&path, "- first", &data).unwrap();
+
+        write_body(&path, "- first\n- second").unwrap();
+        assert_eq!(read_body(&path), "- first\n- second");
+        assert_eq!(
+            read_data_block::<Block>(&path),
+            data,
+            "the block survived a body rewrite"
+        );
+
+        let fresh = temp_file("writebody_fresh");
+        write_body(&fresh, "- only").unwrap();
+        assert_eq!(read_body(&fresh), "- only");
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&fresh);
     }
 }

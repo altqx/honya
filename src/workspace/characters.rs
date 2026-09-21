@@ -227,16 +227,22 @@ pub fn alignment_candidates(chars: &[Character], inc: &Character) -> Vec<Charact
 /// Roster entries offered to one alignment question.
 const MAX_ALIGNMENT_CANDIDATES: usize = 60;
 
-/// Sort by id, re-render the table, and write the data block atomically.
-fn finish(
-    ws: &Workspace,
-    mut chars: Vec<Character>,
-    outcome: CharacterUpsertOutcome,
-) -> std::io::Result<CharacterUpsertOutcome> {
+/// Sort into the stored order, re-render the table and write it with the data
+/// block. Shared so the order a reader depends on is decided in one place, and
+/// so the visible table cannot be written without the JSON it derives from.
+fn save(ws: &Workspace, mut chars: Vec<Character>) -> std::io::Result<()> {
     chars.sort_by(|a, b| a.id.cmp(&b.id));
     let body = render_table(&chars);
     let block = CharactersBlock { characters: chars };
-    data_block::write_with_data(&ws.characters_md(), &body, &block)?;
+    data_block::write_with_data(&ws.characters_md(), &body, &block)
+}
+
+fn finish(
+    ws: &Workspace,
+    chars: Vec<Character>,
+    outcome: CharacterUpsertOutcome,
+) -> std::io::Result<CharacterUpsertOutcome> {
+    save(ws, chars)?;
     Ok(outcome)
 }
 
@@ -284,10 +290,7 @@ pub fn merge(ws: &Workspace, from_id: &str, into_id: &str) -> std::io::Result<bo
         dedup_relationships(c);
     }
 
-    chars.sort_by(|a, b| a.id.cmp(&b.id));
-    let body = render_table(&chars);
-    let block = CharactersBlock { characters: chars };
-    data_block::write_with_data(&ws.characters_md(), &body, &block)?;
+    save(ws, chars)?;
     Ok(true)
 }
 
@@ -299,9 +302,7 @@ pub fn remove(ws: &Workspace, id: &str) -> std::io::Result<()> {
     if chars.len() == before {
         return Ok(());
     }
-    let body = render_table(&chars);
-    let block = CharactersBlock { characters: chars };
-    data_block::write_with_data(&ws.characters_md(), &body, &block)
+    save(ws, chars)
 }
 
 /// Query by case/whitespace-insensitive substring `query` (id/jp_name/translated_name/
