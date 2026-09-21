@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
 use super::client::{
-    LlmClient, LlmError, Result, RetryPolicy, StreamDelta, parse_retry_after, retry_after_hint,
+    LlmClient, LlmError, Result, RetryPolicy, StreamDelta, delta_sink, parse_retry_after, tracking,
 };
 use super::{
     ChatRequest, ChatResponse, Choice, FunctionCall, ResponseFormat, ResponseMessage, Role,
@@ -150,23 +150,20 @@ impl CodexClient {
         replay_after_delta: bool,
     ) -> Result<ChatResponse> {
         let emitted = AtomicBool::new(false);
-        let mut tracked = |delta: StreamDelta| {
-            emitted.store(true, Ordering::Relaxed);
-            on_delta(delta);
-        };
-        let mut sent = 0u32;
-        loop {
-            sent += 1;
-            match self.run_once(req, &mut tracked).await {
-                Err(e)
-                    if self.retry.should_retry(&e, sent)
-                        && (replay_after_delta || !emitted.load(Ordering::Relaxed)) =>
-                {
-                    tokio::time::sleep(self.retry.backoff(sent, retry_after_hint(&e))).await;
-                }
-                other => return other,
-            }
-        }
+        let sink = delta_sink(on_delta);
+        self.retry
+            .drive_while(
+                || {
+                    Box::pin(async {
+                        let mut tracked = tracking(&sink, &emitted);
+                        self.run_once(req, &mut tracked).await
+                    })
+                },
+                // A non-streaming call discards its deltas, so a replay costs
+                // nothing; a streaming one cannot replay once output escaped.
+                || replay_after_delta || !emitted.load(Ordering::Relaxed),
+            )
+            .await
     }
 }
 

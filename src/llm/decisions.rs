@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 
 use super::Usage;
 use super::client::{
-    LlmError, Result, RetryPolicy, parse_error_envelope, parse_retry_after, retry_after_hint,
+    LlmError, Result, RetryPolicy, parse_error_envelope, parse_retry_after,
 };
 
 pub const OPENROUTER_DECISIONS_URL: &str = "https://openrouter.ai/api/alpha/decisions";
@@ -281,16 +281,10 @@ impl DecisionsClient {
 #[async_trait]
 impl DecisionsBackend for DecisionsClient {
     async fn decide(&self, req: &DecisionsRequest) -> Result<DecisionsResponse> {
-        let mut sent = 0u32;
-        loop {
-            sent += 1;
-            match self.send_once(req).await {
-                Err(e) if self.retry.should_retry(&e, sent) => {
-                    tokio::time::sleep(self.retry.backoff(sent, retry_after_hint(&e))).await;
-                }
-                other => return other,
-            }
-        }
+        // `self.retry` was already clamped to `MAX_SEND_ATTEMPTS` at
+        // construction, so the shared driver honours this route's shorter
+        // budget without knowing about it.
+        self.retry.drive(|| Box::pin(self.send_once(req))).await
     }
 }
 
