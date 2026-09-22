@@ -339,14 +339,34 @@ fn slugify(name: &str) -> String {
 
 /// Execute one tool call, emit the matching `AppEvent`, return a `ToolResult`.
 /// Bad args or unknown tool yield `ToolResult::err` so the loop can recover.
+/// What a tool call needs from the run it belongs to.
+///
+/// The judgement handle and somewhere to bank what a judgement spends travel
+/// together because they are always wanted together: a tool that can ask a
+/// question is a tool that can run up a bill.
+#[derive(Default, Clone, Copy)]
+pub struct ToolCtx<'a> {
+    pub system_one: Option<&'a SystemOneHandle>,
+    pub usage: Option<&'a std::sync::Mutex<crate::llm::Usage>>,
+}
+
+impl ToolCtx<'_> {
+    fn bank(&self, usage: &crate::llm::Usage) {
+        if let Some(sink) = self.usage {
+            sink.lock().unwrap_or_else(|e| e.into_inner()).add(usage);
+        }
+    }
+}
+
 pub async fn dispatch_tool(
     ws: &Workspace,
     tx: &EventTx,
     chapter: u32,
     name: &str,
     args_json: &str,
-    system_one: Option<&SystemOneHandle>,
+    ctx: &ToolCtx<'_>,
 ) -> ToolResult {
+    let system_one = ctx.system_one;
     match name {
         "upsert_character" => {
             let a: UpsertCharacterArgs = match serde_json::from_str(args_json) {
@@ -370,31 +390,26 @@ pub async fn dispatch_tool(
             };
             // Name matching cannot connect a nickname to the full name it
             // belongs to; ask before letting a duplicate onto the roster.
-            let alignment = match system_one {
-                Some(s1) => {
-                    let roster = characters::load(ws);
-                    let candidates = characters::alignment_candidates(&roster, &character);
-                    match entity_align::align(
-                        s1.backend.as_ref(),
-                        &s1.config,
-                        &character,
-                        &candidates,
-                    )
-                    .await
-                    {
-                        Some(out) => {
-                            if let Some(summary) = out.summary {
-                                tx.send(AppEvent::Log {
-                                    level: crate::model::LogLevel::Info,
-                                    msg: format!("ch{chapter} {summary}"),
-                                });
-                            }
-                            out.alignment
+            let aligning = system_one
+                .is_some_and(|s1| s1.is_on(crate::model::SystemOneFeature::EntityAlignment));
+            let alignment = if aligning {
+                let roster = characters::load(ws);
+                let candidates = characters::alignment_candidates(&roster, &character);
+                match entity_align::align(system_one, &character, &candidates).await {
+                    Some(out) => {
+                        ctx.bank(&out.usage);
+                        if let Some(summary) = out.summary {
+                            tx.send(AppEvent::Log {
+                                level: crate::model::LogLevel::Info,
+                                msg: format!("ch{chapter} {summary}"),
+                            });
                         }
-                        None => characters::Alignment::default(),
+                        out.alignment
                     }
+                    None => characters::Alignment::default(),
                 }
-                None => characters::Alignment::default(),
+            } else {
+                characters::Alignment::default()
             };
             match characters::upsert_keep_translation(ws, character, &alignment) {
                 Ok(outcome) => {
@@ -715,6 +730,13 @@ pub struct WorkspaceTools {
     tx: EventTx,
     chapter: u32,
     system_one: Option<SystemOneHandle>,
+    /// System One spend from judgements made inside a tool call.
+    ///
+    /// The executor has no accumulator of its own and `execute` takes `&self`,
+    /// so it banks the tokens here and the caller drains them with
+    /// [`Self::take_judgement_usage`] to fold in alongside the Orchestrator's
+    /// own. Before this they were only ever printed in a log line.
+    judgement_usage: std::sync::Mutex<crate::llm::Usage>,
 }
 
 impl WorkspaceTools {
@@ -731,7 +753,18 @@ impl WorkspaceTools {
             tx,
             chapter,
             system_one,
+            judgement_usage: std::sync::Mutex::new(crate::llm::Usage::default()),
         }
+    }
+
+    /// Take everything judgements spent during this executor's lifetime.
+    pub fn take_judgement_usage(&self) -> crate::llm::Usage {
+        std::mem::take(
+            &mut *self
+                .judgement_usage
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()),
+        )
     }
 
     fn workspace(&self) -> Workspace {
@@ -749,7 +782,10 @@ impl ToolExecutor for WorkspaceTools {
             self.chapter,
             name,
             arguments_json,
-            self.system_one.as_ref(),
+            &ToolCtx {
+                system_one: self.system_one.as_ref(),
+                usage: Some(&self.judgement_usage),
+            },
         )
         .await;
         Ok(serde_json::to_string(&result)?)
@@ -806,7 +842,7 @@ mod tests {
             1,
             "upsert_character",
             r#"{"id":"rin","jp_name":"鈴","thai_name":"ริน","also_called":[{"jp":"鈴ちゃん","thai":"รินจัง"}]}"#,
-            None,
+            &ToolCtx::default(),
         )
         .await;
         assert!(character.ok, "{}", character.message);
@@ -820,7 +856,7 @@ mod tests {
             1,
             "upsert_glossary_term",
             r#"{"jp_term":"魔法","thai_term":"เวทมนตร์","forbidden_thai":["มายากล"]}"#,
-            None,
+            &ToolCtx::default(),
         )
         .await;
         assert!(term.ok, "{}", term.message);
@@ -834,7 +870,7 @@ mod tests {
             1,
             "append_translation",
             r#"{"chapter":1,"chunk_index":0,"thai_text":"คำแปล"}"#,
-            None,
+            &ToolCtx::default(),
         )
         .await;
         assert!(appended.ok, "{}", appended.message);
@@ -877,7 +913,7 @@ mod tests {
             3,
             "upsert_glossary_term",
             r#"{"jp_term":"聖剣","translated_term":"ดาบเทพ","do_not_translate":true}"#,
-            None,
+            &ToolCtx::default(),
         )
         .await;
 
@@ -935,7 +971,7 @@ mod tests {
             3,
             "get_glossary",
             r#"{"protected_only":true,"limit":10}"#,
-            None,
+            &ToolCtx::default(),
         )
         .await;
 
@@ -982,7 +1018,7 @@ mod tests {
             3,
             "upsert_character",
             r#"{"id":"yuu","jp_name":"有月勇","translated_name":"อาริทสึกิ ยู","aliases":["勇"]}"#,
-            None,
+            &ToolCtx::default(),
         )
         .await;
         assert!(result.ok, "{}", result.message);
@@ -1005,7 +1041,7 @@ mod tests {
             3,
             "upsert_character",
             r#"{"id":"miya2","jp_name":"未夜","translated_name":"มิยะ","romaji":"Miya"}"#,
-            None,
+            &ToolCtx::default(),
         )
         .await;
         assert!(result.ok);
@@ -1045,7 +1081,7 @@ mod tests {
             5,
             "merge_character",
             r#"{"from_id":"yuu-bare","into_id":"yuu"}"#,
-            None,
+            &ToolCtx::default(),
         )
         .await;
         assert!(result.ok, "{}", result.message);
@@ -1074,7 +1110,7 @@ mod tests {
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let result =
-            dispatch_tool(&ws, &EventTx(tx), 3, "get_character", r#"{"query":"勇"}"#, None).await;
+            dispatch_tool(&ws, &EventTx(tx), 3, "get_character", r#"{"query":"勇"}"#, &ToolCtx::default()).await;
         assert!(result.ok);
         let arr = result
             .data
@@ -1099,7 +1135,7 @@ mod tests {
             3,
             "get_character",
             r#"{"query":"乃々香"}"#,
-            None,
+            &ToolCtx::default(),
         )
         .await;
         assert!(result.ok);
@@ -1134,7 +1170,7 @@ mod tests {
                 3,
                 "get_glossary",
                 &format!(r#"{{"query":"{query}"}}"#),
-            None,
+            &ToolCtx::default(),
         )
             .await;
             assert!(result.ok);

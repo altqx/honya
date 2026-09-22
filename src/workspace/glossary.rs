@@ -121,9 +121,7 @@ pub fn remove(ws: &Workspace, jp_term: &str) -> std::io::Result<()> {
     if terms.len() == before {
         return Ok(());
     }
-    let body = render_table(&terms);
-    let block = GlossaryBlock { terms };
-    data_block::write_with_data(&ws.glossary_md(), &body, &block)
+    save_all(ws, terms)
 }
 
 /// Query terms by case-insensitive substring `query` (jp_term/translated_term/romaji/

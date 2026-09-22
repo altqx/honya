@@ -399,7 +399,7 @@ impl LexiconScreen {
         rows
     }
 
-    pub fn handle_key(&mut self, key: KeyEvent, ws: Option<&Workspace>) -> Action {
+    pub fn handle_key(&mut self, key: KeyEvent, ws: Option<&Workspace>, acts: &[Act]) -> Action {
         if self.editing.is_some() {
             return self.handle_edit_key(key, ws);
         }
@@ -429,8 +429,7 @@ impl LexiconScreen {
         // Commands come from the table; only navigation is left below. Tab is
         // the documented exception — it is a reserved global everywhere else,
         // and the Lexicon keeps it for its sections.
-        let acts = self.actions(ws);
-        match action_table::hit(&acts, &key) {
+        match action_table::hit(acts, &key) {
             action_table::KeyHit::Run(id) => return self.run(id, ws).unwrap_or(Action::None),
             action_table::KeyHit::Blocked => return Action::None,
             action_table::KeyHit::Miss => {}
@@ -901,6 +900,7 @@ impl LexiconScreen {
         ui: &mut crate::ui::kit::Ui,
         area: Rect,
         ws: Option<&Workspace>,
+        acts: &[Act],
     ) {
         self.screen_area = area;
         let header = Rect {
@@ -912,8 +912,7 @@ impl LexiconScreen {
             height: area.height.saturating_sub(1),
             ..area
         };
-        let acts = self.actions(ws);
-        self.render_header(ui, header, ws, &acts);
+        self.render_header(ui, header, ws, acts);
         self.render_table(ui, body, ws);
 
         // The selected row's own verbs, over the right end of the row the table
@@ -921,7 +920,7 @@ impl LexiconScreen {
         if let Some(sel) = self.list.selected()
             && let Some(rect) = ui.zones.rect_of(crate::ui::kit::ZoneId::row(sel))
         {
-            crate::ui::kit::toolbar::RowActions::new(&acts).render(ui, rect);
+            crate::ui::kit::toolbar::RowActions::new(acts).render(ui, rect);
         }
 
         if self.editing.is_some() {
@@ -1631,8 +1630,9 @@ mod tests {
         let mut s = LexiconScreen::new();
         assert_eq!(s.sub, SUB_GLOSSARY);
 
+        let acts = s.actions(None);
         let (_, zones) =
-            crate::ui::kit::ctx::draw_test(100, 20, |ui, area| s.render(ui, area, None));
+            crate::ui::kit::ctx::draw_test(100, 20, |ui, area| s.render(ui, area, None, &acts));
         let rect = zones
             .rect_of(crate::ui::kit::ZoneId::segment(SUB_CHARACTERS as usize))
             .expect("the Characters section should register a zone");
@@ -1840,8 +1840,10 @@ mod tests {
         screen.begin_new();
         let rows = screen.editing.as_ref().unwrap().rows();
 
-        let (_, zones) =
-            crate::ui::kit::ctx::draw_test(100, 40, |ui, area| screen.render(ui, area, None));
+        let acts = screen.actions(None);
+        let (_, zones) = crate::ui::kit::ctx::draw_test(100, 40, |ui, area| {
+            screen.render(ui, area, None, &acts)
+        });
         for field in &rows {
             let id = crate::ui::kit::ZoneId::new(crate::ui::kit::ZoneKind::Field, *field as u32);
             let rect = zones
@@ -1876,8 +1878,9 @@ mod tests {
         let last = *rows.last().unwrap();
         screen.editing.as_mut().unwrap().focus_field(last);
 
+        let acts = screen.actions(None);
         let (_, zones) =
-            crate::ui::kit::ctx::draw_test(80, 10, |ui, area| screen.render(ui, area, None));
+            crate::ui::kit::ctx::draw_test(80, 10, |ui, area| screen.render(ui, area, None, &acts));
         let id = crate::ui::kit::ZoneId::new(crate::ui::kit::ZoneKind::Field, last as u32);
         let rect = zones
             .rect_of(id)

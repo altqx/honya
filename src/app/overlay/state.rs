@@ -853,6 +853,115 @@ pub struct SettingsState {
 }
 
 impl SettingsState {
+    /// The live value of a toggle row.
+    pub(crate) fn settings_toggle(&self, f: SField) -> bool {
+        match f {
+            SField::ParallelLookahead => self.parallel_lookahead,
+            SField::PrepassExtract => self.prepass_extract,
+            SField::CoherenceCheck => self.coherence_check,
+            SField::SystemOneEnabled => self.system_one.enabled,
+            other => settings_defs::feature_of(other)
+                .map(|feat| self.system_one.armed(feat))
+                .unwrap_or(false),
+        }
+    }
+
+    /// The label a cycle row currently shows.
+    pub(crate) fn settings_select_label(&self, f: SField) -> String {
+        match f {
+            SField::OrchProvider => self.models.orchestrator.provider.label().to_string(),
+            SField::TransProvider => self.models.translator.provider.label().to_string(),
+            SField::ReviewProvider => self.models.reviewer.provider.label().to_string(),
+            SField::RefineProvider => self.models.refine.provider.label().to_string(),
+            SField::OrchEffort => crate::model::Effort::label(self.models.orchestrator.effort).to_string(),
+            SField::TransEffort => crate::model::Effort::label(self.models.translator.effort).to_string(),
+            SField::ReviewEffort => crate::model::Effort::label(self.models.reviewer.effort).to_string(),
+            SField::RefineEffort => crate::model::Effort::label(self.models.refine.effort).to_string(),
+            SField::PreferredLanguageField => self.preferred_language.label().to_string(),
+            SField::ServiceTierField => {
+                crate::model::ServiceTier::label(self.service_tier).to_string()
+            }
+            SField::GateMode => self.system_one.review_gate.label().to_string(),
+            SField::GateProvider => self.system_one.provider.label().to_string(),
+            // "Terminal (adaptive) · adaptive" says it twice and overflows the
+            // stepper's value column; the name alone already carries the tone.
+            SField::Theme => {
+                let (name, tone) = (self.theme.label(), self.theme.tone());
+                if name.to_lowercase().contains(tone) {
+                    name.to_string()
+                } else {
+                    format!("{name} · {tone}")
+                }
+            }
+            SField::UpdateModeField => self.update_mode.label().to_string(),
+            SField::ReleaseChannelField => self.release_channel.label().to_string(),
+            // A Codex model row is picked from the account's list rather than
+            // typed, so it has a current value like any other choice row.
+            SField::OrchModel | SField::TransModel | SField::ReviewModel | SField::RefineModel => {
+                self.agent_model_of(f).unwrap_or_default().to_string()
+            }
+            _ => String::new(),
+        }
+    }
+
+    /// A secret row's value, and whether the environment already supplies it.
+    pub(crate) fn settings_secret(&self, f: SField) -> (String, bool) {
+        match f {
+            SField::OpenRouterKey => (self.openrouter_key.clone(), self.api_key_env),
+            SField::TokenrouterKey => (self.tokenrouter_key.clone(), self.tokenrouter_key_env),
+            SField::GoogleKey => (self.google_key.clone(), self.google_key_env),
+            SField::CloudflareToken => (
+                self.cloudflare_api_token.clone(),
+                self.cloudflare_api_token_env,
+            ),
+            SField::GateKey => (self.typesafe_key.clone(), self.typesafe_key_env),
+            _ => (String::new(), false),
+        }
+    }
+
+    /// A text or numeric row's current contents.
+    pub(crate) fn settings_text(&self, f: SField) -> String {
+        match f {
+            SField::OrchModel => self.models.orchestrator.model.clone(),
+            SField::TransModel => self.models.translator.model.clone(),
+            SField::ReviewModel => self.models.reviewer.model.clone(),
+            SField::RefineModel => self.models.refine.model.clone(),
+            SField::CloudflareAccount => self.cloudflare_account_id.clone(),
+            SField::MaxAttempts => self.max_attempts.clone(),
+            SField::RetryAttempts => self.retry_attempts.clone(),
+            SField::RetryCooldown => self.retry_cooldown_secs.clone(),
+            SField::ContinuitySentences => self.continuity_sentences.clone(),
+            SField::LoopStall => self.loop_stall_secs.clone(),
+            SField::Retranslates => self.max_chapter_retranslates.clone(),
+            SField::ChunkTargetTokens => self.chunk_target_tokens.clone(),
+            SField::ChunkHardCapTokens => self.chunk_hard_cap_tokens.clone(),
+            SField::GateModel => self.system_one.model.clone(),
+            SField::GateConfidence => self.system_one_confidence.clone(),
+            _ => String::new(),
+        }
+    }
+
+    /// Whether a row is currently inert.
+    ///
+    /// The System One block is the only case: with the master switch off, every
+    /// judgement row below it does nothing, and saying so is better than
+    /// letting someone set five toggles that have no effect.
+    pub(crate) fn settings_disabled(&self, f: SField) -> bool {
+        if matches!(f, SField::SystemOneEnabled) {
+            return false;
+        }
+        let in_block = settings_defs::feature_of(f).is_some()
+            || matches!(
+                f,
+                SField::GateMode
+                    | SField::GateProvider
+                    | SField::GateModel
+                    | SField::GateKey
+                    | SField::GateConfidence
+            );
+        in_block && !self.system_one.enabled
+    }
+
     pub(super) fn from_cfg_focus(cfg: &AppConfig, field: u8) -> Self {
         let mut st = Self {
             models: cfg.models.clone(),
@@ -919,7 +1028,15 @@ impl SettingsState {
 
     /// Mutable handle to the focused text buffer (None for cycle fields).
     pub(super) fn text_field_mut(&mut self) -> Option<&mut String> {
-        Some(match self.current() {
+        self.text_field_mut_of(self.current())
+    }
+
+    /// Mutable handle to any row's text buffer, focused or not.
+    ///
+    /// The GUI draws every row of a tab at once, so it edits rows it is not
+    /// "on"; the TUI only ever edits the focused one.
+    pub(crate) fn text_field_mut_of(&mut self, f: SField) -> Option<&mut String> {
+        Some(match f {
             SField::OrchModel => &mut self.models.orchestrator.model,
             SField::TransModel => &mut self.models.translator.model,
             SField::ReviewModel => &mut self.models.reviewer.model,
@@ -963,9 +1080,27 @@ impl SettingsState {
         })
     }
 
-    /// The provider of the agent owning the focused field, if it's an agent field.
-    pub(super) fn agent_provider(&self) -> Option<crate::model::Provider> {
-        Some(match self.current() {
+    /// The model id on an agent row, read-only.
+    pub(crate) fn agent_model_of(&self, f: SField) -> Option<&str> {
+        Some(match f {
+            SField::OrchProvider | SField::OrchModel | SField::OrchEffort => {
+                self.models.orchestrator.model.as_str()
+            }
+            SField::TransProvider | SField::TransModel | SField::TransEffort => {
+                self.models.translator.model.as_str()
+            }
+            SField::ReviewProvider | SField::ReviewModel | SField::ReviewEffort => {
+                self.models.reviewer.model.as_str()
+            }
+            SField::RefineProvider | SField::RefineModel | SField::RefineEffort => {
+                self.models.refine.model.as_str()
+            }
+            _ => return None,
+        })
+    }
+
+    pub(crate) fn agent_provider_of(&self, f: SField) -> Option<crate::model::Provider> {
+        Some(match f {
             SField::OrchProvider | SField::OrchModel | SField::OrchEffort => {
                 self.models.orchestrator.provider
             }
@@ -984,10 +1119,14 @@ impl SettingsState {
 
     /// A model field whose provider is Codex — picked from a list, not typed.
     pub(super) fn is_codex_model(&self) -> bool {
+        self.is_codex_model_of(self.current())
+    }
+
+    pub(crate) fn is_codex_model_of(&self, f: SField) -> bool {
         matches!(
-            self.current(),
+            f,
             SField::OrchModel | SField::TransModel | SField::ReviewModel | SField::RefineModel
-        ) && self.agent_provider() == Some(crate::model::Provider::Codex)
+        ) && self.agent_provider_of(f) == Some(crate::model::Provider::Codex)
     }
 
     /// Whether the focused field accepts typed text (vs. a Left/Right choice).
@@ -997,8 +1136,16 @@ impl SettingsState {
 
     /// Cycle the focused non-text field. `forward` is Right/Space; `false` is Left.
     pub(super) fn cycle(&mut self, forward: bool) {
-        let cur = self.current();
-        if self.is_codex_model() {
+        self.cycle_field(self.current(), forward);
+    }
+
+    /// Advance any row's value, focused or not.
+    ///
+    /// This is the one place that knows what follows what for every choice
+    /// row, which is why [`Self::select_domain`] sits beside it and
+    /// [`Self::set_select`] is written in terms of it.
+    pub(crate) fn cycle_field(&mut self, cur: SField, forward: bool) {
+        if self.is_codex_model_of(cur) {
             let models = self.codex_models.clone();
             if let Some(a) = self.agent_for(cur)
                 && !models.is_empty()
@@ -1074,6 +1221,151 @@ impl SettingsState {
             SField::UpdateModeField => self.update_mode = self.update_mode.toggled(),
             SField::ReleaseChannelField => self.release_channel = self.release_channel.toggled(),
             _ => {}
+        }
+    }
+
+    /// The choices a select row offers, in the order the arrows walk them.
+    ///
+    /// Lives beside [`Self::cycle_field`] because the two have to agree about
+    /// what follows what. The GUI used to keep its own const arrays of
+    /// providers, efforts, tiers and gate modes, which is the same list written
+    /// a second time and nothing keeping it in step.
+    pub(crate) fn select_domain(&self, f: SField) -> Vec<String> {
+        use crate::model::{Effort, Provider, ReleaseChannel, ReviewGateMode, ServiceTier,
+            TargetLanguage, UpdateMode};
+
+        match f {
+            // A Codex model row is a pick from the account's model list, not a
+            // free choice from a fixed domain.
+            SField::OrchModel | SField::TransModel | SField::ReviewModel | SField::RefineModel => {
+                if self.is_codex_model_of(f) {
+                    self.codex_models.clone()
+                } else {
+                    Vec::new()
+                }
+            }
+            SField::OrchProvider
+            | SField::TransProvider
+            | SField::ReviewProvider
+            | SField::RefineProvider => {
+                let mut out = Vec::new();
+                let first = Provider::default();
+                let mut p = first;
+                loop {
+                    out.push(p.label().to_string());
+                    p = p.cycled(true);
+                    if p == first {
+                        break;
+                    }
+                }
+                out
+            }
+            // The gate rides a different provider enum from the agents: a
+            // decisions backend is not a chat backend.
+            SField::GateProvider => {
+                let mut out = Vec::new();
+                let first = crate::model::DecisionsProvider::default();
+                let mut p = first;
+                loop {
+                    out.push(p.label().to_string());
+                    p = p.cycled(true);
+                    if p == first {
+                        break;
+                    }
+                }
+                out
+            }
+            SField::OrchEffort | SField::TransEffort | SField::ReviewEffort
+            | SField::RefineEffort => [
+                None,
+                Some(Effort::Minimal),
+                Some(Effort::Low),
+                Some(Effort::Medium),
+                Some(Effort::High),
+                Some(Effort::Xhigh),
+            ]
+            .iter()
+            .map(|e| Effort::label(*e).to_string())
+            .collect(),
+            SField::ServiceTierField => [None, Some(ServiceTier::Flex), Some(ServiceTier::Priority)]
+                .iter()
+                .map(|t| ServiceTier::label(*t).to_string())
+                .collect(),
+            SField::PreferredLanguageField => {
+                let mut out = Vec::new();
+                let first = TargetLanguage::default();
+                let mut l = first;
+                loop {
+                    out.push(l.label().to_string());
+                    l = l.cycled();
+                    if l == first {
+                        break;
+                    }
+                }
+                out
+            }
+            SField::GateMode => {
+                let mut out = Vec::new();
+                let first = ReviewGateMode::default();
+                let mut m = first;
+                loop {
+                    out.push(m.label().to_string());
+                    m = m.cycled(true);
+                    if m == first {
+                        break;
+                    }
+                }
+                out
+            }
+            SField::Theme => ALL_THEMES
+                .iter()
+                .map(|t| {
+                    let (name, tone) = (t.label(), t.tone());
+                    if name.to_lowercase().contains(tone) {
+                        name.to_string()
+                    } else {
+                        format!("{name} · {tone}")
+                    }
+                })
+                .collect(),
+            SField::UpdateModeField => {
+                let first = UpdateMode::default();
+                vec![first.label().to_string(), first.toggled().label().to_string()]
+            }
+            SField::ReleaseChannelField => {
+                let first = ReleaseChannel::default();
+                vec![first.label().to_string(), first.toggled().label().to_string()]
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Where this row's current value sits in [`Self::select_domain`].
+    ///
+    /// `None` when the stored value is not on offer at all — a Codex model
+    /// saved against an account that no longer lists it. Reporting that as
+    /// index 0 would make picking the first option a no-op, leaving the stale
+    /// value configured with the form showing something else.
+    pub(crate) fn select_index(&self, f: SField) -> Option<usize> {
+        let current = self.settings_select_label(f);
+        self.select_domain(f).iter().position(|o| *o == current)
+    }
+
+    /// Move a select row to `target`, by walking the cycle rather than by
+    /// assigning — so there is still exactly one place that knows how each
+    /// domain advances.
+    pub(crate) fn set_select(&mut self, f: SField, target: usize) {
+        let n = self.select_domain(f).len();
+        if n == 0 || target >= n {
+            return;
+        }
+        // `n + 1` because a value that is not in the domain spends the first
+        // step getting into it.
+        for _ in 0..=n {
+            if self.select_index(f) == Some(target) {
+                return;
+            }
+            self.cycle_field(f, true);
         }
     }
 
@@ -1282,19 +1574,6 @@ impl SettingsState {
         }
     }
 
-    /// Switch one agent's provider (0 orchestrator · 1 translator · 2 reviewer ·
-    /// 3 refine), carrying the same model fallbacks as the TUI's cycle key.
-    pub fn switch_agent_provider(&mut self, agent: usize, next: crate::model::Provider) {
-        let codex_models = self.codex_models.clone();
-        let a = match agent {
-            0 => &mut self.models.orchestrator,
-            1 => &mut self.models.translator,
-            2 => &mut self.models.reviewer,
-            _ => &mut self.models.refine,
-        };
-        let fallback = provider_model_fallback(a.provider, next, &a.model, &codex_models);
-        a.switch_provider(next, Some(&fallback));
-    }
 }
 
 /// Theme picker; navigating live-previews via `PreviewTheme`, so the whole UI
@@ -1619,7 +1898,11 @@ impl ExportState {
     }
 
     /// Selected formats in display order.
-    pub(super) fn selected_formats(&self) -> Vec<ExportFormat> {
+    ///
+    /// `pub(crate)` because both front ends need it: while it was `pub(super)`
+    /// the GUI could not reach it and re-derived the answer against a hardcoded
+    /// index-to-label pairing of its own.
+    pub(crate) fn selected_formats(&self) -> Vec<ExportFormat> {
         ExportFormat::ALL
             .iter()
             .zip(self.formats)
@@ -1628,3 +1911,103 @@ impl ExportState {
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn import(files: Vec<(PathBuf, u64)>) -> ImportState {
+        ImportState::new(files, Vec::new(), TargetLanguage::Thai)
+    }
+
+    /// Both renderers draw the wizard rail from `visible_steps`, so its shape
+    /// is a shared contract rather than one front end's detail. The GUI used to
+    /// re-derive it from string literals, which is a second answer to a
+    /// question only this has the right to answer.
+    #[test]
+    fn the_wizard_rail_is_always_an_ordered_run_from_pick_to_import() {
+        let full = import(Vec::new());
+        let into = ImportState::new_into(
+            Vec::new(),
+            Vec::new(),
+            "Project".to_string(),
+            2,
+            TargetLanguage::Thai,
+        );
+        let append = ImportState::new_append(
+            Vec::new(),
+            Vec::new(),
+            "Project".to_string(),
+            2,
+            TargetLanguage::Thai,
+        );
+
+        for (name, st) in [("full", &full), ("into", &into), ("append", &append)] {
+            let steps = st.visible_steps();
+            assert_eq!(
+                steps.first(),
+                Some(&ImportStep::Pick),
+                "{name}: every flow starts at the source file"
+            );
+            assert_eq!(
+                steps.last(),
+                Some(&ImportStep::Importing),
+                "{name}: every flow ends by importing"
+            );
+            assert!(
+                steps.windows(2).all(|w| w[0] < w[1]),
+                "{name}: the rail must run forwards: {steps:?}"
+            );
+            assert!(
+                steps.iter().all(|s| ImportStep::ALL.contains(s)),
+                "{name}: the rail only shows declared steps"
+            );
+            assert!(
+                steps.contains(&st.step),
+                "{name}: the rail cannot highlight a step it does not show"
+            );
+        }
+
+        assert_eq!(full.visible_steps().len(), ImportStep::ALL.len());
+        assert_eq!(
+            append.visible_steps(),
+            vec![ImportStep::Pick, ImportStep::Importing],
+            "appending chapters skips everything but the file"
+        );
+        assert!(
+            into.visible_steps().len() < full.visible_steps().len(),
+            "adding a volume to a named project skips the naming steps"
+        );
+    }
+
+    /// The export checklist and the formats actually exported are the same
+    /// array read twice, so they have to agree for every combination. The GUI
+    /// used to pair index to label by hand, which is where they could not.
+    #[test]
+    fn selected_formats_follow_the_checklist() {
+        let all = ExportFormat::ALL;
+        for bits in 0..8u8 {
+            let mut st = ExportState::new(1);
+            for (i, slot) in st.formats.iter_mut().enumerate() {
+                *slot = bits & (1 << i) != 0;
+            }
+            let expected: Vec<ExportFormat> = all
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| bits & (1 << i) != 0)
+                .map(|(_, f)| *f)
+                .collect();
+            assert_eq!(
+                st.selected_formats(),
+                expected,
+                "checklist {bits:03b} must export exactly what it shows"
+            );
+        }
+
+        assert_eq!(
+            ExportState::new(1).selected_formats().len(),
+            all.len(),
+            "a fresh export opts in to everything"
+        );
+    }
+}

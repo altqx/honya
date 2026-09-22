@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::StreamExt;
+use futures::future::BoxFuture;
 use reqwest::StatusCode;
 use serde::Deserialize;
 
@@ -213,6 +214,46 @@ impl RetryPolicy {
     pub fn should_retry(&self, err: &LlmError, sent: u32) -> bool {
         err.is_retryable() && sent < self.attempts_for(err)
     }
+
+    /// Send under this policy until it succeeds or the budget runs out.
+    ///
+    /// The transport supplies only the one-shot send; attempt counting, the
+    /// `Retry-After` hint and the backoff stay here. Every transport drove this
+    /// loop itself before, and two of the copies had already drifted apart.
+    ///
+    /// The send is a boxed future rather than an `AsyncFnMut` because these are
+    /// called from `#[async_trait]` methods, whose boxed future must be `Send`:
+    /// an async closure's future cannot be proven `Send` across the elided
+    /// lifetimes there, and `BoxFuture` states it.
+    pub async fn drive<'a, T>(
+        &self,
+        send_once: impl FnMut() -> BoxFuture<'a, Result<T>>,
+    ) -> Result<T> {
+        self.drive_while(send_once, || true).await
+    }
+
+    /// As [`drive`](Self::drive), but stop retrying once `may_replay` says the
+    /// call can no longer be replayed.
+    ///
+    /// A stream that has already handed deltas to its caller is the case: a
+    /// replay would double-feed the field-stream parser, so the decision
+    /// belongs to the transport rather than to the policy.
+    pub async fn drive_while<'a, T>(
+        &self,
+        mut send_once: impl FnMut() -> BoxFuture<'a, Result<T>>,
+        may_replay: impl Fn() -> bool,
+    ) -> Result<T> {
+        let mut sent = 0u32;
+        loop {
+            sent += 1;
+            match send_once().await {
+                Err(e) if self.should_retry(&e, sent) && may_replay() => {
+                    tokio::time::sleep(self.backoff(sent, retry_after_hint(&e))).await;
+                }
+                other => return other,
+            }
+        }
+    }
 }
 
 impl Default for RetryPolicy {
@@ -288,7 +329,39 @@ impl ClientConfig {
     }
 }
 
-pub(super) fn retry_after_hint(err: &LlmError) -> Option<u64> {
+/// The caller's stream callback, reachable from a shared capture.
+///
+/// [`RetryPolicy::drive_while`] builds a fresh future per attempt, so the
+/// callback cannot live in the factory closure as a `&mut` — the future would
+/// borrow the closure's own captures. Parking it behind a lock lets each
+/// attempt make its own callback from a shared reference instead.
+pub(super) type DeltaSink<'a> = std::sync::Mutex<&'a mut (dyn for<'d> FnMut(StreamDelta<'d>) + Send)>;
+
+pub(super) fn delta_sink<'a>(
+    on_delta: &'a mut (dyn for<'d> FnMut(StreamDelta<'d>) + Send),
+) -> DeltaSink<'a> {
+    std::sync::Mutex::new(on_delta)
+}
+
+/// One attempt's callback: records that output escaped, then forwards it.
+///
+/// The lock is taken per delta and never held across an await, so this stays a
+/// plain hand-off rather than a synchronisation point.
+pub(super) fn tracking<'a>(
+    sink: &'a DeltaSink<'_>,
+    emitted: &'a std::sync::atomic::AtomicBool,
+) -> impl for<'d> FnMut(StreamDelta<'d>) + Send + 'a {
+    move |delta| {
+        emitted.store(true, Ordering::Relaxed);
+        // Poisoning only means an earlier delta panicked on its way out; the
+        // sink itself is still usable, and dropping the rest of the stream
+        // would turn one bad delta into a failed chunk.
+        let mut sink = sink.lock().unwrap_or_else(|e| e.into_inner());
+        (**sink)(delta);
+    }
+}
+
+fn retry_after_hint(err: &LlmError) -> Option<u64> {
     match err {
         LlmError::RateLimited { retry_after, .. } => Some(*retry_after),
         _ => None,
@@ -644,17 +717,10 @@ impl OpenRouterClient {
 #[async_trait]
 impl LlmClient for OpenRouterClient {
     async fn chat(&self, req: &ChatRequest) -> Result<ChatResponse> {
-        let policy = self.cfg.send_policy();
-        let mut sent = 0u32;
-        loop {
-            sent += 1;
-            match self.send_once(req).await {
-                Err(e) if policy.should_retry(&e, sent) => {
-                    tokio::time::sleep(policy.backoff(sent, retry_after_hint(&e))).await;
-                }
-                other => return other,
-            }
-        }
+        self.cfg
+            .send_policy()
+            .drive(|| Box::pin(self.send_once(req)))
+            .await
     }
 
     async fn chat_stream(
@@ -666,23 +732,19 @@ impl LlmClient for OpenRouterClient {
         // output can't be replayed here without double-feeding the field-stream
         // parser, so that case is left to the pipeline (the partial-stream path).
         let emitted = std::sync::atomic::AtomicBool::new(false);
-        let mut tracked = |delta: StreamDelta| {
-            emitted.store(true, Ordering::Relaxed);
-            on_delta(delta);
-        };
-        let policy = self.cfg.send_policy();
-        let mut sent = 0u32;
-        loop {
-            sent += 1;
-            match self.send_stream_once(req, &mut tracked).await {
-                // Only retry while nothing has reached the caller: replaying after
-                // partial output would double-feed the field-stream parser.
-                Err(e) if policy.should_retry(&e, sent) && !emitted.load(Ordering::Relaxed) => {
-                    tokio::time::sleep(policy.backoff(sent, retry_after_hint(&e))).await;
-                }
-                other => return other,
-            }
-        }
+        let sink = delta_sink(on_delta);
+        self.cfg
+            .send_policy()
+            .drive_while(
+                || {
+                    Box::pin(async {
+                        let mut tracked = tracking(&sink, &emitted);
+                        self.send_stream_once(req, &mut tracked).await
+                    })
+                },
+                || !emitted.load(Ordering::Relaxed),
+            )
+            .await
     }
 }
 
@@ -1326,6 +1388,63 @@ mod tests {
                 .send_policy()
                 .max_attempts,
             3
+        );
+    }
+
+    /// The retry loop used to be pasted into every transport, so it could only
+    /// be exercised by standing one up. Driving it directly is the point of
+    /// moving it onto the policy.
+    ///
+    /// A `Retry-After: 0` keeps the backoff at zero, so this asserts the
+    /// attempt budget without waiting for one.
+    #[tokio::test]
+    async fn the_policy_drives_the_send_and_declines_to_replay_when_told() {
+        use std::sync::atomic::AtomicU32;
+
+        let policy = RetryPolicy {
+            max_attempts: 3,
+            cooldown_cap: Duration::from_secs(20),
+        };
+        let throttled = || LlmError::RateLimited {
+            retry_after: 0,
+            message: "slow down".into(),
+        };
+
+        let sent = AtomicU32::new(0);
+        let out: Result<()> = policy
+            .drive(|| {
+                Box::pin(async {
+                    sent.fetch_add(1, Ordering::Relaxed);
+                    Err(throttled())
+                })
+            })
+            .await;
+        assert!(out.is_err());
+        assert_eq!(
+            sent.load(Ordering::Relaxed),
+            RATE_LIMIT_MIN_ATTEMPTS,
+            "a rate limit gets its deeper budget through the driver"
+        );
+
+        // A stream that already handed deltas to its caller cannot be replayed,
+        // and the policy asks rather than assuming.
+        let sent = AtomicU32::new(0);
+        let out: Result<()> = policy
+            .drive_while(
+                || {
+                    Box::pin(async {
+                        sent.fetch_add(1, Ordering::Relaxed);
+                        Err(throttled())
+                    })
+                },
+                || false,
+            )
+            .await;
+        assert!(out.is_err());
+        assert_eq!(
+            sent.load(Ordering::Relaxed),
+            1,
+            "no replay once output escaped"
         );
     }
 

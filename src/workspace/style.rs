@@ -10,23 +10,12 @@ pub fn append_note(ws: &Workspace, note: &str) -> std::io::Result<()> {
         return Ok(());
     }
     let path = ws.style_md();
-    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let body = data_block::read_body(&path);
     let bullet = format!("- {note}");
-
-    let new = match existing.find("<!-- honya:data") {
-        Some(i) => {
-            let body = existing[..i].trim_end();
-            let block = &existing[i..];
-            format!("{body}\n{bullet}\n\n{block}")
-        }
-        None => {
-            let body = existing.trim_end();
-            if body.is_empty() {
-                format!("{bullet}\n")
-            } else {
-                format!("{body}\n{bullet}\n")
-            }
-        }
+    let body = if body.is_empty() {
+        bullet
+    } else {
+        format!("{body}\n{bullet}")
     };
-    data_block::atomic_write(&path, &new)
+    data_block::write_body(&path, &body)
 }

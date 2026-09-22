@@ -130,7 +130,7 @@ pub async fn run_prepass(
         ..ChatRequest::default()
     };
 
-    let (out, usage) =
+    let (out, mut usage) =
         chat_structured::<PrepassOut>(client, req, "prepass_result", prepass_schema(), 1).await?;
 
     // Preserve earlier-volume renderings; the prepass may only enrich the roster.
@@ -174,21 +174,22 @@ pub async fn run_prepass(
         }
         // The roster fills as this loop runs, so a nickname extracted from the
         // same sample as its full name can still be aligned onto it.
-        let alignment = match system_one {
-            Some(s1) => {
-                let roster = characters::load(ws);
-                let candidates = characters::alignment_candidates(&roster, &character);
-                crate::agents::entity_align::align(
-                    s1.backend.as_ref(),
-                    &s1.config,
-                    &character,
-                    &candidates,
-                )
-                .await
-                .map(|out| out.alignment)
-                .unwrap_or_default()
+        let aligning = system_one
+            .is_some_and(|s1| s1.is_on(crate::model::SystemOneFeature::EntityAlignment));
+        let alignment = if aligning {
+            let roster = characters::load(ws);
+            let candidates = characters::alignment_candidates(&roster, &character);
+            match crate::agents::entity_align::align(system_one, &character, &candidates).await {
+                // Seeding the roster can run one alignment per extracted
+                // character, so this is the pass's own spend, not a stray call.
+                Some(out) => {
+                    usage.add(&out.usage);
+                    out.alignment
+                }
+                None => characters::Alignment::default(),
             }
-            None => characters::Alignment::default(),
+        } else {
+            characters::Alignment::default()
         };
         // Best-effort: a single bad row must not sink the whole seed.
         if characters::upsert_aligned(ws, character, &alignment).is_ok() {

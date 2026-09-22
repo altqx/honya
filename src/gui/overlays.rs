@@ -427,9 +427,11 @@ fn export_panel(
                     .small(),
             );
             ui.add_space(4.0);
-            ui.checkbox(&mut st.formats[0], "Markdown (merged volume)");
-            ui.checkbox(&mut st.formats[1], "EPUB");
-            ui.checkbox(&mut st.formats[2], "DOCX");
+            // Rows come from `ExportFormat::ALL`, like the terminal's do, so
+            // the label beside a checkbox is the format that checkbox selects.
+            for (i, fmt) in crate::export::ExportFormat::ALL.iter().enumerate() {
+                ui.checkbox(&mut st.formats[i], fmt.label());
+            }
             ui.add_space(10.0);
             ui.horizontal(|ui| {
                 if ui.button("Cancel").clicked() {
@@ -437,12 +439,7 @@ fn export_panel(
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if primary_button(ui, pal, "Export").clicked() {
-                        use crate::export::ExportFormat;
-                        let formats: Vec<ExportFormat> = ExportFormat::ALL
-                            .iter()
-                            .zip(st.formats)
-                            .filter_map(|(f, on)| on.then_some(*f))
-                            .collect();
+                        let formats = st.selected_formats();
                         if !formats.is_empty() {
                             actions.push(Action::ExportVolume {
                                 vol: st.vol,
@@ -508,29 +505,22 @@ fn import_wizard(
         ui.set_width(560.0);
 
         // Step breadcrumb (append mode has only pick + import).
-        let steps: &[&str] = if st.append_to.is_some() {
-            &["Source", "Import"]
-        } else if st.lock_name {
-            &["Source", "Volume", "Synopsis", "Import"]
-        } else {
-            &["Source", "Name", "Title", "Volume", "Synopsis", "Import"]
-        };
-        let current = match (st.step, st.lock_name, st.append_to.is_some()) {
-            (ImportStep::Pick, _, _) => 0,
-            (_, _, true) => 1,
-            (ImportStep::Volume, true, _) => 1,
-            (ImportStep::Synopsis, true, _) => 2,
-            (_, true, _) => 3,
-            (s, false, _) => ImportStep::ALL
-                .iter()
-                .position(|x| *x == s)
-                .unwrap_or(0)
-                .min(steps.len() - 1),
-        };
+        // The rail shows only the steps this flow actually visits, and
+        // `ImportState` already decides which those are — the terminal's rail
+        // reads the same list. Re-deriving it here from string literals meant a
+        // flow that skipped a step in one front end could still show it in the
+        // other.
+        let steps = st.visible_steps();
         ui.horizontal(|ui| {
-            for (i, s) in steps.iter().enumerate() {
-                let color = if i == current { pal.accent } else { pal.ink_faint };
-                ui.label(RichText::new(*s).color(color).small());
+            for (i, step) in steps.iter().enumerate() {
+                let color = if *step == st.step {
+                    pal.accent
+                } else if *step < st.step {
+                    pal.ink_soft
+                } else {
+                    pal.ink_faint
+                };
+                ui.label(RichText::new(step.label()).color(color).small());
                 if i + 1 < steps.len() {
                     ui.label(RichText::new("→").color(pal.ink_faint).small());
                 }

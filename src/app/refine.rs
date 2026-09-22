@@ -954,7 +954,12 @@ impl RefineScreen {
         None
     }
 
-    pub fn handle_key(&mut self, key: KeyEvent, project: Option<&Project>) -> Action {
+    pub fn handle_key(
+        &mut self,
+        key: KeyEvent,
+        project: Option<&Project>,
+        acts: &[Act],
+    ) -> Action {
         if self.in_flight
             && key.modifiers.contains(KeyModifiers::CONTROL)
             && key.code == KeyCode::Char('c')
@@ -981,8 +986,7 @@ impl RefineScreen {
         }
         // Commands come from the table, ahead of the input, so a chord the
         // screen declares is never eaten by the field being typed into.
-        let acts = self.acts(project.is_some());
-        match action_table::hit(&acts, &key) {
+        match action_table::hit(acts, &key) {
             action_table::KeyHit::Run(id) => return self.run_action(id).unwrap_or(Action::None),
             action_table::KeyHit::Blocked => return Action::None,
             action_table::KeyHit::Miss => {}
@@ -1976,6 +1980,7 @@ impl RefineScreen {
         ui: &mut crate::ui::kit::Ui,
         area: Rect,
         has_project: bool,
+        acts: &[Act],
     ) {
         let theme: &Theme = ui.theme;
         let frame = ui.frame_count;
@@ -2012,8 +2017,7 @@ impl RefineScreen {
             .split(area);
         let band = rows[rows.len() - 2];
 
-        let acts = self.acts(has_project);
-        let toolbar = crate::ui::kit::toolbar::Toolbar::new(&acts).has_menu(true).render(
+        let toolbar = crate::ui::kit::toolbar::Toolbar::new(acts).has_menu(true).render(
             ui,
             Rect {
                 x: band.x + 1,
@@ -3470,6 +3474,13 @@ fn mention_candidates(project: Option<&Project>, q: &str) -> Vec<MentionCandidat
 mod tests {
     use super::*;
 
+    /// Press a key the way `App` does: resolve the table first, then dispatch
+    /// from it. The screen no longer builds its own.
+    fn press(s: &mut RefineScreen, k: KeyEvent, project: Option<&Project>) -> Action {
+        let acts = s.actions(project);
+        s.handle_key(k, project, &acts)
+    }
+
     #[test]
     fn parse_scope_extracts_chapters_and_resources() {
         let scope = parse_scope("fix @v1/c3 and update @glossary please");
@@ -3646,21 +3657,15 @@ mod tests {
         ];
         s.open_picker(sessions, "a".to_string());
         assert!(s.picker_open() && s.is_capturing());
-        let action = s.handle_key(
-            ratatui::crossterm::event::KeyEvent::new(
+        let action = press(&mut s, ratatui::crossterm::event::KeyEvent::new(
                 KeyCode::Down,
                 ratatui::crossterm::event::KeyModifiers::empty(),
-            ),
-            None,
-        );
+            ), None);
         assert!(matches!(action, Action::None));
-        let action = s.handle_key(
-            ratatui::crossterm::event::KeyEvent::new(
+        let action = press(&mut s, ratatui::crossterm::event::KeyEvent::new(
                 KeyCode::Enter,
                 ratatui::crossterm::event::KeyModifiers::empty(),
-            ),
-            None,
-        );
+            ), None);
         match action {
             Action::RefineSwitchSession { id } => assert_eq!(id, "b"),
             other => panic!("expected switch to b, got {other:?}"),
@@ -3895,8 +3900,9 @@ mod tests {
             s.on_app_event(&tool_invoked(&format!("c{n}"), "read_chapter", "ch1"));
         }
 
+        let acts = s.acts(true);
         let (_, zones) =
-            crate::ui::kit::ctx::draw_test(100, 40, |ui, area| s.render(ui, area, true));
+            crate::ui::kit::ctx::draw_test(100, 40, |ui, area| s.render(ui, area, true, &acts));
 
         for i in 0..s.blocks.len() {
             let id = crate::ui::kit::ZoneId::new(crate::ui::kit::ZoneKind::Row, i as u32);
@@ -3920,8 +3926,9 @@ mod tests {
     fn a_click_on_a_folded_block_also_opens_it() {
         let mut s = RefineScreen::new();
         s.on_app_event(&tool_invoked("c0", "grep_chapter", "先輩"));
+        let acts = s.acts(true);
         let (_, zones) =
-            crate::ui::kit::ctx::draw_test(100, 20, |ui, area| s.render(ui, area, true));
+            crate::ui::kit::ctx::draw_test(100, 20, |ui, area| s.render(ui, area, true, &acts));
         let rect = zones
             .rect_of(crate::ui::kit::ZoneId::new(crate::ui::kit::ZoneKind::Row, 0))
             .expect("the tool block registered a zone");
@@ -3960,14 +3967,14 @@ mod tests {
 
         // From the bottom, back up through the three things you said.
         s.selected = None;
-        s.handle_key(shift(KeyCode::Up), None);
+        press(&mut s, shift(KeyCode::Up), None);
         assert_eq!(s.selected, Some(mine[2]));
-        s.handle_key(shift(KeyCode::Up), None);
+        press(&mut s, shift(KeyCode::Up), None);
         assert_eq!(s.selected, Some(mine[1]));
-        s.handle_key(shift(KeyCode::Down), None);
+        press(&mut s, shift(KeyCode::Down), None);
         assert_eq!(s.selected, Some(mine[2]));
         // ...and it stops rather than wrapping round.
-        s.handle_key(shift(KeyCode::Down), None);
+        press(&mut s, shift(KeyCode::Down), None);
         assert_eq!(s.selected, Some(mine[2]));
     }
 
@@ -4097,14 +4104,14 @@ mod tests {
 
         // Newest first, so the selection starts on the most recent run.
         assert_eq!(s.task_rows(), vec![2, 1, 0]);
-        s.handle_key(key(KeyCode::Down), None);
+        press(&mut s, key(KeyCode::Down), None);
         assert_eq!(s.tasks, Some(1));
-        s.handle_key(typed('j'), None);
+        press(&mut s, typed('j'), None);
         assert_eq!(s.tasks, Some(2));
-        s.handle_key(typed('j'), None);
+        press(&mut s, typed('j'), None);
         assert_eq!(s.tasks, Some(2), "the list stops rather than wrapping");
 
-        s.handle_key(key(KeyCode::Esc), None);
+        press(&mut s, key(KeyCode::Esc), None);
         assert!(s.tasks.is_none());
         assert!(!s.owns_keyboard());
     }
@@ -4113,11 +4120,11 @@ mod tests {
     fn hiding_completed_runs_leaves_the_running_ones() {
         let mut s = with_runs();
         s.toggle_tasks();
-        s.handle_key(typed('h'), None);
+        press(&mut s, typed('h'), None);
         assert!(s.tasks_hide_done);
         assert_eq!(s.task_rows(), vec![2, 0], "only the running two");
         assert_eq!(s.tasks, Some(0), "and the selection is valid again");
-        s.handle_key(typed('h'), None);
+        press(&mut s, typed('h'), None);
         assert_eq!(s.task_rows(), vec![2, 1, 0]);
     }
 
@@ -4126,13 +4133,13 @@ mod tests {
         let mut s = with_runs();
         s.toggle_tasks();
         // Row 0 is `call_2`, which is running.
-        match s.handle_key(typed('x'), None) {
+        match press(&mut s, typed('x'), None) {
             Action::RefineCancelSubagent { id } => assert_eq!(id, "call_2"),
             other => panic!("expected a cancel, got {other:?}"),
         }
         // Row 1 is `call_1`, which already finished — nothing to stop.
         s.tasks = Some(1);
-        assert!(matches!(s.handle_key(typed('x'), None), Action::None));
+        assert!(matches!(press(&mut s, typed('x'), None), Action::None));
     }
 
     #[test]
@@ -4150,17 +4157,17 @@ mod tests {
 
         s.focused = false;
         s.selected = Some(i);
-        s.handle_key(key(KeyCode::Enter), None);
+        press(&mut s, key(KeyCode::Enter), None);
         assert_eq!(s.child.as_deref(), Some("call_0"));
         assert!(s.child_transcript("call_0").contains("read_chapter"));
         assert!(s.owns_keyboard());
 
         // Read-only, and ⌃C stops that child rather than the turn.
-        match s.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL), None) {
+        match press(&mut s, KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL), None) {
             Action::RefineCancelSubagent { id } => assert_eq!(id, "call_0"),
             other => panic!("expected a cancel, got {other:?}"),
         }
-        s.handle_key(typed('q'), None);
+        press(&mut s, typed('q'), None);
         assert!(s.child.is_none());
     }
 
@@ -4332,13 +4339,10 @@ mod tests {
         s.scroll = 3;
         s.follow = false;
 
-        let action = s.handle_key(
-            ratatui::crossterm::event::KeyEvent::new(
+        let action = press(&mut s, ratatui::crossterm::event::KeyEvent::new(
                 KeyCode::End,
                 ratatui::crossterm::event::KeyModifiers::empty(),
-            ),
-            None,
-        );
+            ), None);
 
         assert!(matches!(action, Action::None));
         assert!(!s.follow);
@@ -4355,13 +4359,10 @@ mod tests {
         s.scroll = 2;
         s.follow = false;
 
-        let action = s.handle_key(
-            ratatui::crossterm::event::KeyEvent::new(
+        let action = press(&mut s, ratatui::crossterm::event::KeyEvent::new(
                 KeyCode::End,
                 ratatui::crossterm::event::KeyModifiers::CONTROL,
-            ),
-            None,
-        );
+            ), None);
 
         assert!(matches!(action, Action::None));
         assert!(s.follow);
@@ -4374,13 +4375,10 @@ mod tests {
         let mut s = RefineScreen::new();
         s.begin_turn();
 
-        let action = s.handle_key(
-            ratatui::crossterm::event::KeyEvent::new(
+        let action = press(&mut s, ratatui::crossterm::event::KeyEvent::new(
                 KeyCode::Char('c'),
                 ratatui::crossterm::event::KeyModifiers::CONTROL,
-            ),
-            None,
-        );
+            ), None);
 
         assert!(matches!(action, Action::RefineCancel));
     }
@@ -4391,13 +4389,10 @@ mod tests {
         s.begin_turn();
         assert!(s.focused);
 
-        let action = s.handle_key(
-            ratatui::crossterm::event::KeyEvent::new(
+        let action = press(&mut s, ratatui::crossterm::event::KeyEvent::new(
                 KeyCode::Esc,
                 ratatui::crossterm::event::KeyModifiers::empty(),
-            ),
-            None,
-        );
+            ), None);
 
         assert!(matches!(action, Action::None));
         assert!(!s.focused);
@@ -4587,7 +4582,7 @@ mod tests {
         let mut s = RefineScreen::new();
         s.on_app_event(&ask(vec![q("Which rendering?", &[])]));
         for c in "ทาคาฮาชิ".chars() {
-            s.handle_key(typed(c), None);
+            press(&mut s, typed(c), None);
         }
         assert!(s.input.is_empty(), "the chat buffer must stay untouched");
         let Some(RefinePending::Ask(sess)) = s.pending.front() else {
@@ -4602,7 +4597,7 @@ mod tests {
     fn a_slash_does_not_open_the_command_popup_while_a_question_is_up() {
         let mut s = RefineScreen::new();
         s.on_app_event(&ask(vec![q("Which rendering?", &[])]));
-        s.handle_key(typed('/'), None);
+        press(&mut s, typed('/'), None);
         assert!(
             matches!(s.popup, Popup::None),
             "a blocking question owns the keyboard"
@@ -4621,13 +4616,13 @@ mod tests {
         ]));
 
         // First question: pick the second option, which advances.
-        s.handle_key(key(KeyCode::Down), None);
-        assert!(matches!(s.handle_key(key(KeyCode::Enter), None), Action::None));
+        press(&mut s, key(KeyCode::Down), None);
+        assert!(matches!(press(&mut s, key(KeyCode::Enter), None), Action::None));
         // Second question: type instead of picking.
         for c in "only for elders".chars() {
-            s.handle_key(typed(c), None);
+            press(&mut s, typed(c), None);
         }
-        let action = s.handle_key(key(KeyCode::Enter), None);
+        let action = press(&mut s, key(KeyCode::Enter), None);
         let Action::RefineRespondInteraction { id, answer } = action else {
             panic!("the last question should submit, got {action:?}");
         };
@@ -4644,8 +4639,8 @@ mod tests {
     fn arrows_revisit_an_earlier_question_without_losing_its_answer() {
         let mut s = RefineScreen::new();
         s.on_app_event(&ask(vec![q("One?", &["a", "b"]), q("Two?", &["c", "d"])]));
-        s.handle_key(key(KeyCode::Enter), None);
-        s.handle_key(key(KeyCode::Left), None);
+        press(&mut s, key(KeyCode::Enter), None);
+        press(&mut s, key(KeyCode::Left), None);
 
         let Some(RefinePending::Ask(sess)) = s.pending.front() else {
             panic!("card gone");
@@ -4667,9 +4662,9 @@ mod tests {
         assert_eq!(s.pending.len(), 2);
 
         for c in "one".chars() {
-            s.handle_key(typed(c), None);
+            press(&mut s, typed(c), None);
         }
-        let first = s.handle_key(key(KeyCode::Enter), None);
+        let first = press(&mut s, key(KeyCode::Enter), None);
         assert!(
             matches!(first, Action::RefineRespondInteraction { id: 7, .. }),
             "the front card answers first, got {first:?}"
@@ -4691,18 +4686,18 @@ mod tests {
         let mut s = RefineScreen::new();
         s.on_app_event(&ask(vec![q("Which?", &[])]));
         assert!(
-            matches!(s.handle_key(key(KeyCode::Esc), None), Action::RefineRespondInteraction { answer, .. } if answer.is_empty()),
+            matches!(press(&mut s, key(KeyCode::Esc), None), Action::RefineRespondInteraction { answer, .. } if answer.is_empty()),
             "an untouched card goes on the first Esc"
         );
 
         s.on_app_event(&ask(vec![q("Which?", &[])]));
-        s.handle_key(typed('x'), None);
+        press(&mut s, typed('x'), None);
         assert!(
-            matches!(s.handle_key(key(KeyCode::Esc), None), Action::None),
+            matches!(press(&mut s, key(KeyCode::Esc), None), Action::None),
             "a typed answer is not thrown away by one keystroke"
         );
         assert!(matches!(
-            s.handle_key(key(KeyCode::Esc), None),
+            press(&mut s, key(KeyCode::Esc), None),
             Action::RefineRespondInteraction { .. }
         ));
     }
@@ -4713,12 +4708,12 @@ mod tests {
     fn a_typed_answer_beats_a_picked_option() {
         let mut s = RefineScreen::new();
         s.on_app_event(&ask(vec![q("Which?", &["a", "b"])]));
-        s.handle_key(key(KeyCode::Down), None);
-        s.handle_key(key(KeyCode::Down), None);
+        press(&mut s, key(KeyCode::Down), None);
+        press(&mut s, key(KeyCode::Down), None);
         for c in "neither".chars() {
-            s.handle_key(typed(c), None);
+            press(&mut s, typed(c), None);
         }
-        let Action::RefineRespondInteraction { answer, .. } = s.handle_key(key(KeyCode::Enter), None)
+        let Action::RefineRespondInteraction { answer, .. } = press(&mut s, key(KeyCode::Enter), None)
         else {
             panic!("should submit");
         };
@@ -4738,17 +4733,17 @@ mod tests {
             options: vec!["1".into(), "2".into(), "3".into()],
             multiple: true,
         }]));
-        s.handle_key(key(KeyCode::Enter), None);
-        s.handle_key(key(KeyCode::Down), None);
-        s.handle_key(key(KeyCode::Down), None);
-        s.handle_key(key(KeyCode::Enter), None);
+        press(&mut s, key(KeyCode::Enter), None);
+        press(&mut s, key(KeyCode::Down), None);
+        press(&mut s, key(KeyCode::Down), None);
+        press(&mut s, key(KeyCode::Enter), None);
 
         let Some(RefinePending::Ask(sess)) = s.pending.front() else {
             panic!("a multi-select card must not submit on the first Enter");
         };
         assert_eq!(sess.answers[0].picked, vec![0, 2]);
         let Action::RefineRespondInteraction { answer, .. } =
-            s.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL), None)
+            press(&mut s, KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL), None)
         else {
             panic!("^s should send");
         };
@@ -4769,8 +4764,8 @@ mod tests {
             summary: "rewrite ch.3".into(),
             diff,
         });
-        s.handle_key(key(KeyCode::Down), None);
-        s.handle_key(key(KeyCode::PageDown), None);
+        press(&mut s, key(KeyCode::Down), None);
+        press(&mut s, key(KeyCode::PageDown), None);
         let Some(RefinePending::Approval { scroll, .. }) = s.pending.front() else {
             panic!("approval gone");
         };

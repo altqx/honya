@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 
 use super::Usage;
 use super::client::{
-    LlmError, Result, RetryPolicy, parse_error_envelope, parse_retry_after, retry_after_hint,
+    LlmError, Result, RetryPolicy, parse_error_envelope, parse_retry_after,
 };
 
 pub const OPENROUTER_DECISIONS_URL: &str = "https://openrouter.ai/api/alpha/decisions";
@@ -193,6 +193,51 @@ pub struct SystemOneHandle {
     pub config: crate::model::SystemOne,
 }
 
+/// The largest state a judgement will send, in characters.
+///
+/// Jev bills and truncates by token, and this sits under that at roughly one
+/// token per character — conservative for Japanese and Thai alike. A judgement
+/// whose state does not fit defers to its deterministic path rather than being
+/// asked about a truncated passage.
+pub const MAX_STATE_CHARS: usize = 24_000;
+
+/// Which switch governs a judgement.
+///
+/// Almost all of them are a per-judgement toggle under the master switch. The
+/// review gate is the exception: it has a tri-state mode of its own, because
+/// "screen before the reviewer" and "replace the reviewer" are different
+/// answers rather than degrees of one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Switch {
+    Feature(crate::model::SystemOneFeature),
+    ReviewGate,
+    /// Already decided, per question.
+    ///
+    /// The audit judge batches checks that answer to different toggles into one
+    /// request — the state is what costs — so it filters its questions by each
+    /// check's own feature before asking. Those filters go through
+    /// [`SystemOne::feature`](crate::model::SystemOne::feature), which ANDs in
+    /// the master switch, so an off switch still leaves nothing to ask and
+    /// [`SystemOneHandle::ask`] declines on the empty batch.
+    PerQuestion,
+}
+
+impl From<crate::model::SystemOneFeature> for Switch {
+    fn from(f: crate::model::SystemOneFeature) -> Self {
+        Switch::Feature(f)
+    }
+}
+
+/// One batch of answers, with what asking for them cost.
+///
+/// Usage is part of the result rather than something a judgement may choose to
+/// report, because three of them used to drop it and their spend never reached
+/// the run's totals.
+pub struct Judgement {
+    pub answers: BTreeMap<String, Answer>,
+    pub usage: Usage,
+}
+
 impl SystemOneHandle {
     pub fn new(
         backend: Option<std::sync::Arc<dyn DecisionsBackend>>,
@@ -201,6 +246,65 @@ impl SystemOneHandle {
         Some(Self {
             backend: backend?,
             config: config.clone(),
+        })
+    }
+
+    /// Whether `gate`'s judgement is switched on.
+    pub fn is_on(&self, switch: impl Into<Switch>) -> bool {
+        match switch.into() {
+            Switch::Feature(f) => self.config.feature(f),
+            Switch::ReviewGate => self.config.review_gate_mode().is_on(),
+            Switch::PerQuestion => true,
+        }
+    }
+
+    /// The confidence a judgement must clear before it is acted on.
+    pub fn confidence_threshold(&self) -> f64 {
+        self.config.confidence_threshold()
+    }
+
+    /// Whether a state is small enough to send.
+    ///
+    /// Exposed because a judgement that can shrink its state — the spine
+    /// classifier trims its excerpts — needs to know the budget it is trimming
+    /// towards. [`Self::ask`] checks it again, so this is an optimisation and
+    /// never the only guard.
+    pub fn state_fits(state: &serde_json::Value) -> bool {
+        state.to_string().chars().count() <= MAX_STATE_CHARS
+    }
+
+    /// Ask one batch of typed questions, or decline to.
+    ///
+    /// `None` is the single "use the deterministic path" answer, and it covers
+    /// every reason there is to: the judgement is switched off, there is
+    /// nothing to ask, the state is too large to send, or the backend failed.
+    /// Each of the five judgements spelled that ladder out for itself before,
+    /// down to its own copy of the character budget.
+    ///
+    /// A judgement still owns what it asks and what it does with a missing or
+    /// unconfident answer — this can only ever cost a call, never change a
+    /// verdict.
+    pub async fn ask(
+        &self,
+        switch: impl Into<Switch>,
+        state: serde_json::Value,
+        questions: BTreeMap<String, Question>,
+    ) -> Option<Judgement> {
+        if !self.is_on(switch) || questions.is_empty() || !Self::state_fits(&state) {
+            return None;
+        }
+        let resp = self
+            .backend
+            .decide(&DecisionsRequest {
+                model: self.config.model.clone(),
+                state,
+                questions,
+            })
+            .await
+            .ok()?;
+        Some(Judgement {
+            answers: resp.answers,
+            usage: resp.usage.to_usage(),
         })
     }
 }
@@ -281,16 +385,10 @@ impl DecisionsClient {
 #[async_trait]
 impl DecisionsBackend for DecisionsClient {
     async fn decide(&self, req: &DecisionsRequest) -> Result<DecisionsResponse> {
-        let mut sent = 0u32;
-        loop {
-            sent += 1;
-            match self.send_once(req).await {
-                Err(e) if self.retry.should_retry(&e, sent) => {
-                    tokio::time::sleep(self.retry.backoff(sent, retry_after_hint(&e))).await;
-                }
-                other => return other,
-            }
-        }
+        // `self.retry` was already clamped to `MAX_SEND_ATTEMPTS` at
+        // construction, so the shared driver honours this route's shorter
+        // budget without knowing about it.
+        self.retry.drive(|| Box::pin(self.send_once(req))).await
     }
 }
 
@@ -397,5 +495,173 @@ mod tests {
         // `confidence` is optional in the schema; absent must not read as certain.
         let a: Answer = serde_json::from_str(r#"{"type":"choice","choice":"approve"}"#).unwrap();
         assert_eq!(a.confidence(), 0.0);
+    }
+
+    // ─── ask: the one place a judgement decides whether to ask at all ───
+
+    struct FakeBackend {
+        calls: std::sync::atomic::AtomicUsize,
+        fail: bool,
+    }
+
+    impl FakeBackend {
+        fn ok() -> Self {
+            Self {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                fail: false,
+            }
+        }
+        fn broken() -> Self {
+            Self {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                fail: true,
+            }
+        }
+        fn calls(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::Relaxed)
+        }
+    }
+
+    #[async_trait]
+    impl DecisionsBackend for FakeBackend {
+        async fn decide(&self, req: &DecisionsRequest) -> Result<DecisionsResponse> {
+            self.calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if self.fail {
+                return Err(LlmError::Api {
+                    status: 503,
+                    message: "down".to_string(),
+                });
+            }
+            Ok(DecisionsResponse {
+                model: "typesafe/jev-1.13".to_string(),
+                answers: req
+                    .questions
+                    .keys()
+                    .map(|k| (k.clone(), Answer::Noul { noul: 0.9 }))
+                    .collect(),
+                usage: DecisionsUsage {
+                    input_tokens: 100,
+                    output_tokens: 10,
+                    cost: Some(0.00001),
+                },
+            })
+        }
+    }
+
+    fn handle(backend: FakeBackend, audit: bool) -> (SystemOneHandle, std::sync::Arc<FakeBackend>) {
+        let backend = std::sync::Arc::new(backend);
+        let handle = SystemOneHandle {
+            backend: backend.clone(),
+            config: crate::model::SystemOne {
+                enabled: true,
+                audit,
+                provider: crate::model::DecisionsProvider::OpenRouter,
+                model: "typesafe/jev-1.13".to_string(),
+                min_confidence: 0.8,
+                ..crate::model::SystemOne::default()
+            },
+        };
+        (handle, backend)
+    }
+
+    fn one_question() -> BTreeMap<String, Question> {
+        BTreeMap::from([("q0".to_string(), Question::noul("Is it so?"))])
+    }
+
+    #[tokio::test]
+    async fn an_answered_batch_reports_what_it_cost() {
+        let (h, b) = handle(FakeBackend::ok(), true);
+        let out = h
+            .ask(
+                crate::model::SystemOneFeature::Audit,
+                serde_json::json!({ "passage": "猫" }),
+                one_question(),
+            )
+            .await
+            .expect("a live backend answers");
+        assert_eq!(out.answers["q0"].as_noul(), Some(0.9));
+        assert_eq!(out.usage.total_tokens, 110, "usage rides with the answers");
+        assert_eq!(b.calls(), 1);
+    }
+
+    /// The five reasons a judgement declines were written out in each of the
+    /// five modules. They live here now, so this is where they are pinned.
+    #[tokio::test]
+    async fn every_reason_to_decline_costs_no_call() {
+        let state = serde_json::json!({ "passage": "猫" });
+
+        let (off, b) = handle(FakeBackend::ok(), false);
+        assert!(
+            off.ask(
+                crate::model::SystemOneFeature::Audit,
+                state.clone(),
+                one_question()
+            )
+            .await
+            .is_none(),
+            "feature off"
+        );
+        assert_eq!(b.calls(), 0);
+
+        let (on, b) = handle(FakeBackend::ok(), true);
+        assert!(
+            on.ask(
+                crate::model::SystemOneFeature::Audit,
+                state.clone(),
+                BTreeMap::new()
+            )
+            .await
+            .is_none(),
+            "nothing to ask"
+        );
+        assert_eq!(b.calls(), 0);
+
+        let huge = serde_json::json!({ "passage": "猫".repeat(MAX_STATE_CHARS) });
+        assert!(!SystemOneHandle::state_fits(&huge));
+        assert!(
+            on.ask(
+                crate::model::SystemOneFeature::Audit,
+                huge,
+                one_question()
+            )
+            .await
+            .is_none(),
+            "state too large to send"
+        );
+        assert_eq!(b.calls(), 0, "an oversized state is never sent");
+
+        let (broken, b) = handle(FakeBackend::broken(), true);
+        assert!(
+            broken
+                .ask(
+                    crate::model::SystemOneFeature::Audit,
+                    state,
+                    one_question()
+                )
+                .await
+                .is_none(),
+            "backend error"
+        );
+        assert_eq!(b.calls(), 1, "the failure was a real attempt");
+    }
+
+    /// The master switch turns every judgement off at once, whatever the
+    /// per-feature toggle says.
+    #[tokio::test]
+    async fn the_master_switch_overrides_a_feature_that_is_on() {
+        let (mut h, b) = handle(FakeBackend::ok(), true);
+        h.config.enabled = false;
+        assert!(!h.is_on(crate::model::SystemOneFeature::Audit));
+        assert!(
+            h.ask(
+                crate::model::SystemOneFeature::Audit,
+                serde_json::json!({ "passage": "猫" }),
+                one_question()
+            )
+            .await
+            .is_none()
+        );
+        assert_eq!(b.calls(), 0);
     }
 }

@@ -186,6 +186,18 @@ pub enum Action {
     /// Re-discover importable source files while the import wizard is open (its
     /// pick step's `r`), so a freshly-dropped file shows up without reopening.
     RescanImports,
+    /// Re-read the shelf from disk: loose source files and the project list.
+    ///
+    /// Touches disk, so it belongs on this side of the funnel rather than in a
+    /// render pass — and going through `apply` is what lets the projection see
+    /// that the shelf changed.
+    RescanShelf,
+    /// Clear the toast line.
+    ///
+    /// An `Action` rather than a bare assignment because three front-end sites
+    /// and the key router each did it themselves, which is three too many
+    /// places for one field.
+    DismissToast,
     /// Export the given volume of the open project to the chosen deliverable
     /// formats (merged Markdown / EPUB / DOCX), written under `<root>/exports/`.
     ExportVolume {
@@ -472,6 +484,9 @@ pub struct App {
     pub frame: u64,
     pub tx: EventTx,
     pub cfg: AppConfig,
+    /// User keybindings, folded into `screen_actions` so every reader of the
+    /// table sees the rebound key.
+    pub bindings: crate::app::keys::Bindings,
     pub theme: Theme,
     pub projects: Vec<Project>,
     pub active: Option<ActiveProject>,
@@ -609,6 +624,11 @@ impl App {
             frame: 0,
             tx,
             cfg,
+            // Defaults here, loaded by the caller: `config_dir()` honours
+            // `XDG_CONFIG_HOME` even under `cfg(test)`, so reading the file in
+            // the constructor would make every test that builds an `App`
+            // depend on whatever the developer has bound.
+            bindings: crate::app::keys::Bindings::default(),
             theme,
             projects,
             active: None,
@@ -2485,10 +2505,7 @@ impl App {
                 }
             }
             ZoneKind::RemoteChip => Some(Action::show_overlay(Overlay::settings_account())),
-            ZoneKind::ToastBody | ZoneKind::ToastClose => {
-                self.toast = None;
-                Some(Action::None)
-            }
+            ZoneKind::ToastBody | ZoneKind::ToastClose => Some(Action::DismissToast),
             ZoneKind::Hint => match id.index as usize {
                 chrome::HELP_HINT => Some(Action::show_overlay(Overlay::Help(0))),
                 chrome::PALETTE_HINT => Some(Action::show_overlay(Overlay::palette())),
@@ -2665,8 +2682,7 @@ impl App {
                 return Action::show_overlay(Overlay::Log(0));
             }
             KeyCode::Esc | KeyCode::Backspace if self.toast.is_some() => {
-                self.toast = None;
-                return Action::None;
+                return Action::DismissToast;
             }
             _ => {}
         }
@@ -2702,8 +2718,13 @@ impl App {
     /// One call site for all six screens: the key router, the toolbar, the
     /// context menu, the footer and the help overlay all read this, which is
     /// what stops any two of them disagreeing about what a key does.
+    ///
+    /// User bindings are folded in *here* rather than by the caller, because a
+    /// caller that forgets leaves the rebound key working in one surface and
+    /// not the others — which is exactly what happened while `Bindings::apply`
+    /// was the caller's job and only one of eight call sites did it.
     pub(crate) fn screen_actions(&self) -> Vec<Act> {
-        match self.screen {
+        let mut acts = match self.screen {
             Screen::Shelf => self.shelf.actions(&self.projects),
             Screen::Project => self.project.actions(self.active.as_ref()),
             Screen::Translate => self.translate.actions(),
@@ -2714,7 +2735,9 @@ impl App {
             // Refine is per-project: it offers nothing until one is open.
             Screen::Refine if self.active.is_none() => Vec::new(),
             Screen::Refine => self.refine.actions(self.active.as_ref().map(|a| &a.project)),
-        }
+        };
+        self.bindings.apply(self.screen, &mut acts);
+        acts
     }
 
     /// The palette, with what exists added to what is always there.
@@ -2972,21 +2995,29 @@ impl App {
     }
 
     fn route_to_screen(&mut self, k: KeyEvent) -> Action {
+        // Resolved once, here, so the screen dispatches from the same table the
+        // toolbar prints and the palette lists — user bindings included. A
+        // screen that rebuilt its own would answer to the original key as well
+        // as the rebound one.
+        let acts = self.screen_actions();
         match self.screen {
-            Screen::Shelf => self
-                .shelf
-                .handle_key(k, &self.projects, self.cfg.preferred_language),
-            Screen::Project => self.project.handle_key(k, self.active.as_ref()),
-            Screen::Translate => self.translate.handle_key(k),
-            Screen::Reader => self.reader.handle_key(k),
-            Screen::Lexicon => self
-                .lexicon
-                .handle_key(k, self.active.as_ref().map(|a| &a.workspace)),
+            Screen::Shelf => {
+                self.shelf
+                    .handle_key(k, &self.projects, self.cfg.preferred_language, &acts)
+            }
+            Screen::Project => self.project.handle_key(k, self.active.as_ref(), &acts),
+            Screen::Translate => self.translate.handle_key(k, &acts),
+            Screen::Reader => self.reader.handle_key(k, &acts),
+            Screen::Lexicon => {
+                self.lexicon
+                    .handle_key(k, self.active.as_ref().map(|a| &a.workspace), &acts)
+            }
             // Refine is per-project: ignore keys until a project is open.
             Screen::Refine if self.active.is_none() => Action::None,
-            Screen::Refine => self
-                .refine
-                .handle_key(k, self.active.as_ref().map(|a| &a.project)),
+            Screen::Refine => {
+                self.refine
+                    .handle_key(k, self.active.as_ref().map(|a| &a.project), &acts)
+            }
         }
     }
 
@@ -3019,6 +3050,18 @@ impl App {
             Action::None => {}
             Action::Quit => {
                 self.running = false;
+            }
+            Action::RescanShelf => {
+                let root = working_root();
+                self.shelf.rescan(&root);
+                self.projects = crate::workspace::scan::scan_projects(&root);
+                // Nothing downstream folds an event for this, and the snapshot
+                // reads `projects`, so a watching dashboard would otherwise
+                // stay on the old shelf until some unrelated event moved it.
+                self.push_remote_snapshot();
+            }
+            Action::DismissToast => {
+                self.toast = None;
             }
             Action::FocusNext => {
                 self.focus.next(&self.zones);
@@ -5755,7 +5798,7 @@ impl App {
                 self.hover,
                 frame_count,
             );
-            self.overlay.render(&mut ui, area, &self.cfg, &self.log);
+            self.overlay.render(&mut ui, area, &self.log);
         }
 
         // Settle focus and hover against what was actually drawn. A list can
@@ -5781,6 +5824,9 @@ impl App {
         let foreign = matches!(self.screen, Screen::Shelf)
             .then(|| self.foreign_busy_dirs())
             .unwrap_or_default();
+        // Resolved before `ui` borrows the registry, and owned, so the toolbar
+        // a screen draws is the same table its keys dispatch from.
+        let acts = self.screen_actions();
         let mut ui = Ui::new(
             f,
             &mut self.zones,
@@ -5791,17 +5837,29 @@ impl App {
             self.frame,
         );
         match self.screen {
-            Screen::Shelf => self.shelf.render(&mut ui, body, &self.projects, &foreign),
-            Screen::Project => self.project.render(&mut ui, body, self.active.as_ref()),
+            Screen::Shelf => {
+                self.shelf
+                    .render(&mut ui, body, &self.projects, &foreign, &acts)
+            }
+            Screen::Project => {
+                self.project
+                    .render(&mut ui, body, self.active.as_ref(), &acts)
+            }
             Screen::Translate => {
-                self.translate.render(&mut ui, body, self.cfg.service_tier)
+                self.translate
+                    .render(&mut ui, body, self.cfg.service_tier, &acts)
             }
-            Screen::Reader => self.reader.render(&mut ui, body),
-            Screen::Lexicon => {
-                self.lexicon
-                    .render(&mut ui, body, self.active.as_ref().map(|a| &a.workspace))
+            Screen::Reader => self.reader.render(&mut ui, body, &acts),
+            Screen::Lexicon => self.lexicon.render(
+                &mut ui,
+                body,
+                self.active.as_ref().map(|a| &a.workspace),
+                &acts,
+            ),
+            Screen::Refine => {
+                self.refine
+                    .render(&mut ui, body, self.active.is_some(), &acts)
             }
-            Screen::Refine => self.refine.render(&mut ui, body, self.active.is_some()),
         }
     }
 
@@ -6561,9 +6619,11 @@ async fn prepare_epub_import(
     // per-publisher thresholds only guess at what this answers directly.
     let roles = match crate::epub::judge::classify_spine(system_one, &docs).await {
         Some(out) => {
+            // An import is not a run, so there is no usage accumulator to fold
+            // into here; the log line is where this spend is accounted for.
             tx.send(AppEvent::Log {
                 level: LogLevel::Info,
-                msg: out.summary,
+                msg: format!("{} ({} tok)", out.summary, out.usage.total_tokens),
             });
             out.roles
         }
@@ -7017,6 +7077,32 @@ mod mouse_tests {
     fn render(app: &mut App, w: u16, h: u16) {
         let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
         term.draw(|f| app.render(f)).unwrap();
+    }
+
+    /// `route_key` decides what a key means; `apply` is what changes anything.
+    ///
+    /// Toast dismissal used to clear the field inside the router and return
+    /// `Action::None`, so the one state change a keystroke made was the one the
+    /// funnel never saw — and the same three lines were repeated in the GUI.
+    #[test]
+    fn dismissing_a_toast_is_decided_by_the_router_and_done_by_apply() {
+        for key in [KeyCode::Esc, KeyCode::Backspace] {
+            let mut app = app();
+            app.toast = Some(Toast::info("something happened"));
+
+            let action = app.route_key(KeyEvent::new(key, KeyModifiers::empty()));
+            assert!(
+                matches!(action, Action::DismissToast),
+                "{key:?} should resolve to an action"
+            );
+            assert!(
+                app.toast.is_some(),
+                "routing must not have cleared it on its own"
+            );
+
+            app.apply(action);
+            assert!(app.toast.is_none(), "apply is what clears it");
+        }
     }
 
     fn ev(kind: MouseEventKind, col: u16, row: u16) -> MouseEvent {
@@ -7648,6 +7734,26 @@ mod remote_tests {
             }
         }
         assert!(saw_log, "a Log event should project a Log delta");
+    }
+
+    /// Routing the rescan through `apply` was only half of it: the projection
+    /// is driven by folded events, and this action folds none, so a watching
+    /// dashboard stayed on the old shelf until something unrelated moved it.
+    #[test]
+    fn rescanning_the_shelf_publishes_it_to_a_watching_dashboard() {
+        let mut app = app();
+        let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel::<RemoteOutbound>();
+        app.remote_out = Some(out_tx);
+
+        app.apply(Action::RescanShelf);
+
+        let mut saw_snapshot = false;
+        while let Ok(msg) = out_rx.try_recv() {
+            if matches!(msg, RemoteOutbound::Snapshot(_)) {
+                saw_snapshot = true;
+            }
+        }
+        assert!(saw_snapshot, "the shelf changed and nobody was told");
     }
 
     #[test]

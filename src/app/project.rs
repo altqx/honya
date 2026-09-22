@@ -194,7 +194,12 @@ impl ProjectScreen {
         self.collapsed.clear();
     }
 
-    pub fn handle_key(&mut self, key: KeyEvent, active: Option<&ActiveProject>) -> Action {
+    pub fn handle_key(
+        &mut self,
+        key: KeyEvent,
+        active: Option<&ActiveProject>,
+        acts: &[Act],
+    ) -> Action {
         let Some(active) = active else {
             return Action::None;
         };
@@ -206,8 +211,7 @@ impl ProjectScreen {
 
         // Commands come from the table; what is left here is navigation —
         // moving the cursor, stepping between the panels, folding volumes.
-        let acts = self.actions(Some(active));
-        let action = match action_table::hit(&acts, &key) {
+        let action = match action_table::hit(acts, &key) {
             action_table::KeyHit::Run(id) => {
                 self.run(id, Some(active)).unwrap_or(Action::None)
             }
@@ -564,6 +568,7 @@ impl ProjectScreen {
         ui: &mut crate::ui::kit::Ui,
         area: Rect,
         active: Option<&ActiveProject>,
+        acts: &[Act],
     ) {
         let Some(active) = active else {
             let theme: &Theme = ui.theme;
@@ -588,8 +593,7 @@ impl ProjectScreen {
             .split(panes[2]);
         self.side_area = cols[1];
 
-        let acts = self.actions(Some(active));
-        crate::ui::kit::toolbar::Toolbar::new(&acts).has_menu(true).render(
+        crate::ui::kit::toolbar::Toolbar::new(acts).has_menu(true).render(
             ui,
             Rect {
                 x: panes[1].x + 1,
@@ -609,7 +613,7 @@ impl ProjectScreen {
         if let Some(sel) = self.tree.selected()
             && let Some(rect) = ui.zones.rect_of(crate::ui::kit::ZoneId::row(sel))
         {
-            crate::ui::kit::toolbar::RowActions::new(&acts).render(ui, rect);
+            crate::ui::kit::toolbar::RowActions::new(acts).render(ui, rect);
         }
 
         let theme: &Theme = ui.theme;
@@ -1362,6 +1366,14 @@ fn status_word(s: ChapterStatus) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Press a key the way `App` does: resolve the screen's table first, then
+    /// dispatch from it. The screen no longer builds its own, so a test that
+    /// skipped this step would not be exercising the real path.
+    fn press(screen: &mut ProjectScreen, k: KeyEvent, active: &ActiveProject) -> Action {
+        let acts = screen.actions(Some(active));
+        screen.handle_key(k, Some(active), &acts)
+    }
     use crate::model::{ModelSet, Project};
     use crate::workspace::Workspace;
     use ratatui::crossterm::event::{KeyEvent, KeyModifiers};
@@ -1435,11 +1447,11 @@ mod tests {
 
         // Row 0 is the volume header; move to chapter 1 and mark it with Space.
         assert!(matches!(
-            screen.handle_key(key(KeyCode::Down), Some(&active)),
+            press(&mut screen, key(KeyCode::Down), &active),
             Action::None
         ));
         assert!(matches!(
-            screen.handle_key(key(KeyCode::Char(' ')), Some(&active)),
+            press(&mut screen, key(KeyCode::Char(' ')), &active),
             Action::None
         ));
         assert!(screen.selected.contains(&(1, 1)));
@@ -1447,10 +1459,10 @@ mod tests {
         // Move the cursor to chapter 2. Pressing `t` must translate the marked
         // chapter, not the cursor row, then clear the mark state.
         assert!(matches!(
-            screen.handle_key(key(KeyCode::Down), Some(&active)),
+            press(&mut screen, key(KeyCode::Down), &active),
             Action::None
         ));
-        match screen.handle_key(key(KeyCode::Char('t')), Some(&active)) {
+        match press(&mut screen, key(KeyCode::Char('t')), &active) {
             Action::EnqueueChapters { chapters, .. } => assert_eq!(chapters, vec![(1, 1)]),
             other => panic!("expected EnqueueChapters, got {other:?}"),
         }
@@ -1460,7 +1472,7 @@ mod tests {
         );
 
         // With no marks, `t` remains the single-chapter shortcut for the cursor row.
-        match screen.handle_key(key(KeyCode::Char('t')), Some(&active)) {
+        match press(&mut screen, key(KeyCode::Char('t')), &active) {
             Action::EnqueueChapters { chapters, .. } => assert_eq!(chapters, vec![(1, 2)]),
             other => panic!("expected EnqueueChapters, got {other:?}"),
         }
@@ -1473,15 +1485,15 @@ mod tests {
 
         // Down over Vol.01's two chapters stays in volume 1 (no switch).
         assert!(matches!(
-            screen.handle_key(key(KeyCode::Down), Some(&active)),
+            press(&mut screen, key(KeyCode::Down), &active),
             Action::None
         ));
         assert!(matches!(
-            screen.handle_key(key(KeyCode::Down), Some(&active)),
+            press(&mut screen, key(KeyCode::Down), &active),
             Action::None
         ));
         // The next Down lands on the Vol.02 header → auto-switch the active volume.
-        match screen.handle_key(key(KeyCode::Down), Some(&active)) {
+        match press(&mut screen, key(KeyCode::Down), &active) {
             Action::SetActiveVolume { vol } => assert_eq!(vol, 2),
             other => panic!("expected SetActiveVolume, got {other:?}"),
         }
@@ -1493,13 +1505,13 @@ mod tests {
         let mut screen = ProjectScreen::new();
 
         // Mark chapter 1 in Vol.01.
-        screen.handle_key(key(KeyCode::Down), Some(&active));
-        screen.handle_key(key(KeyCode::Char(' ')), Some(&active));
+        press(&mut screen, key(KeyCode::Down), &active);
+        press(&mut screen, key(KeyCode::Char(' ')), &active);
         assert!(screen.selected.contains(&(1, 1)));
 
         // Crossing into Vol.02 keeps the marks so cross-volume queueing works.
-        screen.handle_key(key(KeyCode::Down), Some(&active));
-        let action = screen.handle_key(key(KeyCode::Down), Some(&active));
+        press(&mut screen, key(KeyCode::Down), &active);
+        let action = press(&mut screen, key(KeyCode::Down), &active);
         assert!(matches!(action, Action::SetActiveVolume { vol: 2 }));
         assert!(
             screen.selected.contains(&(1, 1)),
@@ -1513,16 +1525,16 @@ mod tests {
         let mut screen = ProjectScreen::new();
 
         // Mark Vol.01 ch 1.
-        screen.handle_key(key(KeyCode::Down), Some(&active));
-        screen.handle_key(key(KeyCode::Char(' ')), Some(&active));
+        press(&mut screen, key(KeyCode::Down), &active);
+        press(&mut screen, key(KeyCode::Char(' ')), &active);
 
         // Move to Vol.02 ch 1 and mark it too.
-        screen.handle_key(key(KeyCode::Down), Some(&active));
-        screen.handle_key(key(KeyCode::Down), Some(&active));
-        screen.handle_key(key(KeyCode::Down), Some(&active));
-        screen.handle_key(key(KeyCode::Char(' ')), Some(&active));
+        press(&mut screen, key(KeyCode::Down), &active);
+        press(&mut screen, key(KeyCode::Down), &active);
+        press(&mut screen, key(KeyCode::Down), &active);
+        press(&mut screen, key(KeyCode::Char(' ')), &active);
 
-        match screen.handle_key(key(KeyCode::Char('t')), Some(&active)) {
+        match press(&mut screen, key(KeyCode::Char('t')), &active) {
             Action::EnqueueChapters { chapters, .. } => {
                 assert_eq!(chapters, vec![(1, 1), (2, 1)]);
             }
@@ -1541,8 +1553,8 @@ mod tests {
         let active = two_vol_project();
         let mut screen = ProjectScreen::new();
 
-        screen.handle_key(key(KeyCode::Down), Some(&active));
-        screen.handle_key(key(KeyCode::Char(' ')), Some(&active));
+        press(&mut screen, key(KeyCode::Down), &active);
+        press(&mut screen, key(KeyCode::Char(' ')), &active);
 
         assert!(screen.selected.contains(&(1, 1)));
         assert!(
@@ -1556,7 +1568,7 @@ mod tests {
         let active = active_project();
         let mut screen = ProjectScreen::new();
         assert!(matches!(
-            screen.handle_key(key(KeyCode::Char('V')), Some(&active)),
+            press(&mut screen, key(KeyCode::Char('V')), &active),
             Action::AddVolume
         ));
     }
@@ -1576,8 +1588,9 @@ mod tests {
 
         let active = active_project(); // Vol.01 with chapters 1 & 2
         let mut screen = ProjectScreen::new();
+        let acts = screen.actions(Some(&active));
         let (_, zones) = crate::ui::kit::ctx::draw_test(100, 30, |ui, area| {
-            screen.render(ui, area, Some(&active))
+            screen.render(ui, area, Some(&active), &acts)
         });
         // Rows: 0 = Vol header, 1 = ch 1, 2 = ch 2. Ask the registry where
         // row 1 landed rather than deriving it from the tree area again.
@@ -1605,8 +1618,9 @@ mod tests {
 
         let active = two_vol_project(); // active.vol == 1
         let mut screen = ProjectScreen::new();
+        let acts = screen.actions(Some(&active));
         let (_, zones) = crate::ui::kit::ctx::draw_test(100, 30, |ui, area| {
-            screen.render(ui, area, Some(&active))
+            screen.render(ui, area, Some(&active), &acts)
         });
         // Rows: 0 Vol.01, 1 ch1, 2 ch2, 3 Vol.02, 4 ch1, 5 ch2.
         let rect = zones
@@ -1628,8 +1642,9 @@ mod tests {
             vol.chapters.push(chapter(i));
         }
         let mut screen = ProjectScreen::new();
+        let acts = screen.actions(Some(&active));
         let (lines, _) = crate::ui::kit::ctx::draw_test(100, 12, |ui, area| {
-            screen.render(ui, area, Some(&active))
+            screen.render(ui, area, Some(&active), &acts)
         });
 
         let outer_right = (screen.tree_area.x + screen.tree_area.width) as usize;
@@ -1653,11 +1668,11 @@ mod tests {
         let mut screen = ProjectScreen::new();
 
         screen.focus_volume(&active, 2);
-        screen.handle_key(key(KeyCode::Down), Some(&active));
+        press(&mut screen, key(KeyCode::Down), &active);
         assert_eq!(screen.selected_chapter(&active), Some(1));
         assert_eq!(screen.selected_volume(&active), Some(2));
 
-        let action = screen.handle_key(key(KeyCode::Char('z')), Some(&active));
+        let action = press(&mut screen, key(KeyCode::Char('z')), &active);
         assert!(
             matches!(action, Action::None | Action::SetActiveVolume { vol: 2 }),
             "unexpected action: {action:?}"
@@ -1688,11 +1703,11 @@ mod tests {
         let active = two_vol_project();
         let mut screen = ProjectScreen::new();
 
-        screen.handle_key(key(KeyCode::Char('z')), Some(&active));
+        press(&mut screen, key(KeyCode::Char('z')), &active);
         assert_eq!(screen.rows(&active).len(), 2);
 
         assert!(matches!(
-            screen.handle_key(key(KeyCode::Char('Z')), Some(&active)),
+            press(&mut screen, key(KeyCode::Char('Z')), &active),
             Action::None
         ));
         assert!(screen.collapsed.is_empty());
@@ -1746,7 +1761,7 @@ mod tests {
     fn side_layout_gives_detail_a_comfortable_minimum() {
         let active = active_project();
         let mut screen = ProjectScreen::new();
-        screen.handle_key(key(KeyCode::Down), Some(&active));
+        press(&mut screen, key(KeyCode::Down), &active);
         let (_, detail_h) = screen.side_layout_heights(&active, 40);
         assert!(
             detail_h >= 22,

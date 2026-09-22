@@ -11,8 +11,7 @@ use serde_json::{Map, Value, json};
 use crate::model::ServiceTier;
 
 use super::client::{
-    ClientConfig, LlmClient, LlmError, Result, StreamDelta, parse_retry_after,
-    retry_after_hint,
+    ClientConfig, LlmClient, LlmError, Result, StreamDelta, delta_sink, parse_retry_after, tracking,
 };
 use super::{
     ChatRequest, ChatResponse, Choice, FunctionCall, Message, ResponseFormat, ResponseMessage,
@@ -124,17 +123,10 @@ impl GoogleInteractionsClient {
 #[async_trait]
 impl LlmClient for GoogleInteractionsClient {
     async fn chat(&self, req: &ChatRequest) -> Result<ChatResponse> {
-        let policy = self.cfg.send_policy();
-        let mut sent = 0u32;
-        loop {
-            sent += 1;
-            match self.send_once(req).await {
-                Err(e) if policy.should_retry(&e, sent) => {
-                    tokio::time::sleep(policy.backoff(sent, retry_after_hint(&e))).await;
-                }
-                other => return other,
-            }
-        }
+        self.cfg
+            .send_policy()
+            .drive(|| Box::pin(self.send_once(req)))
+            .await
     }
 
     async fn chat_stream(
@@ -143,24 +135,19 @@ impl LlmClient for GoogleInteractionsClient {
         on_delta: &mut (dyn for<'a> FnMut(StreamDelta<'a>) + Send),
     ) -> Result<ChatResponse> {
         let emitted = std::sync::atomic::AtomicBool::new(false);
-        let mut tracked = |delta: StreamDelta| {
-            emitted.store(true, std::sync::atomic::Ordering::Relaxed);
-            on_delta(delta);
-        };
-        let policy = self.cfg.send_policy();
-        let mut sent = 0u32;
-        loop {
-            sent += 1;
-            match self.send_stream_once(req, &mut tracked).await {
-                Err(e)
-                    if policy.should_retry(&e, sent)
-                        && !emitted.load(std::sync::atomic::Ordering::Relaxed) =>
-                {
-                    tokio::time::sleep(policy.backoff(sent, retry_after_hint(&e))).await;
-                }
-                other => return other,
-            }
-        }
+        let sink = delta_sink(on_delta);
+        self.cfg
+            .send_policy()
+            .drive_while(
+                || {
+                    Box::pin(async {
+                        let mut tracked = tracking(&sink, &emitted);
+                        self.send_stream_once(req, &mut tracked).await
+                    })
+                },
+                || !emitted.load(std::sync::atomic::Ordering::Relaxed),
+            )
+            .await
     }
 }
 
