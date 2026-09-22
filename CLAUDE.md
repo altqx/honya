@@ -132,3 +132,18 @@ Single Rust (edition 2024) TUI crate — no companion services, DB, or Docker. S
 - **Running the app needs a real TTY.** In a headless agent, launch it inside a PTY (a `tmux` session or a desktop terminal), not as a plain piped process. Set `HONYA_NO_UPDATE_CHECK=1` to skip the startup network update check.
 - **No API key is required just to launch or to import.** With no key, honya shows a Welcome/sample-project offline path; EPUB/PDF/HTML/Markdown import + cleanse is pure Rust pre-processing (no LLM), so importing a source file into a new project is a good offline smoke test. A provider key (`HONYA_API_KEY`/`OPENROUTER_API_KEY`, etc.) is only needed to actually translate.
 - **The current working directory is the "shelf."** Run `honya` from a folder that holds your projects and loose source files, not from the repo root.
+
+## Agent skills
+
+### Issue tracker
+
+Issues live in Linear — workspace `altq`, team `letitia` (`ALT`), project `honya` — reached
+through the Linear MCP tools. Code and PRs stay on GitHub. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five canonical triage roles, each label string equal to its name. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: one `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
